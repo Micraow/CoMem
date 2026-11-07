@@ -50,6 +50,14 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             pendingDirs: health.staleSummaries,
             degradedDirs: health.degradedSummaries,
           },
+          // §17.5 的记忆健康度。`ObservabilityService.health()` 已经算出来了，
+          // 不往封套里带的话控制台只能去 `GET /memories/pending` 拉一页再数，
+          // 而那个端点需要认证、还只返回一页。
+          memory: {
+            pendingReview: health.pendingReview,
+            orphanTasks: health.orphanTasks,
+            oldestPendingAgeSeconds: health.oldestPendingAgeSeconds,
+          },
           version: SERVICE_VERSION,
         });
       });

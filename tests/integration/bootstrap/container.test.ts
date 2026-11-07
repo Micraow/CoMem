@@ -73,6 +73,28 @@ describe('createContainer', () => {
     await expect(stat(join(dataDir, '_meta', 'comem.sqlite'))).resolves.toBeDefined();
   });
 
+  it('全新部署只读路径可用：四个上下文目录建好、权限行存在、列表是空的', async () => {
+    // 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：
+    // `list` / `tree` / `GET /sessions` 都走 `filterReadable`，物化表里没有根行
+    // 就一条都返回不了，而「空列表」和「没有权限」是两件事。
+    const root = Uri.parse('comem://user/local');
+    for (const name of ['memories', 'resources', 'skills', 'sessions']) {
+      await expect(stat(join(dataDir, 'user', 'local', name))).resolves.toBeDefined();
+    }
+
+    const listed = await container.services.filesystem.list(root);
+    expect(listed.map((entry) => entry.uri.name).sort()).toEqual([
+      'memories',
+      'resources',
+      'sessions',
+      'skills',
+    ]);
+
+    // 会话页走的是 `filesystem.list(scope.child('sessions'))`，不是 `SessionService`。
+    const sessions = await container.services.filesystem.list(root.child('sessions'));
+    expect(sessions).toEqual([]);
+  });
+
   it('close() 幂等', async () => {
     await container.close();
     await expect(container.close()).resolves.toBeUndefined();

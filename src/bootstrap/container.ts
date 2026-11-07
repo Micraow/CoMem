@@ -479,6 +479,28 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     groups,
   });
 
+  // §12.6 根预置：`comem://user/{uid}/` 要有 `user:{uid} = manage` 这一行。
+  //
+  // 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：`list` /
+  // `tree` / `GET /sessions` 都走 `filterReadable`，它是纯 SQL 查询，物化表里没有
+  // 根行就一条都返回不了。写路径上 `InheritingAuthorizer` 会顺手补，但只读路径
+  // 不会——一个刚装好、还没写过东西的实例，控制台是空的。
+  //
+  // 幂等：行已存在就是覆盖成同样的值。
+  const userRoot = Uri.parse(`comem://user/${subject.replace(/^user:/u, '')}`);
+  await acl.materializeNode(userRoot);
+
+  // §6.5 的四个上下文目录在建库时就建出来。
+  //
+  // 不建的话，「全新部署 + 打开会话页」会拿到 403 而不是空列表：`list` 会先对目录
+  // 求 read 权限，而目录不存在就物化不出行，`InheritingAuthorizer` 只能拒绝。
+  // 空列表和「没有权限」是两件事，前者是正确状态。
+  for (const name of ['memories', 'resources', 'skills', 'sessions']) {
+    const directory = userRoot.child(name);
+    await store.mkdir(directory, { recursive: true });
+    await acl.materializeNode(directory);
+  }
+
   const summary = new SummaryService({
     nodes,
     index,
