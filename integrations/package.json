@@ -1,0 +1,16 @@
+{
+  "name": "co-mem",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CoMem 宿主 Hook 插件：会话召回与采集",
+  "bin": {
+    "co-mem": "./cli.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

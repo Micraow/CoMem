@@ -1,0 +1,216 @@
+/**
+ * Claude Code 宿主适配（架构文档 §15.5、§15.8）。
+ *
+ * 适配器只回答四个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从载荷
+ * 哪里读**、**一轮结束怎么判定**。去重、游标、锁、重试都在 `lib/` 里，与宿主无关。
+ *
+ * ## 载荷
+ *
+ * Claude Code 的 hook 从 stdin 收 JSON，公共字段是 `session_id`、`transcript_path`、
+ * `cwd`、`hook_event_name`，其余按事件不同：
+ *
+ * | 事件 | 额外字段 |
+ * |---|---|
+ * | `SessionStart` | `source`（`startup` / `resume` / `clear` / `compact`） |
+ * | `UserPromptSubmit` | `prompt` |
+ * | `PreToolUse` | `tool_name`、`tool_input`、`tool_use_id` |
+ * | `PostToolUse` | 同上 + `tool_response` |
+ * | `Stop` | `stop_hook_active` |
+ * | `PreCompact` | `trigger`、`custom_instructions` |
+ *
+ * ## 事件 ID
+ *
+ * Claude Code 的 `Stop` 载荷里没有事件 ID，而两轮合法的 `Stop` 可以完全一样。
+ * 拿载荷哈希当 ID 会把第二轮当成重复事件吞掉（丢消息），所以只有工具类事件用
+ * `tool_use_id` 合成 ID，其余一律 `null`（不去重，靠游标兜底，§15.4）。
+ */
+
+import { ComemHookError } from '../lib/http.mjs';
+
+/** 会话 ID 前缀（§15.5）。宿主自己的 session_id 直接拼在后面。 */
+export const SESSION_ID_PREFIX = 'cc-';
+
+/** 内部事件名 ↔ 宿主事件名。 */
+export const EVENT_NAMES = Object.freeze({
+  SessionStart: 'SessionStart',
+  UserPromptSubmit: 'UserPromptSubmit',
+  PreToolUse: 'PreToolUse',
+  PostToolUse: 'PostToolUse',
+  Stop: 'Stop',
+  PreCompact: 'PreCompact',
+});
+
+/** 需要拦截 `comem://` 路径的文件工具（任务书：只有这三个）。 */
+const FILE_TOOLS = new Set(['Read', 'Write', 'Edit']);
+
+function asRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
+}
+
+function text(value) {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+function renderToolOutput(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function toolFilePath(toolName, toolInput) {
+  if (toolName === null || !FILE_TOOLS.has(toolName)) {
+    return null;
+  }
+  return text(toolInput['file_path']) ?? text(toolInput['path']);
+}
+
+/**
+ * 宿主载荷 → 内部事件。
+ *
+ * 未知事件直接抛错：静默忽略等于让一个拼错的 settings 条目长期不生效，而宿主
+ * 不会提示。抛出的错误由 `runHook` 收敛成 stderr + 退出码 0（不能打断对话）。
+ *
+ * @param {unknown} raw
+ */
+export function normalizeEvent(raw) {
+  const payload = asRecord(raw);
+  const rawEventName = text(payload['hook_event_name']) ?? text(payload['event']);
+  if (rawEventName === null) {
+    throw new ComemHookError('Claude Code 载荷缺少 hook_event_name。', {
+      code: 'HOOK_INVALID_ARGUMENT',
+    });
+  }
+  // `SessionEnd` 与 `PreCompact` 都是「把待处理消息提交完」的时机（§15.2 的表格
+  // 把它们并成一行），内部归一成 `PreCompact`。
+  const event = rawEventName === 'SessionEnd' ? 'PreCompact' : rawEventName;
+  if (!(event in EVENT_NAMES)) {
+    throw new ComemHookError(`未支持的 Claude Code hook 事件：${rawEventName}`, {
+      code: 'HOOK_INVALID_ARGUMENT',
+    });
+  }
+
+  const sessionId = text(payload['session_id']);
+  if (sessionId === null) {
+    throw new ComemHookError('Claude Code 载荷缺少 session_id。', {
+      code: 'HOOK_INVALID_ARGUMENT',
+    });
+  }
+
+  const toolInput = asRecord(payload['tool_input']);
+  const toolName = text(payload['tool_name']);
+  const toolUseId = text(payload['tool_use_id']);
+
+  return {
+    host: 'claude-code',
+    event,
+    hostEventName: EVENT_NAMES[event],
+    sessionId: `${SESSION_ID_PREFIX}${sessionId}`,
+    eventId: toolUseId === null ? null : `${event}:${toolUseId}`,
+    cwd: text(payload['cwd']) ?? process.cwd(),
+    prompt: text(payload['prompt']),
+    toolName,
+    filePath: toolFilePath(toolName, toolInput),
+    toolInput: payload['tool_input'] ?? null,
+    toolOutput: renderToolOutput(payload['tool_response']),
+    toolUseId,
+    transcriptPath: text(payload['transcript_path']),
+    messages: null,
+    source: text(payload['source']),
+  };
+}
+
+/**
+ * 内部结果 → Claude Code 的返回信封。`null` 表示不写 stdout（等于放行）。
+ *
+ * - `SessionStart` / `UserPromptSubmit`：`hookSpecificOutput.additionalContext`
+ * - `PreToolUse`：`hookSpecificOutput.permissionDecision = 'deny'`
+ * - 其余：不输出
+ *
+ * @param {ReturnType<typeof normalizeEvent>} event
+ * @param {{ context?: string, deny?: string, message?: string } | undefined} result
+ */
+export function formatOutput(event, result) {
+  if (result === undefined) {
+    return null;
+  }
+  if (typeof result.context === 'string' && result.context !== '') {
+    return {
+      hookSpecificOutput: {
+        hookEventName: event.hostEventName,
+        additionalContext: result.context,
+      },
+    };
+  }
+  if (typeof result.deny === 'string' && result.deny !== '') {
+    return {
+      hookSpecificOutput: {
+        hookEventName: event.hostEventName,
+        permissionDecision: 'deny',
+        permissionDecisionReason: result.deny,
+      },
+    };
+  }
+  if (typeof result.message === 'string' && result.message !== '') {
+    return { systemMessage: result.message };
+  }
+  return null;
+}
+
+async function readJsonStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  if (raw === '') {
+    throw new ComemHookError('Claude Code hook 没有收到 stdin 载荷。', {
+      code: 'HOOK_INVALID_ARGUMENT',
+    });
+  }
+  return JSON.parse(raw);
+}
+
+/**
+ * 入口：stdin → 归一化 → 业务处理 → 宿主信封。
+ *
+ * 任何异常都写 stderr 并正常退出（退出码 0）：hook 是旁路，它挂了不能把用户的
+ * 这一轮对话一起挂掉。`PreToolUse` 的拦截是**返回值**，不是抛错。
+ *
+ * `read` 与 `write` 可注入，测试不启动子进程也能跑完整链路。
+ *
+ * @param {(event: ReturnType<typeof normalizeEvent>) => Promise<object | undefined>} handler
+ * @param {{ read?: () => Promise<unknown>, write?: (line: string) => void }} [options]
+ */
+export async function runHook(handler, options = {}) {
+  const read = options.read ?? readJsonStdin;
+  const write = options.write ?? ((line) => process.stdout.write(`${line}\n`));
+
+  let event;
+  try {
+    event = normalizeEvent(await read());
+  } catch (error) {
+    process.stderr.write(`co-mem hook: ${error instanceof Error ? error.message : String(error)}\n`);
+    return null;
+  }
+
+  try {
+    const result = await handler(event);
+    const output = formatOutput(event, result);
+    if (output !== null) {
+      write(JSON.stringify(output));
+    }
+  } catch (error) {
+    process.stderr.write(
+      `co-mem hook ${event.event}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+  return event;
+}
