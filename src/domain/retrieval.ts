@@ -47,6 +47,13 @@ export interface SearchHit {
   readonly abstract: string | null;
   readonly score: number;
   readonly contextType: ContextType;
+  /**
+   * 记忆类型，非记忆文件为 `null`。
+   *
+   * 必须返回：§8.6 的分层投放按记忆类型决定起始层级（`events` 从 L1 概览起），
+   * 少这一列就只能一律从 L0 起投，事件类记忆会退化成一句话摘要。
+   */
+  readonly memoryType: string | null;
 }
 
 export interface GrepQuery {

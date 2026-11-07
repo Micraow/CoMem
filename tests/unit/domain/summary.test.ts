@@ -8,6 +8,7 @@ import {
   extractAbstract,
   recordChange,
   shouldRecompute,
+  skeletonOverview,
   truncateToChars,
   type SummaryFreshness,
 } from '../../../src/domain/summary.js';
@@ -176,5 +177,82 @@ describe('recordChange', () => {
       pendingChanges: 6,
       totalEntries: 300,
     });
+  });
+});
+
+describe('skeletonOverview', () => {
+  it('多级标题按层级缩进（每级 2 空格），再接首段', () => {
+    const body = [
+      '# 架构文档',
+      '',
+      '本文描述 CoMem 的架构边界与数据布局。',
+      '',
+      '## §8 索引与检索',
+      '',
+      '### §8.6 上下文组装',
+      '',
+      '正文其余部分。',
+    ].join('\n');
+
+    expect(skeletonOverview(body)).toBe(
+      [
+        '架构文档',
+        '  §8 索引与检索',
+        '    §8.6 上下文组装',
+        '',
+        '本文描述 CoMem 的架构边界与数据布局。',
+      ].join('\n'),
+    );
+  });
+
+  it('六级标题逐级缩进', () => {
+    const body = ['# L1', '## L2', '### L3', '#### L4', '##### L5', '###### L6', '', '首段。'].join(
+      '\n',
+    );
+
+    expect(skeletonOverview(body)).toBe(
+      ['L1', '  L2', '    L3', '      L4', '        L5', '          L6', '', '首段。'].join('\n'),
+    );
+  });
+
+  it('没有标题时只返回首段', () => {
+    expect(skeletonOverview('第一段。\n\n第二段。')).toBe('第一段。');
+  });
+
+  it('只有标题没有正文时只返回标题树', () => {
+    expect(skeletonOverview('# 标题\n\n## 子标题')).toBe('标题\n  子标题');
+  });
+
+  it('空正文返回空串', () => {
+    expect(skeletonOverview('')).toBe('');
+    expect(skeletonOverview('   \n\n  ')).toBe('');
+  });
+
+  it('首段超长时截断到 400 字符', () => {
+    const paragraph = '一'.repeat(450);
+    const overview = skeletonOverview(`# 标题\n\n${paragraph}`);
+
+    expect(overview).toBe(`标题\n\n${'一'.repeat(400)}`);
+  });
+
+  it('首段是标题后的第一段，不是标题前的引言', () => {
+    const body = ['# 标题', '', '第一段。', '', '第二段。'].join('\n');
+    expect(skeletonOverview(body)).toBe('标题\n\n第一段。');
+  });
+
+  it('首段内部的软换行原样保留', () => {
+    expect(skeletonOverview('# 标题\n\n第一行\n第二行\n\n第二段')).toBe('标题\n\n第一行\n第二行');
+  });
+
+  it('忽略 ATX 标题的可选闭合序列', () => {
+    expect(skeletonOverview('# 标题 ##\n\n正文')).toBe('标题\n\n正文');
+  });
+
+  it('# 后面没有空白不算标题', () => {
+    expect(skeletonOverview('#标签\n\n正文')).toBe('#标签');
+  });
+
+  it('七个 # 不是标题', () => {
+    expect(skeletonOverview('####### 标题\n\n正文')).toBe('####### 标题');
   });
 });

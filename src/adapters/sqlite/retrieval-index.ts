@@ -374,6 +374,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
         abstract: nullableText(row['abstract']),
         score,
         contextType: text(row['context_type']) as ContextType,
+        memoryType: nullableText(row['memory_type']),
       });
     }
 

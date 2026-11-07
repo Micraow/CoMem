@@ -181,3 +181,110 @@ export function consumeChanges(
 export function recordChange(freshness: SummaryFreshness): SummaryFreshness {
   return { ...freshness, pendingChanges: freshness.pendingChanges + 1 };
 }
+
+/**
+ * 骨架概览里首段的字符上限。
+ *
+ * 400：经验值，来源未知。`local/notes/comparison.md` 第 2 条要求「标题树 + 首段」，
+ * 没给具体长度。取 §9.1 的 L1 预算（4000 字符）的 1/10 作为「一段话」的量级：
+ * 再长就不是概览，而是把原文换个位置放。
+ */
+const SKELETON_PARAGRAPH_MAX_CHARS = 400;
+
+/**
+ * Markdown ATX 标题：`#`–`######` 后必须跟空白，标题文本非空。
+ *
+ * `#标签` 不算标题（CommonMark 的规则），所以 `\S.*` 前面必须有 `[ \t]+`。
+ * 没有 `g` 标志，`test` 无状态，可以放心在循环里复用。
+ */
+const HEADING_PATTERN = /^(#{1,6})[ \t]+(\S.*)$/;
+
+/** ATX 标题的可选闭合序列（`## 标题 ##`），属于语法标记，不属于标题文本。 */
+const HEADING_CLOSING_SEQUENCE = /[ \t]+#+[ \t]*$/;
+
+/**
+ * 层级缩进单位（`comparison.md` 第 2 条：每级 2 空格）。
+ *
+ * 用缩进而非保留 `#`：`#` 与缩进表达同一件事，两个都留等于把层级编码两遍，模型读
+ * 到的是一堆井号。缩进形态更接近「目录树」。
+ */
+const INDENT_UNIT = '  ';
+
+/** 从正文里取第一个非标题段落；没有段落时返回空串。 */
+function firstParagraph(lines: readonly string[]): string {
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    if (line.trim() === '' || HEADING_PATTERN.test(line)) {
+      index += 1;
+      continue;
+    }
+
+    // 段落 = 连续的、既非空行也不是标题的行。段落内部的换行原样保留：
+    // Markdown 的软换行在中文里常见，压成一行会改变可读性。
+    const paragraph: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index] ?? '';
+      if (current.trim() === '' || HEADING_PATTERN.test(current)) {
+        break;
+      }
+      paragraph.push(current);
+      index += 1;
+    }
+    return paragraph.join('\n');
+  }
+  return '';
+}
+
+/**
+ * 没有摘要时，用「标题树 + 首段」合成一份概览（`comparison.md` 第 2 条）。
+ *
+ * 长文档的标题结构本身就是有用的概览，比「没有 L1 就直接降到 L0」好：L0 只有
+ * 一句话，模型看到标题树才知道该不该展开读原文。
+ *
+ * 输出形如：
+ *
+ * ```text
+ * 架构文档
+ *   §8 索引与检索
+ *     §8.6 上下文组装
+ *
+ * 本文描述 CoMem 的架构边界与数据布局……
+ * ```
+ *
+ * 标题树与首段之间空一行。正文没有标题时只返回首段；只有标题没有正文时只返回
+ * 标题树；空正文返回空串。
+ *
+ * 入参是**正文**（不含 frontmatter），由调用方从 `ContentStore.readText` 拿。
+ */
+export function skeletonOverview(body: string): string {
+  if (body.trim() === '') {
+    return '';
+  }
+
+  const lines = body.split(/\r?\n/);
+  const headings: string[] = [];
+  for (const line of lines) {
+    const match = HEADING_PATTERN.exec(line);
+    if (match === null) {
+      continue;
+    }
+    const level = (match[1] ?? '').length;
+    const text = (match[2] ?? '').replace(HEADING_CLOSING_SEQUENCE, '').trim();
+    if (text === '') {
+      continue;
+    }
+    headings.push(`${INDENT_UNIT.repeat(level - 1)}${text}`);
+  }
+
+  const paragraph = truncateToChars(firstParagraph(lines), SKELETON_PARAGRAPH_MAX_CHARS);
+
+  const parts: string[] = [];
+  if (headings.length > 0) {
+    parts.push(headings.join('\n'));
+  }
+  if (paragraph !== '') {
+    parts.push(paragraph);
+  }
+  return parts.join('\n\n');
+}
