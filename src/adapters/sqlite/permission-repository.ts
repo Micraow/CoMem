@@ -8,6 +8,13 @@
  *
  * `acl_entry` 是物化之前的原始授权条目，只服务授权反查（控制台的 ACL 页、退组清理），
  * 不参与检索。
+ *
+ * ## deny 也必须物化
+ *
+ * `level` 只能表达「允许到什么级别」。同一主体在同一节点上既有 allow 又有 deny 时
+ * deny 赢（§12.2 不变量 2），求值结果是空集；空集如果只靠「没有行」表达，读侧就
+ * 分不清「被拒绝」与「从未授权」，`user:*` 的 allow 会把被 deny 的主体放进来。
+ * 所以 `node_permission` 带 `effect`，读侧谓词是「有 allow 且没有 deny」。
  */
 
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
@@ -17,11 +24,17 @@ import type { Logger } from '../../domain/log.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, placeholders } from './node-repository.js';
 
-/** `node_permission` 的一行：物化后的有效权限（只存 allow，deny 已在物化阶段清空）。 */
+/**
+ * `node_permission` 的一行：物化后的有效权限。
+ *
+ * `effect === 'deny'` 的行是「这个主体在链上被 deny 清空」的标记，它没有对应的
+ * allow 行，只用于压掉同一查询主体集合里的 `user:*` 通配。
+ */
 export interface PermissionRow {
   readonly nodeUri: string;
   readonly principal: string;
   readonly level: AclLevel;
+  readonly effect: AclEffect;
 }
 
 /** `acl_entry` 的一行：原始授权条目。 */
@@ -83,20 +96,31 @@ export class PermissionRepository {
       this.#db
         .prepare(`DELETE FROM node_permission WHERE node_uri = ? OR node_uri GLOB ?`)
         .run(uri, globPrefixPattern(uri));
-
-      const statement = this.#db.prepare(
-        `INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)
-         ON CONFLICT(node_uri, principal) DO UPDATE SET level = excluded.level`,
-      );
-      for (const permission of permissions) {
-        statement.run(permission.nodeUri, permission.principal, permission.level);
-      }
+      this.#writeRows(permissions);
     });
     this.#logger.debug('物化权限子树重算', { uri, rows: permissions.length });
   }
 
   /**
+   * 单个节点的物化（增量物化入口）：只替换该节点的行，不碰子树。
+   *
+   * 与 `replaceSubtree` 的区别只在删除范围。新建节点时两者等价，但这里不会在
+   * 「重算一个已有后代的目录」时把后代的行删掉却不算回来。
+   */
+  replaceNode(uri: string, permissions: readonly PermissionRow[]): void {
+    withWriteTransaction(this.#db, () => {
+      this.#db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(uri);
+      this.#writeRows(permissions);
+    });
+    this.#logger.debug('物化权限节点重写', { uri, rows: permissions.length });
+  }
+
+  /**
    * 检索用：给定主体集合，返回有 read 权限的 URI 集合。
+   *
+   * 语义是「有 allow 且没有 deny」（§12.2 不变量 2）：主体集合里任一主体拿到
+   * `level >= read` 的 allow，且没有任何主体在同一个节点上有 deny 行。deny 优先
+   * 于 allow，所以这两个条件不能合并成 `MAX(level)`。
    *
    * 一次 `IN (...)` 查询拿完，不按 URI 逐条查：`search` 一次要过滤 40 条候选，
    * 逐条查就是 40 次往返。SQLite 的变量上限默认 32766（`SQLITE_MAX_VARIABLE_NUMBER`），
@@ -110,11 +134,21 @@ export class PermissionRepository {
     if (uris.length === 0 || principals.length === 0) {
       return new Set<string>();
     }
-    const sql = `SELECT DISTINCT node_uri FROM node_permission
-      WHERE node_uri IN (${placeholders(uris.length)})
-        AND principal IN (${placeholders(principals.length)})
-        AND level >= ${READ_LEVEL}`;
-    const rows = this.#db.prepare(sql).all(...uris, ...principals);
+    // 主体集合在 SQL 里出现两次（外层 allow、内层 deny），复用同一个占位符片段，
+    // 绑定顺序与出现顺序一致：先 URI 集合，再两遍主体集合。
+    const principalList = placeholders(principals.length);
+    const sql = `SELECT DISTINCT p.node_uri FROM node_permission p
+      WHERE p.node_uri IN (${placeholders(uris.length)})
+        AND p.principal IN (${principalList})
+        AND p.level >= ${READ_LEVEL}
+        AND p.effect = 'allow'
+        AND NOT EXISTS (
+          SELECT 1 FROM node_permission d
+          WHERE d.node_uri = p.node_uri
+            AND d.principal IN (${principalList})
+            AND d.effect = 'deny'
+        )`;
+    const rows = this.#db.prepare(sql).all(...uris, ...principals, ...principals);
     return new Set(rows.map((row) => text(row['node_uri'])));
   }
 
@@ -180,5 +214,24 @@ export class PermissionRepository {
     );
     this.#logger.debug('物化权限子树删除', { uri, deleted });
     return deleted;
+  }
+
+  /**
+   * 写入物化行，调用方负责删除范围与事务边界。
+   *
+   * 用 `ON CONFLICT DO UPDATE` 而不是普通 `INSERT`：入参里同一
+   * `(node_uri, principal)` 出现两次时，普通插入会抛约束错误，而重算语义下
+   * 后者覆盖前者才是唯一合理的解释。
+   */
+  #writeRows(permissions: readonly PermissionRow[]): void {
+    const statement = this.#db.prepare(
+      `INSERT INTO node_permission (node_uri, principal, level, effect) VALUES (?, ?, ?, ?)
+       ON CONFLICT(node_uri, principal) DO UPDATE SET
+         level = excluded.level,
+         effect = excluded.effect`,
+    );
+    for (const permission of permissions) {
+      statement.run(permission.nodeUri, permission.principal, permission.level, permission.effect);
+    }
   }
 }

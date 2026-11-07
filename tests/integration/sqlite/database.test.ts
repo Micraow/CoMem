@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -11,6 +11,19 @@ import {
   runMigrations,
   withWriteTransaction,
 } from '../../../src/adapters/sqlite/database.js';
+
+/**
+ * 迁移目录里的最大版本号。
+ *
+ * **不要写成字面量。** 每加一个迁移，写死的数字就会红一次——那不是回归，是测试在
+ * 替我们数文件。这里扫目录，断言的是「迁移框架应用到了最新的那个版本」。
+ */
+const LATEST_VERSION = Math.max(
+  ...readdirSync(new URL('../../../src/adapters/sqlite/migrations', import.meta.url))
+    .map((name) => /^(\d{4})_/.exec(name)?.[1])
+    .filter((version): version is string => version !== undefined)
+    .map(Number),
+);
 
 let tempDir: string;
 let openDatabases: DatabaseSync[];
@@ -72,9 +85,8 @@ describe('runMigrations', () => {
     const db = open(':memory:');
 
     expect(currentVersion(db)).toBe(0);
-    // 0001 骨架 + 0002 索引与检索（W3）。
-    expect(runMigrations(db)).toBe(2);
-    expect(currentVersion(db)).toBe(2);
+    expect(runMigrations(db)).toBe(LATEST_VERSION);
+    expect(currentVersion(db)).toBe(LATEST_VERSION);
     expect(tableNames(db)).toContain('schema_version');
   });
 
@@ -85,8 +97,10 @@ describe('runMigrations', () => {
     runMigrations(db);
     runMigrations(db);
 
-    expect(currentVersion(db)).toBe(2);
-    expect(db.prepare('SELECT COUNT(*) AS total FROM schema_version').get()).toMatchObject({ total: 2 });
+    expect(currentVersion(db)).toBe(LATEST_VERSION);
+    expect(db.prepare('SELECT COUNT(*) AS total FROM schema_version').get()).toMatchObject({
+      total: LATEST_VERSION,
+    });
   });
 
   it('0002 建索引与检索的业务表', () => {
@@ -118,11 +132,11 @@ describe('runMigrations', () => {
 
   it('文件库同样生效', () => {
     const file = join(tempDir, 'migrated.sqlite');
-    expect(runMigrations(open(file))).toBe(2);
+    expect(runMigrations(open(file))).toBe(LATEST_VERSION);
 
     const reopened = open(file);
-    expect(currentVersion(reopened)).toBe(2);
-    expect(runMigrations(reopened)).toBe(2);
+    expect(currentVersion(reopened)).toBe(LATEST_VERSION);
+    expect(runMigrations(reopened)).toBe(LATEST_VERSION);
   });
 });
 

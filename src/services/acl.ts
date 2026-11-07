@@ -12,6 +12,20 @@
  * 后过期。`setAcl` 时把整棵子树重算一遍写进 `node_permission`，之后
  * `check` / `filterReadable` 只查表（§8.2 的代价转移：ACL 改动低频，读高频）。
  *
+ * ## deny 也要物化
+ *
+ * `node_permission` 带 `effect` 列。被 deny 清空的主体没有 allow 行，但必须有一条
+ * deny 行：否则查询主体集合里的 `user:*` 通配会把该主体放进来，跨用户越权。
+ * 只对**具体主体**写 deny 行——`user:*` 自己不是「被拒绝的人」，给它写 deny 会
+ * 把所有人都挡掉。
+ *
+ * 判定规则：主体的有效权限为空、且链上有命中它的 deny 条目时写 deny 行。
+ * 「链上有 allow」本身不够——`restricted` 切断继承同样产生空集，那不是拒绝，
+ * 给被切断的主体写 deny 会顺带压掉同一请求里其它主体的合法 allow。
+ *
+ * 物化行由 `materializePermissions` 这个私有纯函数产出。这段逻辑更适合放
+ * `domain/acl.ts`（与 `effectiveAcl` 同源），但本 wave 不改 domain，先留在服务层。
+ *
  * ## 写文件的顺序
  *
  * `setAcl` 先写 `.acl.json`（真相），再在一个事务里重算 `node_permission` 与
@@ -180,6 +194,71 @@ function maxLevel(levels: ReadonlySet<AclLevel>): AclLevel {
     }
   }
   return max;
+}
+
+/**
+ * 条目是否命中主体：精确相等，或 `user:*` 命中所有 user 主体（§12.1）。
+ *
+ * 与 `domain/acl.ts` 的 `entryMatches` 同一规则。domain 没有导出它，而本 wave
+ * 不改 domain，所以服务层重复这三行——规则本身只有「精确匹配 + 唯一通配符」。
+ */
+function entryMatches(entryPrincipal: string, subject: string): boolean {
+  if (entryPrincipal === subject) {
+    return true;
+  }
+  return entryPrincipal === USER_WILDCARD && subject.startsWith('user:');
+}
+
+/** 链上是否有命中主体的 deny 条目。命中即该主体在目标节点上被拒绝（§12.2）。 */
+function hasDenyEntry(chain: readonly AclNode[], subject: string): boolean {
+  return chain.some((node) =>
+    node.entries.some(
+      (entry) => entry.effect === 'deny' && entryMatches(entry.principal, subject),
+    ),
+  );
+}
+
+/**
+ * 单个节点的物化行：每个主体的有效权限 → `node_permission` 的一行。
+ *
+ * 输入是链与主体集合，输出只依赖纯函数 `effectiveAcl`，没有 IO。
+ *
+ * - 有效集合非空 → allow 行，级别取集合最大值（高位包含低位，见 `maxLevel`）。
+ * - 有效集合为空且链上有命中该主体的 deny → deny 行。deny 行的 `level` 不参与
+ *   判定（读侧只看 `effect`），存最小合法级别 `READ_LEVEL` 避免暗示「拒绝到某一级」。
+ * - `user:*` 不写 deny 行：它是通配符，不是「被拒绝的人」。给它写 deny 会把所有
+ *   user 主体一起挡掉，包括 owner。
+ *
+ * 这段逻辑更适合 `domain/acl.ts`（与 `effectiveAcl` 同源），本 wave 不改 domain。
+ */
+function materializePermissions(
+  uri: Uri,
+  chain: readonly AclNode[],
+  principals: readonly string[],
+): readonly PermissionRow[] {
+  const rows: PermissionRow[] = [];
+  for (const principal of principals) {
+    const levels = effectiveAcl(chain, principal);
+    if (levels.size > 0) {
+      rows.push({
+        nodeUri: uri.toString(),
+        principal,
+        level: maxLevel(levels),
+        effect: 'allow',
+      });
+      continue;
+    }
+    if (principal === USER_WILDCARD || !hasDenyEntry(chain, principal)) {
+      continue;
+    }
+    rows.push({
+      nodeUri: uri.toString(),
+      principal,
+      level: READ_LEVEL,
+      effect: 'deny',
+    });
+  }
+  return rows;
 }
 
 function toEntryRows(uri: Uri, entries: readonly AclFileEntry[]): readonly AclEntryRow[] {
@@ -438,14 +517,27 @@ export class AclService implements Authorizer {
    *
    * 直接查 `node_permission` 而不是 `readableUris`：后者固定 `level >= 1`，
    * 回答不了 `write` / `manage` 的检查。
+   *
+   * deny 优先（§12.2 不变量 2）：主体集合里有人被 deny 时 allow 一律作废。这与
+   * `PermissionRepository.readableUris` 是同一套谓词，只把「级别 >= read」换成
+   * `MAX(level)`。
    */
   #maxLevel(uri: string, principals: readonly string[]): AclLevel | null {
     if (principals.length === 0) {
       return null;
     }
+    const principalList = principals.map(() => '?').join(', ');
     const sql = `SELECT MAX(level) AS level FROM node_permission
-      WHERE node_uri = ? AND principal IN (${principals.map(() => '?').join(', ')})`;
-    const row = this.#db.prepare(sql).get(uri, ...principals);
+      WHERE node_uri = ?
+        AND principal IN (${principalList})
+        AND effect = 'allow'
+        AND NOT EXISTS (
+          SELECT 1 FROM node_permission d
+          WHERE d.node_uri = node_permission.node_uri
+            AND d.principal IN (${principalList})
+            AND d.effect = 'deny'
+        )`;
+    const row = this.#db.prepare(sql).get(uri, ...principals, ...principals);
     const value = row?.['level'];
     return typeof value === 'number' ? (value as AclLevel) : null;
   }
@@ -503,19 +595,34 @@ export class AclService implements Authorizer {
     const permissions: PermissionRow[] = [];
     for (const node of nodes) {
       const chain = await this.#readChain(node.uri, node.kind, cache);
-      for (const principal of collectPrincipals(chain)) {
-        const levels = effectiveAcl(chain, principal);
-        if (levels.size === 0) {
-          continue;
-        }
-        permissions.push({
-          nodeUri: node.uri.toString(),
-          principal,
-          level: maxLevel(levels),
-        });
-      }
+      permissions.push(...materializePermissions(node.uri, chain, collectPrincipals(chain)));
     }
     return permissions;
+  }
+
+  /**
+   * 单个节点的物化（增量入口）。
+   *
+   * 用于「新建节点时从父目录复制有效权限」：新节点还没有后代，只重算自己。
+   * 链仍然是唯一真相——父目录的 `node_permission` 行是派生结果，直接复制它会在
+   * 父行过期时把错误一起继承下来。
+   *
+   * 与 `setAcl` 的整棵子树重算共用 `materializePermissions`，保证两条路径的
+   * 谓词一致。
+   */
+  async materializeNode(uri: Uri): Promise<void> {
+    const kind = this.#nodes.get(uri.toString())?.kind ?? 'directory';
+    const chain = await this.#readChain(uri, kind, new Map<string, AclFile | null>());
+    const permissions = materializePermissions(uri, chain, collectPrincipals(chain));
+
+    this.#runInTransaction(() => {
+      this.#permissions.replaceNode(uri.toString(), permissions);
+    });
+
+    this.#logger.debug('节点权限物化', {
+      uri: uri.toString(),
+      permissions: permissions.length,
+    });
   }
 
   /** 根 → 目标目录的链。文档节点不把自己算进去（见 `#materialize`）。 */

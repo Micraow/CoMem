@@ -91,11 +91,30 @@ export interface RemoveResult {
   readonly removedFiles: number;
 }
 
+/**
+ * 节点写入观察者（架构文档 §8.2 的物化增量入口）。
+ *
+ * `FileSystemService` 是内容的唯一写入口，索引与 `node_permission` 都是派生数据。
+ * 节点落盘后必须通知它们：没有通知就没有 `node_permission` 行，检索永远看不到
+ * 新节点（「写成功了但读不到」）。
+ *
+ * 实现方负责幂等：同一个 URI 可能被通知多次（覆盖写、重复 mkdir）。
+ */
+export interface NodeWriteObserver {
+  /** 节点被创建或更新后调用。`kind` 是落盘后的实际形态。 */
+  onNodeWritten(uri: Uri, kind: 'file' | 'directory'): Promise<void>;
+
+  /** 节点被删除、或 move 后源路径消失时调用。实现方负责清掉派生行。 */
+  onNodeRemoved(uri: Uri): Promise<void>;
+}
+
 export interface FileSystemServiceDeps {
   readonly store: ContentStore;
   readonly locks: PathLockManager;
   readonly authorizer: Authorizer;
   readonly logger: Logger;
+  /** 派生数据的写入通知；顺序即调用顺序，实现方之间不应有依赖。 */
+  readonly observers?: readonly NodeWriteObserver[];
 }
 
 export class FileSystemService {
@@ -103,12 +122,14 @@ export class FileSystemService {
   readonly #locks: PathLockManager;
   readonly #authorizer: Authorizer;
   readonly #logger: Logger;
+  readonly #observers: readonly NodeWriteObserver[];
 
   constructor(deps: FileSystemServiceDeps) {
     this.#store = deps.store;
     this.#locks = deps.locks;
     this.#authorizer = deps.authorizer;
     this.#logger = deps.logger;
+    this.#observers = deps.observers ?? [];
   }
 
   async read(uri: Uri): Promise<TextDocument> {
@@ -197,6 +218,7 @@ export class FileSystemService {
     return this.#locks.withLock(uri, 'exact', async () => {
       const created = !(await this.#store.exists(uri));
       const stat = await this.#store.writeText(uri, text, options);
+      await this.#notifyWritten(uri, 'file');
       return { uri, stat, created };
     });
   }
@@ -241,15 +263,20 @@ export class FileSystemService {
   /** 建目录，父目录不存在时一并建（`recursive`），已存在不报错。 */
   async mkdir(uri: Uri): Promise<void> {
     await this.#authorizer.assert(uri, WRITE);
-    await this.#locks.withLock(uri, 'tree', () => this.#store.mkdir(uri, { recursive: true }));
+    await this.#locks.withLock(uri, 'tree', async () => {
+      await this.#store.mkdir(uri, { recursive: true });
+      await this.#notifyWritten(uri, 'directory');
+    });
   }
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */
   async remove(uri: Uri): Promise<RemoveResult> {
     await this.#authorizer.assert(uri, MANAGE);
-    return this.#locks.withLock(uri, 'tree', async () => ({
-      removedFiles: await this.#store.remove(uri, { recursive: true }),
-    }));
+    return this.#locks.withLock(uri, 'tree', async () => {
+      const removedFiles = await this.#store.remove(uri, { recursive: true });
+      await this.#notifyRemoved(uri);
+      return { removedFiles };
+    });
   }
 
   /**
@@ -280,8 +307,50 @@ export class FileSystemService {
         ? { first: from, second: to }
         : { first: to, second: from };
     await this.#locks.withLock(ordered.first, 'tree', () =>
-      this.#locks.withLock(ordered.second, 'tree', () => this.#store.move(from, to)),
+      this.#locks.withLock(ordered.second, 'tree', async () => {
+        await this.#store.move(from, to);
+        // 移动 = 源路径消失 + 目标路径出现，两侧的派生数据都要通知。
+        await this.#notifyRemoved(from);
+        const stat = await this.#store.stat(to);
+        if (stat !== null) {
+          await this.#notifyWritten(to, stat.kind);
+        }
+      }),
     );
+  }
+
+  /**
+   * 通知「节点已写入」。
+   *
+   * **observer 抛错不能让写操作失败**：文件已经落盘，回滚反而丢数据；索引与权限是
+   * 派生数据，靠对账修复（架构文档 §7）。逐个捕获，一个 observer 失败不影响其余。
+   */
+  async #notifyWritten(uri: Uri, kind: 'file' | 'directory'): Promise<void> {
+    for (const observer of this.#observers) {
+      try {
+        await observer.onNodeWritten(uri, kind);
+      } catch (error) {
+        this.#logger.error('节点写入观察者失败，已忽略。', {
+          uri: uri.toString(),
+          kind,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  /** 通知「节点已删除」，失败语义与 `#notifyWritten` 相同。 */
+  async #notifyRemoved(uri: Uri): Promise<void> {
+    for (const observer of this.#observers) {
+      try {
+        await observer.onNodeRemoved(uri);
+      } catch (error) {
+        this.#logger.error('节点删除观察者失败，已忽略。', {
+          uri: uri.toString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   /** 有 read 权限的直接子项。 */

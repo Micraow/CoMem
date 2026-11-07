@@ -49,12 +49,15 @@ function record(uri: string, content: string, overrides: Partial<IndexRecord> = 
   };
 }
 
-function grant(uri: string, principal: string, level = 1): void {
-  db.prepare('INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)').run(
-    uri,
-    principal,
-    level,
-  );
+function grant(
+  uri: string,
+  principal: string,
+  level = 1,
+  effect: 'allow' | 'deny' = 'allow',
+): void {
+  db.prepare(
+    'INSERT INTO node_permission (node_uri, principal, level, effect) VALUES (?, ?, ?, ?)',
+  ).run(uri, principal, level, effect);
 }
 
 async function seed(
@@ -240,6 +243,28 @@ describe('search：范围与权限', () => {
     expect(uris(await search('记忆', { levels: ['L0'] }))).toEqual([memory]);
     expect(uris(await search('记忆'))).not.toContain(archived);
   });
+
+  it('deny 压掉 user:* 的 allow：命中被排除', async () => {
+    const publicDoc = 'comem://user/alice/public.md';
+    const blocked = 'comem://user/alice/blocked.md';
+    await seed(publicDoc, '记忆', {}, 'user:*');
+    await seed(blocked, '记忆', {}, 'user:*');
+    grant(blocked, 'user:alice', 1, 'deny');
+
+    expect(uris(await search('记忆', { principals: ['user:alice', 'user:*'] }))).toEqual([
+      publicDoc,
+    ]);
+    // deny 行只压 alice：bob 通过 user:* 仍然可读。
+    expect(uris(await search('记忆', { principals: ['user:bob', 'user:*'] }))).toContain(blocked);
+  });
+
+  it('只有 deny 行、没有 allow 时不可读', async () => {
+    const uri = 'comem://user/alice/deny-only.md';
+    await index.upsert([record(uri, '记忆')]);
+    grant(uri, 'user:alice', 1, 'deny');
+
+    expect(uris(await search('记忆'))).not.toContain(uri);
+  });
 });
 
 describe('search：分数', () => {
@@ -406,6 +431,16 @@ describe('glob', () => {
 
   it('limit 生效', async () => {
     expect(await glob('**', { limit: 1 })).toEqual(['comem://user/alice/a.md']);
+  });
+
+  it('deny 压掉 user:* 的 allow：路径被排除', async () => {
+    const uri = 'comem://user/alice/a.md';
+    db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(uri);
+    grant(uri, 'user:*', 1, 'allow');
+    grant(uri, 'user:alice', 1, 'deny');
+
+    expect(await glob('*.md', { principals: ['user:alice', 'user:*'] })).toEqual([]);
+    expect(await glob('*.md', { principals: ['user:bob', 'user:*'] })).toEqual([uri]);
   });
 
   it('空 scope 在进 SQL 之前就被拒绝', async () => {

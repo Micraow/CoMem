@@ -13,6 +13,11 @@
  * **`grep` 不在这里**：FTS5 索引的是词，`grep` 匹配的是任意正则，两者是不同的访问
  * 路径。`grep` 由 `services/search.ts` 实现——先用本索引拿到权限过滤后的候选 URI，
  * 再逐个读文件做行匹配。
+ *
+ * **权限判断是 deny 优先**（架构文档 §12.2 不变量 2）：可读 = 主体集合里有人拿到
+ * `level >= read` 的 allow，且没有人在同一节点上有 deny 行。索引层与仓储层
+ * （`PermissionRepository.readableUris`）必须用同一套谓词，否则同一次请求里
+ * `search` 与 `grep` 会给出不同的可见集合。两处都收在 `permissionPredicate`。
  */
 
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
@@ -151,6 +156,35 @@ function globToRegExp(pattern: string): RegExp {
     source += char.replace(REGEXP_SPECIAL, '\\$&');
   }
   return new RegExp(`^${source}$`);
+}
+
+/**
+ * 权限谓词：节点对主体集合可读。
+ *
+ * 主体集合在 SQL 里出现两次（外层 allow、内层 deny 的排除），占位符复用同一个
+ * 局部变量，绑定时按出现顺序展开成两段。`search` 与 `glob` 共用这一份。
+ */
+function permissionPredicate(principals: readonly string[]): {
+  readonly sql: string;
+  readonly params: readonly string[];
+} {
+  const principalList = placeholders(principals.length);
+  return {
+    sql: `EXISTS (
+         SELECT 1 FROM node_permission p
+         WHERE p.node_uri = n.uri
+           AND p.principal IN (${principalList})
+           AND p.level >= ${READ_LEVEL}
+           AND p.effect = 'allow'
+           AND NOT EXISTS (
+             SELECT 1 FROM node_permission d
+             WHERE d.node_uri = p.node_uri
+               AND d.principal IN (${principalList})
+               AND d.effect = 'deny'
+           )
+       )`,
+    params: [...principals, ...principals],
+  };
 }
 
 /**
@@ -341,15 +375,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
       params.push(...query.levels);
     }
 
-    conditions.push(
-      `EXISTS (
-         SELECT 1 FROM node_permission p
-         WHERE p.node_uri = n.uri
-           AND p.principal IN (${placeholders(query.principals.length)})
-           AND p.level >= ${READ_LEVEL}
-       )`,
-    );
-    params.push(...query.principals);
+    const permission = permissionPredicate(query.principals);
+    conditions.push(permission.sql);
+    params.push(...permission.params);
 
     const sql = `SELECT n.uri, n.level, n.abstract, n.context_type, bm25(node_fts) AS rank
        FROM node_fts
@@ -410,15 +438,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
     conditions.push(scopes.sql);
     params.push(...scopes.params);
 
-    conditions.push(
-      `EXISTS (
-         SELECT 1 FROM node_permission p
-         WHERE p.node_uri = n.uri
-           AND p.principal IN (${placeholders(query.principals.length)})
-           AND p.level >= ${READ_LEVEL}
-       )`,
-    );
-    params.push(...query.principals);
+    const permission = permissionPredicate(query.principals);
+    conditions.push(permission.sql);
+    params.push(...permission.params);
 
     const sql = `SELECT n.uri FROM node n
        WHERE ${conditions.join('\n         AND ')}

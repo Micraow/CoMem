@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { currentVersion, openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import type { Logger } from '../../../src/domain/log.js';
 import {
   PermissionRepository,
@@ -25,8 +25,13 @@ function createLogger(): Logger {
   return logger;
 }
 
-function permission(nodeUri: string, principal: string, level: 1 | 3 | 7): PermissionRow {
-  return { nodeUri, principal, level };
+function permission(
+  nodeUri: string,
+  principal: string,
+  level: 1 | 3 | 7,
+  effect: 'allow' | 'deny' = 'allow',
+): PermissionRow {
+  return { nodeUri, principal, level, effect };
 }
 
 function entry(uri: string, principal: string, level: 1 | 3 | 7, effect: 'allow' | 'deny'): AclEntryRow {
@@ -216,5 +221,71 @@ describe('deleteSubtree', () => {
 
   it('不存在的子树返回 0', () => {
     expect(repository.deleteSubtree('comem://user/alice/missing')).toBe(0);
+  });
+});
+
+describe('readableUris：deny 优先（§12.2 不变量 2）', () => {
+  const DIR = 'comem://user/alice/dir';
+  const PUBLIC = `${DIR}/public.md`;
+  const BLOCKED = `${DIR}/blocked.md`;
+  const DENIED = `${DIR}/denied.md`;
+
+  it('deny 行压掉 user:* 的 allow', () => {
+    repository.replaceSubtree(DIR, [
+      permission(PUBLIC, 'user:*', 1, 'allow'),
+      permission(BLOCKED, 'user:*', 1, 'allow'),
+      permission(BLOCKED, 'user:alice', 1, 'deny'),
+      // 同一节点同一主体只有一行（主键），deny 行就是「被清空」的表达。
+      permission(DENIED, 'user:alice', 1, 'deny'),
+    ]);
+
+    expect(repository.readableUris([PUBLIC, BLOCKED, DENIED], ['user:alice', 'user:*'])).toEqual(
+      new Set([PUBLIC]),
+    );
+    // 通配主体本身没有被 deny：bob 通过 user:* 仍然可读这两个节点。
+    expect(repository.readableUris([PUBLIC, BLOCKED, DENIED], ['user:bob', 'user:*'])).toEqual(
+      new Set([PUBLIC, BLOCKED]),
+    );
+  });
+
+  it('只有 deny 行、没有 allow 时不可读', () => {
+    repository.replaceSubtree(DIR, [permission(DENIED, 'user:alice', 1, 'deny')]);
+
+    expect(repository.readableUris([DENIED], ['user:alice', 'user:*'])).toEqual(new Set());
+  });
+
+  it('deny 不跨节点：同一主体的其它节点不受影响', () => {
+    repository.replaceSubtree(DIR, [
+      permission(PUBLIC, 'user:alice', 1, 'allow'),
+      permission(DENIED, 'user:alice', 1, 'deny'),
+    ]);
+
+    expect(repository.readableUris([PUBLIC, DENIED], ['user:alice'])).toEqual(new Set([PUBLIC]));
+  });
+});
+
+describe('迁移 0004：effect 列', () => {
+  it('老行（不带 effect 的 INSERT）默认为 allow', () => {
+    db.prepare('INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)').run(
+      'comem://user/alice/legacy.md',
+      'user:alice',
+      1,
+    );
+
+    const row = db
+      .prepare('SELECT effect FROM node_permission WHERE node_uri = ?')
+      .get('comem://user/alice/legacy.md');
+    expect(row?.['effect']).toBe('allow');
+    expect(
+      repository.readableUris(['comem://user/alice/legacy.md'], ['user:alice']),
+    ).toEqual(new Set(['comem://user/alice/legacy.md']));
+  });
+
+  it('重复运行迁移不炸，版本号不再前进', () => {
+    const applied = runMigrations(db);
+
+    expect(applied).toBeGreaterThanOrEqual(4);
+    expect(runMigrations(db)).toBe(applied);
+    expect(currentVersion(db)).toBe(applied);
   });
 });

@@ -12,16 +12,18 @@ import {
   permissionDenied,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
-import { FileSystemService } from '../../../src/services/filesystem.js';
+import { FileSystemService, type NodeWriteObserver } from '../../../src/services/filesystem.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 interface RecordingLogger extends Logger {
   readonly warnings: string[];
+  readonly errors: string[];
 }
 
 function createLogger(): RecordingLogger {
   const warnings: string[] = [];
+  const errors: string[] = [];
   const logger: RecordingLogger = {
     trace: () => undefined,
     debug: () => undefined,
@@ -29,11 +31,28 @@ function createLogger(): RecordingLogger {
     warn: (message) => {
       warnings.push(message);
     },
-    error: () => undefined,
+    error: (message) => {
+      errors.push(message);
+    },
     child: () => logger,
     warnings,
+    errors,
   };
   return logger;
+}
+
+/** 记录通知顺序的观察者。 */
+class RecordingObserver implements NodeWriteObserver {
+  readonly written: { readonly uri: string; readonly kind: 'file' | 'directory' }[] = [];
+  readonly removed: string[] = [];
+
+  async onNodeWritten(uri: Uri, kind: 'file' | 'directory'): Promise<void> {
+    this.written.push({ uri: uri.toString(), kind });
+  }
+
+  async onNodeRemoved(uri: Uri): Promise<void> {
+    this.removed.push(uri.toString());
+  }
 }
 
 /** 拒绝特定 URI 的测试替身，用来断言列表语义（§12.4）。 */
@@ -73,8 +92,11 @@ let store: ContentStore;
 let locks: PathLockManager;
 let service: FileSystemService;
 
-function createService(authorizer: Authorizer = new AllowAllAuthorizer()): FileSystemService {
-  return new FileSystemService({ store, locks, authorizer, logger });
+function createService(
+  authorizer: Authorizer = new AllowAllAuthorizer(),
+  observers: readonly NodeWriteObserver[] = [],
+): FileSystemService {
+  return new FileSystemService({ store, locks, authorizer, logger, observers });
 }
 
 beforeEach(() => {
@@ -374,5 +396,94 @@ describe('授权', () => {
 
     await expect(denied.remove(target)).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     expect((await service.read(target)).text).toBe('a');
+  });
+});
+
+describe('观察者', () => {
+  it('write 后通知 onNodeWritten(file)', async () => {
+    const observer = new RecordingObserver();
+    const service = createService(new AllowAllAuthorizer(), [observer]);
+    const target = uri('a.md');
+
+    await service.write(target, 'a');
+
+    expect(observer.written).toEqual([{ uri: target.toString(), kind: 'file' }]);
+    expect(observer.removed).toEqual([]);
+  });
+
+  it('mkdir 后通知 onNodeWritten(directory)', async () => {
+    const observer = new RecordingObserver();
+    const service = createService(new AllowAllAuthorizer(), [observer]);
+    const target = uri('dir');
+
+    await service.mkdir(target);
+
+    expect(observer.written).toEqual([{ uri: target.toString(), kind: 'directory' }]);
+  });
+
+  it('move 后通知源删除与目标写入', async () => {
+    const observer = new RecordingObserver();
+    const service = createService(new AllowAllAuthorizer(), [observer]);
+    const from = uri('dir');
+    const to = uri('moved');
+    await service.mkdir(from);
+    observer.written.length = 0;
+
+    await service.move(from, to);
+
+    expect(observer.removed).toEqual([from.toString()]);
+    expect(observer.written).toEqual([{ uri: to.toString(), kind: 'directory' }]);
+  });
+
+  it('remove 后通知 onNodeRemoved', async () => {
+    const observer = new RecordingObserver();
+    const service = createService(new AllowAllAuthorizer(), [observer]);
+    const target = uri('a.md');
+    await service.write(target, 'a');
+    observer.written.length = 0;
+
+    expect(await service.remove(target)).toEqual({ removedFiles: 1 });
+
+    expect(observer.removed).toEqual([target.toString()]);
+  });
+
+  it('observer 抛错不阻断写操作，错误进日志', async () => {
+    const unreliable: NodeWriteObserver = {
+      async onNodeWritten() {
+        throw new Error('索引挂了');
+      },
+      async onNodeRemoved() {
+        throw new Error('索引挂了');
+      },
+    };
+    const service = createService(new AllowAllAuthorizer(), [unreliable]);
+    const target = uri('a.md');
+
+    const result = await service.write(target, 'a');
+
+    expect(result.created).toBe(true);
+    expect((await service.read(target)).text).toBe('a');
+    expect(logger.errors).toContain('节点写入观察者失败，已忽略。');
+
+    expect(await service.remove(target)).toEqual({ removedFiles: 1 });
+    expect(logger.errors).toContain('节点删除观察者失败，已忽略。');
+  });
+
+  it('一个 observer 抛错不影响其它 observer', async () => {
+    const failing: NodeWriteObserver = {
+      async onNodeWritten() {
+        throw new Error('索引挂了');
+      },
+      async onNodeRemoved() {
+        throw new Error('索引挂了');
+      },
+    };
+    const observer = new RecordingObserver();
+    const service = createService(new AllowAllAuthorizer(), [failing, observer]);
+    const target = uri('a.md');
+
+    await service.write(target, 'a');
+
+    expect(observer.written).toEqual([{ uri: target.toString(), kind: 'file' }]);
   });
 });

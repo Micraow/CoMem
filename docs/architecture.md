@@ -689,7 +689,11 @@ CREATE TABLE node (
   body_digest    TEXT NOT NULL,
   size           INTEGER NOT NULL,
   updated_at     TEXT NOT NULL,
-  status         TEXT NOT NULL       -- active | pending | archived
+  status         TEXT NOT NULL,      -- active | pending | archived
+  -- 目录摘要的新鲜度（§9.3）。只在 kind = 'directory' 的行上有意义
+  summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
+  summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
+  summary_entries  INTEGER NOT NULL DEFAULT 0    -- 生成摘要时的直接子项数
 );
 CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
@@ -708,6 +712,7 @@ CREATE TABLE node_permission (
   node_uri   TEXT NOT NULL,
   principal  TEXT NOT NULL,          -- user:alice | group:eng | user:*
   level      INTEGER NOT NULL,       -- 1 read | 3 write | 7 manage
+  effect     TEXT NOT NULL DEFAULT 'allow',  -- allow | deny
   PRIMARY KEY (node_uri, principal)
 );
 CREATE INDEX node_permission_principal ON node_permission(principal, level);
@@ -791,10 +796,23 @@ WHERE f MATCH ?
     WHERE p.node_uri = n.uri
       AND p.principal IN ('user:alice', 'user:*', 'group:eng')
       AND p.level >= 1                          -- read
+      AND p.effect = 'allow'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM node_permission d
+    WHERE d.node_uri = n.uri
+      AND d.principal IN ('user:alice', 'user:*', 'group:eng')
+      AND d.effect = 'deny'
   )
 ORDER BY rank
 LIMIT ?;
 ```
+
+**`effect` 列不能省，否则 deny 在检索路径上完全失效。** 链式求值（§12.2）是正确的，但检索走的是物化表。只有 `level` 的话，`restricted` 节点上「`user:* = allow read` + `user:alice = deny`」会物化成一行 `(N, 'user:*', 1)`，alice 命中通配行就读到了本该被拒绝的节点——跨用户越权，而且不报错。
+
+加 `effect` 之后：`user:*` 物化成通配 allow 行，被拒绝的具体主体物化成 deny 行。alice 同时命中 allow 与 deny，deny 赢；bob 只命中 `user:*`，允许。通配与精确拒绝因此能共存。
+
+**代价是 `principals` 要绑两次**（外层 allow 一次、内层 deny 一次），不是三次——`p.effect = 'allow'` 是字面量。
 
 **路径范围必须用 `GLOB`，不能用 `LIKE`。** 两个原因，第二个是安全问题：
 

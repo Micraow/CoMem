@@ -55,7 +55,7 @@ describe('readSummary', () => {
   it('目录不存在时返回空摘要，不抛错', async () => {
     await expect(
       store.readSummary(Uri.parse('comem://user/alice/never-created')),
-    ).resolves.toEqual({ abstract: '', overview: '', complete: false });
+    ).resolves.toEqual({ abstract: '', overview: '', complete: false, generation: null });
   });
 
   it('目录存在但没有摘要文件时返回空摘要', async () => {
@@ -64,6 +64,7 @@ describe('readSummary', () => {
       abstract: '',
       overview: '',
       complete: false,
+      generation: null,
     });
   });
 
@@ -75,6 +76,7 @@ describe('readSummary', () => {
       abstract: '一句话摘要\n',
       overview: '',
       complete: false,
+      generation: null,
     });
   });
 
@@ -85,7 +87,19 @@ describe('readSummary', () => {
       abstract: '一句话摘要',
       overview: '完整概览',
       complete: true,
+      generation: GENERATION,
     });
+  });
+
+  it('手工写的摘要没有 frontmatter 时 generation 为 null', async () => {
+    // 手工编辑的 .overview.md 没有生成信息。返回 null 表示「来源未知」，
+    // 不要编造 generatedBy: 'llm'——那会让监控页把手工内容算成模型产出。
+    await mkdir(directoryPath(), { recursive: true });
+    await writeFile(join(directoryPath(), '.overview.md'), '手工概览\n', 'utf8');
+
+    const content = await store.readSummary(DIRECTORY);
+    expect(content.overview).toBe('手工概览\n');
+    expect(content.generation).toBeNull();
   });
 
   it('写入的临时文件不会被当成摘要读出来', async () => {
@@ -101,6 +115,7 @@ describe('readSummary', () => {
       abstract: '',
       overview: '',
       complete: false,
+      generation: null,
     });
   });
 
@@ -127,6 +142,7 @@ describe('writeSummary', () => {
       abstract: 'L0',
       overview: 'L1',
       complete: true,
+      generation: null,
     });
   });
 
@@ -224,7 +240,7 @@ describe('writeSummary', () => {
     await store.writeSummary(DIRECTORY, '', '', GENERATION);
 
     const content = await store.readSummary(DIRECTORY);
-    expect(content).toEqual({ abstract: '', overview: '', complete: true });
+    expect(content).toEqual({ abstract: '', overview: '', complete: true, generation: GENERATION });
   });
 
   it('目标目录被同名文件占住时抛 ALREADY_EXISTS', async () => {
@@ -254,6 +270,7 @@ describe('removeSummary', () => {
       abstract: '',
       overview: '',
       complete: false,
+      generation: null,
     });
   });
 

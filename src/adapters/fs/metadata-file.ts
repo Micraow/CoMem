@@ -59,6 +59,16 @@ export interface SummaryFileContent {
   readonly overview: string;
   /** 两个文件是否都存在 */
   readonly complete: boolean;
+  /**
+   * 生成信息；两个文件都没有 frontmatter 时为 `null`。
+   *
+   * **必须回填**：调用方（控制台的监控页、`health` 工具）靠 `degraded` 区分「模型
+   * 生成的摘要」和「断网时规则拼出来的摘要」。少了这个字段，`degraded` 只能恒为
+   * `false`，断网降级就变成静默降级（§9.2、§17.9）。
+   *
+   * L0 与 L1 是同一次生成写的，取非空的优先；两者不一致时以 L1 为准。
+   */
+  readonly generation: SummaryGeneration | null;
 }
 
 export interface MetadataFileStoreDeps {
@@ -134,6 +144,26 @@ function randomTempSuffix(): string {
     .slice(2, 2 + TEMP_SUFFIX_LENGTH)}`;
 }
 
+/**
+ * 从 frontmatter 回填生成信息；没有任何生成键时返回 `null`。
+ *
+ * 手工写的摘要文件可能没有这三个键，此时按「来源未知」处理（`null`），不要编造
+ * `generatedBy: 'llm'`——那会让监控页把手工内容算成模型产出。
+ */
+function readGeneration(data: Readonly<Record<string, unknown>>): SummaryGeneration | null {
+  const generatedBy = data[FRONTMATTER_KEYS.generatedBy];
+  const generatedAt = data[FRONTMATTER_KEYS.generatedAt];
+  const degraded = data[FRONTMATTER_KEYS.degraded];
+  if (generatedBy !== 'llm' && generatedBy !== 'rule') {
+    return null;
+  }
+  return {
+    generatedBy,
+    ...(typeof generatedAt === 'string' ? { generatedAt } : {}),
+    ...(typeof degraded === 'boolean' ? { degraded } : {}),
+  };
+}
+
 function toGenerationRecord(generation: SummaryGeneration): Record<string, unknown> {
   const record: Record<string, unknown> = {
     [FRONTMATTER_KEYS.generatedBy]: generation.generatedBy,
@@ -165,14 +195,15 @@ export class MetadataFileStore {
   async readSummary(directoryUri: Uri): Promise<SummaryFileContent> {
     const directory = toDiskPath(this.#dataDir, directoryUri);
     const [abstract, overview] = await Promise.all([
-      this.#readBody(join(directory, ABSTRACT_FILE_NAME), directoryUri),
-      this.#readBody(join(directory, OVERVIEW_FILE_NAME), directoryUri),
+      this.#readDocument(join(directory, ABSTRACT_FILE_NAME), directoryUri),
+      this.#readDocument(join(directory, OVERVIEW_FILE_NAME), directoryUri),
     ]);
 
     const content: SummaryFileContent = {
-      abstract: abstract ?? '',
-      overview: overview ?? '',
+      abstract: abstract?.body ?? '',
+      overview: overview?.body ?? '',
       complete: abstract !== null && overview !== null,
+      generation: overview?.generation ?? abstract?.generation ?? null,
     };
     this.#logger.debug('读取目录摘要', {
       uri: directoryUri.toString(),
@@ -240,8 +271,11 @@ export class MetadataFileStore {
     this.#logger.debug('删除目录摘要', { uri: directoryUri.toString() });
   }
 
-  /** 读一个摘要文件的正文；不存在返回 `null`。 */
-  async #readBody(absolute: string, directoryUri: Uri): Promise<string | null> {
+  /** 读一个摘要文件的正文与生成信息；不存在返回 `null`。 */
+  async #readDocument(
+    absolute: string,
+    directoryUri: Uri,
+  ): Promise<{ readonly body: string; readonly generation: SummaryGeneration | null } | null> {
     let raw: string;
     try {
       raw = (await readFile(absolute)).toString('utf8');
@@ -252,7 +286,8 @@ export class MetadataFileStore {
       }
       throw mapFsError(error, directoryUri);
     }
-    return parseDocument(raw).body;
+    const parsed = parseDocument(raw);
+    return { body: parsed.body, generation: readGeneration(parsed.data) };
   }
 
   /** 读磁盘上现有的 frontmatter 键值；文件不存在返回空对象。 */

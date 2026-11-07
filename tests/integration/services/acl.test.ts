@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import {
   PermissionRepository,
   type PermissionRow,
@@ -114,13 +115,14 @@ function seedDocument(uri: string): void {
 function permissionsOf(nodeUri: string): readonly PermissionRow[] {
   return db
     .prepare(
-      'SELECT node_uri, principal, level FROM node_permission WHERE node_uri = ? ORDER BY principal ASC',
+      'SELECT node_uri, principal, level, effect FROM node_permission WHERE node_uri = ? ORDER BY principal ASC',
     )
     .all(nodeUri)
     .map((row) => ({
       nodeUri: String(row['node_uri']),
       principal: String(row['principal']),
       level: Number(row['level']) as AclLevel,
+      effect: String(row['effect']) as PermissionRow['effect'],
     }));
 }
 
@@ -300,7 +302,9 @@ describe('求值不变量', () => {
 
     expect(await service.check(Uri.parse(ROOT), 7)).toBe(true);
     expect(await service.check(Uri.parse(ROOT), 1)).toBe(true);
-    expect(permissionsOf(ROOT)).toEqual([{ nodeUri: ROOT, principal: 'user:alice', level: 7 }]);
+    expect(permissionsOf(ROOT)).toEqual([
+      { nodeUri: ROOT, principal: 'user:alice', level: 7, effect: 'allow' },
+    ]);
   });
 
   it('多层叠加：不同层级的 allow 合并后取最高', async () => {
@@ -348,8 +352,8 @@ describe('物化', () => {
     for (const target of targets) {
       expect(permissionsOf(target)).toEqual(
         expect.arrayContaining([
-          { nodeUri: target, principal: 'group:eng', level: 1 },
-          { nodeUri: target, principal: 'user:alice', level: 7 },
+          { nodeUri: target, principal: 'group:eng', level: 1, effect: 'allow' },
+          { nodeUri: target, principal: 'user:alice', level: 7, effect: 'allow' },
         ]),
       );
     }
@@ -482,8 +486,8 @@ describe('事务与反查表', () => {
       { uri: ROOT, principal: 'group:eng', level: 1, effect: 'allow' },
     ]);
     expect(permissionsOf(ROOT)).toEqual([
-      { nodeUri: ROOT, principal: 'group:eng', level: 1 },
-      { nodeUri: ROOT, principal: 'user:alice', level: 7 },
+      { nodeUri: ROOT, principal: 'group:eng', level: 1, effect: 'allow' },
+      { nodeUri: ROOT, principal: 'user:alice', level: 7, effect: 'allow' },
     ]);
   });
 
@@ -507,5 +511,192 @@ describe('事务与反查表', () => {
       const satisfied = [...levels].some((level) => levelSatisfies(level, action));
       expect(satisfied).toBe(await bob.check(Uri.parse(ROOT), action));
     }
+  });
+});
+
+/**
+ * 回归：物化表必须能表达 deny（架构文档 §12.2 不变量 2）。
+ *
+ * 修复前 `node_permission` 只有 level，物化阶段遇到「有效权限为空」直接跳过，
+ * 于是 `user:alice = deny` 在检索侧消失，alice 通过 `user:* = allow` 读到了
+ * 本应被拒绝的节点。这个用例同时覆盖链式求值、批量过滤与 FTS 检索三条读路径。
+ */
+describe('回归：deny 必须被物化', () => {
+  const BOB_ROOT = 'comem://user/bob';
+  const RESTRICTED = `${BOB_ROOT}/restricted`;
+
+  async function seedRestricted(): Promise<void> {
+    seed(BOB_ROOT, RESTRICTED);
+    const bob = createService({ subject: 'user:bob' });
+    await bob.ensureRootPreset(Uri.parse(BOB_ROOT));
+    await bob.setAcl(
+      Uri.parse(RESTRICTED),
+      { mode: 'restricted', entries: [allow('user:*', 1), deny('user:alice', 1)] },
+      'user:bob',
+    );
+  }
+
+  it('alice 被 deny 挡住，bob 通过 user:* 可读', async () => {
+    await seedRestricted();
+    const alice = createService({ subject: 'user:alice' });
+    const bob = createService({ subject: 'user:bob' });
+
+    expect(await alice.check(Uri.parse(RESTRICTED), 1)).toBe(false);
+    expect(await bob.check(Uri.parse(RESTRICTED), 1)).toBe(true);
+    expect(await alice.filterReadable([Uri.parse(RESTRICTED)])).toEqual(new Set());
+  });
+
+  it('FTS 检索同样挡住 alice', async () => {
+    await seedRestricted();
+    const index = new SqliteFtsIndex({ db, logger });
+    await index.upsert([
+      {
+        uri: RESTRICTED,
+        parentUri: BOB_ROOT,
+        scope: 'user',
+        kind: 'directory',
+        contextType: 'memory',
+        memoryType: null,
+        level: 'L0',
+        abstract: null,
+        content: '记忆',
+        bodyDigest: 'digest',
+        size: 2,
+        updatedAt: '2026-11-08T00:00:00.000Z',
+        status: 'active',
+      },
+    ]);
+
+    const alice = createService({ subject: 'user:alice' });
+    const bob = createService({ subject: 'user:bob' });
+    const hits = await index.search({
+      text: '记忆',
+      scopes: [BOB_ROOT],
+      principals: alice.resolvePrincipals('user:alice', []),
+      limit: 10,
+    });
+    expect(hits.map((hit) => hit.uri)).not.toContain(RESTRICTED);
+
+    const bobHits = await index.search({
+      text: '记忆',
+      scopes: [BOB_ROOT],
+      principals: bob.resolvePrincipals('user:bob', []),
+      limit: 10,
+    });
+    expect(bobHits.map((hit) => hit.uri)).toContain(RESTRICTED);
+  });
+});
+
+describe('通配与 deny 物化', () => {
+  it('user:* = allow 且没有 deny 时任何人可读', async () => {
+    const target = `${ROOT}/public`;
+    seed(ROOT, target);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(target),
+      { mode: 'restricted', entries: [allow('user:*', 1)] },
+      'user:alice',
+    );
+
+    expect(permissionsOf(target)).toEqual(
+      expect.arrayContaining([
+        { nodeUri: target, principal: 'user:*', level: 1, effect: 'allow' },
+      ]),
+    );
+    expect(await createService({ subject: 'user:bob' }).check(Uri.parse(target), 1)).toBe(true);
+  });
+
+  it('user:* = deny 时任何人不可读，owner 仍然 manage', async () => {
+    const target = `${ROOT}/secret`;
+    seed(ROOT, target);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(target),
+      { mode: 'restricted', entries: [deny('user:*', 1)] },
+      'user:alice',
+    );
+
+    // user:* 是通配符，不是「被拒绝的人」：不能给它写 deny 行，否则 owner 一起被挡掉。
+    expect(permissionsOf(target)).toEqual([
+      { nodeUri: target, principal: 'user:alice', level: 7, effect: 'allow' },
+    ]);
+    expect(await createService({ subject: 'user:bob' }).check(Uri.parse(target), 1)).toBe(false);
+    expect(await createService({ subject: 'user:alice' }).check(Uri.parse(target), 7)).toBe(true);
+  });
+
+  it('同一主体 allow + deny：物化结果是 deny，查询与链式求值一致', async () => {
+    const target = `${ROOT}/mixed`;
+    seed(ROOT, target);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(target),
+      { mode: 'restricted', entries: [allow('user:bob', 7), deny('user:bob', 1)] },
+      'user:alice',
+    );
+
+    expect(permissionsOf(target)).toEqual(
+      expect.arrayContaining([
+        { nodeUri: target, principal: 'user:bob', level: 1, effect: 'deny' },
+      ]),
+    );
+    const bob = createService({ subject: 'user:bob' });
+    for (const action of [1, 3, 7] as const) {
+      expect(await bob.check(Uri.parse(target), action)).toBe(false);
+    }
+  });
+
+  it('materializeNode：新建节点继承父目录的有效权限', async () => {
+    const parent = `${ROOT}/memories`;
+    const target = `${parent}/note.md`;
+    seed(ROOT, parent);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(parent),
+      { mode: 'inherit', entries: [allow('group:eng', 3)] },
+      'user:alice',
+    );
+    seedDocument(target);
+    expect(permissionsOf(target)).toEqual([]);
+
+    await service.materializeNode(Uri.parse(target));
+
+    expect(permissionsOf(target)).toEqual([
+      { nodeUri: target, principal: 'group:eng', level: 3, effect: 'allow' },
+      { nodeUri: target, principal: 'user:alice', level: 7, effect: 'allow' },
+    ]);
+    expect(
+      await createService({ subject: 'user:bob', groups: ['group:eng'] }).check(
+        Uri.parse(target),
+        3,
+      ),
+    ).toBe(true);
+  });
+
+  it('materializeNode 从父目录继承 deny（父目录被 deny 的主体在子节点也不可读）', async () => {
+    const parent = `${ROOT}/blocked`;
+    const child = `${parent}/note.md`;
+    seed(ROOT, parent);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(parent),
+      { mode: 'restricted', entries: [allow('user:*', 1), deny('user:bob', 1)] },
+      'user:alice',
+    );
+    seedDocument(child);
+
+    await service.materializeNode(Uri.parse(child));
+
+    expect(permissionsOf(child)).toEqual(
+      expect.arrayContaining([
+        { nodeUri: child, principal: 'user:*', level: 1, effect: 'allow' },
+        { nodeUri: child, principal: 'user:bob', level: 1, effect: 'deny' },
+      ]),
+    );
+    expect(await createService({ subject: 'user:bob' }).check(Uri.parse(child), 1)).toBe(false);
   });
 });
