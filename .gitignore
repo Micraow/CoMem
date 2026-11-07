@@ -1,0 +1,33 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# 框架产物
+.nuxt/
+.output/
+.vite/
+.nitro/
+
+# 本地产物：删掉不影响源码
+local/
+
+# 配置与本机密文
+config.yaml
+.env
+.env.*
+!.env.example
+
+# 运行数据
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
