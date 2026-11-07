@@ -8,7 +8,9 @@ import tseslint from 'typescript-eslint';
 const DOMAIN_MESSAGE =
   'domain/ 是领域层，只能 type import zod。任何 IO、协议、适配器与其它层的依赖都必须挡在层外（架构文档 §4.2、§4.3）。';
 const SERVICES_MESSAGE =
-  'services/ 是应用层，只能依赖 domain/。禁止依赖 api/ adapters/ bootstrap/，禁止直接使用 node:fs*、node:sqlite、fetch、ai、@ai-sdk/*（架构文档 §4.2）。';
+  'services/ 是应用层，只能依赖 domain/。禁止依赖 api/ bootstrap/，禁止直接使用 node:fs*、node:sqlite、fetch、ai、@ai-sdk/*（架构文档 §4.2）。';
+const SERVICES_ADAPTERS_MESSAGE =
+  'services/ 只能用 `import type` 引用 adapters/ 的具体类型；值导入禁止。实例一律由 bootstrap 构造注入，services/ 不 new 适配器（架构文档 §4.2、§4.4）。';
 const API_MESSAGE =
   'api/ 是接口层，只做协议转换。禁止依赖 adapters/ 与 bootstrap/——具体技术实现通过构造参数注入（架构文档 §4.1、§4.2）。';
 const ADAPTERS_MESSAGE =
@@ -76,10 +78,17 @@ export default tseslint.config(
                 'ai',
                 '@ai-sdk/*',
                 '**/api/**',
-                '**/adapters/**',
                 '**/bootstrap/**',
               ],
               message: SERVICES_MESSAGE,
+            },
+            {
+              // §4.4 明确不为 ContentStore 之类只做一个实现的类型建接口，
+              // 所以 services/ 只能引用 adapters/ 的具体类型。放开的是**类型**依赖，
+              // 运行期实例仍由 bootstrap 构造注入——这一条不是风格，是可测性与装配边界。
+              group: ['**/adapters/**'],
+              allowTypeImports: true,
+              message: SERVICES_ADAPTERS_MESSAGE,
             },
           ],
         },

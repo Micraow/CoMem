@@ -66,9 +66,13 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 | 层 | 允许 import | 禁止 import |
 |---|---|---|
 | ① 接口层 | ②③ | ④ |
-| ② 应用层 | ③ | ①④、`node:fs`、`node:sqlite`、`fetch`、`ai` |
-| ③ 领域层 | 无 | 全部 |
+| ② 应用层 | ③、④ 的**类型**（`import type`） | ①、④ 的值导入、`node:fs`、`node:sqlite`、`fetch`、`ai` |
+| ③ 领域层 | 无（`zod` 仅限 `import type`） | 全部 |
 | ④ 适配层 | ③ | ①② |
+
+**为什么 `services/` 允许类型导入 `adapters/`。** §4.4 定了「只有一个实现就不留接口」，所以 `FileSystemService` 的构造参数类型就是 `ContentStore` 和 `PathLockManager` 这两个具体类型——不引用它们，服务连签名都写不出来。放开的只是**类型**依赖：`import type` 编译后擦除，运行期实例由 `bootstrap/container.ts` 构造注入，`services/` 里 `new` 不出任何适配器。ESLint 用 `allowTypeImports: true` 精确表达这条边界，值导入仍然报错。
+
+**如果哪天出现第二个实现**（比如内存版内容存储），就把端口接口上移到 `domain/`，那时 §4.4 的判据才成立。
 
 用 ESLint `no-restricted-imports` 挡住越界。这不是风格问题：领域层一旦 import `node:fs`，ACL 求值就没法用内存数据穷举测试，而 ACL 是最不能靠手工点两下验证的部分。
 
@@ -691,6 +695,7 @@ CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
 
 -- 全文检索
+-- 注意 content / abstract 存的是「切分后」的文本，不是原文（见下面的中文切分）
 CREATE VIRTUAL TABLE node_fts USING fts5(
   uri UNINDEXED,
   abstract,
@@ -732,6 +737,39 @@ CREATE TABLE task (
 );
 CREATE INDEX task_claim ON task(status, lease_until);
 ```
+
+**中文必须单字切分，否则检索整段失效。** 实测（SQLite 3.54.1，Node 26 的 `node:sqlite`）：
+
+| 方案 | 查「记忆」（文档含「上下文记忆数据库的设计」） | 查「偏好」（文档含「代码风格上的偏好」） |
+|---|---|---|
+| 只用 `unicode61` | ❌ 无结果 | ❌ 无结果 |
+| 只用 `trigram` | ❌ 无结果（不足 3 字） | ❌ 无结果 |
+| CJK 单字切分 + 短语查询 | ✅ 命中 | ✅ 命中 |
+
+`unicode61` 按 Unicode 类别切词，CJK 连续字是「字母类」，整段变成一个巨型 token——只有把整段原样当查询才命中，用户不可能这么搜。`trigram` 天然支持子串，但要求查询至少 3 个字符，而**中文双字词是最常见的形式**（「用户」「偏好」「记忆」「严格」全部落空）。
+
+做法：**CJK 单字切分（unigram），查询侧同样切分后按短语匹配**。
+
+```ts
+// 索引侧：每个 CJK 字符两侧补空格，再合并空白
+function segmentForIndex(text: string): string {
+  return text
+    .replace(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g, (char) => ` ${char} `)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// 查询侧：切分后包成 FTS5 短语，双引号要转义
+function toMatchExpression(query: string): string {
+  return `"${segmentForIndex(query).replace(/"/g, '""')}"`;
+}
+```
+
+单字会拉低 BM25 的区分度（虚词「的」「在」到处都是），但**短语匹配要求字符相邻**，精度是够的。真正的排序靠 §8.5 的层级加权和后续的 rerank。
+
+**索引里存的是切分后的文本，不是原文。** `node_fts.content` 只服务于匹配，`snippet()` / `highlight()` 不用（返回的是 `abstract` 与 URI，摘要来自 `node` 表）。原文在磁盘上，`read` / `grep` 走文件系统，不走这张表。
+
+**查询里的 FTS5 元字符必须转义。** `"` `*` `(` `)` `-` `:` `^` 和 `AND` / `OR` / `NOT` 都会改变查询语义，用户输入里完全可能出现。整串包成短语 + 内部双引号双写，是唯一安全的做法。
 
 ### 8.2 权限为什么要物化进索引
 
