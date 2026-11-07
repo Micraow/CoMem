@@ -325,17 +325,37 @@ export class SummaryService {
    * 有测试：正文没变（第 2 步）与「只记脏」（第 4 步的 else 分支）。
    */
   async invalidate(nodeUri: Uri): Promise<InvalidationResult> {
-    const recomputed: string[] = [];
-    const markedStale: string[] = [];
-
     if (!(await this.#bodyChanged(nodeUri))) {
       // §9.3 第 2 步：正文没变不传播。这是性能的关键——同一个内容重复写不应该
       // 让整条祖先链都重算。
-      return { recomputed, markedStale, stoppedAt: nodeUri.toString() };
+      return { recomputed: [], markedStale: [], stoppedAt: nodeUri.toString() };
     }
+    return this.#propagateFrom(nodeUri, nodeUri.parent());
+  }
 
-    let stoppedAt = nodeUri.toString();
-    let current = nodeUri.parent();
+  /**
+   * 只标脏，跳过「正文 digest 是否变化」的比较。
+   *
+   * **批量写入必须用它，不能调 `invalidate`。** `add_resource` 的顺序是「写文件 →
+   * 批量 `index.upsert` → 标脏」：等标脏被调用时索引里已经是新 digest 了，比较必然
+   * 相等，整条传播链会被静默跳过。结果是文件写了、目录摘要永远不重算，而测试只数
+   * 调用次数，看不出来。
+   *
+   * 调用方在**知道内容确实变了**时用它——批量导入就是这种情况：它刚写完这批文件。
+   *
+   * `directoryUri` 是要标脏的目录本身（不是被写的文件），因为它没有文件可供比较。
+   */
+  async markStale(directoryUri: Uri): Promise<InvalidationResult> {
+    return this.#propagateFrom(directoryUri, directoryUri);
+  }
+
+  /** 从 `start` 开始向上传播；`origin` 只用于日志。 */
+  async #propagateFrom(origin: Uri, start: Uri | null): Promise<InvalidationResult> {
+    const recomputed: string[] = [];
+    const markedStale: string[] = [];
+
+    let stoppedAt = origin.toString();
+    let current = start;
 
     while (current !== null) {
       stoppedAt = current.toString();
@@ -355,7 +375,7 @@ export class SummaryService {
     }
 
     this.#logger.debug('摘要失效传播完成', {
-      node: nodeUri.toString(),
+      node: origin.toString(),
       recomputed: recomputed.length,
       markedStale: markedStale.length,
       stoppedAt,
@@ -369,10 +389,8 @@ export class SummaryService {
    * 两个文件缺任一就没有完整摘要，返回 `null` —— 「摘要都不全」比「只有半份摘要」
    * 更接近调用方想要的语义（重建索引、显示「暂无摘要」）。
    *
-   * **`degraded` 恒为 `false`**：`MetadataFileStore.readSummary` 只返回正文，不暴露
-   * frontmatter，这一层无法知道摘要是不是规则降级产出的。这是契约缺口，不是取舍——
-   * 修复方式是让 `SummaryFileContent` 带上 `generation`（`adapters/fs/metadata-file.ts`，
-   * 本 wave 不归本服务所有）。
+   * `degraded` 从 `SummaryFileContent.generation` 回填——断网时走规则摘要，模型看到的
+   * 概览质量会明显下降，这个标记是它判断「要不要重试」的依据（§9.2）。
    */
   async read(directoryUri: Uri): Promise<DirectorySummary | null> {
     const content = await this.#metadata.readSummary(directoryUri);

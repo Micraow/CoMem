@@ -356,10 +356,53 @@ describe('degraded', () => {
   });
 });
 
-describe('invalidate', () => {
+describe('markStale', () => {
   beforeEach(async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+  });
+
+  it('索引刚更新过也照常重算——这是批量写入的回归', async () => {
+    // 复现 `add_resource` 的顺序：写文件 → 批量 index.upsert → 标脏。
+    // `invalidate` 在这一步会比较「正文 digest」与「索引里的 body_digest」，
+    // 两者相等就提前返回——文件写了、目录摘要永远不重算，而且不报错。
+    const service = createService();
+    const writeSummary = vi.spyOn(metadata, 'writeSummary');
+
+    const result = await service.markStale(Uri.parse(PREFERENCES));
+
+    // 自底向上：目录自己先重算，然后逐级向上到 scope 根。
+    expect(result.recomputed).toContain(PREFERENCES);
+    expect(result.recomputed[0]).toBe(PREFERENCES);
+    expect(writeSummary).toHaveBeenCalled();
+  });
+
+  it('invalidate 在同样的场景下确实提前返回（对照组）', async () => {
+    // 这条钉住两者的差异：不是「markStale 和 invalidate 一样」，而是
+    // 「invalidate 在这里什么都不做，所以批量路径必须换入口」。
+    const service = createService();
+    await index.upsert([
+      {
+        uri: STYLE,
+        parentUri: PREFERENCES,
+        scope: 'user',
+        kind: 'document',
+        contextType: 'memory',
+        memoryType: 'preferences',
+        level: 'L2',
+        abstract: null,
+        content: '代码风格正文。',
+        bodyDigest: stableDigest('# 风格\n\n代码风格正文。\n'),
+        size: 20,
+        updatedAt: new Date().toISOString(),
+        status: 'active',
+      },
+    ]);
+
+    const result = await service.invalidate(Uri.parse(STYLE));
+
+    expect(result.recomputed).toEqual([]);
+    expect(result.markedStale).toEqual([]);
   });
 
   it('正文没变不传播：digest 与索引一致时 recomputed 与 markedStale 都为空', async () => {
