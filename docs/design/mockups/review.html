@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆复核 · CoMem 控制台</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="review" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main" style="overflow:hidden">
+      <div class="split split-320" style="height:100%">
+
+        <!-- ============ 待复核列表 ============ -->
+        <section class="pane" style="display:flex;flex-direction:column">
+          <div class="pane-h">
+            <span class="t">待复核</span>
+            <span class="badge badge-accent" id="pendCount">5</span>
+            <span class="spacer"></span>
+            <button class="iconbtn" id="btnRefresh" title="重新拉取" aria-label="重新拉取"></button>
+          </div>
+          <div style="padding:8px 10px 0">
+            <div class="seg" id="typeSeg" style="width:100%;display:flex">
+              <button data-type="all" class="is-active" style="flex:1;justify-content:center">全部 <span class="faint">5</span></button>
+              <button data-type="experience" style="flex:1;justify-content:center">经验 <span class="faint">3</span></button>
+              <button data-type="rule" style="flex:1;justify-content:center">规则 <span class="faint">2</span></button>
+            </div>
+          </div>
+          <div id="list" style="flex:1;overflow:auto;margin-top:8px"></div>
+          <div style="padding:10px 12px;border-top:1px solid var(--line);background:var(--bg-2)">
+            <p class="hint" style="margin:0">
+              只有「经验」与「规则」需要人工过闸。其余类型（profile / preferences / events）提交后直接生效。
+            </p>
+          </div>
+        </section>
+
+        <!-- ============ 复核详情 ============ -->
+        <section class="pane" id="reviewPane" style="display:flex;flex-direction:column"></section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="comem.js"></script>
+<script>
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const ITEMS = [
+  {
+    id: 'exp-1',
+    type: 'experience',
+    title: 'monorepo-build-cache.md',
+    uri: 'comem://user/alice/memories/experiences/monorepo-build-cache.md',
+    archive: 'archive_002', session: 'session_7c1a', ago: '12 分钟前', at: '2026-11-07 22:31:04',
+    merge: 'patch', status: 'pending',
+    summary: '在已有「构建缓存」经验后追加一条排查步骤：远程缓存命中率低时先看 inputs 配置。',
+    fields: null,
+    diff: [
+      { t: 'hunk', text: '@@ -1,6 +1,9 @@' },
+      { t: 'ctx', n: 1, text: '# monorepo 构建缓存' },
+      { t: 'ctx', n: 2, text: '' },
+      { t: 'ctx', n: 3, text: '构建缓存放在 `local/cache`，不要写进仓库。' },
+      { t: 'ctx', n: 4, text: 'pnpm store 通过 `store-dir` 复用，CI 上挂载同一个卷。' },
+      { t: 'add', n: 5, text: '' },
+      { t: 'add', n: 6, text: '远程缓存命中率低于 60% 时，先检查 `turbo.json` 的 inputs：' },
+      { t: 'add', n: 7, text: '漏掉环境变量声明会让 hash 每次都不同，表现为「缓存全不命中」。' },
+      { t: 'add', n: 8, text: '排查顺序：inputs → 环境变量白名单 → 锁文件版本。' },
+      { t: 'ctx', n: 9, text: '' },
+      { t: 'del', n: 5, text: '- 命中率低一般是网络问题。' }
+    ],
+    quotes: [
+      { role: 'user', text: 'CI 上缓存好像完全没命中，每次都是全量构建。' },
+      { role: 'assistant', text: '看了下 turbo.json，inputs 里没有声明 NODE_ENV。环境变量没进 hash，缓存 key 每次都变。' },
+      { role: 'user', text: '补上就好了。这个以后可以记一下。' }
+    ],
+    impact: ['comem://user/alice/memories/experiences/', 'comem://user/alice/memories/']
+  },
+  {
+    id: 'rule-1',
+    type: 'rule',
+    title: 'test-first-for-bugfix.md',
+    uri: 'comem://user/alice/memories/rules/testing/test-first-for-bugfix.md',
+    archive: 'archive_002', session: 'session_7c1a', ago: '12 分钟前', at: '2026-11-07 22:31:04',
+    merge: 'replace', status: 'pending',
+    summary: '新增规则：修缺陷先补失败用例。这次会话里两次出现「直接改完不知道有没有修好」，被抽取为规则。',
+    fields: [
+      { k: 'applies_when', v: '修复线上缺陷，且改动落在 <code>src/</code> 下的业务代码' },
+      { k: 'exception', v: '仅改文案、样式或配置文件时不需要补测试；跨模块重构是否补测试由 reviewer 判断' },
+      { k: 'action', v: '先补一个能复现缺陷的失败用例，再提交修复。用例名描述行为，不描述实现。' },
+      { k: 'priority', v: '<code>90</code>' },
+      { k: 'status', v: '<code>pending</code> → 生效后写回 <code>active</code>' }
+    ],
+    diff: [
+      { t: 'hunk', text: '@@ 新建文件 @@' },
+      { t: 'add', n: 1, text: '---' },
+      { t: 'add', n: 2, text: 'uri: comem://user/alice/memories/rules/testing/test-first-for-bugfix.md' },
+      { t: 'add', n: 3, text: 'context_type: memory' },
+      { t: 'add', n: 4, text: 'memory_type: rules' },
+      { t: 'add', n: 5, text: 'status: pending' },
+      { t: 'add', n: 6, text: '---' },
+      { t: 'add', n: 7, text: '' },
+      { t: 'add', n: 8, text: 'rule:' },
+      { t: 'add', n: 9, text: '  name: test-first-for-bugfix' },
+      { t: 'add', n: 10, text: '  applies_when: 修复线上缺陷，且改动落在 src/ 下的业务代码' },
+      { t: 'add', n: 11, text: '  exception: 仅改文案、样式或配置文件时不需要补测试' },
+      { t: 'add', n: 12, text: '  action: 先补失败用例，再提交修复' },
+      { t: 'add', n: 13, text: '  priority: 90' }
+    ],
+    quotes: [
+      { role: 'user', text: '这个 bug 改完了，你确定修好了吗？' },
+      { role: 'assistant', text: '我改了三处，但没有用例能验证。建议先加一个复现用例。' },
+      { role: 'user', text: '以后修 bug 都先写用例吧。' }
+    ],
+    impact: ['comem://user/alice/memories/rules/', 'comem://user/alice/memories/']
+  },
+  {
+    id: 'exp-2',
+    type: 'experience',
+    title: 'pnpm-workspace-prune.md',
+    uri: 'comem://user/alice/memories/experiences/pnpm-workspace-prune.md',
+    archive: 'archive_001', session: 'session_5b09', ago: '3 小时前', at: '2026-11-07 19:12:38',
+    merge: 'replace', status: 'pending',
+    summary: '新增经验：清理 workspace 依赖时先删 node_modules 再 prune，否则残留软链会导致类型检查读到旧产物。',
+    fields: null,
+    diff: [
+      { t: 'hunk', text: '@@ 新建文件 @@' },
+      { t: 'add', n: 1, text: '---' },
+      { t: 'add', n: 2, text: 'memory_type: experiences' },
+      { t: 'add', n: 3, text: 'status: pending' },
+      { t: 'add', n: 4, text: '---' },
+      { t: 'add', n: 5, text: '' },
+      { t: 'add', n: 6, text: '# 清理 workspace 依赖' },
+      { t: 'add', n: 7, text: '' },
+      { t: 'add', n: 8, text: '删掉 package 里不再使用的依赖后，`pnpm prune` 不会清理 workspace 的软链。' },
+      { t: 'add', n: 9, text: '残留软链会让 `tsc -b` 读到旧的 `.d.ts`，表现为「类型还是有」。' },
+      { t: 'add', n: 10, text: '顺序：删 node_modules → prune → 重新 install → 再跑类型检查。' }
+    ],
+    quotes: [
+      { role: 'assistant', text: '类型报错是旧的 .d.ts。node_modules 里还留着上个版本的软链。' },
+      { role: 'user', text: '所以我删了依赖为什么还在？' },
+      { role: 'assistant', text: 'pnpm prune 只清理 lock 里没有的包，workspace 链接要重装才会重建。' }
+    ],
+    impact: ['comem://user/alice/memories/experiences/']
+  },
+  {
+    id: 'rule-2',
+    type: 'rule',
+    title: 'no-secret-in-log.md',
+    uri: 'comem://user/alice/memories/rules/security/no-secret-in-log.md',
+    archive: 'archive_001', session: 'session_5b09', ago: '3 小时前', at: '2026-11-07 19:12:38',
+    merge: 'replace', status: 'pending',
+    summary: '新增规则：日志里不出现凭据。会话中调试 token 校验时打印了完整 header，被抽取为规则。',
+    fields: [
+      { k: 'applies_when', v: '新增或修改日志输出，尤其是请求链路与鉴权相关代码' },
+      { k: 'exception', v: '本地调试的临时日志，且合并前已删除，并在 PR 描述中说明' },
+      { k: 'action', v: '日志不出现 token、cookie、连接串。需要定位时只打印首尾各 4 位并标注掩码。' },
+      { k: 'priority', v: '<code>95</code>' },
+      { k: 'status', v: '<code>pending</code> → 生效后写回 <code>active</code>' }
+    ],
+    diff: [
+      { t: 'hunk', text: '@@ 新建文件 @@' },
+      { t: 'add', n: 1, text: '---' },
+      { t: 'add', n: 2, text: 'memory_type: rules' },
+      { t: 'add', n: 3, text: 'status: pending' },
+      { t: 'add', n: 4, text: '---' },
+      { t: 'add', n: 5, text: '' },
+      { t: 'add', n: 6, text: 'rule:' },
+      { t: 'add', n: 7, text: '  name: no-secret-in-log' },
+      { t: 'add', n: 8, text: '  applies_when: 新增或修改日志输出' },
+      { t: 'add', n: 9, text: '  exception: 本地临时日志，合并前已删除' },
+      { t: 'add', n: 10, text: '  action: 只打印首尾 4 位，其余掩码' },
+      { t: 'add', n: 11, text: '  priority: 95' }
+    ],
+    quotes: [
+      { role: 'assistant', text: '为了定位，我把 authorization header 整个打了出来。' },
+      { role: 'user', text: '别，日志会上云。以后只打前后几位。' }
+    ],
+    impact: ['comem://user/alice/memories/rules/', 'comem://user/alice/memories/']
+  },
+  {
+    id: 'exp-3',
+    type: 'experience',
+    title: 'flaky-test-quarantine.md',
+    uri: 'comem://user/alice/memories/experiences/flaky-test-quarantine.md',
+    archive: 'archive_001', session: 'session_3a77', ago: '昨天', at: '2026-11-06 17:44:12',
+    merge: 'addOnly', status: 'pending',
+    summary: '新增经验：不稳定的用例先隔离再修，不要重跑三次碰运气。',
+    fields: null,
+    diff: [
+      { t: 'hunk', text: '@@ 新建文件 @@' },
+      { t: 'add', n: 1, text: '---' },
+      { t: 'add', n: 2, text: 'memory_type: experiences' },
+      { t: 'add', n: 3, text: 'status: pending' },
+      { t: 'add', n: 4, text: '---' },
+      { t: 'add', n: 5, text: '' },
+      { t: 'add', n: 6, text: '# 不稳定用例' },
+      { t: 'add', n: 7, text: '' },
+      { t: 'add', n: 8, text: '连续两次失败一次通过，就是不稳定，不是「偶发」。' },
+      { t: 'add', n: 9, text: '处理顺序：加 `skip` 并建 issue → 定位时序或共享状态 → 修好后去掉 skip。' },
+      { t: 'add', n: 10, text: '重跑直到通过会污染主干信号，比失败更贵。' }
+    ],
+    quotes: [
+      { role: 'user', text: '这个用例挂了一次，重跑过了，应该没事。' },
+      { role: 'assistant', text: '连续两次失败一次通过，说明有共享状态。先隔离，再修。' }
+    ],
+    impact: ['comem://user/alice/memories/experiences/']
+  }
+];
+
+let selected = ITEMS[0].id;
+let filterType = 'all';
+const reviewed = new Set();
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+const TYPE_LABEL = { experience: '经验', rule: '规则' };
+
+function visibleItems() {
+  return ITEMS.filter((i) => !reviewed.has(i.id) && (filterType === 'all' || i.type === filterType));
+}
+
+function renderList() {
+  const items = visibleItems();
+  document.getElementById('pendCount').textContent = ITEMS.length - reviewed.size;
+  document.getElementById('list').innerHTML = items.map((i) => `
+    <div class="lrow ${i.id === selected ? 'is-sel' : ''}" data-id="${i.id}">
+      <div class="lrow-main">
+        <div class="lrow-top">
+          <span class="badge ${i.type === 'rule' ? 'badge-info' : 'badge-accent'}">${TYPE_LABEL[i.type]}</span>
+          <span class="lrow-t">${i.title}</span>
+        </div>
+        <div class="lrow-m">
+          <span>${i.archive}</span>
+          <span style="color:var(--line-3)">·</span>
+          <span>${i.ago}</span>
+          <span style="color:var(--line-3)">·</span>
+          <span>${i.merge}</span>
+        </div>
+      </div>
+    </div>`).join('') || `<div style="padding:28px 16px;text-align:center">
+      <div class="label" style="margin-bottom:6px">队列已清空</div>
+      <p class="hint" style="margin:0">当前筛选条件下没有待复核记录。</p>
+    </div>`;
+}
+
+function renderDetail() {
+  const item = ITEMS.find((i) => i.id === selected) || visibleItems()[0];
+  const pane = document.getElementById('reviewPane');
+  if (!item) {
+    pane.innerHTML = `<div style="display:grid;place-items:center;height:100%;padding:40px;text-align:center">
+      <div>
+        <div class="label" style="margin-bottom:8px">全部处理完毕</div>
+        <p class="dim" style="font-size:12.5px;max-width:36ch;line-height:1.7">5 条待复核记录已全部分流，管线回到空闲。新的记忆会在下次会话提交后进入队列。</p>
+      </div></div>`;
+    return;
+  }
+
+  const diffHTML = item.diff.map((l) => `
+    <div class="dl ${l.t}">
+      ${l.t === 'hunk' ? '<span class="ln"></span><span class="sig">@@</span>' : `<span class="ln">${l.n ?? ''}</span><span class="sig">${l.t === 'add' ? '+' : l.t === 'del' ? '−' : ' '}</span>`}
+      <span class="tx">${CoMem.esc(l.text).replace(/\*([^*]+)\*/g, '<b style="color:var(--ink)">$1</b>')}</span>
+    </div>`).join('');
+
+  const added = item.diff.filter((l) => l.t === 'add').length;
+  const removed = item.diff.filter((l) => l.t === 'del').length;
+
+  pane.innerHTML = `
+    <div style="flex:1;overflow:auto">
+      <div style="padding:16px 22px 22px">
+        <div class="crumb">
+          <a href="review.html">记忆复核</a><span class="sep">/</span><span>${TYPE_LABEL[item.type]}</span>
+        </div>
+
+        <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div style="flex:1;min-width:240px">
+            <h1 class="doc-title">${item.title}</h1>
+            <div class="uri" data-copy="${item.uri}" style="margin-top:4px">${item.uri}</div>
+          </div>
+          <span class="badge ${item.type === 'rule' ? 'badge-info' : 'badge-accent'}">${TYPE_LABEL[item.type]}</span>
+          <span class="badge badge-warn">pending</span>
+        </div>
+
+        <p class="dim" style="font-size:12.5px;margin-top:12px;line-height:1.65;max-width:76ch">${item.summary}</p>
+
+        <!-- 元数据条 -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-top:16px">
+          <div style="background:var(--surface);padding:9px 12px">
+            <div class="label" style="font-size:8.5px">来源会话</div>
+            <div class="mono" style="font-size:11px;color:var(--ink-2);margin-top:3px">${item.session}</div>
+          </div>
+          <div style="background:var(--surface);padding:9px 12px">
+            <div class="label" style="font-size:8.5px">归档</div>
+            <div class="mono" style="font-size:11px;color:var(--ink-2);margin-top:3px">${item.archive}</div>
+          </div>
+          <div style="background:var(--surface);padding:9px 12px">
+            <div class="label" style="font-size:8.5px">抽取时间</div>
+            <div class="mono" style="font-size:11px;color:var(--ink-2);margin-top:3px">${item.at}</div>
+          </div>
+          <div style="background:var(--surface);padding:9px 12px">
+            <div class="label" style="font-size:8.5px">合并策略</div>
+            <div class="mono" style="font-size:11px;color:var(--ink-2);margin-top:3px">${item.merge}</div>
+          </div>
+        </div>
+
+        <!-- 规则字段 -->
+        ${item.fields ? `
+        <div style="margin-top:20px">
+          <div class="sec-title" style="margin-bottom:4px">规则字段</div>
+          <div style="border:1px solid var(--line);border-radius:var(--r);background:var(--surface);padding:2px 14px">
+            ${item.fields.map((f) => `<div class="field-row">
+              <div class="fk">${f.k}</div>
+              <div class="fv">${f.v}</div>
+            </div>`).join('')}
+          </div>
+          <p class="hint" style="margin-top:8px">
+            <b class="mono" style="color:var(--ink-2)">applies_when</b> 与 <b class="mono" style="color:var(--ink-2)">exception</b>
+            只在 <span class="mono">rule_search</span> 按任务上下文召回时求值，不参与普通全文检索。生效前请确认条件写得足够窄。
+          </p>
+        </div>` : ''}
+
+        <!-- diff -->
+        <div style="margin-top:20px">
+          <div class="sec-title" style="margin-bottom:8px">
+            before / after
+            <span class="badge badge-neutral" style="margin-left:auto;text-transform:none;letter-spacing:0">
+              <span style="color:var(--ok)">+${added}</span>
+              <span style="color:var(--line-3)">/</span>
+              <span style="color:var(--err)">−${removed}</span>
+            </span>
+          </div>
+          <div class="diff">
+            <div class="diff-h">
+              <span>${item.title}</span>
+              <span style="flex:1"></span>
+              <span class="add">+${added}</span><span class="del">−${removed}</span>
+              <span>patch</span>
+            </div>
+            ${diffHTML}
+          </div>
+        </div>
+
+        <!-- 来源对话 -->
+        <div style="margin-top:20px">
+          <div class="sec-title" style="margin-bottom:8px">抽取依据 · 来源对话</div>
+          <div style="border:1px solid var(--line);border-radius:var(--r);background:var(--surface);overflow:hidden">
+            ${item.quotes.map((q) => `<div style="display:flex;gap:10px;padding:9px 12px;border-bottom:1px solid var(--line)">
+              <span class="mono" style="font-size:9.5px;color:var(--ink-4);flex:0 0 56px;padding-top:2px;letter-spacing:.05em">${q.role}</span>
+              <span style="font-size:12px;color:var(--ink-2);line-height:1.6">${q.text}</span>
+            </div>`).join('')}
+          </div>
+        </div>
+
+        <!-- 影响 -->
+        <div style="margin-top:20px">
+          <div class="sec-title" style="margin-bottom:8px">生效后失效的摘要</div>
+          <div style="display:grid;gap:6px">
+            ${item.impact.map((u) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px">
+              <span style="color:var(--warn)">${CoMem.icon('layers', 12)}</span>
+              <span class="mono" style="color:var(--ink-3);word-break:break-all">${u}</span>
+            </div>`).join('')}
+          </div>
+          <p class="hint" style="margin-top:7px">通过后这些目录的 L1 概览会被标记为待刷新，下一次写入或达到阈值时重算。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部操作 -->
+    <div class="review-foot">
+      <input class="input" id="rejectReason" placeholder="拒绝原因（拒绝时必填，会写进归档记录）" style="max-width:340px;height:28px;font-size:12px">
+      <span class="hint" style="display:flex;gap:5px;align-items:center"><span class="kbd">⌘⏎</span> 通过</span>
+      <span class="spacer"></span>
+      <button class="btn btn-danger" id="btnReject">拒绝</button>
+      <button class="btn btn-primary" id="btnApprove">通过并生效</button>
+    </div>`;
+
+  CoMem.bindCopy();
+  document.getElementById('btnApprove').addEventListener('click', () => decide(item, 'approve'));
+  document.getElementById('btnReject').addEventListener('click', () => {
+    const reason = document.getElementById('rejectReason').value.trim();
+    if (!reason) {
+      document.getElementById('rejectReason').focus();
+      CoMem.toast('请先填写拒绝原因');
+      return;
+    }
+    decide(item, 'reject');
+  });
+}
+
+function decide(item, action) {
+  reviewed.add(item.id);
+  const next = ITEMS.find((i) => !reviewed.has(i.id));
+  if (next) selected = next.id;
+  renderList();
+  renderDetail();
+  CoMem.toast(action === 'approve'
+    ? `已通过 · ${item.title} 转为 active`
+    : `已拒绝 · 记录原因并删除该条`);
+}
+
+/* ==========================================================================
+   初始化
+   ========================================================================== */
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btnRefresh').innerHTML = CoMem.icon('retry', 14);
+  document.getElementById('btnRefresh').addEventListener('click', () => CoMem.toast('已重新拉取待复核队列'));
+
+  renderList();
+  renderDetail();
+
+  document.getElementById('list').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-id]');
+    if (!row) return;
+    selected = row.dataset.id;
+    renderList();
+    renderDetail();
+  });
+
+  document.getElementById('typeSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-type]');
+    if (!btn) return;
+    filterType = btn.dataset.type;
+    document.querySelectorAll('#typeSeg button').forEach((b) => b.classList.toggle('is-active', b === btn));
+    const items = visibleItems();
+    if (items.length && !items.some((i) => i.id === selected)) selected = items[0].id;
+    renderList();
+    renderDetail();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      const btn = document.getElementById('btnApprove');
+      if (btn) btn.click();
+    }
+  });
+});
+</script>
+</body>
+</html>

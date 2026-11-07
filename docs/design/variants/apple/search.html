@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>检索调试 · CoMem 控制台</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  document.documentElement.dataset.theme = (() => {
+    try { return localStorage.getItem('comem-apple-theme') || 'dark'; } catch (e) { return 'dark'; }
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+
+  <!-- ==================== 侧边栏 ==================== -->
+  <aside class="sidebar">
+    <div class="sidebar__brand">
+      <span class="brand-mark" aria-hidden="true"><span class="strata strata--lg"><i></i><i></i><i></i></span></span>
+      <span class="brand-text"><b>CoMem</b><span>Console</span></span>
+    </div>
+
+    <div class="scope-wrap">
+      <button class="scope" type="button" id="scopeBtn" title="切换命名空间" aria-haspopup="true" aria-expanded="false">
+        <span class="scope__scheme">comem://</span>
+        <span class="scope__path">user/alice</span>
+        <svg class="scope__chev" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+      </button>
+
+      <div class="popover" id="scopePop" role="menu" aria-label="命名空间" hidden>
+        <div class="popover__label">命名空间</div>
+        <button class="popover__item is-active" type="button" role="menuitem" data-scope="user/alice">
+          <span class="dot" style="color:var(--green)"></span>
+          <span class="popover__path">comem://user/alice</span>
+          <span class="popover__meta">个人空间 · manage</span>
+        </button>
+        <button class="popover__item" type="button" role="menuitem" data-scope="group/eng">
+          <span class="dot" style="color:var(--teal)"></span>
+          <span class="popover__path">comem://group/eng</span>
+          <span class="popover__meta">组空间 · write</span>
+        </button>
+      </div>
+    </div>
+
+    <nav class="sidenav" aria-label="主导航">
+      <div class="sidenav__label">控制台</div>
+      <a class="navitem" href="filesystem.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.9c.4 0 .8.2 1 .5l.7 1H12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 12.5H3.5A1.5 1.5 0 0 1 2 11V4.5Z"/></svg>
+        <span>文件树</span><span class="navitem__count">128</span>
+      </a>
+      <a class="navitem is-active" href="search.html" aria-current="page">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+        <span>检索调试</span>
+      </a>
+      <a class="navitem" href="review.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.5h10v9.5H3z"/><path d="m5.4 8.4 1.8 1.8 3.4-3.6"/></svg>
+        <span>记忆复核</span><span class="navitem__count">5</span>
+      </a>
+      <div class="sidenav__label">治理</div>
+      <a class="navitem" href="acl.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.5" width="10" height="6.5" rx="1.4"/><path d="M5.5 6.5V5a2.5 2.5 0 0 1 5 0v1.5"/></svg>
+        <span>权限管理</span>
+      </a>
+      <a class="navitem" href="index.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 14 5.4 8 8.6 2 5.4z"/><path d="m2 8.6 6 3.2 6-3.2"/></svg>
+        <span>设计规范</span>
+      </a>
+    </nav>
+
+    <div class="sidebar__foot">
+      <div class="footstat"><span>索引条目</span><b>128</b></div>
+      <div class="footbar"><i style="width:64%"></i></div>
+      <div class="footstat"><span>待复核</span><b style="color:var(--orange-ink)">5</b></div>
+      <div class="footstat"><span>运行中任务</span><b>2</b></div>
+    </div>
+  </aside>
+
+  <!-- ==================== 主区 ==================== -->
+  <div class="main">
+    <header class="titlebar">
+      <div class="titlebar__title">
+        <span class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span class="current">检索调试</span></span>
+      </div>
+      <div class="titlebar__spacer"></div>
+      <div class="titlebar__group">
+        <button class="iconbtn" type="button" id="focusSearch" aria-label="聚焦检索输入" title="聚焦检索输入（⌘K）">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+        </button>
+        <button class="iconbtn" type="button" id="themeBtn" aria-label="切换深浅色" title="切换深浅色"></button>
+        <span class="avatar" title="alice@eng">AL</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="page page--wide">
+
+        <div class="page-head">
+          <div class="page-head__main">
+            <div class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span class="current">检索调试</span></div>
+            <h1 class="title-xl">检索调试台</h1>
+            <p class="sub">同一条 query 分别走 <span class="mono">find</span> 与 <span class="mono">search</span>，对比召回差异。分数来自 FTS5 的 BM25 排序，层级表示这条命中是靠摘要、概览还是原文被召回。</p>
+          </div>
+          <div class="page-head__actions">
+            <span class="tag"><span class="dot" style="color:var(--green)"></span>索引 fts5 · <b>128</b> 条</span>
+          </div>
+        </div>
+
+        <!-- ---------- 查询条 ---------- -->
+        <div class="searchbar mb-20">
+          <div class="searchfield" style="flex:1;min-width:260px">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+            <input id="q" type="text" value="TypeScript 严格模式 代码风格" aria-label="检索词" spellcheck="false">
+          </div>
+          <div class="segmented" id="modeSeg" role="tablist" aria-label="检索模式">
+            <button type="button" role="tab" data-mode="find" aria-selected="false">find</button>
+            <button type="button" role="tab" data-mode="search" aria-selected="true">search</button>
+          </div>
+          <button class="btn btn--primary" type="button" id="btnRun">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h9M8.5 4.2 12.5 8l-4 3.8"/></svg>
+            执行检索
+          </button>
+          <div class="searchbar__meta">
+            <label class="check"><input type="checkbox" checked>层级不过滤</label>
+            <label class="check"><input type="checkbox">仅 memory 类型</label>
+            <label class="check"><input type="checkbox">包含 pending 记录</label>
+            <span class="searchbar__hint">targetUri: comem://user/alice/</span>
+          </div>
+        </div>
+
+        <!-- ---------- 指标 ---------- -->
+        <div class="stats mb-20" id="stats"></div>
+
+        <div class="two-col">
+          <!-- ---------- 结果 ---------- -->
+          <div>
+            <div class="card">
+              <div class="card__head">
+                <span class="card__title">召回结果</span>
+                <span class="pill pill--gray" id="resultCount">6</span>
+                <span class="spacer"></span>
+                <span class="caption">按分数降序</span>
+              </div>
+              <div class="hitlist" id="results"></div>
+            </div>
+
+            <div class="callout callout--info mt-16" id="aclNote"></div>
+          </div>
+
+          <!-- ---------- 右栏 ---------- -->
+          <div class="stack-16">
+            <div class="card">
+              <div class="card__head">
+                <span class="card__title" id="planTitle">查询计划</span>
+                <span class="spacer"></span>
+                <span class="pill pill--blue" id="planBadge">3 条</span>
+              </div>
+              <div id="plan"></div>
+            </div>
+
+            <div class="card">
+              <div class="card__head">
+                <span class="card__title">耗时拆解</span>
+                <span class="spacer"></span>
+                <span class="caption mono" id="totalMs">412 ms</span>
+              </div>
+              <div class="timing" id="timing"></div>
+            </div>
+
+            <div class="card">
+              <div class="card__head">
+                <span class="card__title">本次调用</span>
+                <span class="spacer"></span>
+                <button class="btn btn--plain btn--sm" type="button" id="btnCopyCall">复制</button>
+              </div>
+              <pre class="codebox" id="callJSON" style="border-top:.5px solid var(--separator)"></pre>
+            </div>
+          </div>
+        </div>
+
+        <p class="caption mt-24" style="max-width:72ch">
+          演示说明：检索结果、分数与耗时均为手工构造，用来展示信息层级；ACL 过滤掉的条目不会以占位形式返回——列表语义是「无权限即不可见」。
+        </p>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="toast-wrap" role="status" aria-live="polite"></div>
+
+<script>
+/* ==========================================================================
+   图标
+   ========================================================================== */
+const I = {
+  search: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>',
+  lock: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.5" width="10" height="6.5" rx="1.4"/><path d="M5.5 6.5V5a2.5 2.5 0 0 1 5 0v1.5"/></svg>',
+  info: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 7.2v3.6"/><path d="M8 5.1v.1"/></svg>',
+  check: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.2 3.2L13 5"/></svg>',
+  sun: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"/></svg>',
+  moon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 9.4A5.6 5.6 0 0 1 6.6 3a5.6 5.6 0 1 0 6.4 6.4Z"/></svg>'
+};
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+let toastTimer = null;
+function toast(msg) {
+  const wrap = $('.toast-wrap');
+  wrap.innerHTML = `<div class="toast">${I.check}<span>${esc(msg)}</span></div>`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { wrap.innerHTML = ''; }, 2400);
+}
+
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const HITS = {
+  search: [
+    {
+      score: 0.87, level: 0, from: 'memory',
+      uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['缩进', 1]],
+      why: 'typescript idf 4.21 × tf 3 · 严格 idf 3.08 × tf 1 · 缩进 idf 2.94 × tf 1'
+    },
+    {
+      score: 0.79, level: 1, from: 'memory',
+      uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条偏好。code-style 覆盖 TypeScript strict、2 空格缩进与不可变数据写法。',
+      terms: [['typescript', 2], ['代码风格', 2], ['偏好', 1]],
+      why: '代码风格 idf 3.77 × tf 2 · typescript idf 4.21 × tf 2 · 偏好 idf 1.62 × tf 1'
+    },
+    {
+      score: 0.74, level: 2, from: 'memory',
+      uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码。',
+      terms: [['严格', 2], ['null', 1]],
+      why: '严格 idf 3.08 × tf 2 · null idf 4.02 × tf 1'
+    },
+    {
+      score: 0.68, level: 0, from: 'memory',
+      uri: 'comem://group/eng/memories/platform-conventions.md',
+      abs: '工程组约定：服务统一开启 TypeScript 严格模式，公共类型放在 packages/types 下。',
+      terms: [['typescript', 1], ['严格', 1]],
+      why: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    },
+    {
+      score: 0.61, level: 2, from: 'resource',
+      uri: 'comem://user/alice/resources/comem-demo/tsconfig.json',
+      abs: '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true,"target":"ES2022"}}',
+      terms: [['strict', 2], ['tsconfig', 1]],
+      why: 'strict idf 3.96 × tf 2 · tsconfig idf 3.10 × tf 1'
+    },
+    {
+      score: 0.55, level: 0, from: 'skill',
+      uri: 'comem://user/alice/skills/ts-review/SKILL.md',
+      abs: 'TypeScript review 技能：按严格模式规则检查改动，标出隐式 any 与类型收窄缺失。',
+      terms: [['typescript', 1], ['严格', 1]],
+      why: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    }
+  ],
+  find: [
+    {
+      score: 0.91, level: 0, from: 'find',
+      uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['代码风格', 2]],
+      why: '原句整体匹配 · typescript idf 4.21 × tf 3 · 代码风格 idf 3.77 × tf 2'
+    },
+    {
+      score: 0.72, level: 1, from: 'find',
+      uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条偏好。code-style 覆盖 TypeScript strict 与 2 空格缩进。',
+      terms: [['typescript', 2], ['代码风格', 1]],
+      why: '代码风格 idf 3.77 × tf 1 · typescript idf 4.21 × tf 2'
+    },
+    {
+      score: 0.44, level: 2, from: 'find',
+      uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码。',
+      terms: [['严格', 1]],
+      why: '严格 idf 3.08 × tf 1'
+    }
+  ]
+};
+
+const PLAN = [
+  { kind: 'memory', q: '代码风格偏好 TypeScript 严格模式 缩进', hits: 4 },
+  { kind: 'resource', q: 'tsconfig strict 配置 项目', hits: 1 },
+  { kind: 'skill', q: 'typescript 规范检查 技能', hits: 1 }
+];
+
+const TIMING = {
+  search: [
+    ['意图分析（LLM）', 380, 'is-info'],
+    ['逐条召回（3 条 query）', 24, 'is-ok'],
+    ['去重与合并', 0, 'is-ok'],
+    ['ACL 过滤', 0, 'is-ok'],
+    ['BM25 重排', 8, 'is-ok']
+  ],
+  find: [
+    ['召回（单条 query）', 6, 'is-ok'],
+    ['ACL 过滤', 0, 'is-ok'],
+    ['BM25 重排', 3, 'is-ok']
+  ]
+};
+
+const CALL = {
+  search: `{
+  "tool": "search",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "limit": 10,
+  "sessionId": "session_7c1a"
+}`,
+  find: `{
+  "tool": "find",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "limit": 10
+}`
+};
+
+const LEVEL_LABEL = ['摘要', '概览', '原文'];
+let mode = 'search';
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+function highlight(text) {
+  return esc(text).replace(/(typescript|TypeScript|tsconfig|strict|null)/gi, (m) => `<mark>${m}</mark>`);
+}
+
+function renderStats() {
+  const hits = HITS[mode];
+  const l0 = hits.filter((h) => h.level === 0).length;
+  const l1 = hits.filter((h) => h.level === 1).length;
+  const l2 = hits.filter((h) => h.level === 2).length;
+  const total = TIMING[mode].reduce((s, t) => s + t[1], 0);
+  $('#stats').innerHTML = `
+    <div class="stat"><div class="stat__v">${hits.length}</div><div class="stat__k">返回条目</div></div>
+    <div class="stat"><div class="stat__v is-red">2</div><div class="stat__k">被 ACL 过滤</div></div>
+    <div class="stat"><div class="stat__v is-accent">${total}<small>ms</small></div><div class="stat__k">端到端耗时</div></div>
+    <div class="stat"><div class="stat__v" style="font-size:17px;letter-spacing:-0.01em;gap:16px">
+      <span class="lv-0">L0 ${l0}</span><span class="lv-1">L1 ${l1}</span><span class="lv-2">L2 ${l2}</span>
+    </div><div class="stat__k">层级分布</div></div>`;
+}
+
+function renderResults() {
+  const hits = HITS[mode];
+  $('#resultCount').textContent = hits.length;
+  $('#results').innerHTML = hits.map((h, i) => `
+    <article class="hit">
+      <div class="hit__score">
+        <b class="${h.score < 0.6 ? 'is-low' : ''}">${h.score.toFixed(2)}</b>
+        <span class="scorebar"><i style="width:${Math.round(h.score * 100)}%"></i></span>
+      </div>
+      <div class="hit__body">
+        <div class="hit__uri">${highlight(h.uri)}</div>
+        <div class="hit__abs">${esc(h.abs)}</div>
+        <div class="terms">
+          <span class="terms__k">命中</span>
+          ${h.terms.map(([t, n]) => `<span class="term">${esc(t)}<b>×${n}</b></span>`).join('')}
+          <button class="hit__more" type="button" data-toggle="why-${i}">评分明细</button>
+        </div>
+        <div class="hit__detail" id="why-${i}" hidden>${esc(h.why)}</div>
+      </div>
+      <div class="hit__side">
+        <span class="leveltag" data-level="${h.level}"><span class="strata"><i></i><i></i><i></i></span><b>L${h.level}</b></span>
+        <span>${LEVEL_LABEL[h.level]}</span>
+        <span class="mono" style="color:var(--label-3)">${esc(h.from)}</span>
+      </div>
+    </article>`).join('');
+
+  $$('[data-toggle]', $('#results')).forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = document.getElementById(btn.dataset.toggle);
+      const open = !target.hidden;
+      target.hidden = open;
+      btn.textContent = open ? '评分明细' : '收起明细';
+    });
+  });
+}
+
+function renderPlan() {
+  const isSearch = mode === 'search';
+  $('#planTitle').textContent = isSearch ? '查询计划' : '单条查询';
+  $('#planBadge').textContent = isSearch ? `${PLAN.length} 条` : '1 条';
+  $('#planBadge').className = isSearch ? 'pill pill--blue' : 'pill pill--gray';
+
+  const planEl = $('#plan');
+  if (isSearch) {
+    planEl.innerHTML = PLAN.map((p, i) => `
+      <div class="planitem">
+        <span class="planitem__n">${String(i + 1).padStart(2, '0')}</span>
+        <div>
+          <div class="planitem__k">TypedQuery · ${p.kind}</div>
+          <div class="planitem__q">${esc(p.q)}</div>
+        </div>
+        <span class="planitem__r">${p.hits} 条</span>
+      </div>`).join('') + `
+      <div class="planfoot">
+        <div class="planfoot__row"><span>候选总数</span><b>13</b></div>
+        <div class="planfoot__row"><span>跨 query 去重后</span><b>8</b></div>
+        <div class="planfoot__row"><span style="color:var(--red-ink)">ACL 过滤</span><b style="color:var(--red-ink)">−2</b></div>
+        <div class="planfoot__row is-total"><span>返回</span><b>6</b></div>
+      </div>`;
+  } else {
+    planEl.innerHTML = `
+      <div class="planitem">
+        <span class="planitem__n">01</span>
+        <div>
+          <div class="planitem__k" style="color:var(--label-3)">raw query</div>
+          <div class="planitem__q">TypeScript 严格模式 代码风格</div>
+        </div>
+        <span class="planitem__r">3 条</span>
+      </div>
+      <div style="padding:13px 18px 16px;border-top:.5px solid var(--separator);background:var(--surface-2)">
+        <p class="caption" style="line-height:1.55">
+          <span class="mono" style="color:var(--label)">find</span> 不做意图分析，直接把原句送进 FTS5。
+          延迟低，但只覆盖字面表达：查询里的「代码风格」没有拆成 resource / skill 两个方向，
+          所以 skills 与 resources 下的条目不会进入候选。
+        </p>
+      </div>`;
+  }
+}
+
+function renderTiming() {
+  const rows = TIMING[mode];
+  const total = rows.reduce((s, t) => s + t[1], 0);
+  $('#totalMs').textContent = `${total} ms`;
+  $('#timing').innerHTML = rows.map(([label, ms, tone]) => `
+    <div class="timing__row">
+      <div class="timing__top"><span>${esc(label)}</span><b>${ms} ms</b></div>
+      <div class="timing__track"><i class="${tone}" style="width:${Math.max(3, (ms / Math.max(total, 1)) * 100)}%"></i></div>
+    </div>`).join('');
+}
+
+function renderAcl() {
+  $('#aclNote').innerHTML = `${I.lock}
+    <div>
+      <b>ACL 过滤 2 条</b>，按当前身份 <span class="mono">user:alice</span> 计算。
+      被过滤的条目不会出现在结果里，也不返回占位——列表语义是无权限即不可见。
+      <div class="rowflex mt-8" style="gap:8px">
+        <span class="tag">个人空间 · 无 read 权限 <b>1</b></span>
+        <span class="tag">组空间 · restricted 未授权 <b>1</b></span>
+      </div>
+    </div>`;
+}
+
+function renderAll() {
+  $$('#modeSeg button').forEach((b) => b.setAttribute('aria-selected', b.dataset.mode === mode));
+  renderStats();
+  renderResults();
+  renderPlan();
+  renderTiming();
+  renderAcl();
+  $('#callJSON').textContent = CALL[mode];
+}
+
+/* ==========================================================================
+   交互
+   ========================================================================== */
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderAll();
+
+  const themeBtn = $('#themeBtn');
+  const syncTheme = () => {
+    themeBtn.innerHTML = document.documentElement.dataset.theme === 'dark' ? I.sun : I.moon;
+  };
+  syncTheme();
+  themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('comem-apple-theme', next); } catch (e) {}
+    syncTheme();
+    toast(next === 'dark' ? '已切换到深色' : '已切换到浅色');
+  });
+
+  const scopePop = $('#scopePop');
+  const closeScope = () => {
+    scopePop.hidden = true;
+    $('#scopeBtn').setAttribute('aria-expanded', 'false');
+  };
+  $('#scopeBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    scopePop.hidden = !scopePop.hidden;
+    $('#scopeBtn').setAttribute('aria-expanded', String(!scopePop.hidden));
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.scope-wrap')) closeScope();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeScope();
+  });
+  $$('#scopePop [data-scope]').forEach((b) => {
+    b.addEventListener('click', () => {
+      closeScope();
+      toast(`已切换到 ${b.dataset.scope}`);
+    });
+  });
+
+  $('#focusSearch').addEventListener('click', () => {
+    const input = $('#q');
+    input.focus();
+    input.select();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      const input = $('#q');
+      input.focus();
+      input.select();
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      $('#btnRun').click();
+    }
+  });
+
+  $('#modeSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mode]');
+    if (!btn) return;
+    mode = btn.dataset.mode;
+    renderAll();
+  });
+
+  $('#btnRun').addEventListener('click', () => {
+    const btn = $('#btnRun');
+    btn.classList.add('is-busy');
+    btn.textContent = mode === 'search' ? '分析意图…' : '检索中…';
+    setTimeout(() => {
+      btn.classList.remove('is-busy');
+      btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h9M8.5 4.2 12.5 8l-4 3.8"/></svg> 执行检索';
+      renderAll();
+      toast(mode === 'search' ? '已拆解为 3 条 TypedQuery，返回 6 条' : '返回 3 条，耗时 9 ms');
+    }, 460);
+  });
+
+  $('#btnCopyCall').addEventListener('click', () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(CALL[mode]).catch(() => {});
+    toast('已复制调用参数');
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件树 · CoMem 控制台</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  document.documentElement.dataset.theme = (() => {
+    try { return localStorage.getItem('comem-apple-theme') || 'dark'; } catch (e) { return 'dark'; }
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+
+  <!-- ==================== 侧边栏 ==================== -->
+  <aside class="sidebar">
+    <div class="sidebar__brand">
+      <span class="brand-mark" aria-hidden="true"><span class="strata strata--lg"><i></i><i></i><i></i></span></span>
+      <span class="brand-text"><b>CoMem</b><span>Console</span></span>
+    </div>
+
+    <div class="scope-wrap">
+      <button class="scope" type="button" id="scopeBtn" title="切换命名空间" aria-haspopup="true" aria-expanded="false">
+        <span class="scope__scheme">comem://</span>
+        <span class="scope__path">user/alice</span>
+        <svg class="scope__chev" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+      </button>
+
+      <div class="popover" id="scopePop" role="menu" aria-label="命名空间" hidden>
+        <div class="popover__label">命名空间</div>
+        <button class="popover__item is-active" type="button" role="menuitem" data-scope="user/alice">
+          <span class="dot" style="color:var(--green)"></span>
+          <span class="popover__path">comem://user/alice</span>
+          <span class="popover__meta">个人空间 · manage</span>
+        </button>
+        <button class="popover__item" type="button" role="menuitem" data-scope="group/eng">
+          <span class="dot" style="color:var(--teal)"></span>
+          <span class="popover__path">comem://group/eng</span>
+          <span class="popover__meta">组空间 · write</span>
+        </button>
+      </div>
+    </div>
+
+    <nav class="sidenav" aria-label="主导航">
+      <div class="sidenav__label">控制台</div>
+      <a class="navitem is-active" href="filesystem.html" aria-current="page">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.9c.4 0 .8.2 1 .5l.7 1H12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 12.5H3.5A1.5 1.5 0 0 1 2 11V4.5Z"/></svg>
+        <span>文件树</span><span class="navitem__count">128</span>
+      </a>
+      <a class="navitem" href="search.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+        <span>检索调试</span>
+      </a>
+      <a class="navitem" href="review.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.5h10v9.5H3z"/><path d="m5.4 8.4 1.8 1.8 3.4-3.6"/></svg>
+        <span>记忆复核</span><span class="navitem__count">5</span>
+      </a>
+      <div class="sidenav__label">治理</div>
+      <a class="navitem" href="acl.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.5" width="10" height="6.5" rx="1.4"/><path d="M5.5 6.5V5a2.5 2.5 0 0 1 5 0v1.5"/></svg>
+        <span>权限管理</span>
+      </a>
+      <a class="navitem" href="index.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 14 5.4 8 8.6 2 5.4z"/><path d="m2 8.6 6 3.2 6-3.2"/></svg>
+        <span>设计规范</span>
+      </a>
+    </nav>
+
+    <div class="sidebar__foot">
+      <div class="footstat"><span>索引条目</span><b>128</b></div>
+      <div class="footbar"><i style="width:64%"></i></div>
+      <div class="footstat"><span>待复核</span><b style="color:var(--orange-ink)">5</b></div>
+      <div class="footstat"><span>运行中任务</span><b>2</b></div>
+    </div>
+  </aside>
+
+  <!-- ==================== 主区 ==================== -->
+  <div class="main">
+    <header class="titlebar">
+      <div class="titlebar__title">
+        <span class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span class="current">文件树</span></span>
+      </div>
+      <div class="titlebar__spacer"></div>
+      <div class="titlebar__group">
+        <span class="tag"><span class="dot" style="color:var(--green)"></span>fts5 · 128 条</span>
+        <button class="iconbtn" type="button" id="themeBtn" aria-label="切换深浅色" title="切换深浅色">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"/></svg>
+        </button>
+        <span class="avatar" title="alice@eng">AL</span>
+      </div>
+    </header>
+
+    <main class="content content--split">
+      <div class="split">
+
+        <!-- ---------- 目录树 ---------- -->
+        <section class="split__aside" aria-label="命名空间目录树">
+          <div class="aside-head">
+            <span class="aside-head__title">命名空间</span>
+            <span class="spacer"></span>
+            <button class="iconbtn" type="button" id="btnMkdir" title="新建目录" aria-label="新建目录">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+            </button>
+            <button class="iconbtn" type="button" id="btnRefresh" title="刷新索引" aria-label="刷新索引">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7"/><path d="M13 2.6v3.2h-3.2"/></svg>
+            </button>
+          </div>
+
+          <div class="aside-tools">
+            <div class="searchfield">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+              <input id="treeFilter" type="search" placeholder="筛选路径" aria-label="筛选路径">
+            </div>
+          </div>
+
+          <div class="aside-scroll">
+            <div class="tree" id="tree"></div>
+          </div>
+
+          <div class="tree-legend">
+            <span><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.9l1.7 1.5H12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 12.5H3.5A1.5 1.5 0 0 1 2 11V4.5Z"/></svg>目录</span>
+            <span><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.5h4L11 5.5v8H4z"/><path d="M8 2.5v3h3"/></svg>文档</span>
+            <span><span class="dot" style="color:var(--label-4)"></span>元数据</span>
+            <span><span class="dot" style="color:var(--orange)"></span>摘要待刷新</span>
+          </div>
+        </section>
+
+        <!-- ---------- 详情 ---------- -->
+        <section class="split__main" aria-live="polite" id="detailPane"></section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="toast-wrap" role="status" aria-live="polite"></div>
+
+<script>
+/* ==========================================================================
+   图标
+   ========================================================================== */
+const I = {
+  chevron: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg>',
+  folder: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.9c.4 0 .8.2 1 .5l.7 1H12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 12.5H3.5A1.5 1.5 0 0 1 2 11V4.5Z"/></svg>',
+  file: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.5h4L11 5.5v8H4z"/><path d="M8 2.5v3h3"/></svg>',
+  meta: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.4"/></svg>',
+  copy: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.4"/><path d="M10.5 5.5v-2h-8v8h2"/></svg>',
+  info: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 7.2v3.6"/><path d="M8 5.1v.1"/></svg>',
+  alert: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.8 14 13H2z"/><path d="M8 6.6v2.6"/><path d="M8 11.3v.1"/></svg>',
+  check: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.2 3.2L13 5"/></svg>',
+  layers: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2 5.5 3L8 8 2.5 5z"/><path d="m2.5 8.4 5.5 3 5.5-3"/></svg>',
+  arrow: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5"/></svg>'
+};
+
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const DOCS = {
+  'comem://user/alice/memories/preferences/code-style.md': {
+    kind: 'document', name: 'code-style.md',
+    contextType: 'memory', memoryType: 'preferences', status: 'active',
+    updated: '2026-11-07 22:31:04', size: '1.4 KB', bytes: 1432, lines: 21, writes: 4,
+    l0: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。',
+    l0chars: 62,
+    l1chars: 486,
+    l1: `<div class="md">
+      <h4>preferences/ · 5 个条目</h4>
+      <p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。写作风格偏短句，沟通风格偏结论先行。</p>
+      <ul>
+        <li><strong>code-style</strong> — TypeScript strict、2 空格缩进、优先不可变数据与纯函数；禁止 any，外部输入用 unknown 收窄。</li>
+        <li><strong>communication</strong> — 先结论后细节；中文正文保留英文术语；单次回复不超过 3 段。</li>
+        <li><strong>writing-style</strong> — 技术文档用短句，少用「是……不是……」的对比句式。</li>
+        <li><strong>review-habit</strong> — 只针对 diff 给意见，发现范围外问题单独提出。</li>
+        <li><strong>commit-format</strong> — Conventional Commits，subject 用祈使句，不超过 72 字符。</li>
+      </ul>
+      <p class="caption mt-16">概览生成于 2026-11-07 22:14，覆盖 5 个条目中的 4 个当前版本。</p>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>memory_type:</b> preferences
+<b>topic:</b> code-style
+<b>uri:</b> comem://user/alice/memories/preferences/code-style
+<b>status:</b> active
+<b>created_at:</b> 2026-10-28T09:12:00Z
+<b>updated_at:</b> 2026-11-05T16:40:00Z</div>
+      <h4>类型</h4>
+      <ul>
+        <li>TypeScript 严格模式，<code>strict: true</code>。</li>
+        <li>不用 <code>any</code>。外部输入先收窄为 <code>unknown</code>，再做运行时校验。</li>
+        <li>公开函数的返回值必须显式标注。</li>
+      </ul>
+      <h4>格式</h4>
+      <ul>
+        <li>缩进 2 个空格，不用 tab。</li>
+        <li>单行不超过 100 字符。</li>
+        <li>对象字面量末尾保留逗号。</li>
+      </ul>
+      <h4>写法</h4>
+      <ul>
+        <li>优先不可变数据：<code>map</code> / <code>filter</code> / <code>reduce</code>，少用 <code>for</code>。</li>
+        <li>副作用集中到边界层，核心逻辑保持纯函数。</li>
+        <li>不为只有一个实现的场景预留接口。</li>
+      </ul>
+    </div>`,
+    fresh: {
+      stale: true, total: 5, pending: 1, ratio: 20, threshold: 10,
+      generated: '2026-11-07 22:14:08',
+      note: '1 条变更发生在摘要生成之后（code-style.md，22:31）。占比 20% 已超过 10% 阈值，重算任务已入队。',
+      task: 'archive_002 · task_9f21 · running'
+    },
+    trigger: '会话提交 session_7c1a',
+    version: '第 4 次生成',
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '继承自 comem://user/alice/memories/' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/communication.md': {
+    kind: 'document', name: 'communication.md',
+    contextType: 'memory', memoryType: 'preferences', status: 'active',
+    updated: '2026-11-06 09:12:40', size: '912 B', bytes: 912, lines: 12, writes: 2,
+    l0: '用户在沟通上的偏好：先给结论后给细节，中文正文保留英文术语，单次回复控制在 3 段以内。',
+    l0chars: 44,
+    l1chars: 486,
+    l1: `<div class="md">
+      <h4>preferences/ · 5 个条目</h4>
+      <p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。沟通类偏好与写作类偏好分开存放，避免合并时互相覆盖。</p>
+      <ul>
+        <li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li>
+        <li><strong>communication</strong> — 结论先行，控制篇幅，术语不翻译。</li>
+        <li><strong>writing-style</strong> — 短句，少对比句式。</li>
+        <li><strong>review-habit</strong> — 只评论 diff。</li>
+        <li><strong>commit-format</strong> — Conventional Commits。</li>
+      </ul>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>memory_type:</b> preferences
+<b>topic:</b> communication
+<b>uri:</b> comem://user/alice/memories/preferences/communication
+<b>status:</b> active
+<b>updated_at:</b> 2026-11-06T09:12:40Z</div>
+      <h4>表达</h4>
+      <ul>
+        <li>先给结论，再给依据，最后给下一步。</li>
+        <li>中文正文里保留英文术语，不做二次翻译。</li>
+        <li>单次回复不超过 3 段；超出的内容拆成独立文档。</li>
+      </ul>
+      <h4>否定</h4>
+      <ul>
+        <li>不主动夸赞，不加没有信息量的收尾句。</li>
+        <li>不确定的地方直接标注不确定，不用模糊措辞掩盖。</li>
+      </ul>
+    </div>`,
+    fresh: {
+      stale: false, total: 5, pending: 0, ratio: 0, threshold: 10,
+      generated: '2026-11-07 22:14:08',
+      note: '摘要与当前内容一致，覆盖 5 个条目中的 5 个。',
+      task: null
+    },
+    trigger: '会话提交 session_7c1a',
+    version: '第 4 次生成',
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'read', src: '直接授权于本文件' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/writing-style.md': {
+    kind: 'document', name: 'writing-style.md',
+    contextType: 'memory', memoryType: 'preferences', status: 'active',
+    updated: '2026-11-04 15:40:19', size: '2.1 KB', bytes: 2150, lines: 27, writes: 6,
+    l0: '用户在技术写作上的偏好：短句、具体名词、少用形容词；避免三段式排比与「不是……而是……」句式。',
+    l0chars: 46,
+    l1chars: 486,
+    l1: `<div class="md">
+      <h4>preferences/ · 5 个条目</h4>
+      <p>写作类偏好与沟通类偏好分开存放。写作关注句式与结构，沟通关注信息顺序与篇幅。</p>
+      <ul>
+        <li><strong>writing-style</strong> — 短句、具体名词、去掉形容词堆叠。</li>
+        <li><strong>communication</strong> — 先结论后细节。</li>
+        <li><strong>code-style</strong> — 见代码风格条目。</li>
+      </ul>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>memory_type:</b> preferences
+<b>topic:</b> writing-style
+<b>uri:</b> comem://user/alice/memories/preferences/writing-style
+<b>status:</b> active
+<b>updated_at:</b> 2026-11-04T15:40:19Z</div>
+      <h4>句式</h4>
+      <ul>
+        <li>一句话说一件事。超过 40 字拆开。</li>
+        <li>用具体名词代替抽象名词。「把索引重建一次」优于「做一次索引层面的优化」。</li>
+        <li>少用「非常」「显著」「极大」这类程度副词。</li>
+      </ul>
+      <h4>结构</h4>
+      <ul>
+        <li>不使用三段式排比。</li>
+        <li>不用「不是……而是……」的对比句式，直接写结论。</li>
+        <li>段落之间靠内容衔接，不靠「首先 / 其次 / 最后」。</li>
+      </ul>
+      <h4>术语</h4>
+      <ul>
+        <li>首次出现的英文术语保留原文，括注中文。</li>
+        <li>同一个概念全文只用一种叫法。</li>
+      </ul>
+    </div>`,
+    fresh: {
+      stale: false, total: 5, pending: 0, ratio: 0, threshold: 10,
+      generated: '2026-11-07 22:14:08',
+      note: '摘要与当前内容一致，覆盖 5 个条目中的 5 个。',
+      task: null
+    },
+    trigger: '会话提交 session_7c1a',
+    version: '第 4 次生成',
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '继承自 comem://user/alice/memories/' }
+    ]
+  },
+
+  'comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md': {
+    kind: 'document', name: 'no-unrequested-refactor.md',
+    contextType: 'memory', memoryType: 'rules', status: 'active',
+    updated: '2026-11-05 11:08:52', size: '1.1 KB', bytes: 1126, lines: 16, writes: 3,
+    l0: '写代码时不要顺手重构未被要求的代码；发现范围外问题单独提出，不直接改。',
+    l0chars: 36,
+    l1chars: 312,
+    l1: `<div class="md">
+      <h4>rules/code-review/ · 3 条规则</h4>
+      <p>本目录存放代码 review 场景下的硬性规则。每条规则带适用条件与例外，检索时按条件召回，不做全文匹配。</p>
+      <ul>
+        <li><strong>no-unrequested-refactor</strong> — 只改与任务直接相关的行。</li>
+        <li><strong>ts-strict-null</strong> — 不用非空断言绕过 null 检查。</li>
+        <li><strong>test-name-states-behavior</strong> — 测试名描述行为而不是实现。</li>
+      </ul>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>uri:</b> comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md
+<b>context_type:</b> memory
+<b>memory_type:</b> rules
+<b>status:</b> active
+<b>updated_at:</b> 2026-11-05T11:08:52Z</div>
+      <pre>rule:
+  name: no-unrequested-refactor
+  applies_when: 修改已存在的文件，且改动范围超出当前任务描述
+  exception: 目标代码阻塞当前改动（编译失败、测试无法运行）时，允许最小修复并单独说明
+  action: 只改与任务直接相关的行；其他问题写进回复末尾的「顺带发现」
+  priority: 80
+  status: active</pre>
+      <p class="mt-16">规则由 <code>rule_search</code> 按 <code>applies_when</code> 条件召回，不参与普通全文检索。</p>
+    </div>`,
+    fresh: {
+      stale: false, total: 3, pending: 0, ratio: 0, threshold: 10,
+      generated: '2026-11-07 21:50:33',
+      note: '规则文件独立生成摘要，与所属目录概览分开维护。',
+      task: null
+    },
+    trigger: '规则复核通过 · 2026-11-05',
+    version: '第 2 次生成',
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'read', src: '继承自 comem://user/alice/memories/rules/' }
+    ]
+  },
+
+  'comem://group/eng/memories/release-checklist.md': {
+    kind: 'document', name: 'release-checklist.md',
+    contextType: 'memory', memoryType: 'procedures', status: 'active',
+    updated: '2026-11-07 18:02:11', size: '3.2 KB', bytes: 3277, lines: 34, writes: 9,
+    l0: '组内发布流程：冻结分支 → 跑全量测试 → 打 tag → 写变更说明 → 通知值班。任何一步失败即回滚。',
+    l0chars: 48,
+    l1chars: 198,
+    l1: `<div class="md">
+      <h4>group/eng/memories/ · 2 个条目</h4>
+      <p>工程组的共享记忆。成员默认可读，写入需要单独授权。当前 2 个条目：平台约定与发布流程。</p>
+      <ul>
+        <li><strong>platform-conventions</strong> — 服务命名、日志字段、错误码的统一约定。</li>
+        <li><strong>release-checklist</strong> — 发布流程与回滚条件。</li>
+      </ul>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>uri:</b> comem://group/eng/memories/release-checklist.md
+<b>context_type:</b> memory
+<b>memory_type:</b> procedures
+<b>updated_at:</b> 2026-11-07T18:02:11Z</div>
+      <h4>发布前</h4>
+      <ul>
+        <li>确认主干 CI 全绿，没有跳过的用例。</li>
+        <li>冻结发布分支，从冻结时刻起只接受修复类提交。</li>
+        <li>在 <code>#eng-release</code> 频道说明本次范围与回滚负责人。</li>
+      </ul>
+      <h4>发布</h4>
+      <ul>
+        <li>打 tag：<code>v{major}.{minor}.{patch}</code>，tag 消息里带上变更说明的链接。</li>
+        <li>灰度 10% 流量观察 15 分钟，错误率超过 0.5% 立即回滚。</li>
+        <li>全量发布后核对关键指标：延迟 P95、错误率、队列积压。</li>
+      </ul>
+      <h4>回滚</h4>
+      <ul>
+        <li>回滚用上一个 tag，不 revert 提交。</li>
+        <li>回滚后在归档任务里记录原因，供下次 review。</li>
+      </ul>
+    </div>`,
+    fresh: {
+      stale: false, total: 2, pending: 0, ratio: 0, threshold: 10,
+      generated: '2026-11-07 18:05:40',
+      note: '组空间摘要由成员提交后自动重算，当前无待刷新变更。',
+      task: null
+    },
+    trigger: '成员提交 · session_5b09',
+    version: '第 7 次生成',
+    acl: [
+      { p: 'group:eng', lv: 'write', src: '组空间预置' },
+      { p: 'user:alice', lv: 'manage', src: '直接授权于本文件' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/': {
+    kind: 'directory', name: 'preferences',
+    contextType: 'memory', memoryType: null, status: 'active',
+    updated: '2026-11-07 22:31:04', size: '5 个条目', bytes: 5934, lines: null, writes: null,
+    l0: 'alice 在工程实践上的稳定偏好：代码风格、沟通方式、写作风格、review 习惯、提交信息格式。',
+    l0chars: 45,
+    l1chars: 486,
+    l1: `<div class="md">
+      <h4>preferences/ · 5 个条目</h4>
+      <p>本目录收录 alice 在工程实践上的稳定偏好。按话题拆分，每条一个文件，写入时按话题合并，不覆盖其他条目。</p>
+      <ul>
+        <li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li>
+        <li><strong>communication</strong> — 先结论后细节，控制篇幅。</li>
+        <li><strong>writing-style</strong> — 短句，少对比句式。</li>
+        <li><strong>review-habit</strong> — 只评论 diff。</li>
+        <li><strong>commit-format</strong> — Conventional Commits。</li>
+      </ul>
+    </div>`,
+    l2: `<div class="md">
+      <div class="frontmatter"><b>uri:</b> comem://user/alice/memories/preferences/
+<b>kind:</b> directory
+<b>children:</b> 5 个文档 · 3 个元数据文件
+<b>updated_at:</b> 2026-11-07T22:31:04Z</div>
+      <pre>code-style.md            1.4 KB   2026-11-07 22:31
+communication.md         912 B    2026-11-06 09:12
+writing-style.md         2.1 KB   2026-11-04 15:40
+review-habit.md          780 B    2026-10-29 14:02
+commit-format.md         640 B    2026-10-21 10:18
+.abstract.md             268 B    2026-11-07 22:14
+.overview.md             1.9 KB   2026-11-07 22:14
+.acl.json                184 B    2026-11-02 16:45</pre>
+    </div>`,
+    fresh: {
+      stale: true, total: 5, pending: 1, ratio: 20, threshold: 10,
+      generated: '2026-11-07 22:14:08',
+      note: '1 条变更发生在摘要生成之后（code-style.md，22:31）。占比 20% 已超过 10% 阈值，重算任务已入队。',
+      task: 'archive_002 · task_9f21 · running'
+    },
+    trigger: '会话提交 session_7c1a',
+    version: '第 4 次生成',
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '直接授权于本目录' }
+    ]
+  }
+};
+
+const TREE = [
+  {
+    name: 'user/alice', open: true, children: [
+      {
+        name: 'memories', open: true, children: [
+          { name: '.abstract.md', meta: '268 B' },
+          { name: '.overview.md', meta: '1.9 K' },
+          { name: '.acl.json', meta: '184 B' },
+          { name: 'profile.md', meta: '640 B' },
+          { name: 'identity.md', meta: '1.1 K' },
+          { name: 'soul.md', meta: '2.4 K' },
+          {
+            name: 'preferences', open: true, uri: 'comem://user/alice/memories/preferences/', meta: '5', children: [
+              { name: '.abstract.md', meta: '268 B' },
+              { name: '.overview.md', meta: '1.9 K' },
+              { name: '.acl.json', meta: '184 B' },
+              { name: 'code-style.md', uri: 'comem://user/alice/memories/preferences/code-style.md', meta: '1.4 K', sel: true, stale: true },
+              { name: 'communication.md', uri: 'comem://user/alice/memories/preferences/communication.md', meta: '912 B' },
+              { name: 'writing-style.md', uri: 'comem://user/alice/memories/preferences/writing-style.md', meta: '2.1 K' },
+              { name: 'review-habit.md', uri: 'comem://user/alice/memories/preferences/review-habit.md', meta: '780 B' },
+              { name: 'commit-format.md', uri: 'comem://user/alice/memories/preferences/commit-format.md', meta: '640 B' }
+            ]
+          },
+          {
+            name: 'entities', meta: '2', children: [
+              { name: 'comem-project.md', uri: 'comem://user/alice/memories/entities/comem-project.md', meta: '1.6 K' },
+              { name: 'postgres-migration.md', uri: 'comem://user/alice/memories/entities/postgres-migration.md', meta: '980 B' }
+            ]
+          },
+          {
+            name: 'events', meta: '12', children: [
+              { name: '2026-11-05-architecture-decision.md', uri: 'comem://user/alice/memories/events/2026-11-05-architecture-decision.md', meta: '3.4 K' }
+            ]
+          },
+          {
+            name: 'experiences', meta: '1', children: [
+              { name: 'monorepo-migration.md', uri: 'comem://user/alice/memories/experiences/monorepo-migration.md', meta: '1.2 K' }
+            ]
+          },
+          {
+            name: 'rules', open: true, meta: '3', children: [
+              {
+                name: 'code-review', open: true, meta: '3', children: [
+                  { name: 'no-unrequested-refactor.md', uri: 'comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md', meta: '1.1 K' },
+                  { name: 'ts-strict-null.md', uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md', meta: '860 B' },
+                  { name: 'test-name-states-behavior.md', uri: 'comem://user/alice/memories/rules/code-review/test-name-states-behavior.md', meta: '720 B' }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      { name: 'resources', meta: '24', dir: true },
+      { name: 'skills', meta: '6', dir: true },
+      { name: 'sessions', meta: '9', dir: true }
+    ]
+  },
+  {
+    name: 'group/eng', open: true, children: [
+      { name: '.acl.json', meta: '96 B' },
+      {
+        name: 'memories', open: true, children: [
+          { name: '.abstract.md', meta: '204 B' },
+          { name: 'platform-conventions.md', uri: 'comem://group/eng/memories/platform-conventions.md', meta: '2.8 K' },
+          { name: 'release-checklist.md', uri: 'comem://group/eng/memories/release-checklist.md', meta: '3.2 K' }
+        ]
+      },
+      { name: 'resources', meta: '8', dir: true },
+      { name: 'skills', meta: '3', dir: true }
+    ]
+  }
+];
+
+/* ==========================================================================
+   工具
+   ========================================================================== */
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+let toastTimer = null;
+function toast(msg) {
+  const wrap = $('.toast-wrap');
+  wrap.innerHTML = `<div class="toast">${I.check}<span>${esc(msg)}</span></div>`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { wrap.innerHTML = ''; }, 2400);
+}
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('comem-apple-theme', t); } catch (e) { /* 忽略 */ }
+}
+
+/* ==========================================================================
+   目录树
+   ========================================================================== */
+
+function isMeta(name) {
+  return name.startsWith('.') || name === 'memory_diff.json' || name === '.done';
+}
+
+function rowHTML(n) {
+  const isDir = !!n.children || !!n.dir;
+  const meta = isMeta(n.name);
+  const caret = isDir ? `<span class="trow__caret">${I.chevron}</span>` : `<span class="trow__caret is-blank">${I.chevron}</span>`;
+  const icon = isDir ? I.folder : (meta ? I.meta : I.file);
+  const stale = n.stale ? '<span class="dot" style="color:var(--orange)" title="摘要待刷新"></span>' : '';
+  const label = isDir ? n.name + '/' : n.name;
+  return `<div class="trow${n.sel ? ' is-selected' : ''}${meta ? ' trow--muted' : ''}"
+      data-name="${esc(n.name.toLowerCase())}"
+      ${n.uri ? `data-uri="${esc(n.uri)}"` : ''}
+      ${isDir ? 'data-dir="1"' : ''}
+      role="treeitem" tabindex="0" aria-selected="${n.sel ? 'true' : 'false'}" title="${esc(label)}">
+    ${caret}
+    <span class="trow__icon">${icon}</span>
+    <span class="trow__name${isDir ? ' is-dir' : ''}">${esc(label)}</span>
+    ${stale}
+    <span class="trow__meta">${esc(n.meta || '')}</span>
+  </div>`;
+}
+
+function treeHTML(nodes) {
+  return nodes.map((n) => {
+    if (!n.children) return rowHTML(n);
+    return `<details ${n.open ? 'open' : ''}>
+      <summary>${rowHTML(n)}</summary>
+      <div class="tchild">${treeHTML(n.children)}</div>
+    </details>`;
+  }).join('');
+}
+
+/* ==========================================================================
+   详情
+   ========================================================================== */
+
+const LAYER_COPY = [
+  'L0 摘要 · 上限 256 字符。agent 先读这一层判断相关性，读不到正文。',
+  'L1 概览 · 上限 4000 字符。目录级上下文，用来决定要不要展开 L2 原文。',
+  'L2 原文 · 完整文档。只有前两层判断为相关时才会读到这里。'
+];
+
+let currentUri = 'comem://user/alice/memories/preferences/code-style.md';
+let currentLayer = 0;
+
+function crumbs(uri) {
+  const isDir = uri.endsWith('/');
+  const path = uri.replace('comem://', '').replace(/\/$/, '');
+  return `<a href="filesystem.html">comem://</a><span class="crumb__path">${esc(path)}${isDir ? '/' : ''}</span>`;
+}
+
+function freshBlock(f) {
+  const state = f.stale ? '<span class="pill pill--orange"><span class="dot dot--pulse"></span>摘要待刷新</span>'
+                         : '<span class="pill pill--green"><span class="dot"></span>摘要为最新</span>';
+  const pct = Math.min(100, Math.round((f.pending / Math.max(f.total, 1)) * 100));
+  const fillCls = f.stale ? '' : 'is-ok';
+  return `<div class="gauge">
+      <div class="rowflex" style="justify-content:space-between;gap:8px">${state}</div>
+      <div class="gauge__track" role="img" aria-label="落后程度 ${pct}%"><span class="gauge__fill ${fillCls}" style="width:${Math.max(pct, 3)}%"></span></div>
+      <div class="gauge__legend"><span><b>${f.pending}</b> / ${f.total} 条待刷新</span><span>${pct}%</span></div>
+      <p class="caption" style="margin-top:2px">${esc(f.note)}</p>
+      <div class="meta-list__row" style="margin-top:2px">
+        <span class="meta-list__k">重算阈值</span>
+        <span class="meta-list__v">${f.threshold}%</span>
+      </div>
+      ${f.task ? `<div class="taskrow"><span class="status status--info"><span class="dot dot--pulse"></span>running</span><b>${esc(f.task)}</b></div>` : ''}
+    </div>`;
+}
+
+function layerBody(d) {
+  if (currentLayer === 0) {
+    return `<div class="abstract">
+      <div class="abstract__meta">
+        <span class="leveltag" data-level="0"><span class="strata"><i></i><i></i><i></i></span><b>L0</b></span>
+        <span>摘要</span><span style="color:var(--label-4)">·</span>
+        <span>summary.service</span><span style="color:var(--label-4)">·</span>
+        <span>${esc(d.fresh.generated)}</span>
+      </div>
+      <p class="abstract__quote">${esc(d.l0)}</p>
+      <div class="abstract__foot">
+        <span>${d.l0chars} / 256 字符</span>
+        <span style="color:var(--label-4)">·</span>
+        <span>模型 gpt-4o-mini</span>
+      </div>
+    </div>`;
+  }
+  if (currentLayer === 1) {
+    return `<div class="card card--panel"><div class="card__body" style="padding:22px 24px 24px">${d.l1}</div></div>
+      <p class="caption mt-12">${d.l1chars} / 4000 字符 · 超过上限时按条目截断并标注</p>`;
+  }
+  return `<div class="card card--panel"><div class="card__body" style="padding:22px 24px 24px">${d.l2}</div></div>`;
+}
+
+function renderDetail() {
+  const d = DOCS[currentUri];
+  const pane = $('#detailPane');
+  if (!d) return;
+
+  const isDir = d.kind === 'directory';
+  const title = isDir ? d.name + '/' : d.name;
+  const segments = [
+    ['L0', '摘要', 0],
+    ['L1', '概览', 1],
+    ['L2', '原文', 2]
+  ].map(([k, t, i]) => `
+    <button type="button" role="tab" aria-selected="${i === currentLayer}" data-layer="${i}">
+      <span>${k}</span><span style="color:var(--label-3);font-weight:500">${t}</span>
+    </button>`).join('');
+
+  pane.innerHTML = `
+    <div class="content" style="padding:26px 32px 64px">
+      <div style="max-width:1120px;margin:0 auto">
+        <div class="crumb" style="margin-bottom:14px">${crumbs(d.uri || currentUri)}</div>
+
+        <div class="doc-head">
+          <div class="doc-head__main">
+            <h1 class="doc-title">${esc(title)}</h1>
+            <div class="uri" data-copy="${esc(d.uri || currentUri)}" title="点击复制 URI">${esc(d.uri || currentUri)}</div>
+          </div>
+          <button class="btn btn--secondary btn--sm" type="button" id="btnCopy">
+            ${I.copy}复制 URI
+          </button>
+        </div>
+
+        <div class="doc-pills" style="margin-bottom:22px">
+          <span class="pill pill--gray">${isDir ? 'directory' : 'document'}</span>
+          <span class="pill pill--gray">${esc(d.contextType)}</span>
+          ${d.memoryType ? `<span class="pill pill--blue">${esc(d.memoryType)}</span>` : ''}
+          <span class="pill pill--green">${esc(d.status)}</span>
+          ${d.fresh.stale ? '<span class="pill pill--orange"><span class="dot"></span>摘要落后 1 个版本</span>' : ''}
+        </div>
+
+        <div class="detail-grid">
+          <div>
+            <div class="segmented segmented--full" role="tablist" aria-label="披露层级" style="margin-bottom:4px">${segments}</div>
+            <div class="layer-note">${I.info}<span>${LAYER_COPY[currentLayer]}</span></div>
+            ${layerBody(d)}
+
+            <div class="mt-32">
+              <div class="sec-head"><span class="sec-label">读取成本</span><span class="spacer"></span><span class="caption">字符数 · 对数刻度</span></div>
+              <div class="card"><div class="card__body" style="padding:18px 20px 20px">
+                <div class="cost">
+                  ${[['L0', d.l0chars], ['L1', d.l1chars], ['L2', d.bytes]].map(([k, v], i) => {
+                    const max = Math.max(d.l0chars, d.l1chars, d.bytes);
+                    return `<div class="cost__row${i === currentLayer ? ' is-on' : ''}">
+                      <b>${k}</b>
+                      <span class="cost__track"><i style="width:${Math.max(3, Math.round((v / max) * 100))}%"></i></span>
+                      <span class="cost__v">${v.toLocaleString('en-US')} 字符</span>
+                    </div>`;
+                  }).join('')}
+                </div>
+                <p class="caption" style="margin-top:14px">agent 的典型路径是 L0 → L1 → L2。多数查询在 L1 就停止，只有确认相关才读原文。</p>
+              </div></div>
+            </div>
+          </div>
+
+          <aside class="inspector" aria-label="节点元信息">
+            <section class="inspector__section">
+              <div class="inspector__title">摘要来源</div>
+              <div class="meta-list">
+                <div class="meta-list__row"><span class="meta-list__k">生成者</span><span class="meta-list__v">summary.service</span></div>
+                <div class="meta-list__row"><span class="meta-list__k">模型</span><span class="meta-list__v">gpt-4o-mini</span></div>
+                <div class="meta-list__row"><span class="meta-list__k">生成于</span><span class="meta-list__v">${esc(d.fresh.generated)}</span></div>
+                <div class="meta-list__row"><span class="meta-list__k">触发</span><span class="meta-list__v">${esc(d.trigger)}</span></div>
+                <div class="meta-list__row"><span class="meta-list__k">版本</span><span class="meta-list__v">${esc(d.version)}</span></div>
+              </div>
+            </section>
+
+            <section class="inspector__section">
+              <div class="inspector__title">新鲜度</div>
+              ${freshBlock(d.fresh)}
+            </section>
+
+            <section class="inspector__section">
+              <div class="inspector__title">有效权限</div>
+              <div class="acl-mini">
+                ${d.acl.map((a) => `
+                  <div class="acl-mini__row">
+                    <span class="acl-mini__p">${esc(a.p)}</span>
+                    <span class="lv-badge lv-badge--${a.lv}">${esc(a.lv)}<small>${a.lv === 'manage' ? 7 : a.lv === 'write' ? 3 : 1}</small></span>
+                  </div>
+                  <div class="acl-mini__src">${esc(a.src)}</div>`).join('')}
+              </div>
+              <a class="linkrow" href="acl.html">在权限管理中打开 ${I.arrow}</a>
+            </section>
+
+            <section class="inspector__section">
+              <div class="inspector__title">存储</div>
+              <div class="meta-list">
+                <div class="meta-list__row"><span class="meta-list__k">大小</span><span class="meta-list__v">${esc(d.size)}</span></div>
+                ${d.lines ? `<div class="meta-list__row"><span class="meta-list__k">行数</span><span class="meta-list__v">${d.lines}</span></div>` : ''}
+                ${d.writes ? `<div class="meta-list__row"><span class="meta-list__k">写入次数</span><span class="meta-list__v">${d.writes}</span></div>` : ''}
+                <div class="meta-list__row"><span class="meta-list__k">更新于</span><span class="meta-list__v">${esc(d.updated)}</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </div>`;
+
+  $$('[data-layer]', pane).forEach((b) => {
+    b.addEventListener('click', () => {
+      currentLayer = Number(b.dataset.layer);
+      renderDetail();
+    });
+  });
+
+  const copy = $('#btnCopy', pane);
+  if (copy) {
+    copy.addEventListener('click', () => {
+      const text = DOCS[currentUri].uri || currentUri;
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+      toast('已复制 URI');
+    });
+  }
+
+  const uriEl = $('.uri', pane);
+  if (uriEl) {
+    uriEl.addEventListener('click', () => {
+      if (navigator.clipboard) navigator.clipboard.writeText(uriEl.dataset.copy).catch(() => {});
+      toast('已复制 URI');
+    });
+  }
+
+  $('.content', pane).scrollTop = 0;
+}
+
+/* ==========================================================================
+   交互
+   ========================================================================== */
+
+document.addEventListener('DOMContentLoaded', () => {
+  const tree = $('#tree');
+  tree.innerHTML = treeHTML(TREE);
+
+  const themeBtn = $('#themeBtn');
+  const syncThemeIcon = () => {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    themeBtn.innerHTML = dark
+      ? '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"/></svg>'
+      : '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 9.4A5.6 5.6 0 0 1 6.6 3a5.6 5.6 0 1 0 6.4 6.4Z"/></svg>';
+  };
+  syncThemeIcon();
+  themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    syncThemeIcon();
+    toast(next === 'dark' ? '已切换到深色' : '已切换到浅色');
+  });
+
+  const scopePop = $('#scopePop');
+  const closeScope = () => {
+    scopePop.hidden = true;
+    $('#scopeBtn').setAttribute('aria-expanded', 'false');
+  };
+  $('#scopeBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    scopePop.hidden = !scopePop.hidden;
+    $('#scopeBtn').setAttribute('aria-expanded', String(!scopePop.hidden));
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.scope-wrap')) closeScope();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeScope();
+  });
+  $$('#scopePop [data-scope]').forEach((b) => {
+    b.addEventListener('click', () => {
+      closeScope();
+      toast(`已切换到 ${b.dataset.scope}`);
+    });
+  });
+  $('#btnMkdir').addEventListener('click', () => toast('演示稿不提交写操作'));
+  $('#btnRefresh').addEventListener('click', () => toast('索引已刷新 · 128 个条目'));
+
+  tree.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest('.trow');
+    if (!row) return;
+    e.preventDefault();
+    row.click();
+  });
+
+  tree.addEventListener('click', (e) => {
+    const row = e.target.closest('.trow');
+    if (!row) return;
+    /* 接管 summary 的默认折叠，避免「选中即收起」 */
+    e.preventDefault();
+
+    const isDir = row.dataset.dir === '1';
+    const details = row.closest('details');
+    const uri = row.dataset.uri;
+
+    if (e.target.closest('.trow__caret') && isDir) {
+      if (details) details.open = !details.open;
+      return;
+    }
+
+    if (!uri) {
+      if (isDir && details) details.open = !details.open;
+      else toast('该条目未编入演示数据');
+      return;
+    }
+    if (!DOCS[uri]) {
+      $$('.trow', tree).forEach((r) => r.classList.remove('is-selected'));
+      row.classList.add('is-selected');
+      $('#detailPane').innerHTML = `<div class="content" style="padding:64px 32px">
+        <div style="max-width:52ch">
+          <span class="pill pill--gray mb-16">未编入演示数据</span>
+          <h2 class="title" style="margin:14px 0 10px">${esc(row.querySelector('.trow__name').textContent)}</h2>
+          <p class="sub">演示稿只收录 6 个有代表性的节点，其余条目保留在树中，用来展示真实的目录密度与缩进层级。</p>
+          <button class="btn btn--primary mt-20" type="button" id="btnBack">回到 code-style.md</button>
+        </div>
+      </div>`;
+      $('#btnBack').addEventListener('click', () => {
+        currentUri = 'comem://user/alice/memories/preferences/code-style.md';
+        currentLayer = 0;
+        $$('.trow', tree).forEach((r) => r.classList.toggle('is-selected', r.dataset.uri === currentUri));
+        renderDetail();
+      });
+      return;
+    }
+
+    $$('.trow', tree).forEach((r) => r.classList.remove('is-selected'));
+    row.classList.add('is-selected');
+    currentUri = uri;
+    currentLayer = 0;
+    renderDetail();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, textarea')) return;
+    if (['1', '2', '3'].includes(e.key)) {
+      currentLayer = Number(e.key) - 1;
+      renderDetail();
+    }
+  });
+
+  const filter = $('#treeFilter');
+  filter.addEventListener('input', () => {
+    const q = filter.value.trim().toLowerCase();
+    if (!q) {
+      tree.innerHTML = treeHTML(TREE);
+      return;
+    }
+    $$('details', tree).forEach((d) => { d.open = true; });
+    $$('.trow', tree).forEach((r) => {
+      r.style.display = r.dataset.name.includes(q) ? '' : 'none';
+    });
+  });
+
+  renderDetail();
+});
+</script>
+</body>
+</html>

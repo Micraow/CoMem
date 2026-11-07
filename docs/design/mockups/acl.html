@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>权限管理 · CoMem 控制台</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="acl" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main" style="overflow:hidden">
+      <div class="split split-300" style="height:100%">
+
+        <!-- ============ 节点树 ============ -->
+        <section class="pane" style="display:flex;flex-direction:column">
+          <div class="pane-h">
+            <span class="t">节点</span>
+            <span class="spacer"></span>
+            <span class="hint mono" style="font-size:9.5px">2 处边界</span>
+          </div>
+          <div style="padding:8px 10px 0">
+            <div class="searchbox">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+              <input class="input mono" id="aclFilter" placeholder="筛选节点…" aria-label="筛选节点" style="height:27px;font-size:11.5px">
+            </div>
+          </div>
+          <div class="tree" id="aclTree" style="flex:1;overflow:auto"></div>
+          <div class="tree-legend">
+            <span style="color:var(--ok)">● inherit</span>
+            <span style="color:var(--err)">⊘ restricted</span>
+            <span style="margin-left:auto">owner 恒 rwx</span>
+          </div>
+        </section>
+
+        <!-- ============ 授权详情 ============ -->
+        <section class="pane" id="aclPane"></section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="comem.js"></script>
+<script>
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const LV_BITS = { read: 1, write: 3, manage: 7 };
+
+const NODES = {
+  'comem://user/alice/': {
+    label: 'user/alice', mode: 'inherit', owner: 'user:alice',
+    direct: [{ p: 'group:eng', lv: 'read', effect: 'allow', by: 'alice', at: '2026-10-02' }],
+    chain: [
+      { uri: 'comem://user/alice/', mode: 'inherit', note: '根节点预置', eff: [['user:alice', 'manage'], ['group:eng', 'read']] }
+    ],
+    check: [['read', true, 'group:eng'], ['write', false, 'group:eng']]
+  },
+  'comem://user/alice/memories/': {
+    label: 'memories', mode: 'inherit', owner: 'user:alice',
+    direct: [
+      { p: 'group:eng', lv: 'write', effect: 'allow', by: 'alice', at: '2026-10-14' },
+      { p: 'user:bob', lv: 'read', effect: 'allow', by: 'alice', at: '2026-10-28' }
+    ],
+    chain: [
+      { uri: 'comem://user/alice/', mode: 'inherit', note: '根节点预置', eff: [['user:alice', 'manage'], ['group:eng', 'read']] },
+      { uri: 'comem://user/alice/memories/', mode: 'inherit', note: '直接授权 2 条', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] }
+    ],
+    check: [['read', true, 'user:bob'], ['write', true, 'group:eng'], ['manage', false, 'group:eng']]
+  },
+  'comem://user/alice/memories/preferences/': {
+    label: 'preferences', mode: 'inherit', owner: 'user:alice',
+    direct: [{ p: 'group:eng', lv: 'write', effect: 'allow', by: 'alice', at: '2026-11-02' }],
+    chain: [
+      { uri: 'comem://user/alice/', mode: 'inherit', note: '根节点预置', eff: [['user:alice', 'manage'], ['group:eng', 'read']] },
+      { uri: 'comem://user/alice/memories/', mode: 'inherit', note: '直接授权 2 条', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] },
+      { uri: 'comem://user/alice/memories/preferences/', mode: 'inherit', note: '直接授权 1 条', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] }
+    ],
+    check: [['read', true, 'group:eng'], ['write', true, 'group:eng'], ['manage', false, 'group:eng']]
+  },
+  'comem://user/alice/memories/preferences/code-style.md': {
+    label: 'code-style.md', mode: 'inherit', owner: 'user:alice', isDoc: true,
+    direct: [],
+    chain: [
+      { uri: 'comem://user/alice/', mode: 'inherit', note: '根节点预置', eff: [['user:alice', 'manage'], ['group:eng', 'read']] },
+      { uri: 'comem://user/alice/memories/', mode: 'inherit', note: '直接授权 2 条', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] },
+      { uri: 'comem://user/alice/memories/preferences/', mode: 'inherit', note: '直接授权 1 条', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] },
+      { uri: 'comem://user/alice/memories/preferences/code-style.md', mode: 'inherit', note: '本节点无直接授权，全部继承', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] }
+    ],
+    check: [['read', true, 'group:eng'], ['write', true, 'group:eng'], ['manage', false, 'group:eng']]
+  },
+  'comem://user/alice/memories/private/': {
+    label: 'private', mode: 'restricted', owner: 'user:alice',
+    direct: [{ p: 'user:alice', lv: 'manage', effect: 'allow', by: 'alice', at: '2026-10-21' }],
+    chain: [
+      { uri: 'comem://user/alice/memories/', mode: 'inherit', note: '上游：group:eng write · user:bob read', eff: [['user:alice', 'manage'], ['group:eng', 'write'], ['user:bob', 'read']] },
+      { uri: 'comem://user/alice/memories/private/', mode: 'restricted', note: '⊘ 在此切断继承，只看直接授权', eff: [['user:alice', 'manage']] }
+    ],
+    check: [['read', true, 'user:alice'], ['read', false, 'user:bob'], ['write', false, 'group:eng']]
+  },
+  'comem://group/eng/': {
+    label: 'group/eng', mode: 'inherit', owner: 'group:eng',
+    direct: [{ p: 'group:eng', lv: 'write', effect: 'allow', by: 'system', at: '2026-09-18' }],
+    chain: [
+      { uri: 'comem://group/eng/', mode: 'inherit', note: '组空间预置', eff: [['group:eng', 'write']] }
+    ],
+    check: [['read', true, 'group:eng'], ['write', true, 'group:eng'], ['manage', false, 'group:eng']]
+  },
+  'comem://group/eng/memories/release-checklist.md': {
+    label: 'release-checklist.md', mode: 'inherit', owner: 'group:eng', isDoc: true,
+    direct: [{ p: 'user:alice', lv: 'manage', effect: 'allow', by: 'system', at: '2026-11-07' }],
+    chain: [
+      { uri: 'comem://group/eng/', mode: 'inherit', note: '组空间预置', eff: [['group:eng', 'write']] },
+      { uri: 'comem://group/eng/memories/release-checklist.md', mode: 'inherit', note: '直接授权 1 条', eff: [['group:eng', 'write'], ['user:alice', 'manage']] }
+    ],
+    check: [['write', true, 'group:eng'], ['manage', true, 'user:alice']]
+  }
+};
+
+const TREE = [
+  {
+    name: 'user/alice', open: true, uri: 'comem://user/alice/', children: [
+      {
+        name: 'memories', open: true, uri: 'comem://user/alice/memories/', children: [
+          {
+            name: 'preferences', open: true, uri: 'comem://user/alice/memories/preferences/', children: [
+              { name: 'code-style.md', uri: 'comem://user/alice/memories/preferences/code-style.md' },
+              { name: 'communication.md', uri: 'comem://user/alice/memories/preferences/communication.md', disabled: true },
+              { name: 'writing-style.md', uri: 'comem://user/alice/memories/preferences/writing-style.md', disabled: true }
+            ]
+          },
+          { name: 'private', restricted: true, uri: 'comem://user/alice/memories/private/' },
+          { name: 'profile.md', disabled: true },
+          { name: 'rules', children: [{ name: 'code-review', disabled: true }] }
+        ]
+      },
+      { name: 'resources', children: [{ name: 'acme-project', disabled: true }] },
+      { name: 'skills', disabled: true }
+    ]
+  },
+  {
+    name: 'group/eng', open: true, uri: 'comem://group/eng/', children: [
+      {
+        name: 'memories', open: true, children: [
+          { name: 'release-checklist.md', uri: 'comem://group/eng/memories/release-checklist.md' },
+          { name: 'platform-conventions.md', disabled: true }
+        ]
+      },
+      { name: 'resources', disabled: true }
+    ]
+  }
+];
+
+let currentUri = 'comem://user/alice/memories/preferences/';
+
+/* 每次切换 inherit / restricted 都要能还原，保存一份初始快照 */
+Object.values(NODES).forEach((n) => { n._chain = JSON.parse(JSON.stringify(n.chain)); });
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+function rowHTML(n) {
+  const isDir = !!n.children;
+  const flag = n.restricted ? '<span class="cut" title="restricted 边界：继承在此切断">⊘</span>' : '';
+  const badge = n.restricted ? '<span class="badge badge-err" style="height:15px;font-size:8px">restricted</span>' : '';
+  return `<div class="tr${n.uri === currentUri ? ' is-sel' : ''}${n.disabled ? '' : ' clickable'}"
+      data-name="${n.name.toLowerCase()}" ${n.uri ? `data-uri="${n.uri}"` : ''}>
+    <span class="caret${isDir ? '' : ' blank'}">${isDir ? '›' : ''}</span>
+    <span class="tico">${CoMem.icon(isDir ? 'folder' : 'file', 11)}</span>
+    <span class="tname${isDir ? ' dir' : ''}" style="${n.disabled ? 'color:var(--ink-4)' : ''}">${n.name}</span>
+    ${flag}${badge}
+  </div>`;
+}
+
+function renderTree(nodes) {
+  return nodes.map((n) => n.children
+    ? `<details class="tn" ${n.open ? 'open' : ''}><summary>${rowHTML(n)}</summary><div class="tc">${renderTree(n.children)}</div></details>`
+    : rowHTML(n)).join('');
+}
+
+function lvColor(lv) {
+  return lv === 'manage' ? 'lv-manage' : lv === 'write' ? 'lv-write' : 'lv-read';
+}
+
+function renderDetail() {
+  const n = NODES[currentUri];
+  const pane = document.getElementById('aclPane');
+  if (!n) {
+    pane.innerHTML = `<div style="padding:56px 32px;max-width:52ch">
+      <div class="label" style="margin-bottom:10px">未纳入视觉稿</div>
+      <h2 style="font-size:16px;font-weight:600;margin-bottom:8px">该节点没有编入演示数据</h2>
+      <p class="dim" style="font-size:12.5px;line-height:1.7">演示稿保留了 7 个有代表性的节点，用来展示继承、直接授权与 restricted 边界的组合。</p>
+    </div>`;
+    return;
+  }
+
+  const effective = n.mode === 'restricted' ? n.direct.map((d) => ({ p: d.p, lv: d.lv, src: '直接授权' })) : n.chain[n.chain.length - 1].eff.map(([p, lv]) => {
+    const dir = n.direct.find((d) => d.p === p && d.lv === lv);
+    return { p, lv, src: dir ? '直接授权' : '继承' };
+  });
+
+  const chainHTML = n.chain.map((c, i) => {
+    const last = i === n.chain.length - 1;
+    const cut = c.mode === 'restricted';
+    return `<div class="chain-node ${last ? 'is-here' : ''} ${cut ? 'is-cut' : ''}">
+      <span class="cn-dot"></span>
+      <div>
+        <div class="cn-uri" ${last ? 'style="color:var(--ink)"' : ''}>${c.uri}</div>
+        <div class="cn-note">${c.note}${cut ? ' · <span style="color:var(--err)">继承已切断</span>' : ''}</div>
+      </div>
+      <div class="cn-lv">${c.eff.map(([p, lv]) => `<div class="${lvColor(lv)}" style="text-align:right;line-height:1.7">${p.split(':')[0]}:${p.split(':')[1]} <b>${lv}</b></div>`).join('')}</div>
+    </div>`;
+  }).join('');
+
+  pane.innerHTML = `<div style="padding:18px 24px 48px">
+    <div class="crumb"><a href="acl.html">权限</a><span class="sep">/</span><span>${n.label}</span></div>
+
+    <div class="page-head" style="margin-bottom:14px">
+      <div style="min-width:0;flex:1">
+        <h1 class="doc-title">${n.label}${n.isDoc ? '' : '/'}</h1>
+        <div class="uri" data-copy="${currentUri}" style="margin-top:4px">${currentUri}</div>
+      </div>
+      <div class="page-actions">
+        <div class="seg" id="modeSeg">
+          <button data-mode="inherit" class="${n.mode === 'inherit' ? 'is-active' : ''}">inherit</button>
+          <button data-mode="restricted" class="${n.mode === 'restricted' ? 'is-active' : ''}">restricted</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout ${n.mode === 'restricted' ? 'err' : 'info'}" style="margin-bottom:18px">
+      ${CoMem.icon(n.mode === 'restricted' ? 'alert' : 'info', 13)}
+      <div>
+        <b style="display:block;margin-bottom:3px">${n.mode === 'restricted' ? 'restricted：继承在此切断' : 'inherit：沿祖先链累加'}</b>
+        ${n.mode === 'restricted'
+          ? '有效权限只看本节点的直接授权。<span class="mono">user:bob</span> 在 <span class="mono">memories/</span> 上的 read 不会传进来。'
+          : '有效权限 = 本节点直接授权 ∪ 父节点有效权限，直到根。owner 恒为 manage，不能被 ACL 收回。'}
+      </div>
+    </div>
+
+    <!-- 授权列表 -->
+    <div class="sec-title" style="margin-bottom:10px">
+      授权列表
+      <span class="badge badge-neutral" style="margin-left:auto;text-transform:none;letter-spacing:0">${n.direct.length} 条直接</span>
+    </div>
+
+    <div class="panel" style="overflow:hidden">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="width:200px">主体</th>
+            <th style="width:130px">级别</th>
+            <th style="width:88px">效果</th>
+            <th>来源</th>
+            <th style="width:104px">授予</th>
+            <th style="width:64px"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono strong">${n.owner}</td>
+            <td><span class="mono lv-manage">manage</span> <span class="faint mono" style="font-size:10px">7</span></td>
+            <td><span class="badge badge-ok">allow</span></td>
+            <td class="hint" style="font-size:11px">owner · 不可撤销</td>
+            <td class="hint mono" style="font-size:10px">系统预置</td>
+            <td><button class="btn btn-sm btn-ghost" disabled style="opacity:.35;height:22px">撤销</button></td>
+          </tr>
+          ${n.direct.filter((d) => d.p !== n.owner).map((d) => `
+          <tr>
+            <td class="mono strong">${d.p}</td>
+            <td><span class="mono ${lvColor(d.lv)}">${d.lv}</span> <span class="faint mono" style="font-size:10px">${LV_BITS[d.lv]}</span></td>
+            <td><span class="badge badge-ok">${d.effect}</span></td>
+            <td class="hint" style="font-size:11px">直接授权 · 本节点</td>
+            <td class="hint mono" style="font-size:10px">${d.by} · ${d.at}</td>
+            <td><button class="btn btn-sm btn-ghost" data-revoke="${d.p}" style="height:22px">撤销</button></td>
+          </tr>`).join('')}
+          ${n.mode === 'inherit' && n.chain.length > 1 ? n.chain[n.chain.length - 2].eff.filter(([p]) => !n.direct.some((d) => d.p === p) && p !== n.owner).map(([p, lv]) => `
+          <tr style="opacity:.72">
+            <td class="mono">${p}</td>
+            <td><span class="mono ${lvColor(lv)}">${lv}</span> <span class="faint mono" style="font-size:10px">${LV_BITS[lv]}</span></td>
+            <td><span class="badge badge-ok">allow</span></td>
+            <td class="hint" style="font-size:11px">继承自 <span class="mono">comem://user/alice/memories/</span></td>
+            <td class="hint mono" style="font-size:10px">—</td>
+            <td><button class="btn btn-sm btn-ghost" disabled style="opacity:.35;height:22px" title="继承条目需在上游撤销">撤销</button></td>
+          </tr>`).join('') : ''}
+        </tbody>
+      </table>
+      <div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--bg-2);align-items:center;flex-wrap:wrap">
+        <input class="input mono" id="newPrincipal" placeholder="user:carol 或 group:design" style="max-width:240px;height:27px;font-size:11.5px">
+        <div class="seg" id="newLevel">
+          <button data-lv="read" class="is-active">read</button>
+          <button data-lv="write">write</button>
+          <button data-lv="manage">manage</button>
+        </div>
+        <button class="btn btn-sm" id="btnGrant">${CoMem.icon('plus', 11)} 添加授权</button>
+        <span class="hint" style="margin-left:auto;font-size:10.5px">只有 manage 能修改 ACL</span>
+      </div>
+    </div>
+
+    <!-- 推导链 -->
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;margin-top:22px">
+      <div>
+        <div class="sec-title" style="margin-bottom:12px">有效权限推导</div>
+        <div class="chain">${chainHTML}</div>
+      </div>
+
+      <div>
+        <div class="sec-title" style="margin-bottom:12px">求值过程</div>
+        <div class="derivation">
+          <div class="expr">
+            effective(<span style="color:var(--ink)">${n.label}</span>)<br>
+            &nbsp;&nbsp;<span class="op">=</span> ${n.mode === 'restricted'
+              ? 'direct(<span style="color:var(--ink)">本节点</span>)'
+              : 'direct(<span style="color:var(--ink)">本节点</span>) <span class="op">∪</span> effective(parent)'}<br>
+            &nbsp;&nbsp;<span class="op">=</span> { ${n.mode === 'restricted'
+              ? n.direct.map((d) => d.p + ' ' + d.lv).join(', ')
+              : effective.map((e) => e.p + ' ' + e.lv).join(', ')} }
+          </div>
+          <div class="result-chips">
+            ${effective.map((e) => `<span class="badge ${e.lv === 'manage' ? 'badge-err' : e.lv === 'write' ? 'badge-warn' : 'badge-ok'}">${e.p} · ${e.lv} ${LV_BITS[e.lv]}</span>`).join('')}
+          </div>
+          <div class="hint" style="margin-top:10px">
+            位运算：<span class="mono">read = 1</span>，<span class="mono">write = 3 = read | write</span>，
+            <span class="mono">manage = 7</span>。高位包含低位，所以 write 同时满足 read 检查。
+          </div>
+        </div>
+
+        <div class="sec-title" style="margin:18px 0 10px">权限检查</div>
+        <div class="panel" style="overflow:hidden">
+          <table class="tbl">
+            <thead><tr><th>动作</th><th>主体</th><th style="width:80px">结果</th></tr></thead>
+            <tbody>
+              ${n.check.map(([act, ok, who]) => `<tr>
+                <td class="mono">${act}</td>
+                <td class="mono" style="color:var(--ink-3)">${who}</td>
+                <td>${ok ? '<span class="badge badge-ok">allow</span>' : '<span class="badge badge-err">deny</span>'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${n.mode === 'restricted' ? `<div class="callout warn" style="margin-top:12px">
+          ${CoMem.icon('alert', 13)}
+          <div>切到 restricted 后，<span class="mono">group:eng</span> 立即失去 write。即使在上游仍然授权，也进不来。</div>
+        </div>` : ''}
+      </div>
+    </div>
+  </div>`;
+
+  CoMem.bindCopy();
+
+  /* 交互 */
+  pane.querySelectorAll('#modeSeg button').forEach((b) => {
+    b.addEventListener('click', () => {
+      const next = b.dataset.mode;
+      if (next === NODES[currentUri].mode) return;
+      NODES[currentUri].mode = next;
+      if (next === 'restricted') {
+        const snapshot = JSON.parse(JSON.stringify(NODES[currentUri]._chain));
+        const last = snapshot[snapshot.length - 1];
+        last.mode = 'restricted';
+        last.note = '⊘ 在此切断继承，只看直接授权';
+        NODES[currentUri].chain = [last];
+      } else {
+        NODES[currentUri].chain = JSON.parse(JSON.stringify(NODES[currentUri]._chain));
+      }
+      renderDetail();
+      CoMem.toast(next === 'restricted' ? '已切断继承 · 继承条目不再生效' : '已恢复继承 · 上游授权重新生效');
+    });
+  });
+
+  pane.querySelectorAll('[data-revoke]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const p = b.dataset.revoke;
+      NODES[currentUri].direct = NODES[currentUri].direct.filter((d) => d.p !== p);
+      renderDetail();
+      CoMem.toast(`已撤销 ${p}`);
+    });
+  });
+
+  const grant = pane.querySelector('#btnGrant');
+  if (grant) grant.addEventListener('click', () => CoMem.toast('演示稿不提交写操作'));
+  pane.querySelectorAll('#newLevel button').forEach((b) => {
+    b.addEventListener('click', () => {
+      pane.querySelectorAll('#newLevel button').forEach((x) => x.classList.toggle('is-active', x === b));
+    });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const tree = document.getElementById('aclTree');
+  tree.innerHTML = renderTree(TREE);
+
+  tree.addEventListener('click', (e) => {
+    const row = e.target.closest('.tr');
+    if (!row || !row.dataset.uri) return;
+    if (e.target.closest('.caret')) return;
+    currentUri = row.dataset.uri;
+    tree.innerHTML = renderTree(TREE);
+    renderDetail();
+  });
+
+  const filter = document.getElementById('aclFilter');
+  filter.addEventListener('input', () => {
+    const q = filter.value.trim().toLowerCase();
+    tree.querySelectorAll('details.tn').forEach((d) => { d.open = true; });
+    tree.querySelectorAll('.tr').forEach((r) => {
+      r.style.display = (!q || r.dataset.name.includes(q)) ? '' : 'none';
+    });
+  });
+
+  renderDetail();
+});
+</script>
+</body>
+</html>

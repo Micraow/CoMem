@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoMem 控制台 · Material Design 3 设计规范</title>
+<link rel="stylesheet" href="app.css">
+<script>document.documentElement.dataset.theme = (function () { try { return localStorage.getItem('comem-md3-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+<style>
+  /* ---------- 封面 ---------- */
+  .hero {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+    gap: 40px;
+    align-items: center;
+    padding: 48px 40px;
+    border-radius: var(--radius-xl);
+    background:
+      radial-gradient(120% 140% at 100% 0%, color-mix(in srgb, var(--primary) 14%, transparent) 0%, transparent 58%),
+      radial-gradient(90% 120% at 0% 100%, color-mix(in srgb, var(--tertiary) 10%, transparent) 0%, transparent 55%),
+      var(--surface-container-low);
+    border: 1px solid var(--outline-variant);
+    overflow: hidden;
+  }
+
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(color-mix(in srgb, var(--on-surface) 7%, transparent) 1px, transparent 1px);
+    background-size: 22px 22px;
+    opacity: 0.5;
+    mask-image: linear-gradient(120deg, transparent 30%, #000 90%);
+    pointer-events: none;
+  }
+
+  .hero > * { position: relative; z-index: 1; }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 14px;
+    border-radius: var(--radius-full);
+    background: var(--primary-container);
+    color: var(--on-primary-container);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+  }
+
+  .hero h1 {
+    margin-top: 20px;
+    font-size: 32px;
+    line-height: 1.2;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+  }
+
+  .hero h1 span {
+    display: block;
+    font-size: 22px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--on-surface-variant);
+    margin-top: 8px;
+  }
+
+  .hero p.lede {
+    margin-top: 18px;
+    max-width: 54ch;
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--on-surface-variant);
+  }
+
+  .hero-actions {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 26px;
+  }
+
+  .seed-row {
+    display: flex;
+    gap: 28px;
+    flex-wrap: wrap;
+    margin-top: 32px;
+    padding-top: 22px;
+    border-top: 1px solid var(--outline-variant);
+  }
+
+  .seed-item { display: flex; align-items: center; gap: 10px; }
+
+  .seed-swatch {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    background: #00696E;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.16);
+  }
+
+  .seed-k {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--on-surface-variant);
+  }
+
+  .seed-v {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface);
+    margin-top: 2px;
+  }
+
+  /* 封面右上：三层摘要示意 */
+  .layer-demo {
+    display: grid;
+    gap: 10px;
+    padding: 22px;
+    border-radius: var(--radius-lg);
+    background: var(--surface-container);
+    border: 1px solid var(--outline-variant);
+    box-shadow: var(--el-2);
+  }
+
+  .layer-demo .ld-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--on-surface-variant);
+    margin-bottom: 4px;
+  }
+
+  .ld-row {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-container-low);
+    border: 1px solid var(--outline-variant);
+  }
+
+  .ld-row.l0 { border-left: 3px solid var(--primary); }
+  .ld-row.l1 { border-left: 3px solid var(--secondary); }
+  .ld-row.l2 { border-left: 3px solid var(--tertiary); }
+
+  .ld-tag {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .ld-row.l0 .ld-tag { color: var(--primary); }
+  .ld-row.l1 .ld-tag { color: var(--secondary); }
+  .ld-row.l2 .ld-tag { color: var(--tertiary); }
+
+  .ld-file {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface);
+  }
+
+  .ld-budget {
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- 页面导航卡 ---------- */
+  .page-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+    gap: 16px;
+  }
+
+  .page-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 22px;
+    min-height: 196px;
+    border-radius: var(--radius-lg);
+    background: var(--surface-container-low);
+    border: 1px solid var(--outline-variant);
+    color: inherit;
+    text-decoration: none !important;
+    overflow: hidden;
+    isolation: isolate;
+    transition: box-shadow var(--dur-medium) var(--ease-standard),
+      transform var(--dur-medium) var(--ease-standard),
+      border-color var(--dur-medium) var(--ease-standard);
+  }
+
+  .page-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--el-3);
+    border-color: var(--primary);
+  }
+
+  .page-card .pc-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .page-card .pc-ico {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-md);
+    background: var(--secondary-container);
+    color: var(--on-secondary-container);
+  }
+
+  .page-card .pc-idx {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--outline);
+  }
+
+  .page-card h3 {
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: 0.009em;
+  }
+
+  .page-card p {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--on-surface-variant);
+    flex: 1;
+  }
+
+  .page-card .pc-foot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--primary);
+  }
+
+  /* ---------- 色板 ---------- */
+  .palette {
+    display: grid;
+    gap: 10px;
+  }
+
+  .pal-row {
+    display: grid;
+    grid-template-columns: 148px repeat(11, minmax(0, 1fr));
+    gap: 2px;
+    align-items: stretch;
+  }
+
+  .pal-name {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    padding-right: 12px;
+  }
+
+  .pal-name b {
+    font-size: 14px;
+    font-weight: 500;
+    font-family: var(--font-mono);
+  }
+
+  .pal-name span {
+    font-size: 13px;
+    color: var(--on-surface-variant);
+  }
+
+  .swatch {
+    position: relative;
+    height: 56px;
+    display: grid;
+    place-items: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 2px;
+    cursor: default;
+    transition: transform var(--dur-short) var(--ease-standard);
+  }
+
+  .swatch:first-of-type { border-radius: var(--radius-xs) 2px 2px var(--radius-xs); }
+  .swatch:last-of-type { border-radius: 2px var(--radius-xs) var(--radius-xs) 2px; }
+
+  .swatch:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--el-2);
+    z-index: 2;
+    border-radius: var(--radius-xs);
+  }
+
+  .swatch .sw-hex {
+    position: absolute;
+    bottom: 4px;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity var(--dur-short) var(--ease-standard);
+  }
+
+  .swatch:hover .sw-hex { opacity: 0.9; }
+
+  .tone-axis {
+    display: grid;
+    grid-template-columns: 148px repeat(11, minmax(0, 1fr));
+    gap: 2px;
+    padding-bottom: 6px;
+  }
+
+  .tone-axis span {
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--on-surface-variant);
+  }
+
+  /* 角色网格 */
+  .role-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
+    gap: 12px;
+  }
+
+  .role-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--outline-variant);
+    background: var(--surface-container-low);
+  }
+
+  .role-chip {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    flex: none;
+    box-shadow: inset 0 0 0 1px rgb(128 128 128 / 0.24);
+  }
+
+  .role-k {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface);
+    overflow-wrap: break-word;
+  }
+
+  .role-v {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    margin-top: 2px;
+  }
+
+  /* ---------- 字号 ---------- */
+  .type-row {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr) 188px;
+    gap: 24px;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--outline-variant);
+  }
+
+  .type-row:last-child { border-bottom: 0; }
+
+  .type-role {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+  }
+
+  .type-spec {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    text-align: right;
+    line-height: 1.7;
+  }
+
+  .type-spec b { color: var(--on-surface); font-weight: 500; }
+
+  /* ---------- 阴影 ---------- */
+  .el-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+  }
+
+  .el-card {
+    padding: 20px;
+    border-radius: var(--radius-md);
+    background: var(--surface-container-low);
+    border: 1px solid var(--outline-variant);
+  }
+
+  .el-box {
+    height: 76px;
+    border-radius: var(--radius-md);
+    background: var(--surface-container-highest);
+    margin-bottom: 16px;
+  }
+
+  .el-k {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .el-spec {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    margin-top: 4px;
+    line-height: 1.6;
+    word-break: break-word;
+  }
+
+  .el-use {
+    font-size: 14px;
+    color: var(--on-surface-variant);
+    margin-top: 10px;
+    line-height: 1.5;
+  }
+
+  /* ---------- 组件陈列 ---------- */
+  .spec-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .spec-cell .card-body { display: grid; gap: 16px; }
+
+  .spec-label {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--on-surface-variant);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .spec-label::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--outline-variant);
+  }
+
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+
+  /* 做与不做 */
+  .dd-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+  }
+
+  .dd-card {
+    padding: 22px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--outline-variant);
+    background: var(--surface-container-low);
+  }
+
+  .dd-card.do { border-top: 3px solid var(--primary); }
+  .dd-card.dont { border-top: 3px solid var(--error); }
+
+  .dd-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 16px;
+    font-weight: 500;
+    margin-bottom: 16px;
+  }
+
+  .dd-card.do .dd-title svg { color: var(--primary); }
+  .dd-card.dont .dd-title svg { color: var(--error); }
+
+  .dd-list { display: grid; gap: 14px; }
+
+  .dd-item {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 12px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--on-surface-variant);
+  }
+
+  .dd-item b {
+    color: var(--on-surface);
+    font-weight: 500;
+    display: block;
+    margin-bottom: 2px;
+    font-size: 15px;
+  }
+
+  .dd-item .dd-ico { margin-top: 2px; }
+  .dd-card.do .dd-item .dd-ico { color: var(--primary); }
+  .dd-card.dont .dd-item .dd-ico { color: var(--error); }
+
+  /* 角落的规格脚注 */
+  .footnote {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    border-radius: var(--radius-md);
+    background: var(--surface-container);
+    color: var(--on-surface-variant);
+    font-size: 14px;
+    line-height: 1.6;
+    margin-top: 20px;
+  }
+
+  .swatch-legend {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--on-surface-variant);
+  }
+
+  @media (max-width: 1180px) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr);
+      padding: 32px 24px;
+    }
+    .pal-row, .tone-axis { grid-template-columns: 96px repeat(11, minmax(28px, 1fr)); }
+    .swatch { font-size: 12px; }
+    .type-row { grid-template-columns: 1fr; gap: 8px; }
+    .type-spec { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="app-bar" data-app-bar></header>
+  <aside data-nav></aside>
+
+  <main class="main">
+    <div class="main-pad">
+
+      <!-- ===================== 封面 ===================== -->
+      <section class="hero">
+        <div>
+          <span class="eyebrow">Material Design 3 · 静态视觉稿</span>
+          <h1>
+            CoMem 控制台
+            <span>面向 AI agent 的上下文记忆数据库</span>
+          </h1>
+          <p class="lede">
+            所有内容挂在虚拟文件系统 <code>comem://</code> 下。控制台要回答的问题只有三个：
+            这条记忆是什么、我够不够权限、后台把它处理到哪一步了。下面五页是它们各自的视觉答案。
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-filled" href="filesystem.html">进入文件树</a>
+            <a class="btn btn-outlined" href="#palette">查看色彩规范</a>
+          </div>
+          <div class="seed-row">
+            <div class="seed-item">
+              <span class="seed-swatch" aria-hidden="true"></span>
+              <div>
+                <div class="seed-k">种子色 SEED</div>
+                <div class="seed-v">#00696E</div>
+              </div>
+            </div>
+            <div class="seed-item">
+              <div>
+                <div class="seed-k">色相 HUE</div>
+                <div class="seed-v">203.5° teal</div>
+              </div>
+            </div>
+            <div class="seed-item">
+              <div>
+                <div class="seed-k">palette</div>
+                <div class="seed-v">6 条 · 每条 11 个 tone</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="layer-demo" aria-label="三层摘要的预算">
+          <div class="ld-head">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 7.5 12 12l8-4.5z"/><path d="M4 12l8 4.5 8-4.5"/><path d="M4 16.5l8 4.5 8-4.5"/></svg>
+            渐进式披露 · 目录 comem://user/alice/memories/preferences/
+          </div>
+          <div class="ld-row l0">
+            <span class="ld-tag">L0</span>
+            <span class="ld-file">.abstract.md</span>
+            <span class="ld-budget">≤ 256 字</span>
+          </div>
+          <div class="ld-row l1">
+            <span class="ld-tag">L1</span>
+            <span class="ld-file">.overview.md</span>
+            <span class="ld-budget">≤ 4000 字</span>
+          </div>
+          <div class="ld-row l2">
+            <span class="ld-tag">L2</span>
+            <span class="ld-file">code-style.md</span>
+            <span class="ld-budget">原文</span>
+          </div>
+          <div class="divider" style="margin:4px 0"></div>
+          <div class="row" style="justify-content:space-between;font-size:13px;color:var(--on-surface-variant)">
+            <span>摘要落后 1 / 5 条 · 20%</span>
+            <span class="badge badge-tertiary">待刷新</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 页面 ===================== -->
+      <section class="section mt-32">
+        <div class="section-head">
+          <span class="section-num">00</span>
+          <div>
+            <h2 class="section-title">五个页面</h2>
+            <p class="section-desc">每页只解决一个信息表达问题。共享同一套色板、字阶、阴影与组件形态。</p>
+          </div>
+        </div>
+
+        <div class="page-grid stagger">
+          <a class="page-card" href="filesystem.html">
+            <div class="pc-top">
+              <span class="pc-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h6M4 12h6M4 19h6"/><path d="M14 5h6M14 12h6M14 19h6"/><path d="M10 5c2 0 2 7 4 7M10 12h4"/></svg></span>
+              <span class="pc-idx">01</span>
+            </div>
+            <h3>文件树 + 详情</h3>
+            <p>一棵树给出全貌，右侧详情用 L0 / L1 / L2 三档切换，并把「摘要落后多少」算给你看。</p>
+            <span class="pc-foot">打开 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+          </a>
+
+          <a class="page-card" href="search.html">
+            <div class="pc-top">
+              <span class="pc-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg></span>
+              <span class="pc-idx">02</span>
+            </div>
+            <h3>检索调试台</h3>
+            <p>同一条 query 对比 find 与 search：意图拆成几条 TypedQuery、每条命中靠哪一层、ACL 滤掉了多少。</p>
+            <span class="pc-foot">打开 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+          </a>
+
+          <a class="page-card" href="review.html">
+            <div class="pc-top">
+              <span class="pc-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8.5 12 2.4 2.4L16 9.6"/></svg></span>
+              <span class="pc-idx">03</span>
+            </div>
+            <h3>记忆复核</h3>
+            <p>经验与规则两类记忆停在 pending。左边队列，右边 before / after 差异，底部通过或拒绝。</p>
+            <span class="pc-foot">打开 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+          </a>
+
+          <a class="page-card" href="acl.html">
+            <div class="pc-top">
+              <span class="pc-ico"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8.5 10V7.5a3.5 3.5 0 1 1 7 0V10"/></svg></span>
+              <span class="pc-idx">04</span>
+            </div>
+            <h3>权限管理</h3>
+            <p>节点树上标出 restricted 边界，右侧列直接授权，并逐层推导出「有效权限到底怎么来的」。</p>
+            <span class="pc-foot">打开 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+          </a>
+        </div>
+      </section>
+
+      <!-- ===================== 01 色彩 ===================== -->
+      <section class="section" id="palette">
+        <div class="section-head">
+          <span class="section-num">01</span>
+          <div>
+            <h2 class="section-title">色彩：从种子色生成全套角色</h2>
+            <p class="section-desc">
+              以 HCT 的思路生成：固定色相与色度上限，tone 直接等于 L*，超出 sRGB 色域时收敛色度而不是改色调。
+              6 条 palette 的 tone 40 与 tone 80 分别是浅色与深色主题的主色。
+            </p>
+          </div>
+          <div class="spacer"></div>
+          <div class="segmented" role="group" aria-label="色板预览主题">
+            <button type="button" data-pal-theme="light" aria-pressed="false">浅色 tonal</button>
+            <button type="button" data-pal-theme="dark" aria-pressed="true">深色 tonal</button>
+          </div>
+        </div>
+
+        <div class="card card-filled" style="padding:22px 22px 18px">
+          <div class="tone-axis" aria-hidden="true">
+            <span></span>
+            <span>0</span><span>10</span><span>20</span><span>30</span><span>40</span><span>50</span>
+            <span>60</span><span>70</span><span>80</span><span>90</span><span>100</span>
+          </div>
+          <div class="palette" id="paletteRows"></div>
+          <div class="row mt-16 row-wrap" style="justify-content:space-between">
+            <span class="swatch-legend">
+              <span>悬停查看 hex</span>
+              <span>tone 40 · 浅色主色</span>
+              <span>tone 80 · 深色主色</span>
+            </span>
+            <span class="mono-sm">seed #00696E → 6 palettes × 11 tones</span>
+          </div>
+        </div>
+
+        <div class="section-head mt-32" style="border-bottom:0;padding-bottom:0;margin-bottom:12px">
+          <span class="section-num">01b</span>
+          <div>
+            <h3 class="section-title" style="font-size:20px">色彩角色（深色 / 默认）</h3>
+            <p class="section-desc">组件只引用角色，不写裸 hex。下面每个色块都直接取自当前主题的 token。</p>
+          </div>
+        </div>
+        <div class="role-grid" id="roles"></div>
+      </section>
+
+      <!-- ===================== 02 字阶 ===================== -->
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">02</span>
+          <div>
+            <h2 class="section-title">字体：Roboto 五档字阶</h2>
+            <p class="section-desc">
+              display / headline / title / body / label 五档，每档给出字号、行高与字重。
+              <b style="color:var(--on-surface)">基础字号不低于 14px</b>：正文 15–16px，表格 14px，短标签 12–13px。
+              标识符统一 Roboto Mono。
+            </p>
+          </div>
+        </div>
+
+        <div class="card card-outlined" style="overflow:hidden">
+          <div class="type-row" style="background:var(--surface-container);border-bottom:1px solid var(--outline-variant)">
+            <span class="type-role">角色</span>
+            <span class="ink" style="font-size:14px;font-weight:500">示例</span>
+            <span class="type-spec" style="text-align:right;font-weight:500">字号 / 行高 · 字重</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">display</span>
+            <span class="t-display">CoMem 记忆库</span>
+            <span class="type-spec"><b>32</b> / 40 · 400</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">headline</span>
+            <span class="t-headline-m">上下文记忆的目录视图</span>
+            <span class="type-spec"><b>28</b> / 36 · 400</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">title-large</span>
+            <span class="t-title-l">preferences/ 的概览</span>
+            <span class="type-spec"><b>22</b> / 30 · 500</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">title-medium</span>
+            <span class="t-title-m">摘要新鲜度</span>
+            <span class="type-spec"><b>16</b> / 24 · 500</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">body-large</span>
+            <span class="t-body-l">用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。</span>
+            <span class="type-spec"><b>16</b> / 24 · 400</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">body-medium</span>
+            <span class="t-body-m">group:eng 从更上层继承了 write，本节点没有直接授权。</span>
+            <span class="type-spec"><b>15</b> / 22 · 400</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">body-small</span>
+            <span class="t-body-s">任务 session_commit · archive_002 · running · 已重试 1 次</span>
+            <span class="type-spec"><b>14</b> / 20 · 400</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">label-large</span>
+            <span class="t-label-l">通过并生效</span>
+            <span class="type-spec"><b>14</b> / 20 · 500</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">label-medium</span>
+            <span class="t-label-m">restricted 边界</span>
+            <span class="type-spec"><b>13</b> / 18 · 500</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">label-small</span>
+            <span class="t-label-s">pending</span>
+            <span class="type-spec"><b>12</b> / 16 · 500</span>
+          </div>
+          <div class="type-row">
+            <span class="type-role">mono · 标识符</span>
+            <span class="mono" style="font-size:14px">comem://user/alice/memories/preferences/code-style.md</span>
+            <span class="type-spec"><b>14</b> / 20 · 400</span>
+          </div>
+        </div>
+        <div class="footnote">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color:var(--primary)"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><path d="M12 8v.01"/></svg>
+          行高统一 1.5 左右（标题 1.2–1.36，正文 1.5，标签 1.43）。长段落限制在 75 字符以内。
+        </div>
+      </section>
+
+      <!-- ===================== 03 阴影 ===================== -->
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">03</span>
+          <div>
+            <h2 class="section-title">Elevation：0–5 六级阴影</h2>
+            <p class="section-desc">
+              阴影层级是 MD3 与扁平风格最大的区别。深色主题下阴影可见度低，同时用 surface-container 的色调抬升表达层级。
+            </p>
+          </div>
+        </div>
+
+        <div class="el-grid">
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-0)"></div>
+            <div class="el-k">level 0</div>
+            <div class="el-spec">none</div>
+            <div class="el-use">页面背景、内联区块</div>
+          </div>
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-1)"></div>
+            <div class="el-k">level 1</div>
+            <div class="el-spec">0 1 2 / 0 1 3</div>
+            <div class="el-use">卡片、列表容器</div>
+          </div>
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-2)"></div>
+            <div class="el-k">level 2</div>
+            <div class="el-spec">0 1 2 / 0 2 6</div>
+            <div class="el-use">app bar 滚动、悬停卡片</div>
+          </div>
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-3)"></div>
+            <div class="el-k">level 3</div>
+            <div class="el-spec">0 4 8 / 0 1 3</div>
+            <div class="el-use">FAB、snackbar、抽屉</div>
+          </div>
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-4)"></div>
+            <div class="el-k">level 4</div>
+            <div class="el-spec">0 6 10 / 0 2 3</div>
+            <div class="el-use">悬停 FAB、对话框</div>
+          </div>
+          <div class="el-card">
+            <div class="el-box" style="box-shadow:var(--el-5)"></div>
+            <div class="el-k">level 5</div>
+            <div class="el-spec">0 8 12 / 0 4 4</div>
+            <div class="el-use">模态、导航抽屉展开</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 04 形状 ===================== -->
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">04</span>
+          <div>
+            <h2 class="section-title">形状：8 / 12 / 16 / 28</h2>
+            <p class="section-desc">小圆角 8–12px，卡片 12–16px，按钮一律 pill（全圆角），容器 28px。</p>
+          </div>
+        </div>
+        <div class="el-grid">
+          <div class="el-card" style="text-align:center">
+            <div style="height:72px;border-radius:var(--radius-sm);background:var(--secondary-container);margin-bottom:14px"></div>
+            <div class="el-k">8 px</div>
+            <div class="el-use">chip · 输入框 · 树行</div>
+          </div>
+          <div class="el-card" style="text-align:center">
+            <div style="height:72px;border-radius:var(--radius-md);background:var(--secondary-container);margin-bottom:14px"></div>
+            <div class="el-k">12 px</div>
+            <div class="el-use">卡片 · 面板</div>
+          </div>
+          <div class="el-card" style="text-align:center">
+            <div style="height:72px;border-radius:var(--radius-lg);background:var(--secondary-container);margin-bottom:14px"></div>
+            <div class="el-k">16 px</div>
+            <div class="el-use">FAB · 大卡片</div>
+          </div>
+          <div class="el-card" style="text-align:center">
+            <div style="height:72px;border-radius:var(--radius-full);background:var(--secondary-container);margin-bottom:14px"></div>
+            <div class="el-k">pill</div>
+            <div class="el-use">按钮 · 分段 · 徽标</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 05 组件 ===================== -->
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">05</span>
+          <div>
+            <h2 class="section-title">组件形态</h2>
+            <p class="section-desc">
+              四种按钮的视觉差异必须一眼看出：filled 实心主色、tonal 容器色、outlined 描边、text 无底。
+              全部 40px 高，带完整 state layer 与涟漪。
+            </p>
+          </div>
+        </div>
+
+        <div class="spec-grid">
+          <div class="card card-filled spec-cell">
+            <div class="card-head"><span class="card-title">按钮层级</span><span class="spacer"></span><span class="badge badge-outline">40 px</span></div>
+            <div class="card-body">
+              <div class="btn-row">
+                <button class="btn btn-filled" type="button">通过并生效</button>
+                <button class="btn btn-tonal" type="button">标记为待复核</button>
+                <button class="btn btn-outlined" type="button">拒绝</button>
+                <button class="btn btn-text" type="button">查看原文</button>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-elevated" type="button">重新生成摘要</button>
+                <button class="btn btn-danger" type="button">删除记忆</button>
+                <button class="btn btn-sm btn-outlined" type="button">小号 32px</button>
+                <button class="btn btn-filled" type="button" disabled>不可用</button>
+              </div>
+              <div class="btn-row">
+                <button class="fab-extended" type="button">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                  新建记忆
+                </button>
+                <button class="fab" type="button" aria-label="刷新索引">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4.5V10h-5.5"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-filled spec-cell">
+            <div class="card-head"><span class="card-title">分段按钮与 chip</span><span class="spacer"></span><span class="badge badge-outline">44 / 32 px</span></div>
+            <div class="card-body">
+              <div class="segmented" role="group" aria-label="摘要层级">
+                <button type="button" aria-pressed="true">L0 摘要</button>
+                <button type="button" aria-pressed="false">L1 概览</button>
+                <button type="button" aria-pressed="false">L2 原文</button>
+              </div>
+              <div class="chip-row">
+                <button class="chip is-on" type="button" aria-pressed="true">全部 <span class="chip-n">5</span></button>
+                <button class="chip" type="button" aria-pressed="false">经验 <span class="chip-n">3</span></button>
+                <button class="chip" type="button" aria-pressed="false">规则 <span class="chip-n">2</span></button>
+                <button class="chip chip-assist" type="button">仅看 restricted</button>
+              </div>
+              <div class="chip-row">
+                <span class="chip chip-mono">typescript ×3</span>
+                <span class="chip chip-mono">严格 ×1</span>
+                <span class="chip chip-mono">缩进 ×1</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card card-filled spec-cell">
+            <div class="card-head"><span class="card-title">输入与开关</span><span class="spacer"></span><span class="badge badge-outline">48 / 40 px</span></div>
+            <div class="card-body">
+              <label>
+                <span class="field-label">检索词</span>
+                <span class="text-field is-mono">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg>
+                  <input value="TypeScript 严格模式 代码风格" aria-label="检索词">
+                </span>
+              </label>
+              <div class="chip-row" style="gap:20px">
+                <label class="check"><input type="checkbox" checked> 包含 pending 记录</label>
+                <label class="check"><input type="radio" name="mode" checked> inherit</label>
+                <label class="check"><input type="radio" name="mode"> restricted</label>
+              </div>
+              <label class="switch"><input type="checkbox" checked> 摘要自动重算</label>
+            </div>
+          </div>
+
+          <div class="card card-filled spec-cell">
+            <div class="card-head"><span class="card-title">状态与计量</span><span class="spacer"></span><span class="badge badge-outline">badge / meter</span></div>
+            <div class="card-body">
+              <div class="chip-row">
+                <span class="badge badge-primary">active</span>
+                <span class="badge badge-tertiary">pending</span>
+                <span class="badge badge-error">deny</span>
+                <span class="badge badge-secondary">running</span>
+                <span class="badge badge-outline">archived</span>
+              </div>
+              <div>
+                <div class="row" style="justify-content:space-between;font-size:14px;color:var(--on-surface-variant);margin-bottom:8px">
+                  <span>摘要新鲜度</span><span class="tnum ink">1 / 5 · 20%</span>
+                </div>
+                <div class="meter"><i class="is-warn" style="width:20%"></i></div>
+              </div>
+              <div>
+                <div class="row" style="justify-content:space-between;font-size:14px;color:var(--on-surface-variant);margin-bottom:8px">
+                  <span>L1 预算占用</span><span class="tnum ink">486 / 4000</span>
+                </div>
+                <div class="meter"><i style="width:12%"></i></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 06 做与不做 ===================== -->
+      <section class="section">
+        <div class="section-head">
+          <span class="section-num">06</span>
+          <div>
+            <h2 class="section-title">做与不做</h2>
+            <p class="section-desc">上一版被指出的问题，逐条对照。</p>
+          </div>
+        </div>
+
+        <div class="dd-grid">
+          <div class="dd-card do">
+            <div class="dd-title">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg>
+              这样做
+            </div>
+            <div class="dd-list">
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg></span>
+                <div><b>正文 15–16px，最小 14px</b>表格与标识符单独定 14px，只有 chip 里的短标签允许 12–13px。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg></span>
+                <div><b>按钮 40px 高，带 state layer</b>悬停 8%、按下 12% 的半透明覆盖层，涟漪用 CSS 动画实现。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg></span>
+                <div><b>8px 网格与 16px 卡片内边距</b>卡片内边距最小 16px，行高 1.5，长段落限宽。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg></span>
+                <div><b>语义色 + 图标 + 文案三重表达</b>pending 不靠颜色区分，同时给徽标文字与图标。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L20 7"/></svg></span>
+                <div><b>深浅两套完整方案</b>默认深色，切换后所有角色重新映射，对比度分别校验。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dd-card dont">
+            <div class="dd-title">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+              不要这样做
+            </div>
+            <div class="dd-list">
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></span>
+                <div><b>10–11px 的辅助文字</b>信息密度不是靠压字号换来的；放不下就拆面板、折叠次要信息。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></span>
+                <div><b>四种按钮长得一样</b>层级差异要靠填充、描边、容器色区分，不能只靠字号和灰色。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></span>
+                <div><b>纯扁平、无阴影</b>没有 elevation 就失去了 MD3 的层级语义，卡片与背景糊成一片。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></span>
+                <div><b>组件里写死 hex</b>一律引用角色 token，否则深浅切换必然出现某个角落没跟上。</div>
+              </div>
+              <div class="dd-item">
+                <span class="dd-ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></span>
+                <div><b>把内部术语露在界面上</b>界面上一律叫「元数据文件」，状态叫「基线 / 待刷新」，不出现 <code>page_id</code>、<code>digest</code> 这类字段名。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="row row-wrap" style="justify-content:space-between;padding-top:24px;border-top:1px solid var(--outline-variant);color:var(--on-surface-variant);font-size:14px">
+        <span>CoMem 控制台 · 静态视觉稿 · 无构建步骤、无外部依赖</span>
+        <span class="mono-sm">Material Design 3 · seed #00696E · 8px grid</span>
+      </footer>
+
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+<script>
+M3.shell({ active: 'index' });
+
+/* ---------- 色板数据 ---------- */
+const PALETTES = [
+  { key: 'primary', label: 'primary', note: '主操作 / 选中',
+    tones: {"0":"#000000","10":"#002022","20":"#003739","30":"#004F53","40":"#00696E","50":"#00848A","60":"#00A0A8","70":"#31BCC4","80":"#57D8E0","90":"#77F5FD","100":"#FFFFFF"} },
+  { key: 'secondary', label: 'secondary', note: '次级 / 导航选中',
+    tones: {"0":"#000000","10":"#002022","20":"#123538","30":"#2A4C4E","40":"#416466","50":"#5A7D7F","60":"#739799","70":"#8DB2B4","80":"#A8CDD0","90":"#C3EAEC","100":"#FFFFFF"} },
+  { key: 'tertiary', label: 'tertiary', note: '待办 / 需要留意',
+    tones: {"0":"#000000","10":"#2D1600","20":"#4D2609","30":"#673C1F","40":"#825435","50":"#9D6C4C","60":"#B98565","70":"#D6A07E","80":"#F3BB98","90":"#FFDBC7","100":"#FFFFFF"} },
+  { key: 'neutral', label: 'neutral', note: '表面 / 文本',
+    tones: {"0":"#000000","10":"#171D1D","20":"#2B3232","30":"#414848","40":"#596060","50":"#717879","60":"#8B9292","70":"#A5ADAD","80":"#C0C8C8","90":"#DCE4E4","100":"#FFFFFF"} },
+  { key: 'neutral-variant', label: 'neutral-variant', note: '描边 / 次要文本',
+    tones: {"0":"#000000","10":"#0E1E1F","20":"#233334","30":"#394A4B","40":"#506263","50":"#687A7B","60":"#819495","70":"#9CAFB0","80":"#B7CACB","90":"#D2E6E7","100":"#FFFFFF"} },
+  { key: 'error', label: 'error', note: '拒绝 / 失败',
+    tones: {"0":"#000000","10":"#410000","20":"#680012","30":"#92001E","40":"#B22832","50":"#D14649","60":"#F06261","70":"#FF8983","80":"#FFB3AD","90":"#FFDAD6","100":"#FFFFFF"} }
+];
+
+const ROLES = [
+  ['primary', '主操作、选中态、链接'],
+  ['on-primary', '主色上的文本与图标'],
+  ['primary-container', '选中指示器 / FAB 容器'],
+  ['on-primary-container', '容器上的文本'],
+  ['secondary', '次级强调'],
+  ['secondary-container', '导航选中、tonal 按钮'],
+  ['on-secondary-container', 'tonal 按钮文本'],
+  ['tertiary', '待复核、需要留意'],
+  ['tertiary-container', '待办徽标底'],
+  ['on-tertiary-container', '待办徽标文本'],
+  ['error', '拒绝、失败、危险'],
+  ['error-container', '错误提示底'],
+  ['on-error-container', '错误提示文本'],
+  ['surface', '页面背景'],
+  ['on-surface', '正文主色'],
+  ['surface-variant', '次级表面'],
+  ['on-surface-variant', '说明文字、图标'],
+  ['outline', '输入框描边、分隔线'],
+  ['outline-variant', '卡片边框、弱分隔'],
+  ['surface-container-low', '卡片底'],
+  ['surface-container', '面板底、app bar 滚动'],
+  ['surface-container-high', '悬停、输入框底'],
+  ['surface-container-highest', 'chip 底、进度轨道'],
+  ['inverse-surface', 'snackbar 底'],
+  ['inverse-on-surface', 'snackbar 文本'],
+  ['inverse-primary', 'snackbar 动作']
+];
+
+function luminance(hex) {
+  const c = hex.replace('#', '');
+  const rgb = [0, 2, 4].map((i) => {
+    const v = parseInt(c.slice(i, i + 2), 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+}
+
+function renderPalette(theme) {
+  const dark = theme === 'dark';
+  document.getElementById('paletteRows').innerHTML = PALETTES.map((p) => {
+    const cells = Object.entries(p.tones).map(([tone, hex]) => {
+      const onLight = luminance(hex) > 0.45;
+      const isKey = (dark && tone === '80') || (!dark && tone === '40');
+      return `<div class="swatch" style="background:${hex};color:${onLight ? '#111' : '#fff'};${
+        isKey ? 'box-shadow:inset 0 0 0 2px var(--on-surface);' : ''
+      }" title="${p.label} · tone ${tone} · ${hex}">
+        ${tone}<span class="sw-hex">${hex.replace('#', '')}</span>
+      </div>`;
+    }).join('');
+    return `<div class="pal-row">
+      <div class="pal-name"><b>${p.label}</b><span>${p.note}</span></div>
+      ${cells}
+    </div>`;
+  }).join('');
+}
+
+function renderRoles() {
+  const cs = getComputedStyle(document.documentElement);
+  document.getElementById('roles').innerHTML = ROLES.map(([role, use]) => {
+    const hex = cs.getPropertyValue(`--${role}`).trim().toUpperCase();
+    return `<div class="role-card">
+      <span class="role-chip" style="background:var(--${role})"></span>
+      <div style="min-width:0">
+        <div class="role-k">--${role}</div>
+        <div class="role-v">${hex} · ${use}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+let palTheme = 'dark';
+renderPalette(palTheme);
+renderRoles();
+
+document.querySelectorAll('[data-pal-theme]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    palTheme = btn.dataset.palTheme;
+    document.querySelectorAll('[data-pal-theme]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.palTheme === palTheme));
+    });
+    renderPalette(palTheme);
+  });
+});
+
+document.addEventListener('m3:theme', () => renderRoles());
+
+/* 平滑锚点 */
+document.querySelectorAll('a[href^="#"]').forEach((a) => {
+  a.addEventListener('click', (e) => {
+    const target = document.querySelector(a.getAttribute('href'));
+    if (!target) return;
+    e.preventDefault();
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+</script>
+</body>
+</html>

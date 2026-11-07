@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件树 · CoMem 控制台</title>
+<link rel="stylesheet" href="app.css">
+<script>document.documentElement.dataset.theme = (function () { try { return localStorage.getItem('comem-md3-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+<style>
+  .main { height: calc(100vh - 64px); overflow: hidden; }
+  .split { height: 100%; }
+
+  .tree-toolbar { padding: 10px 12px; border-bottom: 1px solid var(--outline-variant); }
+  .tree-legend { gap: 10px; row-gap: 6px; font-size: 13px; }
+
+  /* ---------- 详情 ---------- */
+  .detail-scroll { padding: 24px 28px 72px; }
+
+  .detail-head { display: grid; gap: 14px; }
+
+  .detail-title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .detail-title-row h1 {
+    font-size: 28px;
+    line-height: 1.29;
+    font-weight: 400;
+    letter-spacing: -0.005em;
+    overflow-wrap: anywhere;
+  }
+
+  .detail-badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 6px; }
+
+  .layer-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    padding-top: 4px;
+  }
+
+  /* 层级预算 */
+  .budget {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 260px;
+    flex: 1;
+  }
+
+  .budget .b-track { flex: 1; }
+
+  .budget .b-val {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    white-space: nowrap;
+  }
+
+  /* 层级内容 */
+  .layer-card { margin-top: 20px; }
+
+  .layer-body {
+    padding: 24px 26px 26px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--on-surface);
+  }
+
+  .layer-body h4 {
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: 0.009em;
+    margin: 26px 0 10px;
+    color: var(--on-surface);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .layer-body h4:first-child { margin-top: 0; }
+
+  .layer-body h4::before {
+    content: "";
+    width: 4px;
+    height: 16px;
+    border-radius: 2px;
+    background: var(--primary);
+    flex: none;
+  }
+
+  .layer-body p { margin-bottom: 12px; max-width: 72ch; }
+  .layer-body p:last-child { margin-bottom: 0; }
+
+  .layer-body ul { display: grid; gap: 10px; margin-bottom: 8px; }
+
+  .layer-body li {
+    position: relative;
+    padding-left: 22px;
+    max-width: 74ch;
+  }
+
+  .layer-body li::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 0.72em;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--outline);
+  }
+
+  .layer-body strong { font-weight: 500; color: var(--on-surface); }
+
+  .layer-body code {
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: var(--radius-xs);
+    background: var(--surface-container-high);
+    color: var(--on-surface);
+  }
+
+  .abstract-quote {
+    position: relative;
+    padding: 4px 0 4px 22px;
+    border-left: 2px solid var(--primary);
+    font-size: 17px;
+    line-height: 1.7;
+    color: var(--on-surface);
+    max-width: 70ch;
+  }
+
+  .abstract-note {
+    margin-top: 22px;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    background: var(--surface-container);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--on-surface-variant);
+  }
+
+  .abstract-note svg { color: var(--primary); margin-top: 1px; }
+
+  .frontmatter {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.85;
+    padding: 16px 18px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--outline-variant);
+    color: var(--on-surface-variant);
+    overflow-x: auto;
+    margin-bottom: 22px;
+    white-space: pre;
+  }
+
+  .frontmatter b { color: var(--on-surface); font-weight: 500; }
+
+  .file-listing {
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.9;
+    padding: 16px 18px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-container-lowest);
+    border: 1px solid var(--outline-variant);
+    color: var(--on-surface-variant);
+    overflow-x: auto;
+    white-space: pre;
+    margin-bottom: 20px;
+  }
+
+  .file-listing .meta { color: var(--outline); }
+
+  /* 右侧信息列 */
+  .info-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 20px;
+  }
+
+  @media (min-width: 1180px) {
+    .info-grid { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+  }
+
+  .fresh-state {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .fresh-state.is-stale { color: var(--tertiary); }
+  .fresh-state.is-fresh { color: var(--primary); }
+
+  .fresh-gauge {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 14px;
+    margin-top: 16px;
+  }
+
+  .fresh-gauge .g-v {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .task-pill {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 16px;
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-container);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    color: var(--on-surface-variant);
+    flex-wrap: wrap;
+  }
+
+  .task-pill b { color: var(--on-surface); font-weight: 500; }
+
+  .acl-list { display: grid; gap: 2px; }
+
+  .acl-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 16px;
+    background: var(--surface-container-low);
+  }
+
+  .acl-row:first-child { border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+  .acl-row:last-child { border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+
+  .acl-p {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface);
+  }
+
+  .acl-src {
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+  }
+
+  .lv {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
+    border-radius: var(--radius-xs);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .lv-manage { background: var(--primary-container); color: var(--on-primary-container); }
+  .lv-write { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+  .lv-read { background: var(--secondary-container); color: var(--on-secondary-container); }
+
+  .meta-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1px;
+    background: var(--outline-variant);
+    border: 1px solid var(--outline-variant);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-top: 20px;
+  }
+
+  .meta-strip > div { background: var(--surface-container-low); padding: 14px 16px; }
+
+  .meta-strip .k {
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    color: var(--on-surface-variant);
+  }
+
+  .meta-strip .v {
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface);
+    overflow-wrap: anywhere;
+  }
+
+  .empty-state {
+    display: grid;
+    place-items: center;
+    height: 100%;
+    padding: 48px 32px;
+    text-align: center;
+    color: var(--on-surface-variant);
+  }
+
+  .empty-state .es-ico {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--surface-container-high);
+    margin-bottom: 20px;
+    color: var(--on-surface-variant);
+  }
+
+  @media (max-width: 900px) {
+    .main { height: auto; overflow: visible; }
+    .split { height: auto; }
+    .pane-scroll { overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="app-bar" data-app-bar></header>
+  <aside data-nav></aside>
+
+  <main class="main">
+    <div class="split">
+
+      <!-- ================= 目录树 ================= -->
+      <section class="pane" aria-label="命名空间">
+        <div class="pane-head">
+          <span class="t">命名空间</span>
+          <span class="spacer"></span>
+          <button class="icon-btn" type="button" aria-label="新建目录" title="新建目录" data-snack="已打开「新建目录」面板">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="icon-btn" type="button" aria-label="刷新索引" title="刷新索引" data-snack="索引已刷新 · 128 条记录">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4.5V10h-5.5"/></svg>
+          </button>
+        </div>
+
+        <div class="tree-toolbar">
+          <span class="text-field text-field-outlined is-mono" style="height:40px;padding:0 12px;font-size:13px">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16l-6 7.5V20l-4-2.5v-4z"/></svg>
+            <input id="treeFilter" placeholder="筛选路径…" aria-label="筛选路径">
+          </span>
+        </div>
+
+        <div class="pane-scroll">
+          <div class="tree" id="tree"></div>
+        </div>
+
+        <div class="tree-legend">
+          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h7A1.5 1.5 0 0 1 19 9v8.5A1.5 1.5 0 0 1 17.5 19h-13A1.5 1.5 0 0 1 3 17.5z"/></svg>目录</span>
+          <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h7.5L18 7.5V21H6z"/><path d="M13.5 3v4.5H18"/></svg>文档</span>
+          <span style="color:var(--error)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m6.5 6.5 11 11"/></svg>restricted</span>
+          <span>元数据文件</span>
+        </div>
+      </section>
+
+      <!-- ================= 详情 ================= -->
+      <section class="pane" id="detail" aria-live="polite"></section>
+
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+<script>
+M3.shell({ active: 'filesystem' });
+
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const DOCS = {
+  'comem://user/alice/memories/preferences/code-style.md': {
+    kind: 'document',
+    name: 'code-style.md',
+    contextType: 'memory',
+    memoryType: 'preferences',
+    status: 'active',
+    updated: '2026-11-07 22:31:04',
+    size: '1.4 KB',
+    lines: 21,
+    writes: 4,
+    l0: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。禁止 any，边界处用 unknown 加运行时校验。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 62 },
+    l1: '<h4>preferences/ · 5 个条目</h4><p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。写作风格偏短句，沟通风格偏结论先行。</p><ul><li><strong>code-style</strong> — TypeScript 严格模式、2 空格缩进、优先不可变数据与纯函数；禁止 <code>any</code>，外部输入用 <code>unknown</code> 收窄。</li><li><strong>communication</strong> — 先结论后细节；中文正文保留英文术语；单次回复不超过 3 段。</li><li><strong>writing-style</strong> — 技术文档用短句，少用「是……不是……」的对比句式。</li><li><strong>review-habit</strong> — 只针对 diff 给意见，发现范围外问题单独提出。</li><li><strong>commit-format</strong> — Conventional Commits，subject 用祈使句，不超过 72 字符。</li></ul><p style="color:var(--on-surface-variant);font-size:14px;margin-top:20px">概览生成于 2026-11-07 22:14，覆盖 5 个条目中的 4 个当前版本。</p>',
+    l1meta: { chars: 486, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/preferences/code-style.md\n<b>context_type:</b> memory   <b>memory_type:</b> preferences\n<b>status:</b> active\n<b>updated_at:</b> 2026-11-07T22:31:04+08:00\n<b>created_at:</b> 2026-10-28T09:12:00Z</div><h4>类型</h4><ul><li>TypeScript 严格模式，<code>strict: true</code>。</li><li>不用 <code>any</code>。外部输入先收窄为 <code>unknown</code>，再做运行时校验。</li><li>公开函数的返回值必须显式标注。</li></ul><h4>格式</h4><ul><li>缩进 2 个空格，不用 tab。</li><li>单行不超过 100 字符。</li><li>对象字面量末尾保留逗号。</li></ul><h4>写法</h4><ul><li>优先不可变数据：<code>map</code> / <code>filter</code> / <code>reduce</code>，少用 <code>for</code>。</li><li>副作用集中到边界层，核心逻辑保持纯函数。</li><li>不为只有一个实现的场景预留接口。</li></ul>',
+    fresh: {
+      state: 'stale', total: 5, pending: 1, ratio: 20, threshold: 10,
+      generated: '2026-11-07 22:14:08',
+      note: '1 条变更发生在摘要生成之后（code-style.md，22:31）。占比 20% 已超过 10% 阈值，重算任务已入队。',
+      task: { id: 'task_9f21', status: 'running', type: 'summary_refresh', retried: 1 }
+    },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '继承自 comem://user/alice/memories/' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/communication.md': {
+    kind: 'document',
+    name: 'communication.md',
+    contextType: 'memory',
+    memoryType: 'preferences',
+    status: 'active',
+    updated: '2026-11-06 09:12:40',
+    size: '912 B',
+    lines: 12,
+    writes: 2,
+    l0: '用户在沟通上的偏好：先给结论后给细节，中文正文保留英文术语，单次回复控制在 3 段以内。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 44 },
+    l1: '<h4>preferences/ · 5 个条目</h4><p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。沟通类偏好与写作类偏好分开存放，避免合并时互相覆盖。</p><ul><li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li><li><strong>communication</strong> — 结论先行，控制篇幅，术语不翻译。</li><li><strong>writing-style</strong> — 短句，少对比句式。</li><li><strong>review-habit</strong> — 只评论 diff。</li><li><strong>commit-format</strong> — Conventional Commits。</li></ul>',
+    l1meta: { chars: 486, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/preferences/communication.md\n<b>memory_type:</b> preferences   <b>status:</b> active\n<b>updated_at:</b> 2026-11-06T09:12:40+08:00</div><h4>表达</h4><ul><li>先给结论，再给依据，最后给下一步。</li><li>中文正文里保留英文术语，不做二次翻译。</li><li>单次回复不超过 3 段；超出的内容拆成独立文档。</li></ul><h4>否定</h4><ul><li>不主动夸赞，不加没有信息量的收尾句。</li><li>不确定的地方直接标注不确定，不用模糊措辞掩盖。</li></ul>',
+    fresh: { state: 'fresh', total: 5, pending: 0, ratio: 0, threshold: 10, generated: '2026-11-07 22:14:08', note: '摘要与当前内容一致，覆盖 5 个条目。', task: null },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '继承自 comem://user/alice/memories/' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/writing-style.md': {
+    kind: 'document',
+    name: 'writing-style.md',
+    contextType: 'memory',
+    memoryType: 'preferences',
+    status: 'active',
+    updated: '2026-11-04 15:40:19',
+    size: '2.1 KB',
+    lines: 27,
+    writes: 6,
+    l0: '用户在技术写作上的偏好：短句、具体名词、少用形容词；避免三段式排比与「不是……而是……」句式。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 46 },
+    l1: '<h4>preferences/ · 5 个条目</h4><p>写作类偏好与沟通类偏好分开存放。写作关注句式与结构，沟通关注信息顺序与篇幅。</p><ul><li><strong>writing-style</strong> — 短句、具体名词、去掉形容词堆叠。</li><li><strong>communication</strong> — 先结论后细节。</li><li><strong>code-style</strong> — 见代码风格条目。</li></ul>',
+    l1meta: { chars: 486, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/preferences/writing-style.md\n<b>memory_type:</b> preferences   <b>status:</b> active\n<b>updated_at:</b> 2026-11-04T15:40:19+08:00</div><h4>句式</h4><ul><li>一句话说一件事。超过 40 字拆开。</li><li>用具体名词代替抽象名词。「把索引重建一次」优于「做一次索引层面的优化」。</li><li>少用「非常」「显著」「极大」这类程度副词。</li></ul><h4>结构</h4><ul><li>不使用三段式排比。</li><li>不用「不是……而是……」的对比句式，直接写结论。</li><li>段落之间靠内容衔接，不靠「首先 / 其次 / 最后」。</li></ul>',
+    fresh: { state: 'fresh', total: 5, pending: 0, ratio: 0, threshold: 10, generated: '2026-11-07 22:14:08', note: '摘要与当前内容一致，覆盖 5 个条目。', task: null },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '继承自 comem://user/alice/memories/' }
+    ]
+  },
+
+  'comem://user/alice/memories/experiences/monorepo-build-cache.md': {
+    kind: 'document',
+    name: 'monorepo-build-cache.md',
+    contextType: 'memory',
+    memoryType: 'experiences',
+    status: 'pending',
+    updated: '2026-11-07 22:31:04',
+    size: '1.2 KB',
+    lines: 18,
+    writes: 1,
+    l0: '远程缓存命中率低时先查 inputs 与环境变量声明，再查锁文件版本；排查顺序错了会白跑一轮 CI。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 52 },
+    l1: '<h4>experiences/ · 1 个条目</h4><p>从执行结果蒸馏的经验。本目录的记忆需要人工复核后才会进入检索结果。</p><ul><li><strong>monorepo-build-cache</strong> — 缓存不命中时的排查顺序：inputs → 环境变量白名单 → 锁文件版本。</li></ul>',
+    l1meta: { chars: 198, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/experiences/monorepo-build-cache.md\n<b>memory_type:</b> experiences   <b>status:</b> pending\n<b>updated_at:</b> 2026-11-07T22:31:04+08:00</div><h4>现象</h4><p>CI 上缓存完全没命中，每次都是全量构建，日志里 <code>cache miss</code> 连续出现。</p><h4>原因</h4><ul><li><code>turbo.json</code> 的 <code>inputs</code> 漏掉了环境变量声明，hash 每次都不同。</li><li>锁文件版本升级后没有同步更新 <code>globalDependencies</code>。</li></ul><h4>排查顺序</h4><ul><li>先看 <code>inputs</code>，再对 <code>env</code> 白名单，最后看锁文件版本。</li><li>顺序错了会白跑一轮 CI，先改环境变量通常是最快的验证路径。</li></ul><p style="margin-top:16px;color:var(--on-surface-variant);font-size:14px">这条记忆由会话提交后的抽取步骤产生，复核通过前不进入检索结果。</p>',
+    fresh: { state: 'stale', total: 1, pending: 1, ratio: 100, threshold: 10, generated: '2026-11-06 18:02:00', note: '本条目在摘要生成后被重写过一次，占比 100% 已超过阈值，等待复核通过后重算。', task: null },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'read', src: '直接授权于本文件' }
+    ]
+  },
+
+  'comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md': {
+    kind: 'document',
+    name: 'no-unrequested-refactor.md',
+    contextType: 'memory',
+    memoryType: 'rules',
+    status: 'active',
+    updated: '2026-11-05 11:08:52',
+    size: '1.1 KB',
+    lines: 16,
+    writes: 3,
+    l0: '写代码时不要顺手重构未被要求的代码；发现范围外问题单独提出，不直接改。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 36 },
+    l1: '<h4>rules/code-review/ · 3 条规则</h4><p>本目录存放代码 review 场景下的硬性规则。每条规则带适用条件与例外，检索时按条件召回，不做全文匹配。</p><ul><li><strong>no-unrequested-refactor</strong> — 只改与任务直接相关的行。</li><li><strong>ts-strict-null</strong> — 不用非空断言绕过 null 检查。</li><li><strong>test-name-states-behavior</strong> — 测试名描述行为而不是实现。</li></ul>',
+    l1meta: { chars: 312, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md\n<b>memory_type:</b> rules   <b>status:</b> active\n<b>updated_at:</b> 2026-11-05T11:08:52+08:00</div><pre style="font-family:var(--font-mono);font-size:13.5px;line-height:1.9;color:var(--on-surface-variant);background:none;border:0;padding:0;margin:0 0 20px;white-space:pre-wrap">rule:\n  name: no-unrequested-refactor\n  applies_when: 修改已存在的文件，且改动范围超出当前任务描述\n  exception: 目标代码阻塞当前改动（编译失败、测试无法运行）时，允许最小修复并单独说明\n  action: 只改与任务直接相关的行；其他问题写进回复末尾的「顺带发现」\n  priority: 80\n  status: active</pre><p>规则由 <code>rule_search</code> 按 <code>applies_when</code> 条件召回，不参与普通全文检索。</p>',
+    fresh: { state: 'fresh', total: 3, pending: 0, ratio: 0, threshold: 10, generated: '2026-11-07 21:50:33', note: '规则文件独立生成摘要，与所属目录概览分开维护。', task: null },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'read', src: '继承自 comem://user/alice/memories/rules/' }
+    ]
+  },
+
+  'comem://group/eng/memories/release-checklist.md': {
+    kind: 'document',
+    name: 'release-checklist.md',
+    contextType: 'memory',
+    memoryType: 'procedures',
+    status: 'active',
+    updated: '2026-11-07 18:02:11',
+    size: '3.2 KB',
+    lines: 34,
+    writes: 9,
+    l0: '组内发布流程：冻结分支 → 跑全量测试 → 打 tag → 写变更说明 → 通知值班。任何一步失败即回滚。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 18:05:40', chars: 48 },
+    l1: '<h4>group/eng/memories/ · 2 个条目</h4><p>工程组的共享记忆。成员默认可读，写入需要单独授权。当前 2 个条目：平台约定与发布流程。</p><ul><li><strong>platform-conventions</strong> — 服务命名、日志字段、错误码的统一约定。</li><li><strong>release-checklist</strong> — 发布流程与回滚条件。</li></ul>',
+    l1meta: { chars: 198, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://group/eng/memories/release-checklist.md\n<b>memory_type:</b> procedures   <b>status:</b> active\n<b>updated_at:</b> 2026-11-07T18:02:11+08:00</div><h4>发布前</h4><ul><li>确认主干 CI 全绿，没有跳过的用例。</li><li>冻结发布分支，从冻结时刻起只接受修复类提交。</li><li>在 <code>#eng-release</code> 频道说明本次范围与回滚负责人。</li></ul><h4>发布</h4><ul><li>打 tag：<code>v{major}.{minor}.{patch}</code>，tag 消息里带上变更说明的链接。</li><li>灰度 10% 流量观察 15 分钟，错误率超过 0.5% 立即回滚。</li><li>全量发布后核对关键指标：延迟 P95、错误率、队列积压。</li></ul><h4>回滚</h4><ul><li>回滚用上一个 tag，不 revert 提交。</li><li>回滚后在归档任务里记录原因，供下次 review。</li></ul>',
+    fresh: { state: 'fresh', total: 2, pending: 0, ratio: 0, threshold: 10, generated: '2026-11-07 18:05:40', note: '组空间摘要由成员提交后自动重算，当前无待刷新变更。', task: null },
+    acl: [
+      { p: 'group:eng', lv: 'write', src: '组空间预置' },
+      { p: 'user:alice', lv: 'manage', src: '直接授权于本文件' }
+    ]
+  },
+
+  'comem://user/alice/memories/': {
+    kind: 'directory',
+    name: 'memories/',
+    contextType: 'memory',
+    memoryType: null,
+    status: 'active',
+    updated: '2026-11-07 22:31:04',
+    size: '6 个条目',
+    lines: null,
+    writes: null,
+    l0: 'alice 的长期记忆：代码风格偏好、CoMem 项目背景、2026-11-05 的架构决策，以及一条待复核的 monorepo 迁移经验。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-05 16:41:02', chars: 56 },
+    l1: '<h4>memories/ · 6 个条目</h4><p>alice 的代码风格偏好、正在做的 CoMem 项目，以及最近一次架构决策的记录。按类型拆成 6 个子目录，每条记忆只归一个类型。</p><ul><li><strong>profile.md</strong> — 基本信息与角色。</li><li><strong>preferences/</strong> — 按话题组织的偏好。</li><li><strong>entities/</strong> — 项目、组织等实体。</li><li><strong>events/</strong> — 决策与里程碑。</li><li><strong>experiences/</strong> — 从执行结果蒸馏的经验，需复核。</li><li><strong>rules/</strong> — 必须遵守的约束，需复核。</li></ul>',
+    l1meta: { chars: 392, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/\n<b>kind:</b> directory\n<b>children:</b> 6 个条目 · 3 个元数据文件\n<b>updated_at:</b> 2026-11-07T22:31:04+08:00</div><div class="file-listing">preferences/           5 条      2026-11-07 22:31\nentities/              2 条      2026-11-03 10:02\nevents/                12 条     2026-11-05 16:40\nexperiences/           1 条      2026-11-07 22:31\nrules/                 3 条      2026-11-05 11:08\nprofile.md             640 B     2026-10-30 08:20\n<span class="meta">.abstract.md           268 B     2026-11-07 16:41</span>\n<span class="meta">.overview.md           1.9 KB    2026-11-07 16:41</span>\n<span class="meta">.acl.json              184 B     2026-11-02 16:45</span></div><p>普通 <code>ls</code> 不显示三个元数据文件；只有显式读取时才返回原始内容。</p>',
+    fresh: { state: 'stale', total: 6, pending: 1, ratio: 17, threshold: 10, generated: '2026-11-05 16:41:02', note: 'experiences/ 在 22:31 新增了 1 条待复核经验，占比 17% 已超过 10% 阈值。上游目录的重算排在复核之后，避免把 pending 内容写进摘要。', task: { id: 'task_a317', status: 'pending', type: 'summary_refresh', retried: 0 } },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '直接授权于本目录' },
+      { p: 'user:bob', lv: 'read', src: '直接授权于本目录' }
+    ]
+  },
+
+  'comem://user/alice/memories/preferences/': {
+    kind: 'directory',
+    name: 'preferences/',
+    contextType: 'memory',
+    memoryType: null,
+    status: 'active',
+    updated: '2026-11-07 22:31:04',
+    size: '5 个条目',
+    lines: null,
+    writes: null,
+    l0: 'alice 在工程实践上的稳定偏好：代码风格、沟通方式、写作风格、review 习惯、提交信息格式。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 22:14:08', chars: 45 },
+    l1: '<h4>preferences/ · 5 个条目</h4><p>本目录收录 alice 在工程实践上的稳定偏好。按话题拆分，每条一个文件，写入时按话题合并，不覆盖其他条目。</p><ul><li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li><li><strong>communication</strong> — 先结论后细节，控制篇幅。</li><li><strong>writing-style</strong> — 短句，少对比句式。</li><li><strong>review-habit</strong> — 只评论 diff。</li><li><strong>commit-format</strong> — Conventional Commits。</li></ul>',
+    l1meta: { chars: 486, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/preferences/\n<b>kind:</b> directory\n<b>children:</b> 5 个文档 · 3 个元数据文件\n<b>updated_at:</b> 2026-11-07T22:31:04+08:00</div><div class="file-listing">code-style.md          1.4 KB   2026-11-07 22:31\ncommunication.md       912 B    2026-11-06 09:12\nwriting-style.md       2.1 KB   2026-11-04 15:40\nreview-habit.md        780 B    2026-10-29 14:02\ncommit-format.md       640 B    2026-10-21 10:18\n<span class="meta">.abstract.md           268 B    2026-11-07 22:14</span>\n<span class="meta">.overview.md           1.9 KB   2026-11-07 22:14</span>\n<span class="meta">.acl.json              184 B    2026-11-02 16:45</span></div><p>普通 <code>ls</code> 不显示三个元数据文件；只有显式读取时才返回原始内容。</p>',
+    fresh: { state: 'stale', total: 5, pending: 1, ratio: 20, threshold: 10, generated: '2026-11-07 22:14:08', note: '1 条变更发生在摘要生成之后（code-style.md，22:31）。占比 20% 已超过 10% 阈值，重算任务已入队。', task: { id: 'task_9f21', status: 'running', type: 'summary_refresh', retried: 1 } },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'write', src: '直接授权于本目录' }
+    ]
+  },
+
+  'comem://user/alice/memories/rules/': {
+    kind: 'directory',
+    name: 'rules/',
+    contextType: 'memory',
+    memoryType: null,
+    status: 'active',
+    updated: '2026-11-05 11:08:52',
+    size: '3 个条目',
+    lines: null,
+    writes: null,
+    l0: '必须遵守的约束，按场景分目录。目前只有 code-review 一组，共 3 条规则。',
+    l0meta: { by: 'summary.service', model: 'gpt-4o-mini', at: '2026-11-07 21:50:33', chars: 38 },
+    l1: '<h4>rules/ · 1 个子目录</h4><p>规则是硬约束，带 <code>applies_when</code> 与 <code>exception</code>。写入规则类记忆时状态先为 pending，人工复核后才生效。</p><ul><li><strong>code-review/</strong> — 只改与任务相关的行、不用非空断言、测试名描述行为。</li></ul>',
+    l1meta: { chars: 132, max: 4000 },
+    l2: '<div class="frontmatter"><b>uri:</b> comem://user/alice/memories/rules/\n<b>kind:</b> directory\n<b>children:</b> 1 个子目录 · 2 个元数据文件</div><div class="file-listing">code-review/           3 条规则  2026-11-05 11:08\n<span class="meta">.abstract.md           204 B     2026-11-05 11:09</span>\n<span class="meta">.overview.md           1.2 KB    2026-11-05 11:09</span></div>',
+    fresh: { state: 'fresh', total: 3, pending: 0, ratio: 0, threshold: 10, generated: '2026-11-07 21:50:33', note: '摘要与当前内容一致，覆盖 3 条规则。', task: null },
+    acl: [
+      { p: 'user:alice', lv: 'manage', src: 'owner · 恒为 manage' },
+      { p: 'group:eng', lv: 'read', src: '继承自 comem://user/alice/memories/' }
+    ]
+  }
+};
+
+/* 目录树：children 为目录，meta 为行尾尺寸，meta-file 为元数据文件 */
+const TREE = [
+  {
+    name: 'user/alice', open: true, children: [
+      { name: 'memories', open: true, uri: 'comem://user/alice/memories/', meta: '6', children: [
+        { name: '.abstract.md', metaFile: true, meta: '268 B', uri: 'comem://user/alice/memories/' },
+        { name: '.overview.md', metaFile: true, meta: '1.9 K', uri: 'comem://user/alice/memories/' },
+        { name: '.acl.json', metaFile: true, meta: '184 B', uri: 'comem://user/alice/memories/' },
+        { name: 'profile.md', meta: '640 B', disabled: true },
+        { name: 'identity.md', meta: '1.1 K', disabled: true },
+        { name: 'soul.md', meta: '2.4 K', disabled: true },
+        { name: 'preferences', open: true, uri: 'comem://user/alice/memories/preferences/', meta: '5', children: [
+          { name: '.abstract.md', metaFile: true, meta: '268 B', uri: 'comem://user/alice/memories/preferences/' },
+          { name: '.overview.md', metaFile: true, meta: '1.9 K', uri: 'comem://user/alice/memories/preferences/' },
+          { name: '.acl.json', metaFile: true, meta: '184 B', uri: 'comem://user/alice/memories/preferences/' },
+          { name: 'code-style.md', uri: 'comem://user/alice/memories/preferences/code-style.md', meta: '1.4 K' },
+          { name: 'communication.md', uri: 'comem://user/alice/memories/preferences/communication.md', meta: '912 B' },
+          { name: 'writing-style.md', uri: 'comem://user/alice/memories/preferences/writing-style.md', meta: '2.1 K' },
+          { name: 'review-habit.md', meta: '780 B', disabled: true },
+          { name: 'commit-format.md', meta: '640 B', disabled: true }
+        ] },
+        { name: 'entities', meta: '2', children: [
+          { name: 'comem-project.md', meta: '1.6 K', disabled: true }
+        ] },
+        { name: 'events', meta: '12', children: [
+          { name: '2026-11-05-architecture-decision.md', meta: '3.4 K', disabled: true }
+        ] },
+        { name: 'experiences', open: true, uri: 'comem://user/alice/memories/experiences/', meta: '1', children: [
+          { name: 'monorepo-build-cache.md', uri: 'comem://user/alice/memories/experiences/monorepo-build-cache.md', meta: '1.2 K', pending: true }
+        ] },
+        { name: 'rules', open: true, uri: 'comem://user/alice/memories/rules/', meta: '3', children: [
+          { name: 'code-review', open: true, meta: '3', children: [
+            { name: 'no-unrequested-refactor.md', uri: 'comem://user/alice/memories/rules/code-review/no-unrequested-refactor.md', meta: '1.1 K' },
+            { name: 'ts-strict-null.md', meta: '860 B', disabled: true },
+            { name: 'test-name-states-behavior.md', meta: '720 B', disabled: true }
+          ] }
+        ] },
+        { name: 'private', restricted: true, meta: 'restricted', disabled: true }
+      ] },
+      { name: 'resources', meta: '24', disabled: true },
+      { name: 'skills', meta: '6', disabled: true },
+      { name: 'sessions', meta: '9', disabled: true }
+    ]
+  },
+  {
+    name: 'group/eng', open: true, children: [
+      { name: 'memories', open: true, meta: '2', children: [
+        { name: '.abstract.md', metaFile: true, meta: '204 B', uri: 'comem://group/eng/memories/release-checklist.md' },
+        { name: 'platform-conventions.md', meta: '2.8 K', disabled: true },
+        { name: 'release-checklist.md', uri: 'comem://group/eng/memories/release-checklist.md', meta: '3.2 K' }
+      ] },
+      { name: 'resources', meta: '8', disabled: true },
+      { name: 'skills', meta: '3', disabled: true }
+    ]
+  }
+];
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+let currentUri = 'comem://user/alice/memories/preferences/code-style.md';
+let currentLayer = 0;
+
+const LAYER_META = [
+  { key: 'L0', file: '.abstract.md', name: '摘要', budget: 256, hint: 'agent 先读这一层判断相关性，读不到正文。' },
+  { key: 'L1', file: '.overview.md', name: '概览', budget: 4000, hint: '目录级上下文，用来决定要不要展开 L2 原文。' },
+  { key: 'L2', file: '原文件', name: '原文', budget: null, hint: '完整文档。只有前两层判断为相关时才会读到这里。' }
+];
+
+function rowHTML(node) {
+  const isDir = !!node.children;
+  const sel = node.uri === currentUri;
+  const iconName = isDir ? 'folder' : (node.metaFile ? 'dot' : 'file');
+  const icoSize = node.metaFile ? 12 : 18;
+  const flag = node.restricted
+    ? '<span class="tflag" title="restricted 边界：继承在此切断"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m6.5 6.5 11 11"/></svg></span>'
+    : node.pending
+      ? '<span class="tflag" style="color:var(--tertiary)" title="待复核"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg></span>'
+      : '';
+  const attrs = [
+    'class="trow' + (node.metaFile ? ' is-meta' : '') + '"',
+    'data-name="' + node.name.toLowerCase() + '"',
+    node.uri ? 'data-uri="' + node.uri + '"' : '',
+    sel ? 'aria-selected="true"' : '',
+    node.disabled ? 'aria-disabled="true" style="opacity:.62;cursor:default"' : ''
+  ].filter(Boolean).join(' ');
+
+  return `<div ${attrs} role="treeitem"${sel ? ' aria-current="true"' : ''}>
+    <span class="caret${isDir ? '' : ' blank'}">${isDir ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>' : ''}</span>
+    <span class="tico">${M3.icon(iconName, icoSize)}</span>
+    <span class="tname${isDir ? ' is-dir' : ''}">${node.name}</span>
+    ${flag}
+    <span class="tmeta">${node.meta || ''}</span>
+  </div>`;
+}
+
+function treeHTML(nodes) {
+  return nodes.map((n) => n.children
+    ? `<details class="tn" ${n.open === false ? '' : 'open'}><summary>${rowHTML(n)}</summary><div class="tc">${treeHTML(n.children)}</div></details>`
+    : rowHTML(n)).join('');
+}
+
+document.getElementById('tree').innerHTML = treeHTML(TREE);
+
+function lvClass(lv) {
+  return lv === 'manage' ? 'lv-manage' : lv === 'write' ? 'lv-write' : 'lv-read';
+}
+
+function renderDetail() {
+  const d = DOCS[currentUri];
+  const pane = document.getElementById('detail');
+
+  if (!d) {
+    pane.innerHTML = `<div class="empty-state"><div>
+      <div class="es-ico"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h7.5L18 7.5V21H6z"/><path d="M13.5 3v4.5H18"/></svg></div>
+      <h2 class="t-title-l" style="margin-bottom:8px;color:var(--on-surface)">没有编入视觉稿的节点</h2>
+      <p class="muted-sm" style="max-width:40ch;margin:0 auto">演示数据保留了 8 个有代表性的节点，覆盖文档、目录、元数据文件与 restricted 边界。</p>
+    </div></div>`;
+    return;
+  }
+
+  const seg = LAYER_META.map((l, i) => `
+    <button type="button" data-layer="${i}" aria-pressed="${i === currentLayer}">
+      <span class="seg-k">${l.key}</span>${l.name}
+    </button>`).join('');
+
+  const layer = LAYER_META[currentLayer];
+  let body = '';
+
+  if (currentLayer === 0) {
+    body = `<div class="abstract-quote">${d.l0}</div>
+      <div class="abstract-note">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><path d="M12 8v.01"/></svg>
+        <span>L0 从 L1 正文的 H1 之后、第一个二级标题之前的段落提取，两层不会互相矛盾。写入 <code>${layer.file}</code>，上限 ${layer.budget} 字符。</span>
+      </div>`;
+  } else if (currentLayer === 1) {
+    body = d.l1;
+  } else {
+    body = d.l2;
+  }
+
+  const used = currentLayer === 0 ? d.l0meta.chars : currentLayer === 1 ? d.l1meta.chars : null;
+  const budget = currentLayer === 0 ? 256 : currentLayer === 1 ? 4000 : null;
+  const pct = budget ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+
+  const f = d.fresh;
+  const stale = f.state === 'stale';
+
+  pane.innerHTML = `
+  <div class="pane-scroll">
+    <div class="detail-scroll">
+
+      <div class="crumb">
+        <a href="index.html">控制台</a><span class="sep">/</span>
+        <a href="filesystem.html">文件树</a><span class="sep">/</span>
+        <span class="here mono" style="font-size:13.5px">${currentUri.replace('comem://', '')}</span>
+      </div>
+
+      <div class="detail-head">
+        <div class="detail-title-row">
+          <div style="min-width:0;flex:1">
+            <h1>${d.name}</h1>
+            <div class="uri mt-8" data-copy="${currentUri}">${currentUri}</div>
+          </div>
+          <div class="detail-badges">
+            <span class="badge badge-primary">${d.memoryType || d.contextType}</span>
+            <span class="badge ${d.status === 'pending' ? 'badge-tertiary' : 'badge-outline'} badge-dot">${d.status}</span>
+          </div>
+        </div>
+
+        <div class="layer-bar">
+          <div class="segmented" role="group" aria-label="摘要层级" id="layerSeg">${seg}</div>
+          <div class="budget">
+            <span class="b-val">${budget ? used + ' / ' + budget + ' 字 · ' + pct + '%' : '不设上限'}</span>
+            <span class="meter b-track meter-thin" style="max-width:220px"><i style="width:${budget ? pct : 100}%"></i></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta-strip">
+        <div><div class="k">context_type</div><div class="v">${d.contextType}</div></div>
+        <div><div class="k">${d.kind === 'directory' ? '子项' : '体积'}</div><div class="v">${d.kind === 'directory' ? d.size : d.size + ' · ' + d.lines + ' 行'}</div></div>
+        <div><div class="k">更新于</div><div class="v">${d.updated}</div></div>
+        <div><div class="k">写入次数</div><div class="v">${d.writes ?? '—'}</div></div>
+        <div><div class="k">层级来源</div><div class="v">${layer.key} · ${layer.file}</div></div>
+      </div>
+
+      <section class="card card-elevated layer-card" aria-label="${layer.name}">
+        <div class="card-head">
+          <span class="badge badge-secondary">${layer.key}</span>
+          <span class="card-title">${layer.name}</span>
+          <span class="spacer"></span>
+          <span class="mono-sm" style="font-size:13px">${layer.file}</span>
+        </div>
+        <div class="layer-body">${body}</div>
+        <div class="card-foot" style="display:grid;gap:6px;color:var(--on-surface-variant);font-size:14px">
+          <span>${layer.hint}</span>
+          <span class="row row-wrap" style="gap:10px;font-size:13px">
+            <span class="badge badge-outline" style="height:24px">摘要来源</span>
+            <span class="mono" style="font-size:13px">${currentLayer === 2 ? '原始文件' : d.l0meta.by + ' · ' + d.l0meta.model}</span>
+            <span style="color:var(--outline)">·</span>
+            <span>生成于 ${currentLayer === 2 ? d.updated : (currentLayer === 0 ? d.l0meta.at : d.fresh.generated)}</span>
+          </span>
+        </div>
+      </section>
+
+      <div class="info-grid">
+        <!-- 摘要新鲜度 -->
+        <section class="card" aria-label="摘要新鲜度">
+          <div class="card-head">
+            <span class="card-title">摘要新鲜度</span>
+            <span class="spacer"></span>
+            <span class="badge ${stale ? 'badge-tertiary' : 'badge-secondary'}">${stale ? '待刷新' : '为最新'}</span>
+          </div>
+          <div class="card-body">
+            <div class="fresh-state ${stale ? 'is-stale' : 'is-fresh'}">
+              ${stale
+                ? '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg>'
+                : '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8 12.5 2.6 2.6L16 9.5"/></svg>'}
+              ${stale ? '摘要落后于内容' : '摘要与内容一致'}
+            </div>
+            <p class="muted-sm mt-12">${f.note}</p>
+            <div class="fresh-gauge">
+              <span class="g-v">${f.pending} / ${f.total}</span>
+              <span class="meter"><i class="${stale ? 'is-warn' : ''}" style="width:${f.ratio}%"></i></span>
+              <span class="g-v">${f.ratio}%</span>
+            </div>
+            <div class="row" style="justify-content:space-between;font-size:13px;color:var(--on-surface-variant);margin-top:8px">
+              <span>待刷新占比</span>
+              <span>触发阈值 ${f.threshold}% · 生成于 ${f.generated}</span>
+            </div>
+            ${f.task ? `<div class="task-pill">
+              ${M3.icon('bolt', 16)}
+              <span><b>${f.task.id}</b> · ${f.task.type} · ${f.task.status} · 已重试 ${f.task.retried} 次</span>
+            </div>` : ''}
+          </div>
+        </section>
+
+        <!-- 权限 -->
+        <section class="card" aria-label="本节点权限">
+          <div class="card-head">
+            <span class="card-title">本节点权限</span>
+            <span class="spacer"></span>
+            <a class="btn btn-text btn-sm" href="acl.html">推导链</a>
+          </div>
+          <div class="card-body" style="padding:16px">
+            <div class="acl-list">
+              ${d.acl.map((a) => `
+                <div class="acl-row">
+                  <div>
+                    <div class="acl-p">${a.p}</div>
+                    <div class="acl-src">${a.src}</div>
+                  </div>
+                  <span class="lv ${lvClass(a.lv)}">${a.lv} · ${a.lv === 'manage' ? 7 : a.lv === 'write' ? 3 : 1}</span>
+                </div>`).join('')}
+            </div>
+            <p class="muted-sm mt-12" style="font-size:13px">无权限的节点在列表中完全不出现，不返回占位。</p>
+          </div>
+        </section>
+      </div>
+
+    </div>
+  </div>`;
+}
+
+renderDetail();
+
+/* ---------- 交互 ---------- */
+document.getElementById('detail').addEventListener('click', (e) => {
+  const seg = e.target.closest('[data-layer]');
+  if (seg) {
+    currentLayer = Number(seg.dataset.layer);
+    renderDetail();
+    document.getElementById('detail').querySelector('.detail-title-row')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+  const copyEl = e.target.closest('[data-copy]');
+  if (copyEl) M3.copy(copyEl.dataset.copy);
+});
+
+document.getElementById('tree').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-uri]');
+  if (!row || row.getAttribute('aria-disabled') === 'true') return;
+  const uri = row.dataset.uri;
+  if (!DOCS[uri]) {
+    M3.snack('该节点没有编入视觉稿');
+    return;
+  }
+  currentUri = uri;
+  currentLayer = 0;
+  document.querySelectorAll('.trow[aria-selected="true"]').forEach((n) => n.removeAttribute('aria-selected'));
+  row.setAttribute('aria-selected', 'true');
+  renderDetail();
+  document.querySelector('.pane-scroll')?.scrollTo({ top: 0, behavior: 'smooth' });
+});
+
+document.getElementById('treeFilter').addEventListener('input', (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('.tree .trow').forEach((row) => {
+    const hit = !q || row.dataset.name.includes(q);
+    row.style.display = hit ? '' : 'none';
+    if (hit && q) {
+      let p = row.parentElement;
+      while (p && p !== document.getElementById('tree')) {
+        if (p.tagName === 'DETAILS') p.open = true;
+        p = p.parentElement;
+      }
+    }
+  });
+});
+
+document.querySelectorAll('[data-snack]').forEach((btn) => {
+  btn.addEventListener('click', () => M3.snack(btn.dataset.snack));
+});
+
+M3.bindCopy();
+</script>
+</body>
+</html>

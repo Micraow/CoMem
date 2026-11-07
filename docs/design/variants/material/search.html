@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>检索调试 · CoMem 控制台</title>
+<link rel="stylesheet" href="app.css">
+<script>document.documentElement.dataset.theme = (function () { try { return localStorage.getItem('comem-md3-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+<style>
+  .query-card { padding: 20px; }
+
+  .query-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .query-row .text-field { flex: 1 1 320px; }
+
+  .filter-row {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--outline-variant);
+  }
+
+  .filter-row .check { min-height: 32px; }
+
+  .filter-hint {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--on-surface-variant);
+  }
+
+  .search-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 380px);
+    gap: 20px;
+    align-items: start;
+    margin-top: 20px;
+  }
+
+  @media (max-width: 1240px) {
+    .search-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  /* 命中 */
+  .hit {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 0;
+    border-bottom: 1px solid var(--outline-variant);
+    transition: background var(--dur-short) var(--ease-standard);
+  }
+
+  .hit:last-child { border-bottom: 0; }
+  .hit:hover { background: var(--surface-container); }
+
+  .hit-score {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 18px 8px 18px 16px;
+    border-right: 1px solid var(--outline-variant);
+  }
+
+  .hit-score .v {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 500;
+    line-height: 1;
+    color: var(--primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .hit-score .v.is-low { color: var(--on-surface-variant); }
+
+  .hit-score .bar {
+    position: relative;
+    width: 6px;
+    flex: 1;
+    min-height: 40px;
+    border-radius: var(--radius-full);
+    background: var(--surface-container-highest);
+    overflow: hidden;
+  }
+
+  .hit-score .bar i {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: var(--radius-full);
+    background: var(--primary);
+  }
+
+  /* 三层指示器 */
+  .strata { display: flex; flex-direction: column; gap: 2px; }
+  .strata i {
+    display: block;
+    width: 14px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--outline-variant);
+  }
+  .strata i.on { background: var(--primary); }
+  .strata[data-level="1"] i.on { background: var(--secondary); }
+  .strata[data-level="2"] i.on { background: var(--tertiary); }
+
+  .hit-main { padding: 16px 18px 18px; min-width: 0; }
+
+  .hit-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .hit-uri {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--on-surface);
+    overflow-wrap: anywhere;
+    text-decoration: none;
+  }
+
+  .hit-uri:hover { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+
+  .hit-abs {
+    margin-top: 8px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--on-surface-variant);
+    max-width: 84ch;
+  }
+
+  .hit-abs b {
+    color: var(--on-surface);
+    font-weight: 500;
+    background: color-mix(in srgb, var(--primary) 18%, transparent);
+    border-radius: 3px;
+    padding: 1px 2px;
+  }
+
+  .hit-terms { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+
+  .hit-reason {
+    margin-top: 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--on-surface-variant);
+    padding: 10px 12px;
+    border-radius: var(--radius-xs);
+    background: var(--surface-container-lowest);
+    border-left: 2px solid var(--outline-variant);
+    overflow-wrap: anywhere;
+  }
+
+  /* 右栏 */
+  .search-grid > *,
+  .side-stack > * { min-width: 0; }
+
+  .side-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+
+  .plan-item {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--outline-variant);
+    align-items: start;
+  }
+
+  .plan-item:last-child { border-bottom: 0; }
+
+  .plan-idx {
+    width: 26px;
+    height: 26px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--surface-container-highest);
+    color: var(--on-surface-variant);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .plan-q {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--on-surface);
+  }
+
+  .plan-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+
+  .plan-hits {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--on-surface-variant);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    padding-top: 4px;
+  }
+
+  .timing-row {
+    display: grid;
+    grid-template-columns: 132px minmax(0, 1fr) 62px;
+    gap: 12px;
+    align-items: center;
+    padding: 9px 18px;
+    font-size: 14px;
+  }
+
+  .timing-row .t-name { color: var(--on-surface-variant); font-size: 13.5px; }
+  .timing-row .t-val {
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    color: var(--on-surface);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timing-total {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-top: 1px solid var(--outline-variant);
+    background: var(--surface-container);
+  }
+
+  .timing-total b {
+    font-size: 22px;
+    font-weight: 400;
+    font-family: var(--font-mono);
+    color: var(--on-surface);
+  }
+
+  .call-pre {
+    margin: 0;
+    padding: 16px 18px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.85;
+    color: var(--on-surface-variant);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .call-pre .k { color: var(--primary); }
+  .call-pre .s { color: var(--tertiary); }
+
+  .acl-note { margin-top: 16px; }
+
+  .acl-note .n {
+    font-family: var(--font-mono);
+    font-size: 21px;
+    font-weight: 500;
+    color: var(--tertiary);
+    line-height: 1;
+    margin-right: 2px;
+  }
+
+  .acl-note-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--outline-variant);
+  }
+
+  .acl-note-list div {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--on-surface-variant);
+    overflow-wrap: anywhere;
+  }
+
+  .acl-note-list em {
+    font-style: normal;
+    color: var(--error);
+  }
+
+  .empty {
+    padding: 40px 24px;
+    text-align: center;
+    color: var(--on-surface-variant);
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="app-bar" data-app-bar></header>
+  <aside data-nav></aside>
+
+  <main class="main">
+    <div class="main-pad">
+
+      <div class="page-head">
+        <div class="page-head-main">
+          <div class="crumb">
+            <a href="index.html">控制台</a><span class="sep">/</span><span class="here">检索调试</span>
+          </div>
+          <h1 class="page-title">检索调试台</h1>
+          <p class="page-sub">
+            同一条 query 分别走 <code>find</code> 与 <code>search</code>，对比召回差异。
+            <code>search</code> 会先用会话上下文做意图分析，拆成 0–5 条 <code>TypedQuery</code> 再逐条召回；
+            <code>find</code> 只做一次查询。每条命中都标出分数、命中的摘要层级，以及它为什么被召回。
+          </p>
+        </div>
+        <div class="page-actions">
+          <span class="badge badge-secondary badge-dot">索引 fts5 · 128 条</span>
+        </div>
+      </div>
+
+      <!-- 查询条 -->
+      <section class="card card-elevated query-card" aria-label="检索条件">
+        <div class="query-row">
+          <label class="text-field is-mono" style="min-width:0">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg>
+            <input id="q" value="TypeScript 严格模式 代码风格" aria-label="检索词" spellcheck="false">
+          </label>
+          <div class="segmented" role="group" aria-label="检索模式" id="modeSeg">
+            <button type="button" data-mode="find" aria-pressed="false">find</button>
+            <button type="button" data-mode="search" aria-pressed="true">search</button>
+          </div>
+          <button class="btn btn-filled" id="btnRun" type="button">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h5.5L10 21l8-10.5h-5.5z"/></svg>
+            执行检索
+          </button>
+        </div>
+
+        <div class="filter-row">
+          <label class="check"><input type="checkbox" checked> 不限层级</label>
+          <label class="check"><input type="checkbox"> 仅 memory 类型</label>
+          <label class="check"><input type="checkbox"> 包含 pending 记录</label>
+          <span class="filter-hint">pending 记录默认不参与召回，勾选后仅用于复核排查</span>
+        </div>
+      </section>
+
+      <!-- 指标 -->
+      <div class="metric-strip mt-16" id="metrics"></div>
+
+      <div class="search-grid">
+        <!-- 结果 -->
+        <section class="card" aria-label="召回结果">
+          <div class="card-head">
+            <span class="card-title">召回结果</span>
+            <span class="badge badge-primary" id="resultCount">6</span>
+            <span class="spacer"></span>
+            <span class="mono-sm" style="font-size:13px">按分数降序</span>
+          </div>
+          <div id="results"></div>
+        </section>
+
+        <!-- 右栏 -->
+        <div class="side-stack">
+          <section class="card" aria-label="查询计划">
+            <div class="card-head">
+              <span class="card-title" id="planTitle">查询计划</span>
+              <span class="spacer"></span>
+              <span class="badge badge-secondary" id="planBadge">3 条</span>
+            </div>
+            <div id="plan"></div>
+          </section>
+
+          <section class="card" aria-label="耗时拆解">
+            <div class="card-head">
+              <span class="card-title">耗时拆解</span>
+              <span class="spacer"></span>
+              <span class="mono-sm" style="font-size:13px" id="totalMs">412 ms</span>
+            </div>
+            <div id="timing" style="padding:8px 0"></div>
+          </section>
+
+          <div class="callout callout-warn acl-note" id="aclNote"></div>
+
+          <section class="card" aria-label="本次调用">
+            <div class="card-head">
+              <span class="card-title">本次调用</span>
+              <span class="spacer"></span>
+              <button class="btn btn-text btn-sm" id="btnCopyCall" type="button">复制</button>
+            </div>
+            <pre class="call-pre" id="callJSON"></pre>
+          </section>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+<script>
+M3.shell({ active: 'search' });
+
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const HITS = {
+  search: [
+    {
+      score: 0.87, level: 0, context: 'memory',
+      uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在代码风格上的偏好：<b>TypeScript</b> <b>严格</b>模式、2 空格<b>缩进</b>、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['缩进', 1]],
+      reason: 'typescript idf 4.21 × tf 3 · 严格 idf 3.08 × tf 1 · 缩进 idf 2.94 × tf 1'
+    },
+    {
+      score: 0.79, level: 1, context: 'memory',
+      uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条<b>代码风格</b>偏好。code-style 覆盖 <b>TypeScript</b> strict、2 空格<b>缩进</b>与不可变数据写法。',
+      terms: [['typescript', 2], ['代码风格', 2], ['偏好', 1]],
+      reason: '代码风格 idf 3.77 × tf 2 · typescript idf 4.21 × tf 2 · 偏好 idf 1.62 × tf 1'
+    },
+    {
+      score: 0.74, level: 2, context: 'memory',
+      uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码，且<b>严格</b>模式已开启。',
+      terms: [['严格', 2], ['null', 1]],
+      reason: '严格 idf 3.08 × tf 2 · null idf 4.02 × tf 1'
+    },
+    {
+      score: 0.68, level: 0, context: 'memory',
+      uri: 'comem://group/eng/memories/platform-conventions.md',
+      abs: '工程组约定：服务统一开启 <b>TypeScript</b> <b>严格</b>模式，公共类型放在 packages/types 下。',
+      terms: [['typescript', 1], ['严格', 1]],
+      reason: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    },
+    {
+      score: 0.61, level: 2, context: 'resource',
+      uri: 'comem://user/alice/resources/comem-demo/tsconfig.json',
+      abs: '{"compilerOptions":{"<b>strict</b>":true,"noUncheckedIndexedAccess":true,"target":"ES2022"}}',
+      terms: [['strict', 2], ['tsconfig', 1]],
+      reason: 'strict idf 3.96 × tf 2 · tsconfig idf 3.10 × tf 1'
+    },
+    {
+      score: 0.55, level: 0, context: 'skill',
+      uri: 'comem://user/alice/skills/ts-review/SKILL.md',
+      abs: '<b>TypeScript</b> review 技能：按<b>严格</b>模式规则检查改动，标出隐式 any 与类型收窄缺失。',
+      terms: [['typescript', 1], ['严格', 1]],
+      reason: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    }
+  ],
+  find: [
+    {
+      score: 0.91, level: 0, context: 'memory',
+      uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在<b>代码风格</b>上的偏好：<b>TypeScript</b> <b>严格</b>模式、2 空格缩进、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['代码风格', 2]],
+      reason: '整句匹配命中：typescript idf 4.21 × tf 3 · 代码风格 idf 3.77 × tf 2'
+    },
+    {
+      score: 0.72, level: 1, context: 'memory',
+      uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条偏好。code-style 覆盖 <b>TypeScript</b> strict 与 2 空格缩进。',
+      terms: [['typescript', 2], ['代码风格', 1]],
+      reason: '代码风格 idf 3.77 × tf 1 · typescript idf 4.21 × tf 2'
+    },
+    {
+      score: 0.44, level: 2, context: 'memory',
+      uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码。',
+      terms: [['严格', 1]],
+      reason: '严格 idf 3.08 × tf 1'
+    }
+  ]
+};
+
+const PLAN = [
+  { kind: 'memory', q: '代码风格偏好 TypeScript 严格模式 缩进', hits: 4, conf: '高' },
+  { kind: 'resource', q: 'tsconfig strict 配置 项目', hits: 1, conf: '中' },
+  { kind: 'skill', q: 'typescript 规范检查 技能', hits: 1, conf: '中' }
+];
+
+const TIMING = {
+  search: [
+    ['意图分析（LLM）', 380, 'is-warn'],
+    ['逐条召回 · 3 条 TypedQuery', 24, ''],
+    ['去重与合并', 0, ''],
+    ['ACL 过滤', 0, ''],
+    ['BM25 重排', 8, '']
+  ],
+  find: [
+    ['意图分析', 0, ''],
+    ['单条召回', 6, ''],
+    ['ACL 过滤', 0, ''],
+    ['BM25 重排', 3, '']
+  ]
+};
+
+const CALL = {
+  search: `{
+  "tool": "search",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "scopes": ["comem://user/alice/", "comem://group/eng/"],
+  "principals": ["user:alice", "user:*", "group:eng"],
+  "contextTypes": ["memory", "resource", "skill"],
+  "levels": [0, 1, 2],
+  "limit": 10,
+  "sessionId": "session_7c1a"
+}`,
+  find: `{
+  "tool": "find",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "scopes": ["comem://user/alice/", "comem://group/eng/"],
+  "principals": ["user:alice", "user:*", "group:eng"],
+  "limit": 10
+}`
+};
+
+const LEVEL_LABEL = ['L0 摘要', 'L1 概览', 'L2 原文'];
+const CONTEXT_LABEL = { memory: 'memory', resource: 'resource', skill: 'skill' };
+
+let mode = 'search';
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+function renderMetrics() {
+  const hits = HITS[mode];
+  const l0 = hits.filter((h) => h.level === 0).length;
+  const l1 = hits.filter((h) => h.level === 1).length;
+  const l2 = hits.filter((h) => h.level === 2).length;
+  const total = mode === 'search' ? 412 : 9;
+
+  document.getElementById('metrics').innerHTML = `
+    <div class="metric">
+      <div class="metric-value">${hits.length}<small>条</small></div>
+      <div class="metric-label">返回命中</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value ${mode === 'search' ? 'is-accent' : ''}">${mode === 'search' ? PLAN.length : '—'}<small>${mode === 'search' ? ' 条 TypedQuery' : ' 不做意图拆解'}</small></div>
+      <div class="metric-label">意图拆解</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value is-warn">2<small>条</small></div>
+      <div class="metric-label">ACL 滤除</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value">${total}<small>ms</small></div>
+      <div class="metric-label">总耗时</div>
+    </div>
+    <div class="metric">
+      <div class="metric-value" style="font-size:16px;font-family:var(--font-mono);letter-spacing:0">L0 ${l0} · L1 ${l1} · L2 ${l2}</div>
+      <div class="metric-label">层级分布</div>
+    </div>`;
+}
+
+function renderResults() {
+  const hits = HITS[mode];
+  document.getElementById('resultCount').textContent = hits.length;
+  document.getElementById('results').innerHTML = hits.map((h) => `
+    <article class="hit">
+      <div class="hit-score">
+        <span class="v ${h.score < 0.6 ? 'is-low' : ''}">${h.score.toFixed(2)}</span>
+        <span class="bar"><i style="height:${Math.round(h.score * 100)}%"></i></span>
+        <span class="strata" data-level="${h.level}" title="${LEVEL_LABEL[h.level]}">
+          <i class="${h.level === 0 ? 'on' : ''}"></i>
+          <i class="${h.level === 1 ? 'on' : ''}"></i>
+          <i class="${h.level === 2 ? 'on' : ''}"></i>
+        </span>
+        <span class="mono-sm" style="font-size:12.5px;letter-spacing:.02em">L${h.level}</span>
+      </div>
+      <div class="hit-main">
+        <div class="hit-top">
+          <a class="hit-uri" href="filesystem.html">${h.uri}</a>
+          <span class="badge badge-outline">${CONTEXT_LABEL[h.context]}</span>
+        </div>
+        <p class="hit-abs">${h.abs}</p>
+        <div class="hit-terms">
+          ${h.terms.map(([t, n]) => `<span class="chip chip-mono">${t} ×${n}</span>`).join('')}
+        </div>
+        <div class="hit-reason">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-top:2px;flex:none"><path d="M4 6h16l-6 7.5V20l-4-2.5v-4z"/></svg>
+          <span><b style="color:var(--on-surface);font-weight:500">命中原因</b> · ${h.reason}</span>
+        </div>
+      </div>
+    </article>`).join('');
+}
+
+function renderPlan() {
+  const badge = document.getElementById('planBadge');
+  const wrap = document.getElementById('plan');
+  document.getElementById('planTitle').textContent = mode === 'search' ? '查询计划 · TypedQuery' : '查询计划';
+
+  if (mode === 'find') {
+    badge.textContent = '未拆解';
+    badge.className = 'badge badge-outline';
+    wrap.innerHTML = `<div class="empty">
+      <b style="display:block;color:var(--on-surface);font-weight:500;font-size:15px;margin-bottom:6px">find 不做意图分析</b>
+      单条 query 直接进 FTS5。<br>想要「一句话拆成多个检索面」，切到 search。
+    </div>`;
+    return;
+  }
+
+  badge.textContent = `${PLAN.length} 条`;
+  badge.className = 'badge badge-secondary';
+  wrap.innerHTML = PLAN.map((p, i) => `
+    <div class="plan-item">
+      <span class="plan-idx">${i + 1}</span>
+      <div style="min-width:0">
+        <div class="plan-q">${p.q}</div>
+        <div class="plan-meta">
+          <span class="badge badge-outline">${p.kind}</span>
+          <span class="mono-sm" style="font-size:12.5px">置信度 ${p.conf}</span>
+        </div>
+      </div>
+      <span class="plan-hits">${p.hits} 命中</span>
+    </div>`).join('') +
+    `<div class="card-foot" style="font-size:13px;color:var(--on-surface-variant);border-top:1px solid var(--outline-variant);padding:12px 18px">
+      意图分析产出 0–5 条 TypedQuery，本次 3 条；合并去重后共 ${HITS[mode].length} 条。
+    </div>`;
+}
+
+function renderTiming() {
+  const rows = TIMING[mode];
+  const max = Math.max(...rows.map((r) => r[1]), 1);
+  const total = rows.reduce((s, r) => s + r[1], 0);
+  document.getElementById('totalMs').textContent = `${total} ms`;
+  document.getElementById('timing').innerHTML = rows.map(([name, ms, cls]) => `
+    <div class="timing-row">
+      <span class="t-name">${name}</span>
+      <span class="meter meter-thin"><i class="${cls}" style="width:${ms === 0 ? 0 : Math.max(2, (ms / max) * 100)}%"></i></span>
+      <span class="t-val">${ms} ms</span>
+    </div>`).join('') +
+    `<div class="timing-total">
+      <span class="t-name">合计</span>
+      <b>${total} ms</b>
+    </div>`;
+}
+
+function renderAcl() {
+  document.getElementById('aclNote').innerHTML = `
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="callout-ico"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8.5 10V7.5a3.5 3.5 0 1 1 7 0V10"/></svg>
+    <div style="min-width:0">
+      <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+        <span class="n">2</span>
+        <b>条命中在 ACL 阶段被滤除</b>
+      </div>
+      <div class="acl-note-list">
+        <div>comem://user/dave/memories/preferences/code-style.md <em>· 无 read</em></div>
+        <div>comem://group/design/memories/conventions.md <em>· 无 read</em></div>
+      </div>
+      <div style="margin-top:10px;font-size:13px;line-height:1.6;color:var(--on-surface-variant)">
+        调用方 user:alice 对两条均无 read 级别。无权限节点不返回占位，文件名与摘要本身就是信息。
+      </div>
+    </div>`;
+}
+
+function renderCall() {
+  const json = CALL[mode];
+  document.getElementById('callJSON').innerHTML = M3.esc(json)
+    .replace(/&quot;([a-zA-Z]+)&quot;:/g, '<span class="k">"$1"</span>:')
+    .replace(/: &quot;(.*?)&quot;/g, ': <span class="s">"$1"</span>');
+}
+
+function renderAll() {
+  renderMetrics();
+  renderResults();
+  renderPlan();
+  renderTiming();
+  renderAcl();
+  renderCall();
+  document.querySelectorAll('[data-mode]').forEach((b) => {
+    b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+  });
+}
+
+document.getElementById('modeSeg').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-mode]');
+  if (!btn || btn.dataset.mode === mode) return;
+  mode = btn.dataset.mode;
+  renderAll();
+});
+
+document.getElementById('btnRun').addEventListener('click', () => {
+  const q = document.getElementById('q').value.trim();
+  if (!q) {
+    M3.snack('请先输入检索词');
+    return;
+  }
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true;
+  btn.innerHTML = '检索中…';
+  setTimeout(() => {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13.5h5.5L10 21l8-10.5h-5.5z"/></svg> 执行检索';
+    renderAll();
+    M3.snack(`${mode} 返回 ${HITS[mode].length} 条 · ${TIMING[mode].reduce((s, r) => s + r[1], 0)} ms`);
+  }, 420);
+});
+
+document.getElementById('btnCopyCall').addEventListener('click', () => M3.copy(CALL[mode]));
+
+renderAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件树与详情 · CoMem 控制台</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  try {
+    var saved = localStorage.getItem('comem-theme');
+    if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+  } catch (e) {}
+</script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="index.html" aria-label="CoMem 控制台入口">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-text">CoMem<small>控制台 · 视觉规范 v1.0</small></span>
+    </a>
+    <nav class="nav" aria-label="主导航">
+      <a href="index.html">规范</a>
+      <a href="filesystem.html" aria-current="page">文件树</a>
+      <a href="search.html">检索</a>
+      <a href="review.html">复核</a>
+      <a href="acl.html">权限</a>
+    </nav>
+    <div class="topbar-right">
+      <span class="scope-chip">scope&nbsp;<b>user/alice</b></span>
+      <span class="topbar-divider" aria-hidden="true"></span>
+      <button class="btn btn--ghost btn--icon" id="themeToggle" type="button" aria-label="切换深浅色主题">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="bench">
+    <!-- ==================== 左侧：命名空间树 ==================== -->
+    <aside class="pane pane--side">
+      <div class="pane-head">
+        <span class="pane-title">命名空间</span>
+        <span class="pane-count" id="treeCount">128</span>
+        <div class="pane-head-actions">
+          <button class="btn btn--ghost btn--sm btn--icon" type="button" aria-label="新建目录" title="新建目录">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="btn btn--ghost btn--sm btn--icon" type="button" id="btnRefresh" aria-label="刷新索引" title="刷新索引">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="pane-filter">
+        <div class="searchbox">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          <input class="input input--sm input--mono" id="treeFilter" type="search" placeholder="筛选路径…" aria-label="筛选路径">
+        </div>
+      </div>
+
+      <div class="pane-body tree" id="tree">
+        <details class="tree-group" open>
+          <summary>
+            <div class="tree-row" style="--depth:0" data-uri="comem://user/alice/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">user/alice</span>
+              <span class="tree-meta">manage</span>
+            </div>
+          </summary>
+          <div class="tree-children">
+            <div class="tree-row is-meta" style="--depth:1">
+              <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+              <span class="tree-name">.acl.json</span>
+              <span class="tree-meta">184 B</span>
+            </div>
+
+            <details class="tree-group" open>
+              <summary>
+                <div class="tree-row" style="--depth:1" data-uri="comem://user/alice/memories/" data-dir="1">
+                  <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                  <span class="tree-name">memories</span>
+                  <span class="tree-meta">6</span>
+                </div>
+              </summary>
+              <div class="tree-children">
+                <div class="tree-row is-meta" style="--depth:2">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                  <span class="tree-name">.abstract.md</span>
+                  <span class="tree-meta">L0 · 268 B</span>
+                </div>
+                <div class="tree-row is-meta" style="--depth:2">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                  <span class="tree-name">.overview.md</span>
+                  <span class="tree-meta">L1 · 1.9 K</span>
+                </div>
+                <div class="tree-row is-meta" style="--depth:2">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                  <span class="tree-name">.acl.json</span>
+                  <span class="tree-meta">184 B</span>
+                </div>
+
+                <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/profile.md">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                  <span class="tree-name">profile.md</span>
+                  <span class="tree-meta">640 B</span>
+                </div>
+                <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/identity.md">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                  <span class="tree-name">identity.md</span>
+                  <span class="tree-meta">1.1 K</span>
+                </div>
+
+                <details class="tree-group" open>
+                  <summary>
+                    <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/preferences/" data-dir="1">
+                      <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                      <span class="tree-name">preferences</span>
+                      <span class="tree-meta">5</span>
+                    </div>
+                  </summary>
+                  <div class="tree-children">
+                    <div class="tree-row is-meta" style="--depth:3">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                      <span class="tree-name">.abstract.md</span>
+                      <span class="tree-meta">L0 · 268 B</span>
+                    </div>
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/preferences/code-style.md" aria-selected="true">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">code-style.md</span>
+                      <span class="tree-meta">1.4 K</span>
+                    </div>
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/preferences/communication.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">communication.md</span>
+                      <span class="tree-meta">912 B</span>
+                    </div>
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/preferences/writing-style.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">writing-style.md</span>
+                      <span class="tree-meta">2.1 K</span>
+                    </div>
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/preferences/review-habit.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">review-habit.md</span>
+                      <span class="tree-meta">780 B</span>
+                    </div>
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/preferences/commit-format.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">commit-format.md</span>
+                      <span class="tree-meta">640 B</span>
+                    </div>
+                  </div>
+                </details>
+
+                <details class="tree-group">
+                  <summary>
+                    <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/entities/" data-dir="1">
+                      <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                      <span class="tree-name">entities</span>
+                      <span class="tree-meta">2</span>
+                    </div>
+                  </summary>
+                  <div class="tree-children">
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/entities/comem-project.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">comem-project.md</span>
+                      <span class="tree-meta">1.6 K</span>
+                    </div>
+                  </div>
+                </details>
+
+                <details class="tree-group">
+                  <summary>
+                    <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/events/" data-dir="1">
+                      <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                      <span class="tree-name">events</span>
+                      <span class="tree-meta">12</span>
+                    </div>
+                  </summary>
+                  <div class="tree-children">
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/events/2026-11-05-architecture-decision.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">2026-11-05-architecture-decision.md</span>
+                      <span class="tree-meta">3.4 K</span>
+                    </div>
+                  </div>
+                </details>
+
+                <details class="tree-group" open>
+                  <summary>
+                    <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/experiences/" data-dir="1">
+                      <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                      <span class="tree-name">experiences</span>
+                      <span class="tree-flag" title="1 条待复核">1 pending</span>
+                    </div>
+                  </summary>
+                  <div class="tree-children">
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/experiences/monorepo-migration.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">monorepo-migration.md</span>
+                      <span class="tree-meta">1.2 K</span>
+                    </div>
+                  </div>
+                </details>
+
+                <details class="tree-group">
+                  <summary>
+                    <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/memories/rules/" data-dir="1">
+                      <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                      <span class="tree-name">rules</span>
+                      <span class="tree-meta">3</span>
+                    </div>
+                  </summary>
+                  <div class="tree-children">
+                    <div class="tree-row" style="--depth:3" data-uri="comem://user/alice/memories/rules/license-review/must-locate-license.md">
+                      <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                      <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      <span class="tree-name">license-review/</span>
+                      <span class="tree-meta">1</span>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </details>
+
+            <details class="tree-group">
+              <summary>
+                <div class="tree-row" style="--depth:1" data-uri="comem://user/alice/resources/" data-dir="1">
+                  <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                  <span class="tree-name">resources</span>
+                  <span class="tree-meta">24</span>
+                </div>
+              </summary>
+              <div class="tree-children">
+                <div class="tree-row" style="--depth:2" data-uri="comem://user/alice/resources/comem-demo/architecture.md">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                  <span class="tree-name">comem-demo/</span>
+                  <span class="tree-meta">3</span>
+                </div>
+              </div>
+            </details>
+
+            <div class="tree-row" style="--depth:1" data-uri="comem://user/alice/skills/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">skills</span>
+              <span class="tree-meta">6</span>
+            </div>
+            <div class="tree-row" style="--depth:1" data-uri="comem://user/alice/sessions/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">sessions</span>
+              <span class="tree-meta">9</span>
+            </div>
+          </div>
+        </details>
+
+        <details class="tree-group" open>
+          <summary>
+            <div class="tree-row" style="--depth:0" data-uri="comem://group/eng/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">group/eng</span>
+              <span class="tree-meta">write</span>
+            </div>
+          </summary>
+          <div class="tree-children">
+            <div class="tree-row is-meta" style="--depth:1">
+              <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+              <span class="tree-name">.acl.json</span>
+              <span class="tree-meta">156 B</span>
+            </div>
+            <details class="tree-group" open>
+              <summary>
+                <div class="tree-row" style="--depth:1" data-uri="comem://group/eng/memories/" data-dir="1">
+                  <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                  <span class="tree-name">memories</span>
+                  <span class="tree-meta">2</span>
+                </div>
+              </summary>
+              <div class="tree-children">
+                <div class="tree-row is-meta" style="--depth:2">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                  <span class="tree-name">.abstract.md</span>
+                  <span class="tree-meta">L0 · 204 B</span>
+                </div>
+                <div class="tree-row" style="--depth:2" data-uri="comem://group/eng/memories/release-checklist.md">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                  <span class="tree-name">release-checklist.md</span>
+                  <span class="tree-meta">3.2 K</span>
+                </div>
+                <div class="tree-row" style="--depth:2" data-uri="comem://group/eng/memories/platform-conventions.md">
+                  <span class="tree-caret blank"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+                  <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                  <span class="tree-name">platform-conventions.md</span>
+                  <span class="tree-meta">2.8 K</span>
+                </div>
+              </div>
+            </details>
+            <div class="tree-row" style="--depth:1" data-uri="comem://group/eng/resources/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">resources</span>
+              <span class="tree-meta">8</span>
+            </div>
+            <div class="tree-row" style="--depth:1" data-uri="comem://group/eng/skills/" data-dir="1">
+              <span class="tree-caret"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m6 4 4 4-4 4"/></svg></span>
+              <svg class="tree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              <span class="tree-name">skills</span>
+              <span class="tree-meta">3</span>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="pane-foot">
+        <span class="legend-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+          目录
+        </span>
+        <span class="legend-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/></svg>
+          文档
+        </span>
+        <span class="legend-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+          元数据文件
+        </span>
+      </div>
+    </aside>
+
+    <!-- ==================== 中间：详情 ==================== -->
+    <main class="pane pane--main" id="detailPane" aria-live="polite"></main>
+
+    <!-- ==================== 右侧：元数据栏 ==================== -->
+    <aside class="pane pane--rail">
+      <div class="rail" id="rail"></div>
+    </aside>
+  </div>
+</div>
+
+<div class="toast-layer" id="toastLayer" aria-live="polite" aria-atomic="false"></div>
+
+<script>
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+var DOCS = {
+  "comem://user/alice/memories/preferences/code-style.md": {
+    title: "code-style.md",
+    kind: "document",
+    contextType: "memory",
+    memoryType: "preferences",
+    status: "active",
+    uri: "comem://user/alice/memories/preferences/code-style.md",
+    size: "1.4 KB",
+    bytes: 1432,
+    lines: 21,
+    writes: 4,
+    updated: "2026-11-07 22:31:04",
+    l0: "用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-07 22:14:08", chars: 39, max: 256 },
+    l1meta: { chars: 486, max: 4000 },
+    l1: [
+      "<h4>preferences/ · 5 个条目</h4>",
+      "<p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。写作风格偏短句，沟通风格偏结论先行。</p>",
+      "<ul>",
+      "<li><strong>code-style</strong> — TypeScript strict、2 空格缩进、优先不可变数据与纯函数；禁止 any，外部输入用 unknown 收窄。</li>",
+      "<li><strong>communication</strong> — 先结论后细节；中文正文保留英文术语；单次回复不超过 3 段。</li>",
+      "<li><strong>writing-style</strong> — 技术文档用短句，少用「是……不是……」的对比句式。</li>",
+      "<li><strong>review-habit</strong> — 只针对 diff 给意见，发现范围外问题单独提出。</li>",
+      "<li><strong>commit-format</strong> — Conventional Commits，subject 用祈使句，不超过 72 字符。</li>",
+      "</ul>",
+      "<p class='doc-footnote'>概览生成于 2026-11-07 22:14，覆盖 5 个条目中的 4 个当前版本。</p>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://user/alice/memories/preferences/code-style.md\ncontext_type: memory\nmemory_type: preferences\nstatus: active\nupdated_at: 2026-11-07T22:31:04+08:00</pre>",
+      "<h4>类型</h4>",
+      "<ul>",
+      "<li>TypeScript 严格模式，<code>strict: true</code>。</li>",
+      "<li>不用 <code>any</code>。外部输入先收窄为 <code>unknown</code>，再做运行时校验。</li>",
+      "<li>公开函数的返回值必须显式标注。</li>",
+      "</ul>",
+      "<h4>格式</h4>",
+      "<ul>",
+      "<li>缩进 2 个空格，不用 tab。</li>",
+      "<li>单行不超过 100 字符。</li>",
+      "<li>对象字面量末尾保留逗号。</li>",
+      "</ul>",
+      "<h4>写法</h4>",
+      "<ul>",
+      "<li>优先不可变数据：<code>map</code> / <code>filter</code> / <code>reduce</code>，少用 <code>for</code>。</li>",
+      "<li>副作用集中到边界层，核心逻辑保持纯函数。</li>",
+      "<li>不为只有一个实现的场景预留接口。</li>",
+      "</ul>"
+    ].join(""),
+    fresh: {
+      state: "stale",
+      total: 5,
+      pending: 1,
+      ratio: 20,
+      threshold: 10,
+      generated: "2026-11-07 22:14:08",
+      updated: "2026-11-07 22:31:04",
+      lag: "17 分钟",
+      task: "task_9f21 · running · 已重试 1 次",
+      note: "摘要生成于 22:14，源文件 22:31 更新，落后 17 分钟。1 条变更占 20%，超过 10% 阈值，重算任务已入队。"
+    },
+    acl: [
+      { p: "user:alice", lv: "manage", src: "owner · 不可撤销" },
+      { p: "group:eng", lv: "write", src: "继承自 comem://user/alice/memories/" }
+    ]
+  },
+
+  "comem://user/alice/memories/preferences/communication.md": {
+    title: "communication.md",
+    kind: "document",
+    contextType: "memory",
+    memoryType: "preferences",
+    status: "active",
+    uri: "comem://user/alice/memories/preferences/communication.md",
+    size: "912 B",
+    bytes: 912,
+    lines: 12,
+    writes: 2,
+    updated: "2026-11-06 09:12:40",
+    l0: "用户在沟通上的偏好：先给结论后给细节，中文正文保留英文术语，单次回复控制在 3 段以内。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-07 22:14:08", chars: 44, max: 256 },
+    l1meta: { chars: 486, max: 4000 },
+    l1: [
+      "<h4>preferences/ · 5 个条目</h4>",
+      "<p>本目录收录 alice 在工程实践上的稳定偏好，按话题一个文件。沟通类偏好与写作类偏好分开存放，避免合并时互相覆盖。</p>",
+      "<ul>",
+      "<li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li>",
+      "<li><strong>communication</strong> — 结论先行，控制篇幅，术语不翻译。</li>",
+      "<li><strong>writing-style</strong> — 短句，少对比句式。</li>",
+      "<li><strong>review-habit</strong> — 只评论 diff。</li>",
+      "<li><strong>commit-format</strong> — Conventional Commits。</li>",
+      "</ul>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://user/alice/memories/preferences/communication.md\ncontext_type: memory\nmemory_type: preferences\nstatus: active\nupdated_at: 2026-11-06T09:12:40+08:00</pre>",
+      "<h4>表达</h4>",
+      "<ul>",
+      "<li>先给结论，再给依据，最后给下一步。</li>",
+      "<li>中文正文里保留英文术语，不做二次翻译。</li>",
+      "<li>单次回复不超过 3 段；超出的内容拆成独立文档。</li>",
+      "</ul>",
+      "<h4>否定</h4>",
+      "<ul>",
+      "<li>不主动夸赞，不加没有信息量的收尾句。</li>",
+      "<li>不确定的地方直接标注不确定，不用模糊措辞掩盖。</li>",
+      "</ul>"
+    ].join(""),
+    fresh: {
+      state: "fresh",
+      total: 5,
+      pending: 0,
+      ratio: 0,
+      threshold: 10,
+      generated: "2026-11-07 22:14:08",
+      updated: "2026-11-06 09:12:40",
+      lag: "—",
+      task: null,
+      note: "摘要与当前内容一致，覆盖 5 个条目，没有待刷新变更。"
+    },
+    acl: [
+      { p: "user:alice", lv: "manage", src: "owner · 不可撤销" },
+      { p: "group:eng", lv: "read", src: "直接授权 · 本文件" }
+    ]
+  },
+
+  "comem://user/alice/memories/preferences/": {
+    title: "preferences/",
+    kind: "directory",
+    contextType: "memory",
+    memoryType: null,
+    status: null,
+    uri: "comem://user/alice/memories/preferences/",
+    size: "5 个条目",
+    bytes: 5934,
+    lines: null,
+    writes: null,
+    updated: "2026-11-07 22:31:04",
+    l0: "alice 在工程实践上的稳定偏好：代码风格、沟通方式、写作风格、review 习惯、提交信息格式。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-07 22:14:08", chars: 45, max: 256 },
+    l1meta: { chars: 486, max: 4000 },
+    l1: [
+      "<h4>preferences/ · 5 个条目</h4>",
+      "<p>本目录收录 alice 在工程实践上的稳定偏好。按话题拆分，每条一个文件，写入时按话题合并，不覆盖其他条目。</p>",
+      "<ul>",
+      "<li><strong>code-style</strong> — TypeScript strict、2 空格缩进、函数式写法。</li>",
+      "<li><strong>communication</strong> — 先结论后细节，控制篇幅。</li>",
+      "<li><strong>writing-style</strong> — 短句，少对比句式。</li>",
+      "<li><strong>review-habit</strong> — 只评论 diff。</li>",
+      "<li><strong>commit-format</strong> — Conventional Commits。</li>",
+      "</ul>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://user/alice/memories/preferences/\nkind: directory\nchildren: 5 个文档 · 3 个元数据文件\nupdated_at: 2026-11-07T22:31:04+08:00</pre>",
+      "<pre>code-style.md          1.4 KB   2026-11-07 22:31\ncommunication.md       912 B    2026-11-06 09:12\nwriting-style.md       2.1 KB   2026-11-04 15:40\nreview-habit.md        780 B    2026-10-29 14:02\ncommit-format.md       640 B    2026-10-21 10:18\n.abstract.md           268 B    2026-11-07 22:14\n.overview.md           1.9 KB   2026-11-07 22:14\n.acl.json              184 B    2026-11-02 16:45</pre>"
+    ].join(""),
+    fresh: {
+      state: "stale",
+      total: 5,
+      pending: 1,
+      ratio: 20,
+      threshold: 10,
+      generated: "2026-11-07 22:14:08",
+      updated: "2026-11-07 22:31:04",
+      lag: "17 分钟",
+      task: "task_9f21 · running · 已重试 1 次",
+      note: "1 条变更发生在摘要生成之后（code-style.md，22:31）。占比 20% 已超过 10% 阈值，重算任务 task_9f21 已入队。"
+    },
+    acl: [
+      { p: "user:alice", lv: "manage", src: "owner · 不可撤销" },
+      { p: "group:eng", lv: "write", src: "直接授权 · 本目录" }
+    ]
+  },
+
+  "comem://user/alice/memories/experiences/monorepo-migration.md": {
+    title: "monorepo-migration.md",
+    kind: "document",
+    contextType: "memory",
+    memoryType: "experiences",
+    status: "pending",
+    uri: "comem://user/alice/memories/experiences/monorepo-migration.md",
+    size: "1.2 KB",
+    bytes: 1226,
+    lines: 16,
+    writes: 1,
+    updated: "2026-11-07 22:31:02",
+    l0: "从 monorepo 迁移到单包的教训：先合并依赖再拆目录，反过来会丢失版本对齐信息。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-07 22:14:08", chars: 41, max: 256 },
+    l1meta: { chars: 312, max: 4000 },
+    l1: [
+      "<h4>experiences/ · 1 个条目（待复核）</h4>",
+      "<p>从执行结果蒸馏出来的经验，尚未通过人工复核。未生效的条目默认不参与检索召回，只在复核队列里可见。</p>",
+      "<ul>",
+      "<li><strong>monorepo-migration</strong> — 依赖合并顺序影响版本对齐，先合并再拆目录。</li>",
+      "</ul>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://user/alice/memories/experiences/monorepo-migration.md\ncontext_type: memory\nmemory_type: experiences\nstatus: pending\nupdated_at: 2026-11-07T22:31:02+08:00</pre>",
+      "<h4>内容</h4>",
+      "<p>迁移时先合并依赖清单，再按层拆目录。反过来做会丢失版本对齐信息，最后只能手工比对各包的锁文件。</p>",
+      "<p class='doc-footnote'>该条目处于 pending 状态，通过复核后才会写入 active 并参与检索。</p>"
+    ].join(""),
+    fresh: {
+      state: "stale",
+      total: 1,
+      pending: 1,
+      ratio: 100,
+      threshold: 10,
+      generated: "2026-11-07 22:14:08",
+      updated: "2026-11-07 22:31:02",
+      lag: "17 分钟",
+      task: "task_9f21 · running · 已重试 1 次",
+      note: "唯一一条内容尚未生效，摘要停留在上一版本。复核通过后触发重算。"
+    },
+    acl: [
+      { p: "user:alice", lv: "manage", src: "owner · 不可撤销" },
+      { p: "group:eng", lv: "read", src: "继承自 comem://user/alice/memories/" }
+    ]
+  },
+
+  "comem://group/eng/memories/release-checklist.md": {
+    title: "release-checklist.md",
+    kind: "document",
+    contextType: "memory",
+    memoryType: "procedures",
+    status: "active",
+    uri: "comem://group/eng/memories/release-checklist.md",
+    size: "3.2 KB",
+    bytes: 3277,
+    lines: 34,
+    writes: 9,
+    updated: "2026-11-07 18:02:11",
+    l0: "组内发布流程：冻结分支 → 跑全量测试 → 打 tag → 写变更说明 → 通知值班。任何一步失败即回滚。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-07 18:05:40", chars: 48, max: 256 },
+    l1meta: { chars: 198, max: 4000 },
+    l1: [
+      "<h4>group/eng/memories/ · 2 个条目</h4>",
+      "<p>工程组的共享记忆。成员默认可读，写入需要单独授权。当前 2 个条目：平台约定与发布流程。</p>",
+      "<ul>",
+      "<li><strong>platform-conventions</strong> — 服务命名、日志字段、错误码的统一约定。</li>",
+      "<li><strong>release-checklist</strong> — 发布流程与回滚条件。</li>",
+      "</ul>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://group/eng/memories/release-checklist.md\ncontext_type: memory\nmemory_type: procedures\nstatus: active\nupdated_at: 2026-11-07T18:02:11+08:00</pre>",
+      "<h4>发布前</h4>",
+      "<ul>",
+      "<li>确认主干 CI 全绿，没有跳过的用例。</li>",
+      "<li>冻结发布分支，从冻结时刻起只接受修复类提交。</li>",
+      "<li>在 <code>#eng-release</code> 频道说明本次范围与回滚负责人。</li>",
+      "</ul>",
+      "<h4>发布</h4>",
+      "<ul>",
+      "<li>打 tag：<code>v{major}.{minor}.{patch}</code>，tag 消息里带上变更说明的链接。</li>",
+      "<li>灰度 10% 流量观察 15 分钟，错误率超过 0.5% 立即回滚。</li>",
+      "<li>全量发布后核对关键指标：延迟 P95、错误率、队列积压。</li>",
+      "</ul>",
+      "<h4>回滚</h4>",
+      "<ul>",
+      "<li>回滚用上一个 tag，不 revert 提交。</li>",
+      "<li>回滚后在归档任务里记录原因，供下次 review。</li>",
+      "</ul>"
+    ].join(""),
+    fresh: {
+      state: "fresh",
+      total: 2,
+      pending: 0,
+      ratio: 0,
+      threshold: 10,
+      generated: "2026-11-07 18:05:40",
+      updated: "2026-11-07 18:02:11",
+      lag: "—",
+      task: null,
+      note: "组空间摘要由成员提交后自动重算，当前无待刷新变更。"
+    },
+    acl: [
+      { p: "group:eng", lv: "write", src: "组空间预置" },
+      { p: "user:alice", lv: "manage", src: "直接授权 · 本文件" }
+    ]
+  },
+
+  "comem://user/alice/memories/entities/comem-project.md": {
+    title: "comem-project.md",
+    kind: "document",
+    contextType: "memory",
+    memoryType: "entities",
+    status: "active",
+    uri: "comem://user/alice/memories/entities/comem-project.md",
+    size: "1.6 KB",
+    bytes: 1638,
+    lines: 18,
+    writes: 5,
+    updated: "2026-11-05 16:40:00",
+    l0: "CoMem 项目：面向 AI agent 的上下文记忆数据库，2026 年 9 月启动，单包 + 内部四层分层。",
+    l0meta: { by: "summary.service", model: "gpt-4o-mini", at: "2026-11-05 16:41:02", chars: 44, max: 256 },
+    l1meta: { chars: 244, max: 4000 },
+    l1: [
+      "<h4>entities/ · 2 个条目</h4>",
+      "<p>项目与组织等实体的档案。每条记录一个实体，跨会话更新时按字段合并。</p>",
+      "<ul>",
+      "<li><strong>comem-project</strong> — 项目背景、启动时间与架构决策。</li>",
+      "</ul>"
+    ].join(""),
+    l2: [
+      "<pre>uri: comem://user/alice/memories/entities/comem-project.md\ncontext_type: memory\nmemory_type: entities\nstatus: active\nupdated_at: 2026-11-05T16:40:00+08:00</pre>",
+      "<h4>内容</h4>",
+      "<p>CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启动。决定采用单包 + 内部四层分层，不做 npm workspace 多包。</p>"
+    ].join(""),
+    fresh: {
+      state: "fresh",
+      total: 2,
+      pending: 0,
+      ratio: 0,
+      threshold: 10,
+      generated: "2026-11-05 16:41:02",
+      updated: "2026-11-05 16:40:00",
+      lag: "—",
+      task: null,
+      note: "摘要与当前内容一致，无待刷新变更。"
+    },
+    acl: [
+      { p: "user:alice", lv: "manage", src: "owner · 不可撤销" },
+      { p: "group:eng", lv: "read", src: "继承自 comem://user/alice/memories/" }
+    ]
+  }
+};
+
+var LAYER_NOTE = [
+  "L0 摘要 · 上限 256 字符。agent 先读这一层判断相关性，不读正文。",
+  "L1 概览 · 上限 4000 字符。目录级上下文，用来决定要不要展开 L2 原文。",
+  "L2 原文 · 完整文档。只有前两层判断为相关时才会读到这里。"
+];
+
+var currentUri = "comem://user/alice/memories/preferences/code-style.md";
+var currentLayer = 0;
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+function el(tag, className, html) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (html != null) node.innerHTML = html;
+  return node;
+}
+
+function icon(name) {
+  var paths = {
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+    alert: '<path d="M10.3 3.9 2.5 17.4A1.9 1.9 0 0 0 4.2 20h15.6a1.9 1.9 0 0 0 1.7-2.6L13.7 3.9a1.9 1.9 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
+    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/>',
+    shield: '<path d="M12 3 4 6v6c0 4.4 3.4 7.7 8 9 4.6-1.3 8-4.6 8-9V6Z"/>',
+    layers: '<path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 13 9 5 9-5"/>'
+  };
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths[name] + "</svg>";
+}
+
+function crumbHTML(uri) {
+  var isDir = uri.slice(-1) === "/";
+  var parts = uri.replace("comem://", "").replace(/\/$/, "").split("/");
+  var acc = "comem://";
+  var out = '<a href="filesystem.html">comem://</a>';
+  parts.forEach(function (p, i) {
+    acc += p + (i < parts.length - 1 ? "/" : "");
+    out += '<span class="sep">/</span><a href="filesystem.html">' + p + "</a>";
+    if (i < parts.length - 1) return;
+  });
+  if (isDir) out += '<span class="sep">/</span>';
+  return out;
+}
+
+function layerBodyHTML(d) {
+  if (currentLayer === 0) {
+    return (
+      '<div class="doc-card">' +
+        '<div class="doc-card-head">' +
+          "<span>L0 · abstract</span>" +
+          '<span class="sep">|</span>' +
+          "<span>" + d.l0meta.by + "</span>" +
+          '<span class="sep">|</span>' +
+          "<span>" + d.l0meta.model + "</span>" +
+          '<span class="sep">|</span>' +
+          "<span>" + d.l0meta.at + "</span>" +
+          '<span class="spacer"></span>' +
+          "<span>" + d.l0meta.chars + " / " + d.l0meta.max + " 字符</span>" +
+        "</div>" +
+        '<div class="doc-card-body">' +
+          '<p class="abstract-quote">' + d.l0 + "</p>" +
+        "</div>" +
+      "</div>" +
+      (d.fresh.state === "stale"
+        ? '<p class="doc-footnote">这条摘要生成于 ' + d.fresh.generated + "，对应的是上一版内容；源文件在 " + d.fresh.updated + " 更新过，落后 " + d.fresh.lag + "。</p>"
+        : '<p class="doc-footnote">摘要与当前内容一致，生成于 ' + d.fresh.generated + "。</p>")
+    );
+  }
+  if (currentLayer === 1) {
+    return (
+      '<div class="doc-card">' +
+        '<div class="doc-card-head">' +
+          "<span>L1 · overview</span>" +
+          '<span class="sep">|</span>' +
+          "<span>summary.service</span>" +
+          '<span class="sep">|</span>' +
+          "<span>" + d.l1meta.chars + " / " + d.l1meta.max + " 字符</span>" +
+          '<span class="spacer"></span>' +
+          "<span>目录概览</span>" +
+        "</div>" +
+        '<div class="doc-card-body">' + d.l1 + "</div>" +
+      "</div>"
+    );
+  }
+  return (
+    '<div class="doc-card">' +
+      '<div class="doc-card-head">' +
+        "<span>L2 · 原文</span>" +
+        '<span class="sep">|</span>' +
+        "<span>" + d.size + " · " + (d.lines ? d.lines + " 行" : "目录") + "</span>" +
+        '<span class="spacer"></span>' +
+        "<span>YAML frontmatter + Markdown</span>" +
+      "</div>" +
+      '<div class="doc-card-body">' + d.l2 + "</div>" +
+    "</div>"
+  );
+}
+
+function renderDetail() {
+  var d = DOCS[currentUri];
+  var pane = document.getElementById("detailPane");
+  if (!d) {
+    pane.innerHTML =
+      '<div class="empty">' +
+        "<strong>该节点没有编入演示数据</strong>" +
+        "<span>演示稿只收录 6 个有代表性的节点，其余条目保留在树中，用来展示真实的目录密度。</span>" +
+        '<button class="btn btn--secondary btn--sm" id="btnBack" type="button">回到 code-style.md</button>' +
+      "</div>";
+    var back = document.getElementById("btnBack");
+    if (back) back.addEventListener("click", function () { select("comem://user/alice/memories/preferences/code-style.md"); });
+    return;
+  }
+
+  var isDir = d.kind === "directory";
+  var stale = d.fresh.state === "stale";
+
+  var badges =
+    '<span class="badge badge--neutral">' + (isDir ? "directory" : "document") + "</span>" +
+    '<span class="badge badge--neutral">' + d.contextType + "</span>" +
+    (d.memoryType ? '<span class="badge badge--accent">' + d.memoryType + "</span>" : "") +
+    (d.status === "active" ? '<span class="badge badge--ok">active</span>' : "") +
+    (d.status === "pending" ? '<span class="badge badge--warn">pending</span>' : "") +
+    (stale ? '<span class="badge badge--warn">待刷新</span>' : '<span class="badge badge--ok">摘要最新</span>');
+
+  pane.innerHTML =
+    '<div class="detail">' +
+      '<div class="detail-scroll">' +
+        '<nav class="crumbs" aria-label="URI 路径">' + crumbHTML(d.uri) + "</nav>" +
+
+        '<div class="doc-head">' +
+          '<div class="doc-head-main">' +
+            '<h1 class="doc-title">' + d.title + "</h1>" +
+            '<div class="uri-line">' +
+              '<span class="uri">' + d.uri + "</span>" +
+              '<button class="copy-btn" type="button" id="btnCopyUri" aria-label="复制 URI">' + icon("copy") + "</button>" +
+            "</div>" +
+          "</div>" +
+          '<div class="btn-row">' +
+            '<button class="btn btn--secondary btn--sm" type="button" id="btnRegen">' + icon("refresh") + "重新生成摘要</button>" +
+            '<a class="btn btn--secondary btn--sm" href="acl.html">查看权限</a>' +
+          "</div>" +
+        "</div>" +
+
+        '<div class="badge-row">' + badges +
+          '<span class="spacer"></span>' +
+          '<span class="hint mono">更新于 ' + d.updated + "</span>" +
+        "</div>" +
+
+        '<div class="layer-tabs" role="tablist" aria-label="披露层级">' +
+          [["L0", "摘要"], ["L1", "概览"], ["L2", "原文"]].map(function (pair, i) {
+            return '<button type="button" role="tab" data-layer="' + i + '" aria-selected="' + (i === currentLayer) + '">' +
+              "<b>" + pair[0] + "</b><span>" + pair[1] + "</span></button>";
+          }).join("") +
+        "</div>" +
+
+        '<div class="layer-note">' + icon("info") + "<span>" + LAYER_NOTE[currentLayer] + "</span></div>" +
+
+        '<div class="doc-body">' + layerBodyHTML(d) + "</div>" +
+
+        '<section style="margin-top:24px">' +
+          '<div class="section-title">读取成本 <span class="hint">agent 的典型路径是 L0 → L1 → L2</span></div>' +
+          '<div class="panel"><div class="panel-body">' +
+            '<div class="cost">' +
+              [d.l0meta.chars, d.l1meta.chars, d.bytes].map(function (chars, i) {
+                var max = Math.max(d.l0meta.chars, d.l1meta.chars, d.bytes);
+                return '<div class="cost-row' + (i === currentLayer ? " is-on" : "") + '">' +
+                  '<span class="ck">L' + i + "</span>" +
+                  '<span class="ct"><i style="width:' + Math.max(2, Math.round((chars / max) * 100)) + '%"></i></span>' +
+                  '<span class="cv">' + chars.toLocaleString("en-US") + " 字符</span>" +
+                "</div>";
+              }).join("") +
+            "</div>" +
+            '<p class="hint" style="margin-top:12px">多数查询在 L1 就停止，只有确认相关才读 L2 原文。L0 与 L1 由 summary.service 生成，L2 是用户与 agent 共同写入的内容。</p>' +
+          "</div></div>" +
+        "</section>" +
+
+        '<section style="margin-top:24px">' +
+          '<div class="section-title">元数据文件 <span class="hint">描述目录本身，不出现在普通 ls 结果里</span></div>' +
+          '<div class="panel"><div class="table-wrap"><table class="table table--fixed">' +
+            "<thead><tr><th style='width:168px'>文件</th><th style='width:88px'>层级</th><th>作用</th><th style='width:146px'>写入方</th></tr></thead>" +
+            "<tbody>" +
+              "<tr><td class='mono strong'>.abstract.md</td><td><span class='badge badge--accent'>L0</span></td><td>一句话摘要，≤ 256 字符，agent 先读它判断相关性。</td><td class='mono'>summary.service</td></tr>" +
+              "<tr><td class='mono strong'>.overview.md</td><td><span class='badge badge--info'>L1</span></td><td>目录概览，≤ 4000 字符，决定要不要展开原文。</td><td class='mono'>summary.service</td></tr>" +
+              "<tr><td class='mono strong'>.acl.json</td><td><span class='badge badge--neutral'>ACL</span></td><td>目录权限与继承模式，权限求值的起点。</td><td class='mono'>AclService</td></tr>" +
+            "</tbody>" +
+          "</table></div></div>" +
+        "</section>" +
+      "</div>" +
+    "</div>";
+
+  /* 交互 */
+  pane.querySelectorAll("[data-layer]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      currentLayer = Number(b.getAttribute("data-layer"));
+      renderDetail();
+    });
+  });
+  var copyBtn = document.getElementById("btnCopyUri");
+  if (copyBtn) copyBtn.addEventListener("click", function () {
+    if (navigator.clipboard) navigator.clipboard.writeText(d.uri).catch(function () {});
+    toast("已复制 URI");
+  });
+  var regen = document.getElementById("btnRegen");
+  if (regen) regen.addEventListener("click", function () {
+    toast(stale ? "重算任务已在队列中 · task_9f21 running" : "摘要已是最新，无需重算");
+  });
+
+  renderRail(d);
+}
+
+function renderRail(d) {
+  var rail = document.getElementById("rail");
+  var stale = d.fresh.state === "stale";
+  var pct = Math.min(100, Math.round((d.fresh.pending / Math.max(d.fresh.total, 1)) * 100));
+
+  rail.innerHTML =
+    '<section class="rail-block">' +
+      '<div class="rail-block-head">摘要来源</div>' +
+      '<div class="rail-block-body"><div class="kv">' +
+        '<div class="kv-row"><span class="kv-key">生成者</span><span class="kv-val">' + d.l0meta.by + "</span></div>" +
+        '<div class="kv-row"><span class="kv-key">模型</span><span class="kv-val">' + d.l0meta.model + "</span></div>" +
+        '<div class="kv-row"><span class="kv-key">生成于</span><span class="kv-val">' + d.fresh.generated + "</span></div>" +
+        '<div class="kv-row"><span class="kv-key">触发</span><span class="kv-val">会话提交 session_7c1a</span></div>' +
+        '<div class="kv-row"><span class="kv-key">覆盖</span><span class="kv-val">' + d.fresh.total + " 个条目</span></div>" +
+      "</div></div>" +
+    "</section>" +
+
+    '<section class="rail-block">' +
+      '<div class="rail-block-head">新鲜度</div>' +
+      '<div class="rail-block-body">' +
+        '<div class="fresh ' + (stale ? "is-stale" : "is-fresh") + '">' +
+          '<div class="fresh-head">' + icon(stale ? "alert" : "check") + "<span>" + (stale ? "摘要待刷新" : "摘要为最新") + "</span></div>" +
+          "<p>" + d.fresh.note + "</p>" +
+          '<div class="fresh-gauge">' +
+            '<span class="tnum">' + d.fresh.pending + "/" + d.fresh.total + "</span>" +
+            '<span class="bar ' + (stale ? "bar--warn" : "bar--ok") + '"><i style="width:' + pct + '%"></i></span>' +
+            '<span class="tnum">' + pct + "%</span>" +
+          "</div>" +
+          '<div class="kv" style="margin-top:2px">' +
+            '<div class="kv-row"><span class="kv-key">内容更新</span><span class="kv-val">' + d.fresh.updated + "</span></div>" +
+            '<div class="kv-row"><span class="kv-key">落后</span><span class="kv-val" style="color:' + (stale ? "var(--warn)" : "var(--ok)") + '">' + d.fresh.lag + "</span></div>" +
+            '<div class="kv-row"><span class="kv-key">重算阈值</span><span class="kv-val">' + d.fresh.threshold + "%</span></div>" +
+          "</div>" +
+          (d.fresh.task
+            ? '<div class="callout callout--info" style="margin-top:4px">' + icon("info") +
+              "<span><b>重算中</b><br><span class='mono'>" + d.fresh.task.split(" · ").slice(0, 2).join(" · ") + "</span><br><span>" + d.fresh.task.split(" · ").slice(2).join(" · ") + "</span></span></div>"
+            : '<div class="callout callout--ok" style="margin-top:4px">' + icon("check") + "<span>无待处理任务</span></div>") +
+        "</div>" +
+      "</div>" +
+    "</section>" +
+
+    '<section class="rail-block">' +
+      '<div class="rail-block-head">有效权限</div>' +
+      '<div class="rail-block-body"><div class="kv">' +
+        d.acl.map(function (a) {
+          return '<div class="kv-row" style="grid-template-columns:minmax(0,1fr) auto;align-items:baseline">' +
+            '<span class="kv-key" style="font-family:var(--font-mono);color:var(--text-2)">' + a.p + "</span>" +
+            '<span class="kv-val lv lv--' + a.lv + '">' + a.lv + "</span>" +
+          "</div>" +
+          '<div style="grid-column:1/-1;margin:-4px 0 6px;font-size:13px;color:var(--text-3)">' + a.src + "</div>";
+        }).join("") +
+      "</div>" +
+      '<a class="btn btn--secondary btn--sm" href="acl.html" style="width:100%;margin-top:6px">在权限管理中打开 ↗</a>' +
+      "</div>" +
+    "</section>" +
+
+    '<section class="rail-block">' +
+      '<div class="rail-block-head">存储</div>' +
+      '<div class="rail-block-body"><div class="kv">' +
+        '<div class="kv-row"><span class="kv-key">大小</span><span class="kv-val">' + d.size + "</span></div>" +
+        (d.lines ? '<div class="kv-row"><span class="kv-key">行数</span><span class="kv-val">' + d.lines + "</span></div>" : "") +
+        (d.writes ? '<div class="kv-row"><span class="kv-key">写入次数</span><span class="kv-val">' + d.writes + "</span></div>" : "") +
+        '<div class="kv-row"><span class="kv-key">最后更新</span><span class="kv-val">' + d.updated + "</span></div>" +
+      "</div></div>" +
+    "</section>";
+}
+
+/* ==========================================================================
+   交互
+   ========================================================================== */
+function select(uri) {
+  currentUri = uri;
+  currentLayer = 0;
+  document.querySelectorAll(".tree-row[data-uri]").forEach(function (row) {
+    row.setAttribute("aria-selected", String(row.getAttribute("data-uri") === uri));
+  });
+  renderDetail();
+  var pane = document.getElementById("detailPane");
+  if (pane && pane.scrollTo) {
+    var scroll = pane.querySelector(".detail-scroll");
+    if (scroll) scroll.scrollTop = 0;
+  }
+}
+
+function toast(message) {
+  var layer = document.getElementById("toastLayer");
+  var node = document.createElement("div");
+  node.className = "toast";
+  node.innerHTML = '<span class="dot"></span><span></span>';
+  node.lastChild.textContent = message;
+  layer.appendChild(node);
+  setTimeout(function () {
+    node.classList.add("is-leaving");
+    setTimeout(function () { node.remove(); }, 200);
+  }, 2200);
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  /* 主题 */
+  var root = document.documentElement;
+  var toggle = document.getElementById("themeToggle");
+  function syncLabel() {
+    toggle.setAttribute("aria-label", root.getAttribute("data-theme") === "light" ? "切换到深色主题" : "切换到浅色主题");
+  }
+  toggle.addEventListener("click", function () {
+    var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("comem-theme", next); } catch (e) {}
+    syncLabel();
+  });
+  syncLabel();
+
+  /* 树选择 */
+  document.getElementById("tree").addEventListener("click", function (e) {
+    var row = e.target.closest(".tree-row");
+    if (!row) return;
+    if (e.target.closest(".tree-caret")) return; /* 交给 details 默认展开 */
+    var uri = row.getAttribute("data-uri");
+    if (!uri) return;
+    e.preventDefault();
+    if (!DOCS[uri]) {
+      toast("该节点未编入演示数据");
+      return;
+    }
+    select(uri);
+    var group = row.closest("details");
+    while (group) {
+      group.open = true;
+      group = group.parentElement ? group.parentElement.closest("details") : null;
+    }
+  });
+
+  /* 筛选 */
+  var filter = document.getElementById("treeFilter");
+  filter.addEventListener("input", function () {
+    var q = filter.value.trim().toLowerCase();
+    document.querySelectorAll("#tree .tree-row").forEach(function (row) {
+      var name = row.querySelector(".tree-name");
+      var hit = !q || (name && name.textContent.toLowerCase().indexOf(q) !== -1);
+      row.style.display = hit ? "" : "none";
+    });
+    if (q) {
+      document.querySelectorAll("#tree details").forEach(function (d) { d.open = true; });
+    }
+  });
+
+  /* 键盘 1 / 2 / 3 切层 */
+  document.addEventListener("keydown", function (e) {
+    if (e.target.matches("input, textarea")) return;
+    if (["1", "2", "3"].indexOf(e.key) === -1) return;
+    currentLayer = Number(e.key) - 1;
+    renderDetail();
+  });
+
+  document.getElementById("btnRefresh").addEventListener("click", function () {
+    toast("索引已刷新 · 128 个条目");
+  });
+
+  renderDetail();
+});
+</script>
+</body>
+</html>

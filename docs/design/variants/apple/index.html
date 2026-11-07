@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoMem 控制台 · Apple 设计语言</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  document.documentElement.dataset.theme = (() => {
+    try { return localStorage.getItem('comem-apple-theme') || 'dark'; } catch (e) { return 'dark'; }
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+
+  <!-- ==================== 侧边栏 ==================== -->
+  <aside class="sidebar">
+    <div class="sidebar__brand">
+      <span class="brand-mark" aria-hidden="true"><span class="strata strata--lg"><i></i><i></i><i></i></span></span>
+      <span class="brand-text"><b>CoMem</b><span>Console</span></span>
+    </div>
+
+    <div class="scope-wrap">
+      <button class="scope" type="button" id="scopeBtn" title="切换命名空间" aria-haspopup="true" aria-expanded="false">
+        <span class="scope__scheme">comem://</span>
+        <span class="scope__path">user/alice</span>
+        <svg class="scope__chev" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+      </button>
+
+      <div class="popover" id="scopePop" role="menu" aria-label="命名空间" hidden>
+        <div class="popover__label">命名空间</div>
+        <button class="popover__item is-active" type="button" role="menuitem" data-scope="user/alice">
+          <span class="dot" style="color:var(--green)"></span>
+          <span class="popover__path">comem://user/alice</span>
+          <span class="popover__meta">个人空间 · manage</span>
+        </button>
+        <button class="popover__item" type="button" role="menuitem" data-scope="group/eng">
+          <span class="dot" style="color:var(--teal)"></span>
+          <span class="popover__path">comem://group/eng</span>
+          <span class="popover__meta">组空间 · write</span>
+        </button>
+      </div>
+    </div>
+
+    <nav class="sidenav" aria-label="主导航">
+      <div class="sidenav__label">控制台</div>
+      <a class="navitem" href="filesystem.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.9c.4 0 .8.2 1 .5l.7 1H12a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 12.5H3.5A1.5 1.5 0 0 1 2 11V4.5Z"/></svg>
+        <span>文件树</span><span class="navitem__count">128</span>
+      </a>
+      <a class="navitem" href="search.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+        <span>检索调试</span>
+      </a>
+      <a class="navitem" href="review.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.5h10v9.5H3z"/><path d="m5.4 8.4 1.8 1.8 3.4-3.6"/></svg>
+        <span>记忆复核</span><span class="navitem__count">5</span>
+      </a>
+      <div class="sidenav__label">治理</div>
+      <a class="navitem" href="acl.html">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6.5" width="10" height="6.5" rx="1.4"/><path d="M5.5 6.5V5a2.5 2.5 0 0 1 5 0v1.5"/></svg>
+        <span>权限管理</span>
+      </a>
+      <a class="navitem is-active" href="index.html" aria-current="page">
+        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 14 5.4 8 8.6 2 5.4z"/><path d="m2 8.6 6 3.2 6-3.2"/></svg>
+        <span>设计规范</span>
+      </a>
+    </nav>
+
+    <div class="sidebar__foot">
+      <div class="footstat"><span>索引条目</span><b>128</b></div>
+      <div class="footbar"><i style="width:64%"></i></div>
+      <div class="footstat"><span>待复核</span><b style="color:var(--orange-ink)">5</b></div>
+      <div class="footstat"><span>运行中任务</span><b>2</b></div>
+    </div>
+  </aside>
+
+  <!-- ==================== 主区 ==================== -->
+  <div class="main">
+    <header class="titlebar">
+      <div class="titlebar__title">
+        <span class="crumb"><span class="current">CoMem Console</span><span class="sep">/</span><span>设计规范</span></span>
+      </div>
+      <div class="titlebar__spacer"></div>
+      <div class="titlebar__group">
+        <span class="tag"><span class="dot" style="color:var(--green)"></span>Apple 设计语言</span>
+        <button class="iconbtn" type="button" id="themeBtn" aria-label="切换深浅色" title="切换深浅色"></button>
+        <span class="avatar" title="alice@eng">AL</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="page">
+
+        <!-- ============ 题头 ============ -->
+        <header class="masthead">
+          <div class="eyebrow">
+            <span class="strata" aria-hidden="true"><i></i><i></i><i></i></span>
+            CoMem Console · 视觉规范 · v1.0
+          </div>
+          <h1>把 agent 的记忆，放进一个<em>像系统设置一样熟悉</em>的窗口。</h1>
+          <p class="lede">
+            CoMem 是面向 AI agent 的上下文记忆数据库。所有内容挂在 <span class="mono" style="color:var(--label)">comem://</span>
+            虚拟文件系统下，按 L0 一句话摘要、L1 目录概览、L2 原文三层渐进披露。
+            这套控制台采用 macOS Sequoia / iPadOS 的原生应用观感：半透明材质、连续圆角、系统色，以及足够克制的留白。
+          </p>
+          <div class="meta-line">
+            <span>页面 <b>5</b></span>
+            <span>外观 <b>深色 / 浅色</b></span>
+            <span>字体 <b>SF Pro · SF Mono</b></span>
+            <span>基准 <b>15px / 1.47</b></span>
+            <span>无构建 <b>直接打开</b></span>
+          </div>
+        </header>
+
+        <!-- ============ 01 页面索引 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">01</span>
+            <h2>页面索引</h2>
+            <span class="en">Four surfaces</span>
+          </div>
+          <p class="spec-lede">四个工作面覆盖「找到、判断、过闸、授权」四件事。每个页面只回答一个核心问题，其余信息降级为辅助。</p>
+
+          <div class="pgs">
+            <a class="pg" href="filesystem.html">
+              <span class="pg__n">01 / FILESYSTEM</span>
+              <span class="pg__t">文件树</span>
+              <span class="pg__d">左树右详情。详情可在 L0 / L1 / L2 之间切换，并交代摘要由谁生成、何时生成、是否落后。</span>
+              <span class="pg__arrow">打开 ↗</span>
+            </a>
+            <a class="pg" href="search.html">
+              <span class="pg__n">02 / RETRIEVAL</span>
+              <span class="pg__t">检索调试台</span>
+              <span class="pg__d">对比 find 与 search 的召回差异：意图拆出的多条 TypedQuery、每条命中的分数与层级，以及 ACL 到底过滤掉多少条。</span>
+              <span class="pg__arrow">打开 ↗</span>
+            </a>
+            <a class="pg" href="review.html">
+              <span class="pg__n">03 / REVIEW</span>
+              <span class="pg__t">记忆复核</span>
+              <span class="pg__d">抽取出的「经验」与「规则」生效前需要人工过一道。左右并排看 before / after，规则额外展示适用条件与例外。</span>
+              <span class="pg__arrow">打开 ↗</span>
+            </a>
+            <a class="pg" href="acl.html">
+              <span class="pg__n">04 / PERMISSION</span>
+              <span class="pg__t">权限管理</span>
+              <span class="pg__d">节点树标出 restricted 边界，右侧列出主体、级别、来源，并用一条推导链解释「有效权限」是怎么算出来的。</span>
+              <span class="pg__arrow">打开 ↗</span>
+            </a>
+          </div>
+        </section>
+
+        <!-- ============ 02 系统色板 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">02</span>
+            <h2>系统色板</h2>
+            <span class="en">System colors</span>
+          </div>
+          <p class="spec-lede">
+            强调色只有一个系统蓝，语义色只在表达状态时出现。深色不是浅色的反相：两套外观分别取值，正文对比度都不低于 WCAG AA 的 4.5:1。
+          </p>
+
+          <div class="sec-label mb-12">深色 · 默认</div>
+          <div class="swatches">
+            <div class="sw"><div class="sw__chip" style="background:#0b0b0d"></div><div class="sw__n">bg</div><div class="sw__h">#0B0B0D</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#1c1c1e"></div><div class="sw__n">surface</div><div class="sw__h">#1C1C1E</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#2c2c2e"></div><div class="sw__n">surface-3</div><div class="sw__h">#2C2C2E</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#f5f5f7"></div><div class="sw__n">label</div><div class="sw__h">#F5F5F7</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#b9b9c2"></div><div class="sw__n">label-2</div><div class="sw__h">#B9B9C2</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#0a84ff"></div><div class="sw__n">accent</div><div class="sw__h">#0A84FF</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#30d158"></div><div class="sw__n">green</div><div class="sw__h">#30D158</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#ff9f0a"></div><div class="sw__n">orange</div><div class="sw__h">#FF9F0A</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#ff453a"></div><div class="sw__n">red</div><div class="sw__h">#FF453A</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#bf5af2"></div><div class="sw__n">purple</div><div class="sw__h">#BF5AF2</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#40c8e0"></div><div class="sw__n">teal</div><div class="sw__h">#40C8E0</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#8e8e93"></div><div class="sw__n">gray</div><div class="sw__h">#8E8E93</div></div>
+          </div>
+
+          <div class="sec-label mb-12" style="margin-top:26px">浅色 · 纸白</div>
+          <div class="swatches">
+            <div class="sw"><div class="sw__chip" style="background:#f5f5f7"></div><div class="sw__n">bg</div><div class="sw__h">#F5F5F7</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#ffffff"></div><div class="sw__n">surface</div><div class="sw__h">#FFFFFF</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#ededf0"></div><div class="sw__n">surface-3</div><div class="sw__h">#EDEDF0</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#1d1d1f"></div><div class="sw__n">label</div><div class="sw__h">#1D1D1F</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#6e6e75"></div><div class="sw__n">label-2</div><div class="sw__h">#6E6E75</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#007aff"></div><div class="sw__n">accent</div><div class="sw__h">#007AFF</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#34c759"></div><div class="sw__n">green</div><div class="sw__h">#34C759</div></div>
+            <div class="sw"><div class="sw__chip" style="background:#ff3b30"></div><div class="sw__n">red</div><div class="sw__h">#FF3B30</div></div>
+          </div>
+
+          <p class="caption mt-16" style="max-width:74ch">
+            填充按钮用加深一档的 <span class="mono">accent-fill</span>（#0A6BD6 / #0071E3），保证白字对比度 ≥ 4.5:1；
+            浅色下的语义色文字压暗到 <span class="mono">--*-ink</span>，深色下提亮，两者共用同一组语义 token。
+          </p>
+        </section>
+
+        <!-- ============ 03 字号阶梯 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">03</span>
+            <h2>字号阶梯</h2>
+            <span class="en">Type scale</span>
+          </div>
+          <p class="spec-lede">
+            基础字号 15px，行高 1.47。标题用负字距收紧，SF Pro 在大字号下不需要额外加宽。全站最小字号 13px，且只用于极短标签。
+          </p>
+
+          <div class="type-row">
+            <span class="type-row__k">display</span>
+            <span class="type-row__s" style="font-size:34px;line-height:1.1;font-weight:700;letter-spacing:-0.024em">可检索的档案库</span>
+            <span class="type-row__v">34 / 1.10 / −0.024em</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">title-xl</span>
+            <span class="type-row__s" style="font-size:28px;line-height:1.16;font-weight:700;letter-spacing:-0.021em">文件树浏览器</span>
+            <span class="type-row__v">28 / 1.16 / −0.021em</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">title</span>
+            <span class="type-row__s" style="font-size:22px;line-height:1.24;font-weight:600;letter-spacing:-0.018em">摘要待刷新</span>
+            <span class="type-row__v">22 / 1.24 / −0.018em</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">headline</span>
+            <span class="type-row__s" style="font-size:17px;line-height:1.35;font-weight:590;letter-spacing:-0.011em">code-style.md</span>
+            <span class="type-row__v">17 / 1.35 / −0.011em</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">body</span>
+            <span class="type-row__s" style="font-size:15px;line-height:1.47;color:var(--label-2)">用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进。</span>
+            <span class="type-row__v">15 / 1.47 / −0.006em</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">table</span>
+            <span class="type-row__s" style="font-size:14px;line-height:1.45;color:var(--label-2)">group:eng · write · 继承自 comem://user/alice/memories/</span>
+            <span class="type-row__v">14 / 1.45 / 0</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">caption</span>
+            <span class="type-row__s" style="font-size:13px;color:var(--label-3)">L0 · SUMMARY.SERVICE · 2026-11-07 22:14</span>
+            <span class="type-row__v">13 / 1.40 / 0</span>
+          </div>
+          <div class="type-row">
+            <span class="type-row__k">mono</span>
+            <span class="type-row__s mono" style="font-size:14px;color:var(--label-2)">comem://user/alice/memories/preferences/code-style.md</span>
+            <span class="type-row__v">SF Mono · 14</span>
+          </div>
+        </section>
+
+        <!-- ============ 04 材质与圆角 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">04</span>
+            <h2>材质与圆角</h2>
+            <span class="en">Materials &amp; shape</span>
+          </div>
+          <p class="spec-lede">
+            侧边栏、工具栏、底部操作条使用同一套半透明材质：<span class="mono">blur(30px) saturate(180%)</span> 加半透明底色。
+            材质只用来表达层级——它出现在固定的外壳上，不用于内容卡片。
+          </p>
+
+          <div class="materials mb-20">
+            <div class="material-demo">
+              <div class="material-demo__panel"><b>Sidebar · 62%</b>侧边栏材质</div>
+            </div>
+            <div class="material-demo" style="background:
+              radial-gradient(120px 90px at 30% 80%, rgba(48, 209, 88, 0.45), transparent 70%),
+              radial-gradient(140px 110px at 78% 18%, rgba(255, 159, 10, 0.4), transparent 72%),
+              linear-gradient(150deg, #24361f, #4a3518 60%, #1b2a24);">
+              <div class="material-demo__panel" style="background:var(--material-toolbar)"><b>Toolbar · 78%</b>工具栏材质</div>
+            </div>
+          </div>
+
+          <div class="radii mb-20">
+            <div class="radius"><i style="border-radius:6px"></i><b>6px</b><span>标记</span></div>
+            <div class="radius"><i style="border-radius:10px"></i><b>10px</b><span>控件</span></div>
+            <div class="radius"><i style="border-radius:18px"></i><b>18px</b><span>卡片</span></div>
+            <div class="radius"><i style="border-radius:22px"></i><b>22px</b><span>面板</span></div>
+            <div class="radius"><i style="border-radius:24px 24px 0 0"></i><b>24px</b><span>Sheet</span></div>
+          </div>
+
+          <dl class="spec-list">
+            <div><dt>连续圆角</dt><dd>圆角之外再叠一层 <span class="mono">inset 0 0 0 0.5px</span> 细描边与 <span class="mono">inset 0 0.5px 0</span> 顶部高光，模拟 squircle 的过渡。</dd></div>
+            <div><dt>层级</dt><dd>内容卡片用发丝描边 + 极低扩散阴影；浮层才用大阴影。阴影不用来表达「可点击」。</dd></div>
+            <div><dt>描边</dt><dd>统一 0.5px，颜色 <span class="mono">rgba(255,255,255,.1)</span>。深色下靠透明度，浅色下靠不透明度。</dd></div>
+            <div><dt>动效</dt><dd>统一 <span class="mono">cubic-bezier(0.32, 0.72, 0, 1)</span>，悬停 160ms、进入 280ms。只动 transform 与 opacity。</dd></div>
+          </dl>
+        </section>
+
+        <!-- ============ 05 组件形态 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">05</span>
+            <h2>组件形态</h2>
+            <span class="en">Components</span>
+          </div>
+          <p class="spec-lede">所有组件共享同一套 token。按钮高度 32–38px，主要操作用填充色，次要操作给半透明底。</p>
+
+          <div class="comp-grid">
+            <div class="comp-box">
+              <span class="comp-box__label">按钮</span>
+              <div class="comp-row">
+                <button class="btn btn--primary" type="button">通过并生效</button>
+                <button class="btn btn--secondary" type="button">重试任务</button>
+                <button class="btn btn--plain" type="button">取消</button>
+                <button class="btn btn--danger" type="button">拒绝</button>
+                <button class="btn btn--secondary" type="button" disabled>不可用</button>
+              </div>
+            </div>
+
+            <div class="comp-box">
+              <span class="comp-box__label">分段控件</span>
+              <div class="comp-row">
+                <div class="segmented">
+                  <button type="button" aria-selected="true">find</button>
+                  <button type="button" aria-selected="false">search</button>
+                </div>
+                <div class="segmented">
+                  <button type="button" aria-selected="false">全部</button>
+                  <button type="button" aria-selected="true">经验</button>
+                  <button type="button" aria-selected="false">规则</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="comp-box">
+              <span class="comp-box__label">标记</span>
+              <div class="comp-row">
+                <span class="pill pill--green">active</span>
+                <span class="pill pill--orange">pending</span>
+                <span class="pill pill--red">failed</span>
+                <span class="pill pill--blue">running</span>
+                <span class="pill pill--purple">restricted</span>
+                <span class="pill pill--gray">inherit</span>
+              </div>
+            </div>
+
+            <div class="comp-box">
+              <span class="comp-box__label">层级刻度</span>
+              <div class="comp-row" style="gap:20px">
+                <span class="leveltag" data-level="0"><span class="strata"><i></i><i></i><i></i></span><b>L0</b></span>
+                <span class="leveltag" data-level="1"><span class="strata"><i></i><i></i><i></i></span><b>L1</b></span>
+                <span class="leveltag" data-level="2"><span class="strata"><i></i><i></i><i></i></span><b>L2</b></span>
+              </div>
+              <p class="caption" style="margin:0">三条递减横线是 L0 / L1 / L2 的母题，在 logo、切换器、命中层级里反复出现。</p>
+            </div>
+
+            <div class="comp-box">
+              <span class="comp-box__label">输入与开关</span>
+              <div class="searchfield">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+                <input value="TypeScript 严格模式" aria-label="示例检索词">
+              </div>
+              <div class="comp-row">
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="示例开关" data-switch></button>
+                <button class="switch" type="button" role="switch" aria-checked="false" aria-label="示例开关" data-switch></button>
+              </div>
+            </div>
+
+            <div class="comp-box">
+              <span class="comp-box__label">状态</span>
+              <div class="comp-row" style="gap:18px">
+                <span class="status"><span class="dot" style="color:var(--gray)"></span>pending</span>
+                <span class="status status--info"><span class="dot dot--pulse"></span>running</span>
+                <span class="status status--ok"><span class="dot" style="color:var(--green)"></span>done</span>
+                <span class="status status--err"><span class="dot" style="color:var(--red)"></span>failed</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec-label" style="margin:26px 0 10px">列表行与提示条</div>
+          <div class="grid-2">
+            <div class="group">
+              <div class="group__row">
+                <div class="group__main">
+                  <div class="group__k">code-style.md</div>
+                  <div class="group__v">1.4 KB · 2026-11-07 22:31</div>
+                </div>
+                <div class="group__aside"><span class="leveltag" data-level="0"><span class="strata"><i></i><i></i><i></i></span><b>L0</b></span></div>
+              </div>
+              <div class="group__row">
+                <div class="group__main">
+                  <div class="group__k">communication.md</div>
+                  <div class="group__v">912 B · 2026-11-06 09:12</div>
+                </div>
+                <div class="group__aside"><span class="leveltag" data-level="1"><span class="strata"><i></i><i></i><i></i></span><b>L1</b></span></div>
+              </div>
+              <div class="group__row">
+                <div class="group__main">
+                  <div class="group__k">writing-style.md</div>
+                  <div class="group__v">2.1 KB · 2026-11-04 15:40</div>
+                </div>
+                <div class="group__aside"><span class="leveltag" data-level="2"><span class="strata"><i></i><i></i><i></i></span><b>L2</b></span></div>
+              </div>
+            </div>
+
+            <div class="stack-12">
+              <div class="callout callout--warn">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.8 14 13H2z"/><path d="M8 6.6v2.6"/><path d="M8 11.3v.1"/></svg>
+                <div>摘要落后于内容，2 条记录待刷新。</div>
+              </div>
+              <div class="callout callout--info">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 7.2v3.6"/><path d="M8 5.1v.1"/></svg>
+                <div>ACL 过滤 2 条，按当前身份 <span class="mono">user:alice</span> 计算。</div>
+              </div>
+              <div class="callout callout--success">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.2 3.2L13 5"/></svg>
+                <div>通过后 <span class="mono">pending</span> 写回 <span class="mono">active</span>。</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 06 做与不做 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">06</span>
+            <h2>做与不做</h2>
+            <span class="en">Do / Don't</span>
+          </div>
+          <p class="spec-lede">Apple 的克制是有代价的：每多一种装饰，就少一分可读性。下面几条是这一版反复校对的底线。</p>
+
+          <div class="dodont">
+            <div class="dd dd--do">
+              <div class="dd__head">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.2 3.2L13 5"/></svg>
+                做
+              </div>
+              <ul>
+                <li>正文 15px、行高 1.47，表格 14px；最小 13px 只给短标签。</li>
+                <li>主要操作是填充色 + 白字，高度 36px；次要操作给半透明底。</li>
+                <li>用大间距（24–32px）分组，而不是往每块之间塞分割线。</li>
+                <li>URI、字段名、状态值、数字一律等宽字体 + 表格数字。</li>
+                <li>侧边栏和工具栏用同一套半透明材质，滚动时内容从下面透出来。</li>
+                <li>动效只做位移与透明度，尊重 <code>prefers-reduced-motion</code>。</li>
+              </ul>
+            </div>
+            <div class="dd dd--dont">
+              <div class="dd__head">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+                不做
+              </div>
+              <ul>
+                <li>不用 10–11px 的「信息密度字号」，那是把可读性换成假装的精致。</li>
+                <li>不用紫蓝渐变、发光球体、彩色图标底板。</li>
+                <li>不在界面里暴露开发期内部字段名，用「基线」「待刷新」这类说法。</li>
+                <li>不用颜色单独表意：状态一定同时带文字或形状。</li>
+                <li>不用纯阴影表达层级，也不用大于 24px 的圆角。</li>
+                <li>不把交互藏在悬停里，所有操作都有可见入口。</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 07 结构约定 ============ -->
+        <section class="spec-section">
+          <div class="spec-head">
+            <span class="num">07</span>
+            <h2>结构约定</h2>
+            <span class="en">Layout rules</span>
+          </div>
+
+          <dl class="spec-list">
+            <div><dt>间距刻度</dt><dd>4 · 8 · 12 · 16 · 20 · 24 · 32 · 40 · 56。组件内 12/16，区块间 24/32，页面级 40/56。</dd></div>
+            <div><dt>行高</dt><dd>树行 30px、表格行 44px、列表行 52px。密度靠行高与留白控制，不靠缩字号。</dd></div>
+            <div><dt>外壳</dt><dd>侧边栏 238px + 主区自适应；内部分栏 320px。主区独立滚动，外壳固定。</dd></div>
+            <div><dt>栅格</dt><dd>4px 基准。详情页正文列上限 1120px，右栏 300px，长文行长 68ch。</dd></div>
+            <div><dt>主题</dt><dd>默认深色，<code>localStorage</code> 记忆选择，跨页面保持；两套外观独立校对对比度。</dd></div>
+            <div><dt>文案</dt><dd>界面语言中文；URI、字段名、状态值、主体标识保留英文原文，避免对接时二次翻译。</dd></div>
+          </dl>
+        </section>
+
+        <p class="footer-note">
+          CoMem · 上下文记忆数据库 · 控制台视觉规范 v1.0<br>
+          文件：docs/design/variants/apple/ · 入口 index.html · 无构建步骤 · 无外部依赖
+        </p>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="toast-wrap" role="status" aria-live="polite"></div>
+
+<script>
+const I = {
+  sun: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"/></svg>',
+  moon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 9.4A5.6 5.6 0 0 1 6.6 3a5.6 5.6 0 1 0 6.4 6.4Z"/></svg>',
+  check: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.2 3.2L13 5"/></svg>'
+};
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+let toastTimer = null;
+function toast(msg) {
+  const wrap = $('.toast-wrap');
+  wrap.innerHTML = `<div class="toast">${I.check}<span>${esc(msg)}</span></div>`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { wrap.innerHTML = ''; }, 2200);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const themeBtn = $('#themeBtn');
+  const syncTheme = () => {
+    themeBtn.innerHTML = document.documentElement.dataset.theme === 'dark' ? I.sun : I.moon;
+  };
+  syncTheme();
+  themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('comem-apple-theme', next); } catch (e) {}
+    syncTheme();
+    toast(next === 'dark' ? '已切换到深色' : '已切换到浅色');
+  });
+
+  const scopePop = $('#scopePop');
+  const closeScope = () => {
+    scopePop.hidden = true;
+    $('#scopeBtn').setAttribute('aria-expanded', 'false');
+  };
+  $('#scopeBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    scopePop.hidden = !scopePop.hidden;
+    $('#scopeBtn').setAttribute('aria-expanded', String(!scopePop.hidden));
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.scope-wrap')) closeScope();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeScope();
+  });
+  $$('#scopePop [data-scope]').forEach((b) => {
+    b.addEventListener('click', () => {
+      closeScope();
+      toast(`已切换到 ${b.dataset.scope}`);
+    });
+  });
+
+  $$('[data-switch]').forEach((sw) => {
+    sw.addEventListener('click', () => {
+      const on = sw.getAttribute('aria-checked') === 'true';
+      sw.setAttribute('aria-checked', String(!on));
+    });
+  });
+});
+</script>
+</body>
+</html>

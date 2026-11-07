@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用户与组 · CoMem 控制台</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="admin" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main">
+      <div class="pad">
+
+        <div class="page-head">
+          <div>
+            <div class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span>用户与组</span></div>
+            <h1 class="page-title">用户与组</h1>
+            <p class="page-sub">
+              组只做一层，不嵌套。组空间的默认权限在创建时预置，之后可以降级成只读。
+              成员变更立即生效：ACL 存的是 <span class="mono" style="color:var(--ink)">group:{gid}</span> 这个主体，不展开成成员列表。
+            </p>
+          </div>
+          <div class="page-actions">
+            <button class="btn" id="btnInvite">邀请用户</button>
+            <button class="btn btn-primary" id="btnNewGroup">新建组</button>
+          </div>
+        </div>
+
+        <!-- 概览 -->
+        <div class="metric-strip" style="margin-bottom:18px">
+          <div class="metric"><div class="m-v tnum">5</div><div class="m-k">用户</div></div>
+          <div class="metric"><div class="m-v tnum">3</div><div class="m-k">组</div></div>
+          <div class="metric"><div class="m-v tnum">272</div><div class="m-k">记忆条目</div></div>
+          <div class="metric"><div class="m-v tnum">88.3<small>MB</small></div><div class="m-k">存储占用</div></div>
+        </div>
+
+        <div style="margin-bottom:14px">
+          <div class="seg" data-tabs data-tabs-scope="#tabs">
+            <button data-tab="users" class="is-active">用户 <span class="faint">5</span></button>
+            <button data-tab="groups">组 <span class="faint">3</span></button>
+          </div>
+        </div>
+
+        <div id="tabs">
+
+          <!-- ================= 用户 ================= -->
+          <div data-panel="users">
+            <div class="admin-grid">
+
+              <div class="panel" style="overflow:hidden">
+                <div class="panel-h">
+                  <span class="t">用户列表</span>
+                  <span class="spacer"></span>
+                  <div class="searchbox" style="max-width:200px">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+                    <input class="input mono" placeholder="搜索 uid 或邮箱" aria-label="搜索用户" style="height:25px;font-size:11px">
+                  </div>
+                </div>
+                <table class="tbl">
+                  <thead>
+                    <tr>
+                      <th style="width:70px">uid</th>
+                      <th style="width:110px">名称</th>
+                      <th>邮箱</th>
+                      <th style="width:108px">所属组</th>
+                      <th class="num" style="width:70px">条目</th>
+                      <th class="num" style="width:76px">存储</th>
+                      <th style="width:86px">最近活跃</th>
+                      <th style="width:72px">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody id="userRows"></tbody>
+                </table>
+                <div style="padding:9px 12px;border-top:1px solid var(--line);background:var(--bg-2)" class="hint">
+                  owner 恒为 manage，不能被 ACL 收回；其余用户的权限由所属组与直接授权共同决定。
+                </div>
+              </div>
+
+              <!-- 用户详情 -->
+              <div class="panel" id="userPanel"></div>
+
+              <div class="panel" style="overflow:hidden;grid-column:1 / -1">
+                <div class="panel-h">
+                  <span class="t">最近管理操作</span>
+                  <span class="spacer"></span>
+                  <span class="hint mono" style="font-size:9.5px">保留 30 天</span>
+                </div>
+                <table class="tbl">
+                  <thead><tr><th style="width:88px">时间</th><th style="width:80px">操作者</th><th>操作</th><th style="width:190px">对象</th></tr></thead>
+                  <tbody>
+                    <tr><td class="hint mono" style="font-size:10.5px">22:31</td><td class="mono">alice</td><td>将 <span class="mono">group:eng</span> 的级别从 read 提升为 write</td><td class="mono" style="font-size:11px;color:var(--ink-3)">comem://user/alice/memories/preferences/</td></tr>
+                    <tr><td class="hint mono" style="font-size:10.5px">19:12</td><td class="mono">alice</td><td>把 <span class="mono">memories/private/</span> 切换为 restricted</td><td class="mono" style="font-size:11px;color:var(--ink-3)">comem://user/alice/memories/private/</td></tr>
+                    <tr><td class="hint mono" style="font-size:10.5px">昨天</td><td class="mono">carol</td><td>接受 <span class="mono">design</span> 组的成员邀请</td><td class="mono" style="font-size:11px;color:var(--ink-3)">comem://group/design/</td></tr>
+                    <tr><td class="hint mono" style="font-size:10.5px">3 天前</td><td class="mono">system</td><td>组空间默认权限降级为 read</td><td class="mono" style="font-size:11px;color:var(--ink-3)">comem://group/ops/</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- ================= 组 ================= -->
+          <div data-panel="groups" hidden>
+            <div class="admin-grid">
+
+              <div class="panel" style="overflow:hidden">
+                <div class="panel-h">
+                  <span class="t">组列表</span>
+                  <span class="spacer"></span>
+                  <span class="hint mono" style="font-size:10px">不嵌套</span>
+                </div>
+                <table class="tbl">
+                  <thead>
+                    <tr>
+                      <th style="width:84px">gid</th>
+                      <th style="width:96px">名称</th>
+                      <th class="num" style="width:66px">成员</th>
+                      <th>空间路径</th>
+                      <th style="width:96px">默认权限</th>
+                      <th style="width:96px">最近提交</th>
+                    </tr>
+                  </thead>
+                  <tbody id="groupRows"></tbody>
+                </table>
+                <div style="padding:9px 12px;border-top:1px solid var(--line);background:var(--bg-2)" class="hint">
+                  组空间在创建时预置 <span class="mono">group:{gid} = write</span>。降级成只读只需要改这一条，不需要回写成员。
+                </div>
+              </div>
+
+              <!-- 组成员 -->
+              <div class="panel" id="groupPanel"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="comem.js"></script>
+<script>
+const USERS = [
+  { uid: 'alice', name: 'Alice Chen', mail: 'alice@eng.comem.dev', groups: ['eng', 'design'], entries: 128, size: '42.1 MB', active: '3 分钟前', status: 'active' },
+  { uid: 'bob', name: 'Bob Liu', mail: 'bob@eng.comem.dev', groups: ['eng'], entries: 96, size: '31.7 MB', active: '2 小时前', status: 'active' },
+  { uid: 'carol', name: 'Carol Wu', mail: 'carol@eng.comem.dev', groups: ['design'], entries: 41, size: '12.4 MB', active: '昨天', status: 'active' },
+  { uid: 'dave', name: 'Dave Zhang', mail: 'dave@eng.comem.dev', groups: ['eng'], entries: 7, size: '2.1 MB', active: '12 天前', status: 'read-only' },
+  { uid: 'erin', name: 'Erin Park', mail: 'erin@eng.comem.dev', groups: [], entries: 0, size: '0 B', active: '从未', status: 'pending' }
+];
+
+const GROUPS = [
+  {
+    gid: 'eng', name: '工程组', path: 'comem://group/eng/', level: 'write', last: '22 分钟前',
+    members: [
+      { uid: 'alice', role: 'owner' },
+      { uid: 'bob', role: 'member' },
+      { uid: 'dave', role: 'member' },
+      { uid: 'erin', role: 'pending' }
+    ]
+  },
+  {
+    gid: 'design', name: '设计组', path: 'comem://group/design/', level: 'read', last: '昨天',
+    members: [
+      { uid: 'carol', role: 'owner' },
+      { uid: 'alice', role: 'member' }
+    ]
+  },
+  {
+    gid: 'ops', name: '运维组', path: 'comem://group/ops/', level: 'read', last: '3 天前',
+    members: [
+      { uid: 'dave', role: 'owner' }
+    ]
+  }
+];
+
+let selectedUser = 'alice';
+let selectedGroup = 'eng';
+
+const STATUS_BADGE = {
+  active: '<span class="badge badge-ok">active</span>',
+  'read-only': '<span class="badge badge-neutral">read-only</span>',
+  pending: '<span class="badge badge-warn">pending</span>'
+};
+
+function renderUsers() {
+  document.getElementById('userRows').innerHTML = USERS.map((u) => `
+    <tr class="${u.uid === selectedUser ? 'is-sel' : ''}" data-uid="${u.uid}">
+      <td class="mono strong">${u.uid}</td>
+      <td>${u.name}</td>
+      <td class="mono" style="font-size:11px;color:var(--ink-3)">${u.mail}</td>
+      <td><div style="display:flex;gap:4px;flex-wrap:wrap">${u.groups.length ? u.groups.map((g) => `<span class="tag" style="height:18px;font-size:10px">${g}</span>`).join('') : '<span class="faint">—</span>'}</div></td>
+      <td class="num">${u.entries}</td>
+      <td class="num" style="color:var(--ink-3)">${u.size}</td>
+      <td class="hint mono" style="font-size:10.5px">${u.active}</td>
+      <td>${STATUS_BADGE[u.status]}</td>
+    </tr>`).join('');
+
+  const u = USERS.find((x) => x.uid === selectedUser);
+  document.getElementById('userPanel').innerHTML = `
+    <div class="panel-h">
+      <span class="t">${u.name}</span>
+      <span class="spacer"></span>
+      <span class="avatar">${u.uid.slice(0, 2).toUpperCase()}</span>
+    </div>
+    <div class="panel-b">
+      <dl class="kv">
+        <dt>uid</dt><dd class="mono" style="color:var(--ink)">${u.uid}</dd>
+        <dt>邮箱</dt><dd class="mono" style="font-size:11px">${u.mail}</dd>
+        <dt>个人空间</dt><dd class="mono" style="font-size:11px;word-break:break-all">comem://user/${u.uid}/</dd>
+        <dt>所属组</dt><dd>${u.groups.length ? u.groups.join(' · ') : '未加入任何组'}</dd>
+        <dt>记忆条目</dt><dd class="mono">${u.entries}</dd>
+        <dt>存储占用</dt><dd class="mono">${u.size}</dd>
+        <dt>最近活跃</dt><dd class="mono" style="font-size:11px">${u.active}</dd>
+        <dt>状态</dt><dd>${STATUS_BADGE[u.status]}</dd>
+      </dl>
+
+      <div class="sec-title" style="margin:18px 0 10px">有效权限来源</div>
+      <div style="display:grid;gap:7px">
+        <div style="display:flex;align-items:center;gap:8px;font-size:11px">
+          <span class="mono" style="color:var(--ink-2)">个人空间</span>
+          <span style="flex:1;height:1px;background:var(--line)"></span>
+          <span class="mono lv-manage" style="font-size:10px">manage</span>
+        </div>
+        ${u.groups.map((g) => `<div style="display:flex;align-items:center;gap:8px;font-size:11px">
+          <span class="mono" style="color:var(--ink-2)">group:${g}</span>
+          <span style="flex:1;height:1px;background:var(--line)"></span>
+          <span class="mono ${GROUPS.find((x) => x.gid === g).level === 'write' ? 'lv-write' : 'lv-read'}" style="font-size:10px">${GROUPS.find((x) => x.gid === g).level}</span>
+        </div>`).join('') || '<div class="hint">没有组授权，只能访问个人空间。</div>'}
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:18px">
+        <button class="btn btn-sm" style="flex:1" data-goto-acl>查看权限</button>
+        <button class="btn btn-sm btn-ghost" style="flex:1" data-reset>重置会话</button>
+      </div>
+    </div>`;
+
+  document.querySelectorAll('[data-goto-acl]').forEach((b) => b.addEventListener('click', () => { window.location.href = 'acl.html'; }));
+  document.querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', () => CoMem.toast('演示稿不执行写操作')));
+}
+
+function renderGroups() {
+  document.getElementById('groupRows').innerHTML = GROUPS.map((g) => `
+    <tr class="${g.gid === selectedGroup ? 'is-sel' : ''}" data-gid="${g.gid}">
+      <td class="mono strong">${g.gid}</td>
+      <td>${g.name}</td>
+      <td class="num">${g.members.length}</td>
+      <td class="mono" style="font-size:11px;color:var(--ink-3)">${g.path}</td>
+      <td><span class="mono ${g.level === 'write' ? 'lv-write' : 'lv-read'}" style="font-size:11px">${g.level}</span></td>
+      <td class="hint mono" style="font-size:10.5px">${g.last}</td>
+    </tr>`).join('');
+
+  const g = GROUPS.find((x) => x.gid === selectedGroup);
+  document.getElementById('groupPanel').innerHTML = `
+    <div class="panel-h">
+      <span class="t">${g.name} 成员</span>
+      <span class="spacer"></span>
+      <span class="badge badge-neutral">${g.members.length} 人</span>
+    </div>
+    <div style="max-height:280px;overflow:auto">
+      ${g.members.map((m) => `
+        <div style="display:flex;align-items:center;gap:9px;padding:8px 12px;border-bottom:1px solid var(--line)">
+          <span class="avatar" style="width:20px;height:20px;font-size:9px">${m.uid.slice(0, 2).toUpperCase()}</span>
+          <span class="mono" style="font-size:11.5px;color:var(--ink);flex:1">${m.uid}</span>
+          ${m.role === 'owner'
+            ? '<span class="badge badge-accent">owner</span>'
+            : m.role === 'pending'
+              ? '<span class="badge badge-warn">待接受</span>'
+              : '<span class="badge badge-neutral">member</span>'}
+          <button class="iconbtn" style="width:20px;height:20px" title="移出组" aria-label="移出组" data-remove="${m.uid}">${CoMem.icon('x', 11)}</button>
+        </div>`).join('')}
+    </div>
+    <div class="panel-b" style="border-top:1px solid var(--line)">
+      <div class="field">
+        <span class="label">添加成员</span>
+        <div style="display:flex;gap:6px">
+          <input class="input mono" placeholder="uid，例如 carol" style="height:28px;font-size:11.5px" aria-label="添加成员 uid">
+          <button class="btn btn-sm" id="btnAddMember" style="height:28px">添加</button>
+        </div>
+        <p class="hint" style="margin:2px 0 0">成员加入后立即获得组空间的当前权限，不需要额外授权。</p>
+      </div>
+
+      <div class="sec-title" style="margin:18px 0 10px">组空间默认权限</div>
+      <div style="display:grid;gap:8px">
+        <label style="display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);cursor:pointer;${g.level === 'write' ? 'border-color:var(--accent-line);background:var(--accent-soft)' : ''}">
+          <input type="radio" name="grouplevel" ${g.level === 'write' ? 'checked' : ''} style="margin-top:2px;accent-color:var(--accent)">
+          <span>
+            <span class="mono" style="font-size:11.5px;color:var(--ink)">write</span>
+            <span class="hint" style="display:block;margin-top:1px">成员可读写组空间。默认值。</span>
+          </span>
+        </label>
+        <label style="display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);cursor:pointer;${g.level === 'read' ? 'border-color:var(--accent-line);background:var(--accent-soft)' : ''}">
+          <input type="radio" name="grouplevel" ${g.level === 'read' ? 'checked' : ''} style="margin-top:2px;accent-color:var(--accent)">
+          <span>
+            <span class="mono" style="font-size:11.5px;color:var(--ink)">read</span>
+            <span class="hint" style="display:block;margin-top:1px">只读。写入需要通过直接授权单独开放。</span>
+          </span>
+        </label>
+      </div>
+
+      <div class="callout warn" style="margin-top:12px">
+        ${CoMem.icon('alert', 13)}
+        <div>降级为 read 后，组内 <span class="mono">manage</span> 级别的成员会失去修改 ACL 的能力。owner 不受影响。</div>
+      </div>
+    </div>`;
+
+  const add = document.getElementById('btnAddMember');
+  if (add) add.addEventListener('click', () => CoMem.toast('演示稿不提交写操作'));
+  document.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    CoMem.toast(`演示稿不执行写操作 · 移出 ${b.dataset.remove}`);
+  }));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderUsers();
+  renderGroups();
+
+  document.getElementById('userRows').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-uid]');
+    if (!row) return;
+    selectedUser = row.dataset.uid;
+    renderUsers();
+  });
+
+  document.getElementById('groupRows').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-gid]');
+    if (!row) return;
+    selectedGroup = row.dataset.gid;
+    renderGroups();
+  });
+
+  document.getElementById('btnInvite').addEventListener('click', () => CoMem.toast('演示稿不提交写操作'));
+  document.getElementById('btnNewGroup').addEventListener('click', () => CoMem.toast('演示稿不提交写操作'));
+});
+</script>
+</body>
+</html>

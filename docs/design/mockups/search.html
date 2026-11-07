@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>检索调试 · CoMem 控制台</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="search" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main">
+      <div class="pad">
+
+        <div class="page-head">
+          <div>
+            <div class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span>检索调试</span></div>
+            <h1 class="page-title">检索调试台</h1>
+            <p class="page-sub">
+              同一条 query 分别走 <span class="mono" style="color:var(--ink)">find</span> 与
+              <span class="mono" style="color:var(--ink)">search</span>，对比召回差异。分数来自 FTS5 的 BM25 排序，
+              层级表示这条命中是靠摘要、概览还是原文被召回。
+            </p>
+          </div>
+          <div class="page-actions">
+            <span class="tag"><span class="dot" style="background:var(--ok)"></span>索引 fts5 · 128 条</span>
+          </div>
+        </div>
+
+        <!-- 查询条 -->
+        <div class="panel" style="margin-bottom:14px">
+          <div style="display:flex;gap:10px;padding:12px;align-items:center;flex-wrap:wrap">
+            <div class="searchbox" style="min-width:280px">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="m10.2 10.2 3 3"/></svg>
+              <input class="input mono" id="q" data-search-input value="TypeScript 严格模式 代码风格" aria-label="检索词">
+            </div>
+            <div class="seg" id="modeSeg">
+              <button data-mode="find">find</button>
+              <button data-mode="search" class="is-active">search</button>
+            </div>
+            <button class="btn btn-primary" id="btnRun">执行检索</button>
+            <span class="spacer" style="flex:1"></span>
+            <span class="hint mono" style="font-size:10px">targetUri: comem://user/alice/</span>
+          </div>
+          <div style="display:flex;gap:14px;padding:0 12px 11px;flex-wrap:wrap">
+            <label class="hint" style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" checked style="accent-color:var(--accent)"> level 不过滤</label>
+            <label class="hint" style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" style="accent-color:var(--accent)"> 仅 memory 类型</label>
+            <label class="hint" style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" style="accent-color:var(--accent)"> 包含 pending 记录</label>
+            <span class="hint" style="margin-left:auto">pending 记录默认不参与召回，勾选后仅用于复核排查</span>
+          </div>
+        </div>
+
+        <!-- 指标条 -->
+        <div class="metric-strip" id="metrics" style="margin-bottom:16px"></div>
+
+        <div class="search-grid" id="searchGrid">
+
+          <!-- 结果列 -->
+          <div>
+            <div class="panel" style="overflow:hidden">
+              <div class="panel-h">
+                <span class="t">召回结果</span>
+                <span class="badge badge-neutral" id="resultCount">6</span>
+                <span class="spacer"></span>
+                <span class="hint mono" style="font-size:10px">按分数降序</span>
+              </div>
+              <div id="results"></div>
+            </div>
+
+            <!-- ACL 说明 -->
+            <div class="callout info" id="aclNote" style="margin-top:12px"></div>
+          </div>
+
+          <!-- 右栏 -->
+          <div style="display:grid;gap:14px">
+            <div class="panel">
+              <div class="panel-h">
+                <span class="t" id="planTitle">查询计划</span>
+                <span class="spacer"></span>
+                <span class="badge badge-info" id="planBadge">3 条</span>
+              </div>
+              <div id="plan"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-h"><span class="t">耗时拆解</span><span class="spacer"></span><span class="hint mono" style="font-size:10px" id="totalMs">412 ms</span></div>
+              <div class="panel-b" id="timing" style="display:grid;gap:9px"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-h"><span class="t">本次调用</span><span class="spacer"></span><button class="btn btn-sm btn-ghost" id="btnCopyCall">复制</button></div>
+              <div class="panel-b" style="padding:0">
+                <pre class="mono" id="callJSON" style="margin:0;padding:12px;font-size:10.5px;line-height:1.7;color:var(--ink-3);overflow-x:auto"></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="comem.js"></script>
+<script>
+/* ==========================================================================
+   演示数据
+   ========================================================================== */
+
+const HITS = {
+  search: [
+    {
+      score: 0.87, level: 0, uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['缩进', 1]], from: 'memory',
+      bm25: 'typescript idf 4.21 × tf 3 · 严格 idf 3.08 × tf 1 · 缩进 idf 2.94 × tf 1'
+    },
+    {
+      score: 0.79, level: 1, uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条偏好。code-style 覆盖 TypeScript strict、2 空格缩进与不可变数据写法。',
+      terms: [['typescript', 2], ['代码风格', 2], ['偏好', 1]], from: 'memory',
+      bm25: '代码风格 idf 3.77 × tf 2 · typescript idf 4.21 × tf 2 · 偏好 idf 1.62 × tf 1'
+    },
+    {
+      score: 0.74, level: 2, uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码。',
+      terms: [['严格', 2], ['null', 1]], from: 'memory',
+      bm25: '严格 idf 3.08 × tf 2 · null idf 4.02 × tf 1'
+    },
+    {
+      score: 0.68, level: 0, uri: 'comem://group/eng/memories/platform-conventions.md',
+      abs: '工程组约定：服务统一开启 TypeScript 严格模式，公共类型放在 packages/types 下。',
+      terms: [['typescript', 1], ['严格', 1]], from: 'memory',
+      bm25: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    },
+    {
+      score: 0.61, level: 2, uri: 'comem://user/alice/resources/acme-project/tsconfig.json',
+      abs: '{"compilerOptions":{"strict":true,"noUncheckedIndexedAccess":true,"target":"ES2022"}}',
+      terms: [['strict', 2], ['tsconfig', 1]], from: 'resource',
+      bm25: 'strict idf 3.96 × tf 2 · tsconfig idf 3.10 × tf 1'
+    },
+    {
+      score: 0.55, level: 0, uri: 'comem://user/alice/skills/ts-review/SKILL.md',
+      abs: 'TypeScript review 技能：按严格模式规则检查改动，标出隐式 any 与类型收窄缺失。',
+      terms: [['typescript', 1], ['严格', 1]], from: 'skill',
+      bm25: 'typescript idf 4.21 × tf 1 · 严格 idf 3.08 × tf 1'
+    }
+  ],
+  find: [
+    {
+      score: 0.91, level: 0, uri: 'comem://user/alice/memories/preferences/code-style.md',
+      abs: '用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进、偏好函数式写法。',
+      terms: [['typescript', 3], ['严格', 1], ['代码风格', 2]], from: 'find',
+      bm25: '原句整体匹配 · typescript idf 4.21 × tf 3 · 代码风格 idf 3.77 × tf 2'
+    },
+    {
+      score: 0.72, level: 1, uri: 'comem://user/alice/memories/preferences/',
+      abs: 'preferences/ 共 5 条偏好。code-style 覆盖 TypeScript strict 与 2 空格缩进。',
+      terms: [['typescript', 2], ['代码风格', 1]], from: 'find',
+      bm25: '代码风格 idf 3.77 × tf 1 · typescript idf 4.21 × tf 2'
+    },
+    {
+      score: 0.44, level: 2, uri: 'comem://user/alice/memories/rules/code-review/ts-strict-null.md',
+      abs: '规则：不用非空断言绕过 null 检查。applies_when 修改涉及可选字段的代码。',
+      terms: [['严格', 1]], from: 'find',
+      bm25: '严格 idf 3.08 × tf 1'
+    }
+  ]
+};
+
+const PLAN = [
+  { kind: 'memory', q: '代码风格偏好 TypeScript 严格模式 缩进', hits: 4 },
+  { kind: 'resource', q: 'tsconfig strict 配置 项目', hits: 1 },
+  { kind: 'skill', q: 'typescript 规范检查 技能', hits: 1 }
+];
+
+const TIMING = {
+  search: [
+    ['意图分析（LLM）', 380, 'info'],
+    ['逐条召回（3 条 query）', 24, 'ok'],
+    ['去重与合并', 0, 'ok'],
+    ['ACL 过滤', 0, 'ok'],
+    ['BM25 重排', 8, 'ok']
+  ],
+  find: [
+    ['召回（单条 query）', 6, 'ok'],
+    ['ACL 过滤', 0, 'ok'],
+    ['BM25 重排', 3, 'ok']
+  ]
+};
+
+const CALL = {
+  search: `{
+  "tool": "search",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "limit": 10,
+  "sessionId": "session_7c1a"
+}`,
+  find: `{
+  "tool": "find",
+  "query": "TypeScript 严格模式 代码风格",
+  "targetUri": "comem://user/alice/",
+  "limit": 10
+}`
+};
+
+/* ==========================================================================
+   渲染
+   ========================================================================== */
+
+let mode = 'search';
+
+const LEVEL_LABEL = ['摘要', '概览', '原文'];
+
+function renderMetrics() {
+  const hits = HITS[mode];
+  const l0 = hits.filter((h) => h.level === 0).length;
+  const l1 = hits.filter((h) => h.level === 1).length;
+  const l2 = hits.filter((h) => h.level === 2).length;
+  document.getElementById('metrics').innerHTML = `
+    <div class="metric"><div class="m-v tnum">${hits.length}</div><div class="m-k">返回条目</div></div>
+    <div class="metric"><div class="m-v tnum">2</div><div class="m-k">ACL 过滤</div></div>
+    <div class="metric"><div class="m-v tnum">${mode === 'search' ? 412 : 9}<small>ms</small></div><div class="m-k">总耗时</div></div>
+    <div class="metric"><div class="m-v tnum" style="font-size:13px;letter-spacing:0">L0 ${l0} · L1 ${l1} · L2 ${l2}</div><div class="m-k">层级分布</div></div>`;
+}
+
+function renderResults() {
+  const wrap = document.getElementById('results');
+  document.getElementById('resultCount').textContent = HITS[mode].length;
+  wrap.innerHTML = HITS[mode].map((h) => `
+    <article class="hit">
+      <div class="hit-score">
+        <span class="v ${h.score < 0.6 ? 'low' : ''} tnum">${h.score.toFixed(2)}</span>
+        <span class="scorebar"><i style="width:${Math.round(h.score * 100)}%"></i></span>
+        <span class="lvl" data-level="${h.level}" style="font-size:9px"><span class="strata" data-level="${h.level}"><i></i><i></i><i></i></span><b>L${h.level}</b></span>
+      </div>
+      <div class="hit-body">
+        <div class="hit-uri">${h.uri.replace(/TypeScript|typescript/gi, (m) => `<mark>${m}</mark>`)}</div>
+        <div class="hit-abs">${h.abs}</div>
+        <div class="hit-why">
+          <span class="wk">命中</span>
+          ${h.terms.map(([t, n]) => `<span class="term">${t}<b> ×${n}</b></span>`).join('')}
+          <details style="margin-left:4px">
+            <summary style="cursor:pointer;list-style:none;font-family:var(--font-mono);font-size:9px;color:var(--ink-4);letter-spacing:.08em;text-transform:uppercase">评分明细</summary>
+            <div class="mono" style="font-size:10px;color:var(--ink-4);margin-top:6px;line-height:1.8">${h.bm25}</div>
+          </details>
+        </div>
+      </div>
+      <div class="hit-side">
+        <span class="badge badge-neutral">${LEVEL_LABEL[h.level]}</span>
+        <span class="mono" style="font-size:9.5px;color:var(--ink-4)">${h.from}</span>
+      </div>
+    </article>`).join('');
+}
+
+function renderPlan() {
+  const isSearch = mode === 'search';
+  document.getElementById('planTitle').textContent = isSearch ? '查询计划' : '单条查询';
+  document.getElementById('planBadge').textContent = isSearch ? `${PLAN.length} 条` : '1 条';
+  document.getElementById('planBadge').className = isSearch ? 'badge badge-info' : 'badge badge-neutral';
+
+  const planEl = document.getElementById('plan');
+  if (isSearch) {
+    planEl.innerHTML = PLAN.map((p, i) => `
+      <div class="plan-item">
+        <span class="pi-n">${String(i + 1).padStart(2, '0')}</span>
+        <div>
+          <div class="pi-k">${p.kind}</div>
+          <div class="pi-q">${p.q}</div>
+        </div>
+        <span class="pi-r">${p.hits} 条</span>
+      </div>`).join('') + `
+      <div style="padding:10px 12px;border-top:1px solid var(--line);display:grid;gap:6px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3)"><span>候选总数</span><span class="mono tnum">13</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3)"><span>跨 query 去重后</span><span class="mono tnum">8</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--err)"><span>ACL 过滤</span><span class="mono tnum">−2</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink);border-top:1px solid var(--line);padding-top:6px"><span>返回</span><span class="mono tnum">6</span></div>
+      </div>`;
+  } else {
+    planEl.innerHTML = `
+      <div class="plan-item">
+        <span class="pi-n">01</span>
+        <div>
+          <div class="pi-k" style="color:var(--ink-4)">raw query</div>
+          <div class="pi-q">TypeScript 严格模式 代码风格</div>
+        </div>
+        <span class="pi-r">3 条</span>
+      </div>
+      <div class="panel-b" style="border-top:1px solid var(--line)">
+        <p class="hint" style="margin:0">
+          <span class="mono" style="color:var(--ink-2)">find</span> 不做意图分析，直接把原句送进 FTS5。
+          延迟低，但只覆盖字面表达：查询里的「代码风格」没有拆成 resource / skill 两个方向，
+          所以 skills 与 resources 下的条目不会进入候选。
+        </p>
+      </div>`;
+  }
+}
+
+function renderTiming() {
+  const total = TIMING[mode].reduce((s, t) => s + t[1], 0);
+  document.getElementById('totalMs').textContent = `${total} ms`;
+  document.getElementById('timing').innerHTML = TIMING[mode].map(([label, ms, tone]) => `
+    <div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink-2);margin-bottom:4px">
+        <span>${label}</span><span class="mono tnum" style="color:var(--ink-3)">${ms} ms</span>
+      </div>
+      <div class="progress-line"><span class="track" style="width:100%"><i class="${tone}" style="width:${Math.max(3, (ms / Math.max(total, 1)) * 100)}%"></i></span></div>
+    </div>`).join('');
+}
+
+function renderAcl() {
+  document.getElementById('aclNote').innerHTML = `
+    ${CoMem.icon('lock', 13)}
+    <div>
+      <b>ACL 过滤 2 条</b>，按当前身份 <span class="mono">user:alice</span> 计算。
+      被过滤的条目不会出现在结果里，也不返回占位——列表语义是无权限即不可见。
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <span class="tag" style="font-size:10px">个人空间 · 无 read 权限 <b class="mono" style="color:var(--ink)">1</b></span>
+        <span class="tag" style="font-size:10px">组空间 · restricted 未授权 <b class="mono" style="color:var(--ink)">1</b></span>
+      </div>
+    </div>`;
+}
+
+function renderCall() {
+  document.getElementById('callJSON').textContent = CALL[mode];
+}
+
+function renderAll() {
+  document.querySelectorAll('#modeSeg button').forEach((b) => b.classList.toggle('is-active', b.dataset.mode === mode));
+  renderMetrics();
+  renderResults();
+  renderPlan();
+  renderTiming();
+  renderAcl();
+  renderCall();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderAll();
+
+  document.getElementById('modeSeg').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mode]');
+    if (!btn) return;
+    mode = btn.dataset.mode;
+    renderAll();
+  });
+
+  document.getElementById('btnRun').addEventListener('click', () => {
+    const btn = document.getElementById('btnRun');
+    btn.disabled = true;
+    btn.textContent = mode === 'search' ? '分析意图…' : '检索中…';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = '执行检索';
+      renderAll();
+      CoMem.toast(mode === 'search' ? '已拆解为 3 条查询，返回 6 条' : '返回 3 条，耗时 9ms');
+    }, 420);
+  });
+
+  document.getElementById('btnCopyCall').addEventListener('click', () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(CALL[mode]).catch(() => {});
+    CoMem.toast('已复制调用参数');
+  });
+});
+</script>
+</body>
+</html>

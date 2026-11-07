@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话与任务 · CoMem 控制台</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="sessions" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main">
+      <div class="pad">
+
+        <div class="page-head">
+          <div>
+            <div class="crumb"><a href="index.html">控制台</a><span class="sep">/</span><span>会话与任务</span></div>
+            <h1 class="page-title">会话与后台任务</h1>
+            <p class="page-sub">
+              会话提交后进入归档，归档之后是抽取、合并、摘要刷新。任务状态落在 <span class="mono" style="color:var(--ink)">.meta.json</span>，
+              进程崩溃后按状态与重试计数重新捡起。僵尸锁由心跳超时回收。
+            </p>
+          </div>
+          <div class="page-actions">
+            <button class="btn" id="btnCommit">提交会话</button>
+            <button class="btn btn-ghost" id="btnHealth">运行状态</button>
+          </div>
+        </div>
+
+        <div class="metric-strip" style="margin-bottom:18px">
+          <div class="metric"><div class="m-v tnum">9</div><div class="m-k">会话</div></div>
+          <div class="metric"><div class="m-v tnum">2</div><div class="m-k">归档</div></div>
+          <div class="metric"><div class="m-v tnum" style="color:var(--info)">2</div><div class="m-k">运行中任务</div></div>
+          <div class="metric"><div class="m-v tnum" style="color:var(--err)">1</div><div class="m-k">失败待重试</div></div>
+        </div>
+
+        <!-- ================= 会话 ================= -->
+        <div class="panel" style="overflow:hidden;margin-bottom:16px">
+          <div class="panel-h">
+            <span class="t">会话</span>
+            <span class="spacer"></span>
+            <div class="seg">
+              <button class="is-active">全部</button>
+              <button>open</button>
+              <button>committed</button>
+            </div>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th style="width:126px">sessionId</th>
+                <th>标题</th>
+                <th class="num" style="width:64px">消息</th>
+                <th style="width:92px">状态</th>
+                <th style="width:110px">归档</th>
+                <th style="width:96px">最近活动</th>
+                <th style="width:88px"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="is-sel">
+                <td class="mono strong">session_7c1a</td>
+                <td>重构检索管线的缓存层</td>
+                <td class="num">42</td>
+                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_002</td>
+                <td class="hint mono" style="font-size:10.5px">22:31</td>
+                <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
+              </tr>
+              <tr>
+                <td class="mono strong">session_5b09</td>
+                <td>清理 workspace 依赖</td>
+                <td class="num">18</td>
+                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_001</td>
+                <td class="hint mono" style="font-size:10.5px">19:12</td>
+                <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
+              </tr>
+              <tr>
+                <td class="mono strong">session_3a77</td>
+                <td>修复 flaky 测试</td>
+                <td class="num">64</td>
+                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_001</td>
+                <td class="hint mono" style="font-size:10.5px">昨天</td>
+                <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
+              </tr>
+              <tr>
+                <td class="mono strong">session_2e10</td>
+                <td>讨论 ACL 继承语义</td>
+                <td class="num">27</td>
+                <td><span class="status pending"><span class="dot"></span>open</span></td>
+                <td class="faint">—</td>
+                <td class="hint mono" style="font-size:10.5px">昨天</td>
+                <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
+              </tr>
+              <tr>
+                <td class="mono strong">session_1d44</td>
+                <td>TypeScript 迁移评估</td>
+                <td class="num">9</td>
+                <td><span class="status pending"><span class="dot"></span>open</span></td>
+                <td class="faint">—</td>
+                <td class="hint mono" style="font-size:10.5px">2 天前</td>
+                <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- ================= 任务 ================= -->
+        <div class="panel" style="overflow:hidden;margin-bottom:16px">
+          <div class="panel-h">
+            <span class="t">后台任务</span>
+            <span class="badge badge-info">2 运行中</span>
+            <span class="badge badge-err">1 失败</span>
+            <span class="spacer"></span>
+            <span class="hint mono" style="font-size:10px">每 5s 轮询</span>
+            <button class="iconbtn" id="btnPoll" title="立即刷新" aria-label="立即刷新"></button>
+          </div>
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th style="width:104px">taskId</th>
+                <th style="width:132px">类型</th>
+                <th style="width:104px">所属归档</th>
+                <th style="width:132px">状态</th>
+                <th class="num" style="width:60px">重试</th>
+                <th class="num" style="width:70px">耗时</th>
+                <th style="width:88px">开始时间</th>
+                <th style="width:120px"></th>
+              </tr>
+            </thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+          <div style="padding:10px 12px;border-top:1px solid var(--line);background:var(--bg-2);display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <span class="hint" style="margin:0">
+              重试是幂等的：<span class="mono">session_commit</span> 已完成时直接跳过，
+              只重跑 <span class="mono">memory_extract</span> 与 <span class="mono">summary_refresh</span>。
+            </span>
+            <span class="spacer" style="flex:1"></span>
+            <button class="btn btn-sm" id="btnRetryAll">重试全部失败（1）</button>
+          </div>
+        </div>
+
+        <!-- ================= 归档 + 回收 ================= -->
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start">
+
+          <div class="panel" style="overflow:hidden">
+            <div class="panel-h">
+              <span class="t">归档</span>
+              <span class="spacer"></span>
+              <span class="hint mono" style="font-size:9.5px">序号单调递增，从不复用</span>
+            </div>
+            <div id="archiveList"></div>
+          </div>
+
+          <div class="panel" style="overflow:hidden">
+            <div class="panel-h">
+              <span class="t">僵尸任务回收记录</span>
+              <span class="spacer"></span>
+              <span class="badge badge-warn">3 条</span>
+            </div>
+            <div class="panel-b">
+              <div class="timeline">
+                <div class="tl-item err">
+                  <div class="tl-time">今天 22:18:41</div>
+                  <div class="tl-t"><b class="mono" style="color:var(--ink)">task_9f1d</b> 持有锁 180 秒没有心跳，判定为僵尸，锁已回收，任务重置为 <span class="mono">pending</span>。</div>
+                </div>
+                <div class="tl-item run">
+                  <div class="tl-time">今天 21:44:07</div>
+                  <div class="tl-t"><b class="mono" style="color:var(--ink)">task_9f12</b> 进程重启后残留 <span class="mono">running</span>，按启动时间重置为 <span class="mono">pending</span>，由下一轮调度捡起。</div>
+                </div>
+                <div class="tl-item ok">
+                  <div class="tl-time">今天 19:02:33</div>
+                  <div class="tl-t"><b class="mono" style="color:var(--ink)">task_9ef8</b> 重试 3 次仍失败，转入人工处理队列，不再自动重试。</div>
+                </div>
+              </div>
+              <div class="callout info" style="margin-top:16px">
+                <div>回收只看心跳，不看任务本身跑了多久。长任务需要定期续约，否则会被当成僵尸。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="comem.js"></script>
+<script>
+const TASKS = [
+  { id: 'task_9f21', type: 'summary_refresh', archive: 'archive_002', status: 'running', retry: 0, ms: '3.2s', start: '22:31:04', progress: 46 },
+  { id: 'task_9f20', type: 'memory_extract', archive: 'archive_002', status: 'running', retry: 0, ms: '8.1s', start: '22:31:02', progress: 72 },
+  { id: 'task_9f1e', type: 'session_commit', archive: 'archive_002', status: 'done', retry: 1, ms: '12.4s', start: '22:31:00', progress: 100 },
+  { id: 'task_9f1d', type: 'memory_extract', archive: 'archive_001', status: 'failed', retry: 2, ms: '30.0s', start: '19:12:38', progress: 100 },
+  { id: 'task_9f1c', type: 'summary_refresh', archive: 'archive_001', status: 'done', retry: 0, ms: '2.7s', start: '19:12:36', progress: 100 },
+  { id: 'task_9f22', type: 'memory_extract', archive: 'archive_002', status: 'pending', retry: 0, ms: '—', start: '排队中', progress: 0 },
+  { id: 'task_9f1b', type: 'acl_rebuild', archive: '—', status: 'done', retry: 0, ms: '0.4s', start: '19:12:30', progress: 100 }
+];
+
+const ARCHIVES = [
+  {
+    id: 'archive_002', at: '2026-11-07 22:31:04', messages: 128, status: 'done',
+    changes: [
+      { type: '经验', n: 1, tone: 'accent' },
+      { type: '规则', n: 1, tone: 'info' },
+      { type: '偏好', n: 3, tone: 'neutral' }
+    ],
+    tasks: '3 / 3 完成'
+  },
+  {
+    id: 'archive_001', at: '2026-11-07 19:12:38', messages: 86, status: 'failed',
+    changes: [
+      { type: '经验', n: 2, tone: 'accent' },
+      { type: '规则', n: 1, tone: 'info' }
+    ],
+    tasks: '2 / 3 完成 · 1 失败'
+  }
+];
+
+const STATUS_MAP = {
+  pending: { cls: 'pending', label: 'pending' },
+  running: { cls: 'running', label: 'running' },
+  done: { cls: 'done', label: 'done' },
+  failed: { cls: 'failed', label: 'failed' }
+};
+
+function renderTasks() {
+  document.getElementById('taskRows').innerHTML = TASKS.map((t) => {
+    const s = STATUS_MAP[t.status];
+    const barCls = t.status === 'failed' ? 'err' : t.status === 'done' ? 'ok' : '';
+    return `<tr data-task="${t.id}">
+      <td class="mono strong">${t.id}</td>
+      <td class="mono" style="font-size:11px;color:var(--ink-2)">${t.type}</td>
+      <td class="mono" style="font-size:11px;color:var(--ink-3)">${t.archive}</td>
+      <td>
+        <div class="status ${s.cls}"><span class="dot"></span>${s.label}</div>
+        <div class="progress-line" style="margin-top:5px">
+          <span class="track" style="width:64px"><i class="${barCls}" style="width:${t.progress}%"></i></span>
+        </div>
+      </td>
+      <td class="num" style="${t.retry > 0 ? 'color:var(--warn)' : ''}">${t.retry}</td>
+      <td class="num" style="color:var(--ink-3)">${t.ms}</td>
+      <td class="hint mono" style="font-size:10.5px">${t.start}</td>
+      <td>
+        ${t.status === 'failed'
+          ? `<button class="btn btn-sm" data-retry="${t.id}">${CoMem.icon('retry', 11)} 重试</button>`
+          : t.status === 'running'
+            ? '<button class="btn btn-sm btn-ghost" disabled style="opacity:.4">运行中</button>'
+            : t.status === 'pending'
+              ? '<button class="btn btn-sm btn-ghost" disabled style="opacity:.4">排队中</button>'
+              : '<button class="btn btn-sm btn-ghost" data-log="' + t.id + '">日志</button>'}
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.querySelectorAll('[data-retry]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const t = TASKS.find((x) => x.id === b.dataset.retry);
+      t.status = 'pending';
+      t.retry += 1;
+      t.progress = 0;
+      t.ms = '—';
+      renderTasks();
+      CoMem.toast(`已提交重试 · ${t.id}（第 ${t.retry} 次）`);
+      setTimeout(() => {
+        t.status = 'running';
+        t.progress = 18;
+        t.ms = '0.6s';
+        renderTasks();
+      }, 700);
+    });
+  });
+
+  document.querySelectorAll('[data-log]').forEach((b) => {
+    b.addEventListener('click', () => CoMem.toast(`${b.dataset.log} 的日志已打开（演示）`));
+  });
+}
+
+function renderArchives() {
+  document.getElementById('archiveList').innerHTML = ARCHIVES.map((a) => `
+    <div style="padding:13px 14px;border-bottom:1px solid var(--line)">
+      <div style="display:flex;align-items:center;gap:9px">
+        <span class="mono" style="font-size:12.5px;color:var(--ink);font-weight:500">${a.id}</span>
+        <span class="badge ${a.status === 'done' ? 'badge-ok' : 'badge-err'}">${a.status}</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="hint mono" style="font-size:10px">${a.at}</span>
+      </div>
+      <div style="display:flex;gap:14px;margin-top:8px;font-size:11px;color:var(--ink-3);flex-wrap:wrap">
+        <span><span class="mono">${a.messages}</span> 条消息</span>
+        <span style="color:var(--line-3)">|</span>
+        <span>${a.tasks}</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap">
+        ${a.changes.map((c) => `<span class="tag" style="font-size:10px">
+          <span style="color:var(--${c.tone === 'accent' ? 'accent' : c.tone === 'info' ? 'info' : 'ink-4'})">${c.type}</span>
+          <span class="mono" style="color:var(--ink-2)">+${c.n}</span>
+        </span>`).join('')}
+        <span class="spacer" style="flex:1"></span>
+        <a class="btn btn-sm btn-ghost" href="review.html" style="height:22px;font-size:10.5px">查看变更</a>
+      </div>
+    </div>`).join('') + `
+    <div style="padding:11px 14px;background:var(--bg-2)" class="hint">
+      <span class="mono">archive_001</span> 的抽取任务失败后已重试 2 次。第 3 次仍失败将转入人工处理，不再自动重试。
+    </div>`;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btnPoll').innerHTML = CoMem.icon('retry', 14);
+  document.getElementById('btnPoll').addEventListener('click', () => CoMem.toast('已刷新任务状态'));
+  document.getElementById('btnCommit').addEventListener('click', () => CoMem.toast('演示稿不提交写操作'));
+  document.getElementById('btnHealth').addEventListener('click', () => CoMem.toast('索引正常 · 队列积压 2 · 心跳正常'));
+  document.getElementById('btnRetryAll').addEventListener('click', () => {
+    const t = TASKS.find((x) => x.status === 'failed');
+    if (!t) return CoMem.toast('没有失败任务');
+    t.status = 'pending';
+    t.retry += 1;
+    t.progress = 0;
+    renderTasks();
+    CoMem.toast(`已提交重试 · ${t.id}（第 ${t.retry} 次）`);
+  });
+
+  // 清理占位图标
+  document.querySelectorAll('.callout').forEach((c) => {
+    if (!c.querySelector('svg')) c.insertAdjacentHTML('afterbegin', CoMem.icon('info', 13));
+  });
+
+  renderTasks();
+  renderArchives();
+});
+</script>
+</body>
+</html>

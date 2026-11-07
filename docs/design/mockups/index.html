@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoMem 控制台 · 视觉稿入口</title>
+<link rel="stylesheet" href="comem.css">
+<script>document.documentElement.dataset.theme = (() => { try { return localStorage.getItem('comem-theme') || 'dark'; } catch (e) { return 'dark'; } })();</script>
+</head>
+<body data-shell="index" data-scope="user/alice">
+<div class="grain" aria-hidden="true"></div>
+<div class="app">
+  <div id="topbar"></div>
+  <div class="shell">
+    <aside class="rail" id="rail"></aside>
+    <main class="main">
+      <div class="doc">
+
+        <!-- ============ 题头 ============ -->
+        <header class="masthead">
+          <div class="eyebrow">
+            <span class="glyph" aria-hidden="true"><i></i><i></i><i></i></span>
+            CoMem Console · 静态视觉稿 · v0.1
+          </div>
+          <h1>把 agent 的记忆，做成一座<em>可检索的档案库</em>。</h1>
+          <p class="lede">
+            CoMem 是面向 AI agent 的上下文记忆数据库。所有资源、记忆、技能都挂在
+            <code class="mono" style="font-size:12.5px;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:2px;padding:1px 5px">comem://</code>
+            虚拟文件系统下，按 L0 一句话摘要、L1 目录概览、L2 原文三层渐进披露。
+            这套控制台是给人用的：查一条记忆从哪来、被谁改过、摘要是否落后、哪些主体能看见它。
+          </p>
+          <div class="meta-line">
+            <span>页面 <b>7</b></span>
+            <span>主题 <b>深色 / 浅色</b></span>
+            <span>字体 <b>IBM Plex Sans · Plex Mono · Newsreader</b></span>
+            <span>无构建 <b>直接打开</b></span>
+            <span>更新 <b>2026-11-07</b></span>
+          </div>
+        </header>
+
+        <!-- ============ 01 设计方向 ============ -->
+        <section class="doc-sec">
+          <h2>01 设计方向 <span>Archive Instrument</span></h2>
+          <p>
+            整体是「档案库里的仪器面板」：暖石墨底色（不是常见的蓝黑）、只有一种琥珀色作为信号色、
+            全部边界用 1px 发丝线而不是阴影分层、数据列一律等宽字体加表格数字。
+            信息密度按开发者工具来定，行高 25–28px，一屏尽量多放条目。
+          </p>
+          <p>
+            贯穿全套页面的视觉母题是「地层」：三条长度递减的横线，分别代表 L0 / L1 / L2。
+            它在左上角是 logo，在详情页是层级切换器，在检索结果里是命中层级，在复核页是记忆的深度。
+            同一个符号反复出现，用户不需要再学第二套图例。
+          </p>
+          <div class="comp-grid" style="margin-top:22px">
+            <div class="comp-box">
+              <span class="label">做</span>
+              <ul class="md" style="font-size:12px">
+                <li>发丝边框、2–5px 圆角、无外阴影（浮层除外）</li>
+                <li>单一琥珀信号色 + 语义色只用于状态</li>
+                <li>URI、字段名、状态值、数字全部等宽</li>
+                <li>用留白和分割线分区，不靠卡片堆叠</li>
+              </ul>
+            </div>
+            <div class="comp-box">
+              <span class="label">不做</span>
+              <ul class="md" style="font-size:12px">
+                <li>紫蓝渐变、发光球体、玻璃拟态</li>
+                <li>大于 8px 的圆角、彩色图标底板</li>
+                <li>营销式空状态插画与装饰性动效</li>
+                <li>把内部字段名（page_id、digest）暴露到界面</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 02 页面索引 ============ -->
+        <section class="doc-sec">
+          <h2>02 页面索引 <span>6 个工作面</span></h2>
+          <div class="pg-grid">
+            <a class="pg" href="filesystem.html">
+              <div class="pg-n">01 / FILESYSTEM</div>
+              <div class="pg-t">文件树</div>
+              <div class="pg-d">左树右详情。详情可在 L0 / L1 / L2 之间切换，并交代摘要由谁生成、何时生成、是否待刷新。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+            <a class="pg" href="search.html">
+              <div class="pg-n">02 / RETRIEVAL</div>
+              <div class="pg-t">检索调试台</div>
+              <div class="pg-d">对比 find 与 search 两种模式的召回差异，展示意图拆解出的多条查询、每条命中的分数与层级，以及 ACL 到底过滤掉多少条。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+            <a class="pg" href="review.html">
+              <div class="pg-n">03 / REVIEW</div>
+              <div class="pg-t">记忆复核</div>
+              <div class="pg-d">抽取出的「经验」与「规则」在生效前需要人工过一道。左右并排看 before / after，规则额外展示适用条件与例外。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+            <a class="pg" href="acl.html">
+              <div class="pg-n">04 / PERMISSION</div>
+              <div class="pg-t">权限管理</div>
+              <div class="pg-d">节点树标出 restricted 边界，右侧列出主体、级别、来源，并用一条推导链解释「有效权限」是怎么算出来的。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+            <a class="pg" href="admin.html">
+              <div class="pg-n">05 / ADMIN</div>
+              <div class="pg-t">用户与组</div>
+              <div class="pg-d">用户、组、组成员、组空间默认权限。管理者需要在一屏内判断谁能进哪个空间。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+            <a class="pg" href="sessions.html">
+              <div class="pg-n">06 / SESSIONS</div>
+              <div class="pg-t">会话与后台任务</div>
+              <div class="pg-d">会话提交后进入归档与抽取管线。任务状态、重试次数、僵尸锁回收记录都必须可见，进程崩了才知道从哪续。</div>
+              <span class="pg-arrow">↗</span>
+            </a>
+          </div>
+        </section>
+
+        <!-- ============ 03 色板 ============ -->
+        <section class="doc-sec">
+          <h2>03 色板 <span>单信号色 · 暖中性</span></h2>
+          <p>
+            深色为主。中性色带一点暖（hue ≈ 80°），让长时间阅读不那么刺眼；
+            强调色只有一个琥珀，连锁定、运行、待办都用它，避免用颜色区分语义时撞车。
+          </p>
+
+          <div class="label" style="margin:18px 0 9px">深色 · 默认</div>
+          <div class="swatches">
+            <div class="sw"><div class="chip" style="background:#0a0b0a"></div><div class="n">bg</div><div class="h">#0A0B0A</div></div>
+            <div class="sw"><div class="chip" style="background:#0d0f0e"></div><div class="n">bg-2</div><div class="h">#0D0F0E</div></div>
+            <div class="sw"><div class="chip" style="background:#121413"></div><div class="n">surface</div><div class="h">#121413</div></div>
+            <div class="sw"><div class="chip" style="background:#1e2220"></div><div class="n">surface-3</div><div class="h">#1E2220</div></div>
+            <div class="sw"><div class="chip" style="background:#e9eae4"></div><div class="n">ink</div><div class="h">#E9EAE4</div></div>
+            <div class="sw"><div class="chip" style="background:#a9ada4"></div><div class="n">ink-2</div><div class="h">#A9ADA4</div></div>
+            <div class="sw"><div class="chip" style="background:#82867c"></div><div class="n">ink-3</div><div class="h">#82867C</div></div>
+            <div class="sw"><div class="chip" style="background:#e0a355"></div><div class="n">accent</div><div class="h">#E0A355</div></div>
+            <div class="sw"><div class="chip" style="background:#93b3a6"></div><div class="n">l1 / read</div><div class="h">#93B3A6</div></div>
+            <div class="sw"><div class="chip" style="background:#87b798"></div><div class="n">ok</div><div class="h">#87B798</div></div>
+            <div class="sw"><div class="chip" style="background:#d6a45f"></div><div class="n">warn</div><div class="h">#D6A45F</div></div>
+            <div class="sw"><div class="chip" style="background:#e0705f"></div><div class="n">err</div><div class="h">#E0705F</div></div>
+          </div>
+
+          <div class="label" style="margin:22px 0 9px">浅色 · 纸白</div>
+          <div class="swatches">
+            <div class="sw"><div class="chip" style="background:#f2f1ec"></div><div class="n">bg</div><div class="h">#F2F1EC</div></div>
+            <div class="sw"><div class="chip" style="background:#fbfaf6"></div><div class="n">surface</div><div class="h">#FBFAF6</div></div>
+            <div class="sw"><div class="chip" style="background:#e9e8e1"></div><div class="n">surface-3</div><div class="h">#E9E8E1</div></div>
+            <div class="sw"><div class="chip" style="background:#1b1d18"></div><div class="n">ink</div><div class="h">#1B1D18</div></div>
+            <div class="sw"><div class="chip" style="background:#4d524a"></div><div class="n">ink-2</div><div class="h">#4D524A</div></div>
+            <div class="sw"><div class="chip" style="background:#96601a"></div><div class="n">accent</div><div class="h">#96601A</div></div>
+            <div class="sw"><div class="chip" style="background:#3f6f60"></div><div class="n">l1</div><div class="h">#3F6F60</div></div>
+            <div class="sw"><div class="chip" style="background:#a33c33"></div><div class="n">err</div><div class="h">#A33C33</div></div>
+          </div>
+          <p class="hint" style="margin-top:12px">
+            浅色不是深色的反相：所有前景色重新取值，保证正文对比度 ≥ 4.5:1，强调色压暗到 #96601A 才够。
+          </p>
+        </section>
+
+        <!-- ============ 04 字号 ============ -->
+        <section class="doc-sec">
+          <h2>04 字号体系 <span>8 级 · 等宽承担数据</span></h2>
+          <div class="type-row"><div class="tk">display</div><div class="ts" style="font-family:var(--font-serif);font-size:44px;line-height:1.05;letter-spacing:-.025em">档案库</div><div class="tv">44 / 1.05 / -0.025em</div></div>
+          <div class="type-row"><div class="tk">page-title</div><div class="ts" style="font-size:21px;font-weight:600;letter-spacing:-.018em">文件树浏览器</div><div class="tv">21 / 1.2 / -0.018em</div></div>
+          <div class="type-row"><div class="tk">doc-title</div><div class="ts" style="font-size:18px;font-weight:600;letter-spacing:-.015em">code-style.md</div><div class="tv">18 / 1.3</div></div>
+          <div class="type-row"><div class="tk">abstract</div><div class="ts" style="font-size:14.5px;line-height:1.62">用户在代码风格上的偏好：TypeScript 严格模式、2 空格缩进。</div><div class="tv">14.5 / 1.62</div></div>
+          <div class="type-row"><div class="tk">body</div><div class="ts" style="font-size:13px;line-height:1.72;color:var(--ink-2)">正文用于 L2 原文与说明段落，行长上限 82ch。</div><div class="tv">13 / 1.72</div></div>
+          <div class="type-row"><div class="tk">ui</div><div class="ts" style="font-size:12.5px;color:var(--ink-2)">表格、列表、导航项的默认字号</div><div class="tv">12.5 / 1.5</div></div>
+          <div class="type-row"><div class="tk mono">mono-data</div><div class="ts mono" style="font-size:11.5px;color:var(--ink-2)">comem://user/alice/memories/preferences/code-style.md</div><div class="tv">11.5 / -0.012em</div></div>
+          <div class="type-row"><div class="tk mono">micro-label</div><div class="ts mono" style="font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3)">FRESHNESS · GENERATED BY</div><div class="tv">9.5 / 0.13em</div></div>
+          <p class="hint" style="margin-top:12px">
+            界面基准 13px 而不是 16px。这是密度取舍：一屏 30 行目录，比一句大标题更有用。
+          </p>
+        </section>
+
+        <!-- ============ 05 间距与结构 ============ -->
+        <section class="doc-sec">
+          <h2>05 间距与结构 <span>4px 基准</span></h2>
+          <dl class="spec-list">
+            <div><dt>间距刻度</dt><dd>4 · 8 · 12 · 16 · 22 · 26 · 40 · 56。组件内 8/12，区块间 22/26，页面级 40/56。</dd></div>
+            <div><dt>行高</dt><dd>表格行 33px、树行 25px、列表行 52–64px。密度靠行高控制，不靠缩字号。</dd></div>
+            <div><dt>圆角</dt><dd>控件 3px，面板 5px，标记 2px。圆角只用来软化边缘，不承担层级。</dd></div>
+            <div><dt>边框</dt><dd>统一 1px，颜色 <code>rgba(232,233,226,.09)</code>；强调边界 .17；强分割 .28。</dd></div>
+            <div><dt>外壳</dt><dd>顶栏 46px + 侧栏 214px + 主区自适应。主区独立滚动，侧栏固定。</dd></div>
+            <div><dt>栅格</dt><dd>左右分栏 300 / 320px，详情页右侧元数据栏 296px，最小可读宽度 980px。</dd></div>
+            <div><dt>动效</dt><dd>悬停 100–140ms、进入 300ms ease-out、仅位移与透明度，尊重 <code>prefers-reduced-motion</code>。</dd></div>
+          </dl>
+        </section>
+
+        <!-- ============ 06 组件 ============ -->
+        <section class="doc-sec">
+          <h2>06 组件样张 <span>同一套 token</span></h2>
+          <div class="comp-grid">
+            <div class="comp-box">
+              <span class="label">按钮</span>
+              <div class="comp-row">
+                <button class="btn btn-primary">通过并生效</button>
+                <button class="btn">重试任务</button>
+                <button class="btn btn-ghost">取消</button>
+                <button class="btn btn-danger">拒绝</button>
+                <button class="btn" disabled>不可用</button>
+              </div>
+            </div>
+            <div class="comp-box">
+              <span class="label">标记</span>
+              <div class="comp-row">
+                <span class="badge badge-ok">active</span>
+                <span class="badge badge-warn">pending</span>
+                <span class="badge badge-err">failed</span>
+                <span class="badge badge-info">running</span>
+                <span class="badge badge-accent">restricted</span>
+                <span class="badge badge-neutral">inherit</span>
+              </div>
+            </div>
+            <div class="comp-box">
+              <span class="label">层级刻度</span>
+              <div class="comp-row" style="gap:20px">
+                <span class="lvl" data-level="0"><span class="strata" data-level="0"><i></i><i></i><i></i></span><b>L0</b></span>
+                <span class="lvl" data-level="1"><span class="strata" data-level="1"><i></i><i></i><i></i></span><b>L1</b></span>
+                <span class="lvl" data-level="2"><span class="strata" data-level="2"><i></i><i></i><i></i></span><b>L2</b></span>
+              </div>
+            </div>
+            <div class="comp-box">
+              <span class="label">分段控件 / 输入</span>
+              <div class="comp-row" style="margin-bottom:9px">
+                <div class="seg"><button class="is-active">find</button><button>search</button></div>
+                <div class="seg"><button class="is-active">全部</button><button>经验</button><button>规则</button></div>
+              </div>
+              <input class="input mono" value="TypeScript 严格模式" aria-label="检索词">
+            </div>
+            <div class="comp-box">
+              <span class="label">状态</span>
+              <div class="comp-row" style="gap:18px">
+                <span class="status pending"><span class="dot"></span>pending</span>
+                <span class="status running"><span class="dot"></span>running</span>
+                <span class="status done"><span class="dot"></span>done</span>
+                <span class="status failed"><span class="dot"></span>failed</span>
+              </div>
+            </div>
+            <div class="comp-box">
+              <span class="label">提示条</span>
+              <div class="callout warn" style="margin-top:2px">
+                摘要落后于内容，2 条记录待刷新。
+              </div>
+            </div>
+          </div>
+
+          <div class="label" style="margin:26px 0 10px">树行与 diff 行</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px" class="comp-grid">
+            <div class="panel">
+              <div class="panel-b" style="padding:6px">
+                <div class="tr is-sel"><span class="caret">›</span><span class="tico">▤</span><span class="tname">code-style.md</span><span class="tmeta">1.4k</span></div>
+                <div class="tr"><span class="caret blank">›</span><span class="tico">▤</span><span class="tname">communication.md</span><span class="tmeta">912</span></div>
+                <div class="tr"><span class="caret blank">›</span><span class="tico">▤</span><span class="tname">writing-style.md</span><span class="tmeta">2.1k</span></div>
+              </div>
+            </div>
+            <div class="diff">
+              <div class="dl add"><span class="ln">12</span><span class="sig">+</span><span class="tx">- 缩进：2 个空格</span></div>
+              <div class="dl add"><span class="ln">13</span><span class="sig">+</span><span class="tx">- 类型：禁止 any，边界用 unknown</span></div>
+              <div class="dl del"><span class="ln">12</span><span class="sig">−</span><span class="tx">- 缩进：4 个空格</span></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 07 阅读约定 ============ -->
+        <section class="doc-sec">
+          <h2>07 阅读约定 <span>演示说明</span></h2>
+          <dl class="spec-list">
+            <div><dt>数据</dt><dd>全部为手工构造的演示数据，URI 与字段名遵循 <code>comem://</code> 命名规范，可直接对照接口文档阅读。</dd></div>
+            <div><dt>交互</dt><dd>目录可展开、条目可选中、层级可切换、任务可重试。所有改变只发生在页面内，不请求后端。</dd></div>
+            <div><dt>主题</dt><dd>右上角切换，选择记在 <code>localStorage</code>，跨页面保持。</dd></div>
+            <div><dt>文案</dt><dd>界面语言为中文；URI、字段名、状态值、主体标识保留英文原文，避免对接时二次翻译。</dd></div>
+          </dl>
+        </section>
+
+        <p class="footer-note">
+          CoMem · 上下文记忆数据库 · 控制台视觉稿 v0.1<br>
+          文件：docs/design/mockups/ · 入口 index.html · 无构建步骤
+        </p>
+
+      </div>
+    </main>
+  </div>
+</div>
+<script src="comem.js"></script>
+<script>
+  // 入口页的组件样张需要真实图标，等外壳挂载后统一注入
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.comp-box .callout').forEach((c) => {
+      if (!c.querySelector('svg')) c.insertAdjacentHTML('afterbegin', CoMem.icon('alert', 13));
+    });
+  });
+</script>
+</body>
+</html>
