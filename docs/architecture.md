@@ -1433,14 +1433,16 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 | `edit` | `uri`、`oldString`、`newString`、`replaceAll=false` | 文本：替换结果 |
 | `remember` | `messages[]` | 文本：`taskId` + 抽取在后台进行的提示 |
 | `forget` | `uri`、`recursive=false` | 文本：`Deleted: uri` |
-| `add_resource` | `name`、`files[]`、`to`、`description`、`source`、`tags[]` | 文本：`taskId` |
-| `add_skill` | `data` / `path`、`targetUri`、`listOnly=false` | 文本：安装结果 |
+| `add_resource` | `parentUri`、`files[]`、`wait=false` | 文本：`created` / `updated` / `skipped` 计数 + 索引状态 |
+| `add_skill` | `parentUri`、`name`、`files[]` | 文本：技能 URI + 文件数 |
 
 **为什么返回文本而不是 JSON。** MCP 的返回值直接进模型上下文。文本格式的信息密度更高，模型也更容易读。JSON 适合程序消费，不适合模型消费。
 
 **`remember` 复用提交管线**：造一个合成会话再提交，不另写一条记忆写入路径。
 
 **`add_resource` 分两步：先上传附件，再建资源。** 原始文件必须落盘保留，否则 `download` 没东西可下。
+
+**为什么 `files[]` 而不是 `name` / `to` / `description` / `source` / `tags`。** 一次调用可以导入多个文件，每个文件有自己的路径、附件、规范化文本和摘要；把描述性字段摊在顶层只能表达「一个资源」，表达不了「一个资源目录下的一批文件」。顶层保留 `parentUri` 表示「装到哪里」，其余全部下沉到 `files[]` 的每一项。**返回的是计数不是 `taskId`**：批量写入是同步完成的，没有后台任务可等；`wait` 字段只为将来的异步路径保留。
 
 ```ts
 // 第一步：上传
