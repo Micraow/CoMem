@@ -1,0 +1,125 @@
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import { currentVersion } from '../../../src/adapters/sqlite/database.js';
+import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import { Uri } from '../../../src/domain/uri.js';
+
+const ROOT = 'comem://user/local';
+const SUBJECT = 'user:local';
+const PRINCIPALS = [SUBJECT, 'user:*'];
+
+/** 架构文档 §8.1 的迁移版本数（`0001`–`0006`）。 */
+const LATEST_SCHEMA_VERSION = 6;
+
+let dataDir: string;
+let container: Container;
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'comem-container-'));
+  container = await createContainer({
+    env: {
+      ...process.env,
+      COMEM_DATA_DIR: dataDir,
+      // 写路径会投递摘要失效；用规则摘要，测试不碰模型。
+      COMEM_SUMMARY_GENERATOR: 'rule',
+      COMEM_LOGGING_LEVEL: 'error',
+    },
+  });
+});
+
+afterEach(async () => {
+  await container.close();
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+describe('createContainer', () => {
+  it('每个服务都可实例化', () => {
+    const { services } = container;
+    for (const [name, service] of Object.entries(services)) {
+      expect(service, `服务 ${name} 是 undefined`).toBeDefined();
+    }
+    // 少写一个键时上面的循环发现不了；这里钉住集合本身。
+    expect(Object.keys(services).sort()).toEqual(
+      [
+        'acl',
+        'assembler',
+        'filesystem',
+        'index',
+        'indexObserver',
+        'ledger',
+        'memory',
+        'resource',
+        'search',
+        'session',
+        'skill',
+        'summary',
+        'task',
+        'taskStore',
+      ].sort(),
+    );
+    expect(container.mcpRegistry.list()).toHaveLength(16);
+    expect(container.routes.length).toBeGreaterThan(0);
+    expect(container.observability).toBeDefined();
+  });
+
+  it('数据库迁移跑到最新版本，数据根与 `_meta` 已创建', async () => {
+    expect(currentVersion(container.db)).toBe(LATEST_SCHEMA_VERSION);
+    expect(container.config.dataDir).toBe(dataDir);
+    await expect(stat(join(dataDir, '_meta'))).resolves.toBeDefined();
+    await expect(stat(join(dataDir, '_meta', 'comem.sqlite'))).resolves.toBeDefined();
+  });
+
+  it('close() 幂等', async () => {
+    await container.close();
+    await expect(container.close()).resolves.toBeUndefined();
+  });
+
+  it('写文件 → 索引能查到 → 权限行存在（端到端）', async () => {
+    const { filesystem, acl, index } = container.services;
+    const root = Uri.parse(ROOT);
+    await acl.ensureRootPreset(root);
+
+    const file = root.child('memories', 'preferences', 'code-style.md');
+    await filesystem.write(file, '用户偏好 TypeScript 严格模式。', {
+      frontmatter: { summary: '偏好 TypeScript 严格模式' },
+    });
+    await container.services.indexObserver.drain();
+
+    const hits = await index.search({
+      text: 'TypeScript',
+      scopes: [ROOT],
+      principals: PRINCIPALS,
+      limit: 10,
+    });
+    expect(hits.some((hit) => hit.uri === file.toString())).toBe(true);
+
+    const rows = container.db
+      .prepare('SELECT principal, level, effect FROM node_permission WHERE node_uri = ?')
+      .all(file.toString());
+    expect(rows).toEqual([{ principal: SUBJECT, level: 7, effect: 'allow' }]);
+  });
+
+  it('请求记录与指标都在容器里（request_log 可写）', async () => {
+    await container.observability.recordRequest({
+      requestId: 'req-container',
+      method: 'GET',
+      path: '/health',
+      statusCode: 200,
+      durationMs: 3,
+      errorCode: null,
+      subject: SUBJECT,
+    });
+
+    const row = container.db
+      .prepare('SELECT request_id, path, status_code FROM request_log WHERE request_id = ?')
+      .get('req-container');
+    expect(row).toEqual({ request_id: 'req-container', path: '/health', status_code: 200 });
+    expect(container.observability.renderMetrics()).toContain(
+      'comem_http_request_duration_seconds_count',
+    );
+  });
+});
