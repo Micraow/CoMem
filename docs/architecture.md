@@ -684,7 +684,7 @@ CREATE TABLE node (
   kind           TEXT NOT NULL,      -- directory | document
   context_type   TEXT NOT NULL,      -- memory | resource | skill | session
   memory_type    TEXT,               -- profile | preferences | entities | ...
-  level          INTEGER NOT NULL,   -- 0 | 1 | 2
+  level          TEXT NOT NULL,      -- 'L0' | 'L1' | 'L2'，存字面量不存 0/1/2
   abstract       TEXT,
   body_digest    TEXT NOT NULL,
   size           INTEGER NOT NULL,
@@ -785,7 +785,7 @@ SELECT n.uri, n.level, n.abstract, n.context_type
 FROM node_fts f
 JOIN node n ON n.uri = f.uri
 WHERE f MATCH ?
-  AND n.uri LIKE ? || '%'                       -- 路径 scope
+  AND (n.uri = ? OR n.uri GLOB ? || '/*')       -- 路径 scope，按段边界
   AND EXISTS (
     SELECT 1 FROM node_permission p
     WHERE p.node_uri = n.uri
@@ -795,6 +795,13 @@ WHERE f MATCH ?
 ORDER BY rank
 LIMIT ?;
 ```
+
+**路径范围必须用 `GLOB`，不能用 `LIKE`。** 两个原因，第二个是安全问题：
+
+1. `LIKE` 对 ASCII 大小写不敏感。URI 只做 Unicode NFC 规范化，不折叠大小写，所以 `comem://user/Alice` 和 `comem://user/alice` 是**两个不同的用户**。用 `LIKE` 的话，`alice` 的范围查询会把 `Alice` 的子树一起捞出来——这是跨用户越权。
+2. `LIKE` 的 `_` 和 `%` 是通配符，而 URI 段允许这两个字符（§6.2 只拒斜杠、控制字符、`.`、`..`、保留名）。一个叫 `a_b` 的目录会让范围查询匹配到 `axb`。`GLOB` 的 `*` `?` `[` `]` 同样要转义，但转义规则集中在 `node-repository.ts` 一处。
+
+**`level` 存 `'L0'|'L1'|'L2'` 而不是整数。** 领域类型、检索返回值、索引记录三处都是字面量联合，存整数要在每个读写点做一次有损映射。SQLite 的 TEXT 存储开销相对索引体积可以忽略，换来的是「磁盘上看一眼就知道是什么」。
 
 **代价转移动了。** 改一个节点的 ACL，要重算它所有后代的 `node_permission`。ACL 改动是低频操作（一个项目整个周期可能就改几次），读是高频操作。物化方向必须是「写时算，读时查」。
 

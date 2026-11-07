@@ -83,11 +83,20 @@ export interface NodeStat {
   readonly abstract: string | null;
 }
 
+/**
+ * 检索索引。`SearchQuery` / `GlobQuery` 走索引，`grep` 不走。
+ *
+ * **`grep` 不属于索引。** FTS5 索引的是**词**，`grep` 匹配的是**任意正则**。两者是
+ * 不同的访问路径：让索引实现 `grep` 等于让索引去读文件，那不是它的职责（索引只
+ * 持有 token，没有正文，也没法按行号返回上下文）。`grep` 由 `services/search.ts`
+ * 实现——先用索引拿到权限过滤后的候选 URI，再逐个读文件做行匹配。
+ *
+ * `GrepQuery` / `GrepHit` 保留：它们是服务层的输入输出形状，不属于索引契约。
+ */
 export interface RetrievalIndex {
   upsert(records: readonly IndexRecord[]): Promise<void>;
   deleteByUri(uri: string, options?: { readonly recursive?: boolean }): Promise<void>;
   search(query: SearchQuery): Promise<SearchHit[]>;
-  grep(query: GrepQuery): Promise<GrepHit[]>;
   glob(query: GlobQuery): Promise<string[]>;
   stat(uri: string): Promise<NodeStat | null>;
 }

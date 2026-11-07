@@ -68,12 +68,13 @@ describe('openDatabase', () => {
 });
 
 describe('runMigrations', () => {
-  it('首次应用返回 1，并建立 schema_version 表', () => {
+  it('首次应用返回最新版本号，并建立 schema_version 表', () => {
     const db = open(':memory:');
 
     expect(currentVersion(db)).toBe(0);
-    expect(runMigrations(db)).toBe(1);
-    expect(currentVersion(db)).toBe(1);
+    // 0001 骨架 + 0002 索引与检索（W3）。
+    expect(runMigrations(db)).toBe(2);
+    expect(currentVersion(db)).toBe(2);
     expect(tableNames(db)).toContain('schema_version');
   });
 
@@ -84,16 +85,25 @@ describe('runMigrations', () => {
     runMigrations(db);
     runMigrations(db);
 
-    expect(currentVersion(db)).toBe(1);
-    expect(db.prepare('SELECT COUNT(*) AS total FROM schema_version').get()).toMatchObject({ total: 1 });
+    expect(currentVersion(db)).toBe(2);
+    expect(db.prepare('SELECT COUNT(*) AS total FROM schema_version').get()).toMatchObject({ total: 2 });
   });
 
-  it('0001 只建版本表，不预埋业务表', () => {
+  it('0002 建索引与检索的业务表', () => {
     const db = open(':memory:');
 
     runMigrations(db);
 
-    expect(tableNames(db)).toEqual(['schema_version']);
+    expect(tableNames(db)).toEqual(
+      expect.arrayContaining([
+        'schema_version',
+        'node',
+        'node_fts',
+        'node_permission',
+        'acl_entry',
+        'task',
+      ]),
+    );
   });
 
   it('记录应用时间', () => {
@@ -108,11 +118,11 @@ describe('runMigrations', () => {
 
   it('文件库同样生效', () => {
     const file = join(tempDir, 'migrated.sqlite');
-    expect(runMigrations(open(file))).toBe(1);
+    expect(runMigrations(open(file))).toBe(2);
 
     const reopened = open(file);
-    expect(currentVersion(reopened)).toBe(1);
-    expect(runMigrations(reopened)).toBe(1);
+    expect(currentVersion(reopened)).toBe(2);
+    expect(runMigrations(reopened)).toBe(2);
   });
 });
 
