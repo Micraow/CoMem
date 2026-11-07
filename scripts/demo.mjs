@@ -292,7 +292,9 @@ async function showArchive() {
   const archiveUri = requireState('archiveUri');
   const sessionId = requireState('sessionId');
 
-  const task = await api.get(`/tasks/${taskId}`);
+  // 阶段二在后台跑，轮询到终态再展示。不轮询就只能读到刚建任务时的 pending，
+  // 那看起来像「执行器没跑」——而实际上它只是还没轮到。
+  const task = await waitForTask(taskId);
   detail(`任务 ${task.task.id}：status=${task.task.status}，stepsDone=[${task.task.stepsDone.join(', ')}]`);
 
   const archiveDir = join(DATA_DIR, 'user', 'local', 'sessions', sessionId, 'history', archiveUri.slice(archiveUri.lastIndexOf('/') + 1));
@@ -303,11 +305,33 @@ async function showArchive() {
   const messages = readFileSync(join(archiveDir, 'messages.jsonl'), 'utf8').trim().split('\n');
   detail(`归档消息 ${archiveDir}/messages.jsonl：${messages.length} 行（每行一条消息）`);
 
-  // 阶段二（抽取 → 合并 → 摘要失效）在任务里跑。v1 没有常驻的任务执行器，
-  // 所以任务会停在 pending；这不是演示脚本的兜底，是当前实现的真实状态。
-  if (task.task.status === 'pending') {
-    detail('注意：阶段二（记忆抽取 / 补丁合并 / 摘要失效）没有常驻执行器，任务停在 pending。');
-    detail('      下一步直接用「与合并步骤相同的写入路径」产出一条待复核记忆。');
+  if (task.task.status === 'done') {
+    detail('阶段二完成：四步全部落盘，.done 已写。');
+  } else {
+    // 失败不吞掉：把服务端记的原因原样打出来，否则演示脚本会假装一切正常。
+    detail(`注意：阶段二没有完成（status=${task.task.status}）：${task.task.error ?? '未记录原因'}`);
+  }
+}
+
+/**
+ * 轮询任务到终态。
+ *
+ * 超时 30 秒：离线提供者下四步是毫秒级的，真实模型下 `memory_extract` 要几秒。
+ * 30 秒够用，又短到演示不会卡住。
+ */
+async function waitForTask(taskId) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const task = await api.get(`/tasks/${taskId}`);
+    const status = task.task.status;
+    if (status === 'done' || status === 'failed') {
+      return task;
+    }
+    if (Date.now() > deadline) {
+      detail(`等待任务 ${taskId} 超时（30 秒），当前 status=${status}。`);
+      return task;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
 

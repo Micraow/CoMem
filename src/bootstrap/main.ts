@@ -59,6 +59,10 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
     note: recovered === 0 ? '没有需要回收的任务。' : '租约过期的任务已回到 pending。',
   });
 
+  // 阶段二执行器（§10.1、§10.4）：`recover()` 之后再启动，回收出来的任务第一轮
+  // 就会被认领。没有它，`commit` 建的归档任务永远停在 `pending`。
+  container.commitRunner.start();
+
   const server = await startHttpServer({
     config,
     logger,
@@ -90,9 +94,11 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
 
     void (async () => {
       try {
-        // 先停收新请求（`app.close()`），再关数据库：反过来的话在途请求会撞上
-        // 已关闭的连接，错误从「服务不可用」变成「内部错误」。
+        // 先停收新请求（`app.close()`），再停在途提交任务，最后关数据库：反过来的
+        // 话在途请求会撞上已关闭的连接，错误从「服务不可用」变成「内部错误」。
+        // `container.close()` 里也会 `stop()`，两处都调要幂等（它确实幂等）。
         await server.close();
+        await container.commitRunner.stop();
         await container.close();
         logger.info('CoMem 已退出。', { signal });
         process.exit(0);

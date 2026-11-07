@@ -86,6 +86,12 @@ mkdir -p "$DEMO_ROOT/data"
 # 演示配置：规则摘要（不需要模型凭据）、固定端口、只写 warning 以上的日志。
 cat > "$DEMO_ROOT/config.yaml" <<YAML
 dataDir: ${DEMO_ROOT}/data
+# 离线提供者：演示环境没有模型凭据，抽取步骤返回「空操作列表」。
+# 这不是作弊——要验证的是管线编排与 .done 落盘，不是模型抽得准不准。
+providers:
+  llm:
+    default:
+      type: offline
 summary:
   generator: rule
 server:

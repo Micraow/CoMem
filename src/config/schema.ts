@@ -12,8 +12,12 @@
 import { z } from 'zod';
 
 const llmProviderSchema = z.object({
-  /** `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic` */
-  type: z.enum(['openai-compatible', 'anthropic']).default('openai-compatible'),
+  /**
+   * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`，
+   * `offline` 不连网络、对任何请求返回空结果（演示与端到端测试用，见
+   * `adapters/llm/offline-provider.ts` 的说明）。
+   */
+  type: z.enum(['openai-compatible', 'anthropic', 'offline']).default('openai-compatible'),
   baseUrl: z.string().default('https://api.example.com/v1'),
   model: z.string().default('gpt-4o-mini'),
   apiKey: z.string().default(''),

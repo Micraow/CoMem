@@ -11,7 +11,7 @@
  * 配置 → 日志 → 数据库/迁移 → 适配器 → 模型 → AclService → SummaryService
  *      → ContextAssembler → IndexObserver → FileSystemService → SearchService
  *      → TaskService → SessionService → MemoryService → ResourceService
- *      → SkillService → ObservabilityService → MCP → HTTP 路由
+ *      → SkillService → CommitRunner → ObservabilityService → MCP → HTTP 路由
  * ```
  *
  * 三处顺序容易踩：
@@ -21,6 +21,10 @@
  *    `SearchService` 又在 `FileSystemService` 之后——它的 `grep` 要读文件。
  * 3. **`AclService` 最先**：`FileSystemService` / `SearchService` / `ContextAssembler`
  *    的构造参数都是 `Authorizer`。
+ *
+ * `CommitRunner` 在 `MemoryService` 之后：四个步骤要用 `MemoryService`（预取、读写、
+ * 删除）与 `SummaryService`（归档摘要、失效传播），构造位置比它们早只会拿到
+ * `undefined`。
  *
  * ## 没有循环依赖
  *
@@ -50,6 +54,7 @@ import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
+import { OfflineLlmProvider } from '../adapters/llm/offline-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
@@ -70,6 +75,11 @@ import type { RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { AclService } from '../services/acl.js';
 import { permissionDenied, type AclAction, type Authorizer } from '../services/authorizer.js';
+import { CommitPipeline } from '../services/commit/pipeline.js';
+import { ArchiveSummaryStep } from '../services/commit/steps/archive-summary.js';
+import { MemoryExtractStep } from '../services/commit/steps/memory-extract.js';
+import { MemoryMergeStep } from '../services/commit/steps/memory-merge.js';
+import { SummaryInvalidateStep } from '../services/commit/steps/summary-invalidate.js';
 import { ContextAssembler } from '../services/context-assembler.js';
 import { FileSystemService } from '../services/filesystem.js';
 import { IndexObserver } from '../services/index-observer.js';
@@ -96,6 +106,9 @@ import {
   SummaryService,
 } from '../services/summary.js';
 import { TaskService } from '../services/task.js';
+
+import { createArchivePorts, createArchiveWriter } from './archive-ports.js';
+import { CommitRunner } from './commit-runner.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
@@ -126,6 +139,13 @@ export interface Container {
   readonly logger: Logger;
   readonly db: DatabaseSync;
   readonly observability: ObservabilityService;
+  /**
+   * 阶段二执行器（§10.1、§10.4）。
+   *
+   * `main` 在 `task.recover()` 之后启动它，`close()` 停它。没有它，阶段二的任务
+   * 永远停在 `pending`——`POST /sessions/{id}/commit` 只做阶段一。
+   */
+  readonly commitRunner: CommitRunner;
   readonly services: ContainerServices;
   readonly mcpRegistry: ToolRegistry;
   /** MCP Streamable HTTP 服务端；`main` 挂到 HTTP 上。 */
@@ -449,16 +469,20 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   // ── 模型 ──
   const llmConfig = config.providers.llm.default;
   const llm = new LlmService({
-    provider: new AiSdkLlmProvider({
-      type: llmConfig.type,
-      ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
-      model: llmConfig.model,
-      apiKey: llmConfig.apiKey,
-      maxTokens: llmConfig.maxTokens,
-      timeoutSeconds: llmConfig.timeoutSeconds,
-      pricing: llmConfig.pricing,
-      logger,
-    }),
+    // `offline` 不连网络：演示与端到端测试要验证的是管线编排，不是模型质量。
+    provider:
+      llmConfig.type === 'offline'
+        ? new OfflineLlmProvider()
+        : new AiSdkLlmProvider({
+            type: llmConfig.type,
+            ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
+            model: llmConfig.model,
+            apiKey: llmConfig.apiKey,
+            maxTokens: llmConfig.maxTokens,
+            timeoutSeconds: llmConfig.timeoutSeconds,
+            pricing: llmConfig.pricing,
+            logger,
+          }),
     logger,
     pricing: llmConfig.pricing,
     model: llmConfig.model,
@@ -650,6 +674,50 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
 
   const skill = new SkillService({ store, locks, index, summary, permissions, logger });
 
+  /**
+   * 阶段二执行器（§10.1、§10.3、§10.4）。
+   *
+   * 端口绑定归档目录，所以管线按任务现造（`archive-ports.ts` 的文件头）。装配位置
+   * 必须在 `MemoryService` 之后——四个步骤要用它（预取、读写、删除）与
+   * `SummaryService`（归档摘要、失效传播）。
+   *
+   * **步骤顺序是 §10.3 定死的**：`archive_summary` → `memory_extract` →
+   * `memory_merge` → `summary_invalidate`。合并必须在摘要失效之前——失效步骤读的是
+   * 合并步骤写进 `state` 的「真正写过的文件」集合，顺序调换后它什么都读不到，
+   * 目录摘要从此永远不重算，而日志里只会有一行「没有记忆写入，跳过摘要失效」。
+   */
+  const commitRunner = new CommitRunner({
+    tasks: task,
+    createPipeline: (archiveUri, onStepsChanged) => {
+      const ports = createArchivePorts(archiveUri, {
+        store,
+        metadata,
+        logger,
+        dataDir,
+        onStepsChanged,
+      });
+      const archiveWriter = createArchiveWriter(archiveUri, { store, metadata, logger, dataDir });
+      return new CommitPipeline({
+        steps: [
+          new ArchiveSummaryStep({
+            summary,
+            llm,
+            metadata,
+            workingMemory: { enabled: config.memory.workingMemory.enabled },
+            logger,
+          }),
+          new MemoryExtractStep({ memory, llm, logger }),
+          new MemoryMergeStep({ memory, archive: archiveWriter, logger }),
+          new SummaryInvalidateStep({ summary, logger }),
+        ],
+        ports,
+        logger,
+      });
+    },
+    logger,
+    concurrency: config.task.concurrency,
+  });
+
   const observability = new ObservabilityService({
     requestLog,
     db,
@@ -727,6 +795,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     logger,
     db,
     observability,
+    commitRunner,
     services,
     mcpRegistry,
     mcp,
@@ -737,7 +806,10 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
         return;
       }
       closed = true;
-      // 先等后台的摘要失效跑完：`db.close()` 之后它们写库会抛。
+      // 先停在途提交任务：它们调模型、写归档与记忆，`db.close()` 之后写库会抛。
+      // 与 `main.ts` 的退出路径都调 `stop()`，所以它必须幂等（它确实幂等）。
+      await commitRunner.stop();
+      // 再等后台的摘要失效跑完：`db.close()` 之后它们写库会抛。
       await indexObserver.drain();
       db.close();
       logger.info('数据库连接已关闭。');
