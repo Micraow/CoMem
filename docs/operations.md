@@ -100,7 +100,8 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 
 ```bash
 pnpm dev                 # 等价于 pnpm dev:server，tsx 直接跑 TypeScript
-cd web && pnpm dev       # 控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
+pnpm dev:web             # 控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
+pnpm dev                 # 后端 + 控制台一起起（端口跟着 COMEM_SERVER_PORT 走）
 bash scripts/demo.sh     # 一条命令跑完六条链路，用 /tmp/comem-demo 这个临时数据根
 ```
 

@@ -93,10 +93,12 @@ L0 摘要经过一次压缩，信息密度更高；但 L2 的词频明显更高�
 
 ```bash
 pnpm install
+cd web && pnpm install && cd ..   # 控制台是独立包，有自己的 lockfile
 pnpm dev
 ```
 
-启动输出（实测，`logging.level = info`）：
+`pnpm dev` 同时起后端（`http://127.0.0.1:1933`）与控制台（`http://127.0.0.1:3081`），
+关掉任意一个两个都会停。后端启动输出（实测，`logging.level = info`）：
 
 ```
 $ tsx src/bootstrap/main.ts
@@ -105,22 +107,23 @@ $ tsx src/bootstrap/main.ts
 {"url":"http://127.0.0.1:1933","dataDir":"/home/alice/.local/share/comem","level":"info","time":"...","msg":"CoMem 已启动"}
 ```
 
+只要后端（`pnpm dev:server`）或只要控制台（`pnpm dev:web`）也单独可用。端口被占用时
+`pnpm dev` 会明确报错而不是把控制台接到别的服务上：
+
+```bash
+COMEM_SERVER_PORT=1934 pnpm dev    # 两边一起换端口
+```
+
 数据根按运行形态推导（§6.5）：`COMEM_DATA_DIR` / `--data-dir` 优先，容器里是 `/var/lib/comem`，
 桌面单用户是 `~/.local/share/comem`。不写 `config.yaml` 也能跑，全部配置项都有默认值。
 
-控制台另开一个终端：
+一条命令看完整流程（临时数据根，不碰真实数据，也不需要模型凭据）：
 
 ```bash
-cd web && pnpm dev      # http://127.0.0.1:3081，devProxy 把 /api 转到 1933
+pnpm test:e2e
 ```
 
-一条命令看完整流程（临时数据根，不碰真实数据）：
-
-```bash
-bash scripts/demo.sh
-```
-
-它起服务、写记忆、检索、归档会话、过复核、生成摘要、演示 ACL，跑完自动停。
+它起服务、写记忆、检索、归档会话、跑完阶段二、过复核、生成摘要、演示 ACL，跑完自动停。
 
 ## 六条核心链路
 
@@ -192,8 +195,9 @@ pnpm verify     # typecheck + lint + 单元/集成测试 + Hook 测试
 | `pnpm test:integrations` | `node --test integrations/tests/`：Hook 插件的去重、游标、锁、超时预算 |
 
 测试不 mock 文件系统和数据库：用 `fs.mkdtemp()` 建临时目录、SQLite 用 `:memory:`。
-六条核心链路每条都有对应的集成测试（§20）。本次实测（2026-11-08）：58 个测试文件、
-1248 个用例通过、1 个跳过；`integrations/` 107 个用例全部通过；`pnpm verify` 退出码 0。
+六条核心链路每条都有对应的集成测试（§20）。本次实测（2026-11-08）：59 个测试文件、
+1262 个用例通过、1 个跳过（跨设备 `move` 的 `EXDEV` 分支）；`integrations/` 107 个
+用例全部通过；`pnpm verify` 退出码 0。
 
 ## 许可证
 
