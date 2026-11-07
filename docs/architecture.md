@@ -625,6 +625,13 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
 | `.acl.json` | 这个目录的权限 | `AclService` |
 | `.abstract.md` | 这个目录的一句话摘要（L0） | `SummaryService` |
 | `.overview.md` | 这个目录的完整概览（L1） | `SummaryService` |
+| `.meta.json` | 会话与归档的元数据（进度、步骤、任务 ID） | `SessionService` |
+| `.done` | 归档完成的唯一信号（§10.1） | `CommitPipeline` |
+| `memory_diff.json` | 这次归档抽取出了哪些记忆操作 | `MemoryMergeStep` |
+
+**六种元数据文件的读写全部在 `adapters/fs/metadata-file.ts` 与 `adapters/fs/acl-file.ts`。** `services/` 只声明它需要的方法，具体落盘由适配层做——这条不是为了好看：`services/` 一旦碰 `node:fs`，它下面对 `domain/` 的所有判断就没法用内存数据穷举测试了（§4.2）。
+
+**`.meta.json` 有两种形状**：会话级（`sessionId` / `commitCount` / `pendingTokens`）与归档级（`archiveId` / `phase1` / `stepsDone` / `taskId`），见 §6.6。同一个文件名承载两种结构，靠路径区分——归档在 `history/archive_NNN/` 下。
 
 **文件级摘要不另存档，写在文件自己的 frontmatter 里。**
 

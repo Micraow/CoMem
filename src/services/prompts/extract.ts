@@ -112,7 +112,9 @@ function buildSystemPrompt(memoryTypes: readonly MemoryTypeSchema[]): string {
     ].join('\n'),
     '规则：',
     '- `kind` 只能是 `upsert` 或 `delete`。',
-    '- `operations[].kind` 只能是 `patch` / `replace` / `sum` / `immutable`；`patch` 的块形如 `{ "search": "...", "replace": "..." }`，SEARCH 必须唯一命中。',
+    '- `operations[].kind` 只能是 `patch` / `replace` / `sum` / `immutable`。',
+    '- `patch` 操作把块放在 `blocks` 键下，形如 `{ "kind": "patch", "field": "content", "blocks": [{ "search": "...", "replace": "..." }] }`。**SEARCH 必须在当前正文里唯一命中**：零命中或多处命中都会让整条操作被丢弃。',
+    '- `replace` 用 `value`，`sum` 用 `delta`，`immutable` 用 `value`。`patch` 不用 `value`。',
     '- `identity` 必须覆盖该类型文件名模板里的全部占位符。',
     '- 没有值得保留的信息时输出 `{"operations": []}`。',
   ].join('\n');

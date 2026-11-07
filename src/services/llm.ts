@@ -196,6 +196,11 @@ export class LlmService {
         value = await this.provider.completeJson(prompt, schema, options);
       } catch (error) {
         const failure = ComemError.from(error);
+        // 截断不是解析失败：模型没说完，重试同样的 maxTokens 只会再截断一次
+        // （§11.4 明确要求不重试）。适配层用 `truncated` 标记区分这一种。
+        if (failure.details?.['truncated'] === true) {
+          throw this.failCall(failure, attempt, startedAt, options);
+        }
         // 解析失败只重试一次；其余错误按 §19 的可重试集合判断。两者共享
         // maxAttempts 预算：一次解析失败会消耗一次 attempt。
         const parseFailure = failure.code === 'INVALID_ARGUMENT';
@@ -252,7 +257,14 @@ export class LlmService {
       this.logger.warn('模型调用被上游取消', { model: this.modelName, attempt });
       return failure;
     }
-    this.totals.failed += 1;
+    // 截断不是「失败」：模型正常回答了，只是没说完。两个计数器回答的是不同问题
+    // （「要不要调大 maxTokens」vs「供应商是不是坏了」），混在一起会让监控页给出
+    // 错误建议。结构化输出路径只能从 `truncated` 标记看出这一点。
+    if (failure.details?.['truncated'] === true) {
+      this.totals.truncated += 1;
+    } else {
+      this.totals.failed += 1;
+    }
     this.logger.error('模型调用失败', {
       model: this.modelName,
       attempt,

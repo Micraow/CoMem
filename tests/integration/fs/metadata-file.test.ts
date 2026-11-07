@@ -7,12 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseDocument } from '../../../src/adapters/fs/frontmatter.js';
 import {
   ABSTRACT_FILE_NAME,
+  META_FILE_NAME,
   MetadataFileStore,
   OVERVIEW_FILE_NAME,
 } from '../../../src/adapters/fs/metadata-file.js';
 import { TEMP_FILE_PREFIX, toDiskPath } from '../../../src/adapters/fs/path.js';
+import type { ArchiveMeta } from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
+import type { SessionMeta } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 let dataDir: string;
@@ -20,11 +23,35 @@ let store: MetadataFileStore;
 let logger: Logger;
 
 const DIRECTORY = Uri.parse('comem://user/alice/memories');
+const SESSION_URI = Uri.parse('comem://user/alice/sessions/sess_7f3a91c2');
+const ARCHIVE_URI = Uri.parse('comem://user/alice/sessions/sess_7f3a91c2/history/archive_001');
 const GENERATION = {
   generatedBy: 'llm',
   generatedAt: '2026-11-08T00:00:00.000Z',
   degraded: false,
 } as const;
+
+const SESSION_META: SessionMeta = {
+  sessionId: 'sess_7f3a91c2',
+  userId: 'alice',
+  status: 'open',
+  createdAt: '2026-11-08T00:00:00.000Z',
+  commitCount: 0,
+  lastCommitAt: null,
+  pendingTokens: 0,
+};
+
+const ARCHIVE_META: ArchiveMeta = {
+  archiveId: 'archive_001',
+  phase1: {
+    status: 'ready',
+    messagesSha256: 'a'.repeat(64),
+    archivedMessageIds: ['m1', 'm2'],
+    retainedMessageIds: [],
+  },
+  stepsDone: ['archive_summary'],
+  taskId: 'task-1',
+};
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-metadata-'));
@@ -283,5 +310,235 @@ describe('removeSummary', () => {
     await store.removeSummary(DIRECTORY);
 
     await expect(store.removeSummary(DIRECTORY)).resolves.toBeUndefined();
+  });
+});
+
+/** 直接把一段文本写进目标目录的 `.meta.json`，模拟「磁盘上的文件被改坏」。 */
+async function writeRawMeta(target: Uri, content: string): Promise<void> {
+  const directory = directoryPath(target);
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, META_FILE_NAME), content, 'utf8');
+}
+
+/**
+ * `.meta.json` 只由本模块写；内容不合法是程序缺陷，必须报 `INTERNAL` 而不是
+ * `INVALID_ARGUMENT`（后者会让调用方以为该去改请求），并且消息里要带上是哪一份。
+ */
+async function expectCorruptMeta(run: () => Promise<unknown>, target: Uri): Promise<void> {
+  let caught: unknown;
+  try {
+    await run();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ComemError);
+  expect((caught as ComemError).code).toBe('INTERNAL');
+  expect((caught as ComemError).message).toContain(target.toString());
+}
+
+describe('.meta.json 读写', () => {
+  it('会话元数据往返：写完原样读回', async () => {
+    const meta: SessionMeta = {
+      ...SESSION_META,
+      status: 'committing',
+      commitCount: 3,
+      lastCommitAt: '2026-11-08T01:00:00.000Z',
+      pendingTokens: 42,
+    };
+
+    await store.writeSession(SESSION_URI, meta);
+
+    await expect(store.readSession(SESSION_URI)).resolves.toEqual(meta);
+  });
+
+  it('归档元数据往返：stepsDone 的顺序原样保留', async () => {
+    const meta: ArchiveMeta = {
+      ...ARCHIVE_META,
+      stepsDone: ['archive_summary', 'memory_extract', 'memory_merge'],
+    };
+
+    await store.writeArchive(ARCHIVE_URI, meta);
+
+    await expect(store.readArchive(ARCHIVE_URI)).resolves.toEqual(meta);
+  });
+
+  it('不存在时返回 null（不是抛错）', async () => {
+    await expect(store.readSession(SESSION_URI)).resolves.toBeNull();
+    await expect(store.readArchive(ARCHIVE_URI)).resolves.toBeNull();
+  });
+
+  it('父目录不存在时自动创建', async () => {
+    await store.writeSession(SESSION_URI, SESSION_META);
+
+    await expect(store.readSession(SESSION_URI)).resolves.toEqual(SESSION_META);
+  });
+
+  it('键顺序固定、2 空格缩进、末尾换行', async () => {
+    await store.writeSession(SESSION_URI, SESSION_META);
+
+    const raw = await readFile(join(directoryPath(SESSION_URI), META_FILE_NAME), 'utf8');
+    // 键顺序随实现漂移会让每次提交都产生 diff 噪声，与 `.acl.json` 一致。
+    expect(Object.keys(JSON.parse(raw) as object)).toEqual([
+      'sessionId',
+      'userId',
+      'status',
+      'createdAt',
+      'commitCount',
+      'lastCommitAt',
+      'pendingTokens',
+    ]);
+    expect(raw).toContain('\n  "sessionId": "sess_7f3a91c2"');
+    expect(raw.endsWith('\n')).toBe(true);
+  });
+
+  it('写完之后目录里没有临时文件残留', async () => {
+    await store.writeSession(SESSION_URI, SESSION_META);
+
+    const names = await readdir(directoryPath(SESSION_URI));
+    expect(names.filter((name) => name.startsWith(TEMP_FILE_PREFIX))).toEqual([]);
+  });
+
+  it('并发写不会互相踩踏，最终是两份之一', async () => {
+    await Promise.all([
+      store.writeSession(SESSION_URI, { ...SESSION_META, commitCount: 1 }),
+      store.writeSession(SESSION_URI, { ...SESSION_META, commitCount: 2 }),
+    ]);
+
+    const meta = await store.readSession(SESSION_URI);
+    expect([1, 2]).toContain(meta?.commitCount);
+    expect(
+      (await readdir(directoryPath(SESSION_URI))).filter((name) =>
+        name.startsWith(TEMP_FILE_PREFIX),
+      ),
+    ).toEqual([]);
+  });
+
+  it('内容不是合法 JSON 时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, '{"sessionId": ');
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('顶层不是对象时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, '[]');
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('sessionId 不是字符串时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, sessionId: 42 }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('status 不是合法会话状态时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, status: 'archived' }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('createdAt 不是字符串时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, createdAt: null }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('commitCount 是字符串时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, commitCount: '0' }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('commitCount 是负数 / 小数时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, commitCount: 1.5 }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('lastCommitAt 既不是字符串也不是 null 时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, lastCommitAt: 0 }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('pendingTokens 不是数字时抛 INTERNAL', async () => {
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, pendingTokens: '0' }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('归档顶层不是对象时抛 INTERNAL', async () => {
+    await writeRawMeta(ARCHIVE_URI, '"archive_001"');
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('archiveId 不是字符串时抛 INTERNAL', async () => {
+    await writeRawMeta(ARCHIVE_URI, JSON.stringify({ ...ARCHIVE_META, archiveId: 1 }));
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('stepsDone 含非法步骤名时抛 INTERNAL', async () => {
+    // 步骤名拼错会让某一步被静默重放，记忆操作不幂等，所以必须在读的时候挡住。
+    await writeRawMeta(ARCHIVE_URI, JSON.stringify({ ...ARCHIVE_META, stepsDone: ['summarize'] }));
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('stepsDone 不是数组时抛 INTERNAL', async () => {
+    await writeRawMeta(ARCHIVE_URI, JSON.stringify({ ...ARCHIVE_META, stepsDone: 'archive_summary' }));
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('taskId 既不是字符串也不是 null 时抛 INTERNAL', async () => {
+    await writeRawMeta(ARCHIVE_URI, JSON.stringify({ ...ARCHIVE_META, taskId: 7 }));
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('phase1 不是对象时抛 INTERNAL', async () => {
+    await writeRawMeta(ARCHIVE_URI, JSON.stringify({ ...ARCHIVE_META, phase1: 'ready' }));
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('phase1.status 不是 preparing | ready | failed 时抛 INTERNAL', async () => {
+    await writeRawMeta(
+      ARCHIVE_URI,
+      JSON.stringify({ ...ARCHIVE_META, phase1: { ...ARCHIVE_META.phase1, status: 'done' } }),
+    );
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('phase1.messagesSha256 不是字符串时抛 INTERNAL', async () => {
+    await writeRawMeta(
+      ARCHIVE_URI,
+      JSON.stringify({ ...ARCHIVE_META, phase1: { ...ARCHIVE_META.phase1, messagesSha256: 0 } }),
+    );
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('phase1 的消息 ID 不是字符串数组时抛 INTERNAL', async () => {
+    await writeRawMeta(
+      ARCHIVE_URI,
+      JSON.stringify({
+        ...ARCHIVE_META,
+        phase1: { ...ARCHIVE_META.phase1, retainedMessageIds: [1] },
+      }),
+    );
+
+    await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
+  });
+
+  it('字段齐全但少一个键时抛 INTERNAL（缺字段不能静默变成 undefined）', async () => {
+    const withoutSessionId: Record<string, unknown> = { ...SESSION_META };
+    delete withoutSessionId['sessionId'];
+    await writeRawMeta(SESSION_URI, JSON.stringify(withoutSessionId));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
   });
 });

@@ -1,7 +1,8 @@
-import { TypeValidationError } from 'ai';
+import { NoObjectGeneratedError, TypeValidationError } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 /**
@@ -301,5 +302,40 @@ describe('completeJson', () => {
     await expect(provider.completeJson(PROMPT, z.object({ ok: z.boolean() }))).rejects.toMatchObject(
       { code: 'INVALID_ARGUMENT' },
     );
+  });
+
+  it('结构化输出被截断时映射成 PROVIDER_UNAVAILABLE 并带 truncated 标记', async () => {
+    // `generateObject` 在截断时也抛 `NoObjectGeneratedError`（cause 是 JSON 解析
+    // 失败），只看 cause 会把它当成「模型乱说话」而重试一次。必须看 finishReason：
+    // 模型没说完，重试同样的 maxTokens 只会再截断一次（§11.4）。
+    const { provider } = createProvider();
+    mocks.generateObject.mockRejectedValue(
+      new NoObjectGeneratedError({
+        message: 'truncated',
+        cause: new Error('unterminated JSON'),
+        text: '{"ok":',
+        response: { id: 'r1', modelId: 'test', timestamp: new Date() },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          totalTokens: 2,
+          inputTokenDetails: {
+            noCacheTokens: undefined,
+            cacheReadTokens: undefined,
+            cacheWriteTokens: undefined,
+          },
+          outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+        },
+        finishReason: 'length',
+      }),
+    );
+
+    const error = await provider
+      .completeJson(PROMPT, z.object({ ok: z.boolean() }))
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ComemError);
+    expect((error as ComemError).code).toBe('PROVIDER_UNAVAILABLE');
+    expect((error as ComemError).details?.['truncated']).toBe(true);
   });
 });

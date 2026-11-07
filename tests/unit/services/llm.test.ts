@@ -215,6 +215,23 @@ describe('generateJson', () => {
     expect(service.stats.failed).toBe(1);
   });
 
+  it('结构化输出被截断时不重试', async () => {
+    // 截断也是 `NoObjectGeneratedError`，只看错误码会被当成解析失败重试一次。
+    // 适配层带 `truncated` 标记，这里据此跳过重试（§11.4）。
+    const { service, provider } = createService([
+      {
+        error: new ComemError('PROVIDER_UNAVAILABLE', '模型输出被截断。', { truncated: true }),
+      },
+      { json: { ok: true } },
+    ]);
+
+    await expect(service.generateJson(PROMPT, schema)).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+    });
+    expect(provider.calls).toHaveLength(1);
+    expect(service.stats.truncated).toBe(1);
+  });
+
   it('UNAUTHENTICATED 不重试', async () => {
     const { service, provider } = createService([
       { error: new ComemError('UNAUTHENTICATED', 'API Key 无效。') },

@@ -121,6 +121,11 @@ function readStatusCode(error: unknown): number | undefined {
  * `JSONParseError` 或 `TypeValidationError`。三种都算解析失败：上层据此重试一次
  * （§11.4）。映射成 `INVALID_ARGUMENT` 而不是 `INTERNAL`，是为了让
  * `services/llm.ts` 能把它和供应商故障区分开。
+ *
+ * **截断是例外，必须单独判。** `finishReason === 'length'` 时模型根本没说完，
+ * 抛出来的 `NoObjectGeneratedError` 也是「解析失败」，重试只会用同样的上限再截断
+ * 一次（§11.4 明确要求不重试）。所以先看 `finishReason`，命中就映射成
+ * `PROVIDER_UNAVAILABLE` 并带 `truncated` 标记，让上层跳过重试。
  */
 function isJsonGenerationFailure(error: unknown): boolean {
   return (
@@ -164,6 +169,13 @@ function mapProviderError(error: unknown, context: ProviderErrorContext): ComemE
     );
   }
   if (isJsonGenerationFailure(error)) {
+    if (NoObjectGeneratedError.isInstance(error) && error.finishReason === 'length') {
+      return new ComemError(
+        'PROVIDER_UNAVAILABLE',
+        '模型输出被截断，结构化结果不完整。请调大 maxTokens 后重试。',
+        { truncated: true, finishReason: error.finishReason },
+      );
+    }
     return new ComemError('INVALID_ARGUMENT', '模型输出不是合法的结构化数据，无法按 schema 解析。', {
       cause: error instanceof Error ? error.name : typeof error,
     });

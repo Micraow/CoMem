@@ -1,0 +1,782 @@
+/**
+ * 记忆读写与复核（架构文档 §6.6、§11.1、§11.3、§11.6）。
+ *
+ * 一条记忆是 `memories/` 下的一个 Markdown 文件：YAML frontmatter 存
+ * `memory_type` / `status` / 时间戳 / 各字段，正文存 `content` 字段（§6.6 的示例）。
+ * `content` 之外的字段都是短值，放 frontmatter 才能被索引与检索解析；`content` 可能
+ * 很长，放正文才不会把 frontmatter 撑成第二份原文。
+ *
+ * ## 为什么 frontmatter 的编解码写在这里
+ *
+ * `adapters/fs/frontmatter.ts` 是通用的 YAML frontmatter 编解码，但 `services/`
+ * 只允许 `import type` 引用适配层（§4.2 的 type-only 例外）。`MemoryService` 需要
+ * **值**（序列化 / 解析），不能值导入适配器，所以这里维护一份只覆盖记忆文件格式的
+ * 最小实现。重复的代价是两份 YAML 子集：记忆文件的字段只有 string / number /
+ * boolean / string[] 四种（`domain/memory-type.ts` 的 `FieldType`），不需要完整的
+ * YAML 解析器，也不需要锚点、标签、多文档这些能力。
+ *
+ * 读写必须**往返稳定**：`read` 出来的 `fields` 再 `upsertMemory` 写回去，文件正文
+ * 逐字节相同。否则摘要 digest 对不上，每次写都会触发一次假失效（§9.3）。
+ *
+ * ## 端口为什么是「原样文档」
+ *
+ * `filesystem.read` 的 `text` 必须是**磁盘上的原始内容**（含 frontmatter），
+ * `filesystem.write` 收到的也必须是原始内容。`FileSystemService` 的 `read` 返回的是
+ * 去掉 frontmatter 的正文、`write` 又会用适配层自己的 frontmatter 机制重新序列化，
+ * 两者都不能直接接进来——见 `MemoryServicePorts.read` 的说明与本 wave 的报告。
+ *
+ * ## 复核闸门（§11.6）
+ *
+ * `experiences` / `rules` 写入时 `status = 'pending'`，检索侧按 `status = 'active'`
+ * 过滤，所以它们在被 `approve` 之前**不进检索结果**。其余类型直接 `active`。
+ * 更新一条已复核的记录会把它重新打回 `pending`：正文变了就该重新看一遍。
+ */
+
+import { ComemError } from '../domain/errors.js';
+import type { Logger } from '../domain/log.js';
+import { identityFields, renderPath, type MemoryTypeSchema } from '../domain/memory-type.js';
+import { getMemoryType } from '../domain/memory-types/index.js';
+import { Uri } from '../domain/uri.js';
+
+export type MemoryStatus = 'active' | 'pending' | 'archived';
+
+export interface MemoryRecord {
+  readonly uri: Uri;
+  readonly memoryType: string;
+  /** 字段 → 值。identity 字段必填 */
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly status: MemoryStatus;
+  readonly updatedAt: string;
+}
+
+export interface MemoryWriteResult {
+  readonly uri: Uri;
+  readonly memoryType: string;
+  readonly created: boolean;
+  /** 应用前的正文，用于 `memory_diff.json` 的 `before` */
+  readonly before: string | null;
+  readonly after: string;
+}
+
+/**
+ * 记忆服务的端口。
+ *
+ * `filesystem.read` / `filesystem.write` 的文本是**整份文档**（frontmatter + 正文），
+ * 不是 `FileSystemService` 那种去掉 frontmatter 的正文：记忆的元数据必须能原样读回，
+ * 否则 `fields` 只能靠猜。
+ *
+ * `remove` / `list` 不在最初的端口草图里，是「拒绝即删除」（§11.6）与「待复核列表」
+ * 两个用例的必需能力。`FileSystemService` 结构上同时满足这四个方法。
+ */
+export interface MemoryServicePorts {
+  readonly filesystem: {
+    /** 原样返回文件内容（含 frontmatter）。文件不存在时抛 `NOT_FOUND`。 */
+    read(uri: Uri): Promise<{ readonly text: string }>;
+    write(uri: Uri, text: string, options?: unknown): Promise<unknown>;
+    /** 不存在返回 `null`；目录返回非 `null`（`read` 会以 `INVALID_ARGUMENT` 拒绝）。 */
+    stat(uri: Uri): Promise<unknown>;
+    /** `rm -f` 语义：不存在不是错误。 */
+    remove(uri: Uri): Promise<unknown>;
+    /** 直接子项，带 `kind` 供 `listPending` 递归。 */
+    list(uri: Uri): Promise<readonly { readonly uri: Uri; readonly kind: 'file' | 'directory' }[]>;
+  };
+  /**
+   * 检索端口（§11.3 的预取）。
+   *
+   * `options` 是 `unknown`：`SearchService.find` 的 `FindOptions` 要求调用方身份与
+   * 展开后的 principals，而预取跑在后台任务里没有请求身份。装配方负责把它绑成
+   * 「某个 scope 下已授权的检索」。
+   */
+  readonly search: {
+    find(
+      query: string,
+      options: unknown,
+    ): Promise<
+      readonly { readonly uri: string; readonly abstract: string | null; readonly score: number }[]
+    >;
+  };
+  readonly logger: Logger;
+}
+
+/** `content` 之外还有一个 camelCase vs snake_case 的映射：frontmatter 用 `updated_at`。 */
+const CONTENT_FIELD = 'content';
+const UPDATED_AT_FIELD = 'updatedAt';
+
+const MEMORY_TYPE_KEY = 'memory_type';
+const STATUS_KEY = 'status';
+const CREATED_AT_KEY = 'created_at';
+const UPDATED_AT_KEY = 'updated_at';
+const URI_KEY = 'uri';
+
+/** 这些键是文件元数据，不属于 `fields`。 */
+const RESERVED_KEYS: ReadonlySet<string> = new Set([
+  MEMORY_TYPE_KEY,
+  STATUS_KEY,
+  CREATED_AT_KEY,
+  UPDATED_AT_KEY,
+  URI_KEY,
+]);
+
+/** 走复核闸门的记忆类型（§11.6）。 */
+const GATED_MEMORY_TYPES: ReadonlySet<string> = new Set(['experiences', 'rules']);
+
+/** scope 下放记忆的目录（§6.5）。 */
+const MEMORIES_DIRECTORY = 'memories';
+
+/**
+ * 预取的最小条数。
+ *
+ * 来源：架构文档 §11.3 的 `limit = max(5, prefetchTopN)`。5 是「够模型判断
+ * 『这是新增还是更新』」的经验下界，没有实测数据。
+ */
+const PREFETCH_MIN_LIMIT = 5;
+
+const FRONTMATTER_DELIMITER = '---';
+const SEQUENCE_ITEM_PREFIX = '  - ';
+const CONTENT_HEADING = '## content';
+
+/** 文件名里的 identity 占位符，如 `{topic}`。与 `domain/memory-type.ts` 同一形状。 */
+const PLACEHOLDER_PATTERN = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+
+/**
+ * 普通标量（不加引号）的形态。
+ *
+ * `_` 数字分隔符故意不收进解析：YAML 1.1 的 `1_000` 在 YAML 1.2 里是字符串，
+ * 记忆字段里没有这种写法，当作字符串读回来更安全（写了引号的字符串不会被它命中）。
+ */
+const PLAIN_NUMBER = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/;
+
+/** 会被 YAML 当成非字符串的关键字。 */
+const YAML_RESERVED_WORDS: ReadonlySet<string> = new Set([
+  'true',
+  'false',
+  'null',
+  '~',
+  'yes',
+  'no',
+  'on',
+  'off',
+  'True',
+  'False',
+  'Null',
+  'Yes',
+  'No',
+  'On',
+  'Off',
+  'TRUE',
+  'FALSE',
+  'NULL',
+  'YES',
+  'NO',
+  'ON',
+  'OFF',
+]);
+
+/**
+ * 行首这些字符会让 YAML 换一种解析方式（序列项、映射键、注释、锚点、流式集合……）。
+ *
+ * 命中就加引号，比「记住 YAML 的上下文相关规则」便宜且不会漏。
+ */
+const YAML_LEADING_INDICATORS: ReadonlySet<string> = new Set([
+  '-',
+  '?',
+  ':',
+  ',',
+  '[',
+  ']',
+  '{',
+  '}',
+  '#',
+  '&',
+  '*',
+  '!',
+  '|',
+  '>',
+  "'",
+  '"',
+  '%',
+  '@',
+  '`',
+]);
+
+interface MemoryDocument {
+  readonly memoryType: string;
+  readonly status: MemoryStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  /** 正文（`## content` 及之后），与 `memory_diff.json` 的 before / after 同一形态 */
+  readonly body: string;
+}
+
+function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
+  return new ComemError('INVALID_ARGUMENT', message, details);
+}
+
+function filenamePlaceholders(filename: string): string[] {
+  return [...filename.matchAll(PLACEHOLDER_PATTERN)].map((match) => match[1] ?? '');
+}
+
+/**
+ * 一个值是否需要加引号。
+ *
+ * 判定按 YAML 普通标量的上下文规则：首字符是结构指示符、含 `: ` 或 ` #`、以 `:`
+ * 结尾、含流式指示符（`[ ] { }`）、是保留字或看起来像数字。都命中不了才原样写。
+ * 数字与日期的判断只能靠形态：`2026-11-05` 在 YAML 1.2 里是字符串，但很多解析器
+ * 按 YAML 1.1 的 timestamp 处理，统一加引号能消除歧义。
+ */
+function needsQuoting(value: string): boolean {
+  if (value === '' || value !== value.trim()) {
+    return true;
+  }
+  if (/[\n\r\t]/.test(value)) {
+    return true;
+  }
+  const first = value[0] ?? '';
+  if (YAML_LEADING_INDICATORS.has(first)) {
+    return true;
+  }
+  if (value.includes(': ') || value.includes(' #') || value.endsWith(':')) {
+    return true;
+  }
+  if (/[[\]{}]/.test(value)) {
+    return true;
+  }
+  if (YAML_RESERVED_WORDS.has(value) || PLAIN_NUMBER.test(value)) {
+    return true;
+  }
+  return /^\d{4}-\d{1,2}-\d{1,2}/.test(value);
+}
+
+/**
+ * 把单个标量写成 YAML。
+ *
+ * 需要引号时用双引号 + JSON 转义：JSON 字符串是合法的 YAML 双引号标量，`\n` /
+ * `\"` / `\\` 的语义一致，不需要自己再维护一套转义表。
+ */
+function formatScalar(value: unknown): string {
+  if (typeof value === 'string') {
+    return needsQuoting(value) ? JSON.stringify(value) : value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      // `NaN` / `Infinity` 写进去就再也读不出来（JSON 会变成 null），按类型不合法拒绝。
+      throw invalidArgument('记忆字段不能是 NaN 或 Infinity。', { value: String(value) });
+    }
+    return String(value);
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+  throw invalidArgument('记忆字段只能是字符串、数字、布尔值或字符串数组。', {
+    valueType: typeof value,
+  });
+}
+
+/** 一个字段一行；`string[]` 用 YAML 块序列（每条一行 `  - item`）。 */
+function formatField(name: string, value: unknown): string {
+  if (!Array.isArray(value)) {
+    return `${name}: ${formatScalar(value)}`;
+  }
+  if (value.length === 0) {
+    return `${name}: []`;
+  }
+  return [`${name}:`, ...value.map((item) => `${SEQUENCE_ITEM_PREFIX}${formatScalar(item)}`)].join(
+    '\n',
+  );
+}
+
+function parseScalar(text: string): unknown {
+  if (text.startsWith('"')) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw invalidArgument('记忆文件的 frontmatter 里有不合法的双引号字符串。', { text });
+    }
+  }
+  if (text === '[]') {
+    return [];
+  }
+  if (text === 'true') {
+    return true;
+  }
+  if (text === 'false') {
+    return false;
+  }
+  if (PLAIN_NUMBER.test(text)) {
+    return Number(text);
+  }
+  return text;
+}
+
+/**
+ * 解析 frontmatter 行。
+ *
+ * 只支持本服务写出的子集：`key: scalar`、`key:` 加缩进块序列、空行与整行注释。
+ * 手工写的块标量（`|` / `>`）、锚点、多文档不在支持范围内——记忆文件由服务写入，
+ * 不支持比「悄悄解析错」更好。
+ */
+function parseFrontmatterLines(lines: readonly string[]): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    if (line === '' || line.startsWith('#')) {
+      index += 1;
+      continue;
+    }
+
+    const colon = line.indexOf(':');
+    if (colon <= 0) {
+      throw invalidArgument('记忆文件的 frontmatter 行不是「键: 值」形式。', { line });
+    }
+
+    const key = line.slice(0, colon).trim();
+    const rest = line.slice(colon + 1).trim();
+    if (rest !== '') {
+      data[key] = parseScalar(rest);
+      index += 1;
+      continue;
+    }
+
+    const items: unknown[] = [];
+    index += 1;
+    while (index < lines.length) {
+      const item = lines[index] ?? '';
+      if (!item.startsWith(SEQUENCE_ITEM_PREFIX)) {
+        break;
+      }
+      items.push(parseScalar(item.slice(SEQUENCE_ITEM_PREFIX.length)));
+      index += 1;
+    }
+    data[key] = items;
+  }
+
+  return data;
+}
+
+function renderBody(content: unknown): string {
+  return typeof content === 'string' ? `${CONTENT_HEADING}\n\n${content}` : '';
+}
+
+/** `renderBody` 的逆运算；没有 `## content` 段时返回 `null`（字段不存在）。 */
+function extractContent(body: string): string | null {
+  if (body === '') {
+    return null;
+  }
+  const prefix = `${CONTENT_HEADING}\n`;
+  if (!body.startsWith(prefix)) {
+    return null;
+  }
+  const rest = body.slice(prefix.length);
+  return rest.startsWith('\n') ? rest.slice(1) : rest;
+}
+
+function parseStatus(value: unknown): MemoryStatus {
+  return value === 'pending' || value === 'archived' ? value : 'active';
+}
+
+function serializeMemoryDocument(input: {
+  readonly uri: Uri;
+  readonly memoryType: string;
+  readonly status: MemoryStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly schema: MemoryTypeSchema;
+  readonly fields: Readonly<Record<string, unknown>>;
+}): string {
+  const header = [
+    FRONTMATTER_DELIMITER,
+    `${MEMORY_TYPE_KEY}: ${formatScalar(input.memoryType)}`,
+    `${STATUS_KEY}: ${formatScalar(input.status)}`,
+    `${CREATED_AT_KEY}: ${formatScalar(input.createdAt)}`,
+    `${UPDATED_AT_KEY}: ${formatScalar(input.updatedAt)}`,
+    `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
+  ];
+
+  for (const field of input.schema.fields) {
+    if (field.name === CONTENT_FIELD || field.name === UPDATED_AT_FIELD) {
+      continue;
+    }
+    const value = input.fields[field.name];
+    if (value !== undefined) {
+      header.push(formatField(field.name, value));
+    }
+  }
+  header.push(FRONTMATTER_DELIMITER);
+
+  return `${header.join('\n')}\n\n${renderBody(input.fields[CONTENT_FIELD])}`;
+}
+
+/**
+ * 解析一条记忆文件。
+ *
+ * 没有 frontmatter 或没有 `memory_type` 时返回 `null`：`memories/` 下可能有用户手工
+ * 放的普通 Markdown，它不是记忆，按「不存在」处理比抛错更适合列表遍历。
+ */
+function parseMemoryDocument(text: string): MemoryDocument | null {
+  const lines = text.split('\n');
+  if (lines[0] !== FRONTMATTER_DELIMITER) {
+    return null;
+  }
+  const closingIndex = lines.findIndex(
+    (line, index) => index > 0 && line === FRONTMATTER_DELIMITER,
+  );
+  if (closingIndex < 0) {
+    return null;
+  }
+
+  const data = parseFrontmatterLines(lines.slice(1, closingIndex));
+  const memoryType = data[MEMORY_TYPE_KEY];
+  if (typeof memoryType !== 'string') {
+    return null;
+  }
+
+  // 写盘时固定写一个空行再进正文；这里对称地只吃掉一个。
+  const body = lines.slice(closingIndex + 1).join('\n').replace(/^\n/, '');
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (!RESERVED_KEYS.has(key)) {
+      fields[key] = value;
+    }
+  }
+  const content = extractContent(body);
+  if (content !== null) {
+    fields[CONTENT_FIELD] = content;
+  }
+
+  // `updated_at` 是 `updatedAt` 字段在磁盘上的写法（§6.6 的 frontmatter 用 snake_case）。
+  // 只认 `memory_type` 就够：`read` 不该因为一个自定义类型没注册进内置表而返回「不存在」，
+  // 那会让「写进去了但读不出来」看起来像「没有这条记忆」。
+  const createdAt = typeof data[CREATED_AT_KEY] === 'string' ? data[CREATED_AT_KEY] : '';
+  const updatedAt = typeof data[UPDATED_AT_KEY] === 'string' ? data[UPDATED_AT_KEY] : createdAt;
+  fields[UPDATED_AT_FIELD] = updatedAt;
+
+  return {
+    memoryType,
+    status: parseStatus(data[STATUS_KEY]),
+    createdAt,
+    updatedAt,
+    fields,
+    body,
+  };
+}
+
+/**
+ * 只校验占位符（`renderPath` 的入参），不要求 identity 字段全部出现。
+ *
+ * 导出给抽取步骤：它要判断「模型引用的 `page_id` 与 identity 推出的路径是不是同一个」，
+ * 那份路径推导必须与写入侧完全一致（多一个分支就会一边写 `a/b.md`、一边找 `a-b.md`）。
+ */
+export function renderMemoryUri(
+  scopeUri: Uri,
+  schema: MemoryTypeSchema,
+  values: Readonly<Record<string, unknown>>,
+): Uri {
+  const placeholders: Record<string, string> = {};
+  for (const name of filenamePlaceholders(schema.filename)) {
+    const value = values[name];
+    if (typeof value !== 'string') {
+      throw invalidArgument(`记忆类型 ${schema.type} 的 identity 字段 ${name} 必须是字符串。`, {
+        memoryType: schema.type,
+        field: name,
+      });
+    }
+    placeholders[name] = value;
+  }
+  return scopeUri.child(...renderPath(schema, placeholders).split('/'));
+}
+
+/**
+ * identity 字段全部必填（§11.1：没有 identity 就判定不了「这是同一条还是新的」）。
+ *
+ * 导出给抽取步骤：它要在调 `upsertMemory` 之前就知道 identity 是否齐全，缺字段的
+ * 操作应当进 `skipped`，而不是让整步在写盘时抛错。
+ */
+export function assertMemoryIdentity(
+  schema: MemoryTypeSchema,
+  values: Readonly<Record<string, unknown>>,
+): void {
+  for (const field of identityFields(schema)) {
+    const value = values[field.name];
+    if (typeof value !== 'string' || value === '') {
+      throw invalidArgument(`记忆类型 ${schema.type} 的 identity 字段 ${field.name} 不能为空。`, {
+        memoryType: schema.type,
+        field: field.name,
+      });
+    }
+  }
+}
+
+/** 字段类型必须与 schema 声明一致，否则写进去再读回来是另一种类型。 */
+function assertFieldTypes(
+  schema: MemoryTypeSchema,
+  values: Readonly<Record<string, unknown>>,
+): void {
+  for (const field of schema.fields) {
+    const value = values[field.name];
+    if (value === undefined) {
+      continue;
+    }
+    const valid =
+      field.type === 'string[]'
+        ? Array.isArray(value) && value.every((item) => typeof item === 'string')
+        : typeof value === field.type;
+    if (!valid) {
+      throw invalidArgument(`记忆字段 ${field.name} 的类型必须是 ${field.type}。`, {
+        memoryType: schema.type,
+        field: field.name,
+        expected: field.type,
+      });
+    }
+  }
+}
+
+export class MemoryService {
+  readonly #filesystem: MemoryServicePorts['filesystem'];
+  readonly #search: MemoryServicePorts['search'];
+  readonly #logger: Logger;
+
+  constructor(ports: MemoryServicePorts) {
+    this.#filesystem = ports.filesystem;
+    this.#search = ports.search;
+    this.#logger = ports.logger;
+  }
+
+  /** 读一条记忆；不存在返回 `null`。 */
+  async read(uri: Uri): Promise<MemoryRecord | null> {
+    const document = await this.#readDocument(uri);
+    if (document === null) {
+      return null;
+    }
+    return {
+      uri,
+      memoryType: document.memoryType,
+      fields: document.fields,
+      status: document.status,
+      updatedAt: document.updatedAt,
+    };
+  }
+
+  /**
+   * 按记忆类型渲染路径并写。
+   *
+   * `addOnly` 类型（`events`）在文件已存在时抛 `ALREADY_EXISTS`：事件是「某时发生了
+   * 什么」，发生之后不会改变，覆盖写等于篡改历史（§11.1）。
+   */
+  async upsertMemory(
+    scopeUri: Uri,
+    schema: MemoryTypeSchema,
+    values: Readonly<Record<string, unknown>>,
+  ): Promise<MemoryWriteResult> {
+    assertMemoryIdentity(schema, values);
+    const uri = renderMemoryUri(scopeUri, schema, values);
+    const existing = await this.#readDocument(uri);
+    if (existing !== null && schema.operationMode === 'addOnly') {
+      throw new ComemError(
+        'ALREADY_EXISTS',
+        `记忆 ${uri.toString()} 已存在，${schema.type} 类型只允许新增。`,
+        { uri: uri.toString(), memoryType: schema.type },
+      );
+    }
+
+    assertFieldTypes(schema, values);
+    const now = new Date().toISOString();
+    const fields: Record<string, unknown> = { ...values };
+    if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
+      fields[UPDATED_AT_FIELD] = now;
+    }
+    const status: MemoryStatus = GATED_MEMORY_TYPES.has(schema.type) ? 'pending' : 'active';
+
+    const text = serializeMemoryDocument({
+      uri,
+      memoryType: schema.type,
+      status,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      schema,
+      fields,
+    });
+    await this.#filesystem.write(uri, text);
+
+    this.#logger.info('记忆已写入', {
+      uri: uri.toString(),
+      memoryType: schema.type,
+      status,
+      created: existing === null,
+    });
+
+    return {
+      uri,
+      memoryType: schema.type,
+      created: existing === null,
+      before: existing?.body ?? null,
+      after: renderBody(fields[CONTENT_FIELD]),
+    };
+  }
+
+  /** 复核通过：`pending` → `active`（§11.6）。已经是 `active` 时是空操作。 */
+  async approve(uri: Uri): Promise<void> {
+    const document = await this.#readDocument(uri);
+    if (document === null) {
+      throw new ComemError('NOT_FOUND', `记忆不存在：${uri.toString()}`, { uri: uri.toString() });
+    }
+    const schema = getMemoryType(document.memoryType);
+    if (schema === undefined) {
+      throw invalidArgument(`未知的记忆类型：${document.memoryType}。`, {
+        memoryType: document.memoryType,
+      });
+    }
+    if (document.status === 'active') {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await this.#filesystem.write(
+      uri,
+      serializeMemoryDocument({
+        uri,
+        memoryType: document.memoryType,
+        status: 'active',
+        createdAt: document.createdAt,
+        updatedAt: now,
+        schema,
+        fields: document.fields,
+      }),
+    );
+    this.#logger.info('记忆复核通过', {
+      uri: uri.toString(),
+      memoryType: document.memoryType,
+    });
+  }
+
+  /** 复核拒绝：删除并记录原因（§11.6）。已经不在了是空操作。 */
+  async reject(uri: Uri, reason: string): Promise<void> {
+    const document = await this.#readDocument(uri);
+    if (document === null) {
+      return;
+    }
+    await this.#filesystem.remove(uri);
+    this.#logger.info('记忆复核拒绝，已删除', {
+      uri: uri.toString(),
+      memoryType: document.memoryType,
+      reason,
+    });
+  }
+
+  /**
+   * 删除一条记忆（§11.5 的 `delete` 操作）。
+   *
+   * `rm -f` 语义：不存在不是错误。删除与覆盖写不同，它没有「部分成功」的形态，
+   * 所以不需要读回来判断。
+   */
+  async remove(uri: Uri): Promise<void> {
+    await this.#filesystem.remove(uri);
+    this.#logger.info('记忆已删除', { uri: uri.toString() });
+  }
+
+  /** 待复核列表：scope 下 `memories/` 里 `status = 'pending'` 的记录。 */
+  async listPending(
+    scopeUri: Uri,
+    options: { readonly limit?: number } = {},
+  ): Promise<readonly MemoryRecord[]> {
+    const limit = options.limit ?? Number.POSITIVE_INFINITY;
+    if (limit <= 0) {
+      return [];
+    }
+
+    const records: MemoryRecord[] = [];
+    const visit = async (directory: Uri): Promise<void> => {
+      const entries = await this.#listOrEmpty(directory);
+      for (const entry of entries) {
+        if (records.length >= limit) {
+          return;
+        }
+        if (entry.kind === 'directory') {
+          await visit(entry.uri);
+          continue;
+        }
+        const record = await this.read(entry.uri);
+        if (record !== null && record.status === 'pending') {
+          records.push(record);
+        }
+      }
+    };
+
+    await visit(scopeUri.child(...MEMORIES_DIRECTORY.split('/')));
+    return records;
+  }
+
+  /**
+   * §11.3 的抽取预取：按 schema 目录做一次检索，返回 top-N。
+   *
+   * 单文件类型（`profile` / `identity` / `soul`，`filename` 里没有占位符）直接读该
+   * 文件：它们的目录里可能有别的记忆，检索会把同目录的其它文件也算成「已读」。
+   *
+   * 只返回 `active`：`pending` 记录还在复核（§11.6），把它当「已有记忆」喂给抽取
+   * 会让模型以为结论已经生效。
+   */
+  async prefetch(
+    scopeUri: Uri,
+    schema: MemoryTypeSchema,
+    query: string,
+    topN: number,
+  ): Promise<readonly MemoryRecord[]> {
+    const limit = Math.max(PREFETCH_MIN_LIMIT, topN);
+
+    if (!schema.filename.includes('{')) {
+      const record = await this.read(renderMemoryUri(scopeUri, schema, {}));
+      return record !== null && record.status === 'active' ? [record] : [];
+    }
+
+    const directory = scopeUri.child(...schema.directory.split('/')).toString();
+    const hits = await this.#search.find(query, { scopes: [directory], limit });
+
+    const records: MemoryRecord[] = [];
+    for (const hit of hits) {
+      if (records.length >= limit) {
+        break;
+      }
+      const uri = Uri.tryParse(hit.uri);
+      if (uri === null) {
+        this.#logger.warn('预取命中的 URI 不合法，已跳过', { uri: hit.uri, memoryType: schema.type });
+        continue;
+      }
+      const record = await this.read(uri);
+      if (record !== null && record.status === 'active') {
+        records.push(record);
+      }
+    }
+    return records;
+  }
+
+  async #readDocument(uri: Uri): Promise<MemoryDocument | null> {
+    if ((await this.#filesystem.stat(uri)) === null) {
+      return null;
+    }
+    const { text } = await this.#filesystem.read(uri);
+    const document = parseMemoryDocument(text);
+    if (document === null) {
+      // 端口语义不对（例如注入了返回正文的 `FileSystemService`）时，这里会一路返回
+      // null，看起来像「没有记忆」，抽取会重复新增。留一条 warn 让它可查。
+      this.#logger.warn('记忆文件缺少可解析的 frontmatter，按不存在处理', {
+        uri: uri.toString(),
+      });
+    }
+    return document;
+  }
+
+  async #listOrEmpty(
+    directory: Uri,
+  ): Promise<readonly { readonly uri: Uri; readonly kind: 'file' | 'directory' }[]> {
+    try {
+      return await this.#filesystem.list(directory);
+    } catch (error) {
+      if (error instanceof ComemError && error.code === 'NOT_FOUND') {
+        return [];
+      }
+      throw error;
+    }
+  }
+}

@@ -66,6 +66,26 @@ export interface Session {
   readonly lastCommitAt: string | null;
 }
 
+/**
+ * `sessions/sess_NNN/.meta.json` 的形状（架构文档 §6.6，加上 `status`）。
+ *
+ * 放在领域层：`services/` 的用例与 `adapters/fs/metadata-file.ts` 的读写都要用它，
+ * 而它本身是纯数据（§4.2：领域层不 import 其它层，反过来谁都能依赖它）。
+ *
+ * `commitCount` 是**归档序号计数器**，不是统计值——`archive_NNN` 的编号由它加一
+ * 得到（§10.2「单调递增，从不复用」）。删掉 `history/` 里的目录不会让它回退。
+ */
+export interface SessionMeta {
+  readonly sessionId: string;
+  /** 作用域根标识（`comem://user/alice` 的 `alice`），§6.6 叫 `userId` */
+  readonly userId: string;
+  readonly status: SessionStatus;
+  readonly createdAt: string;
+  readonly commitCount: number;
+  readonly lastCommitAt: string | null;
+  readonly pendingTokens: number;
+}
+
 /** 归档阶段的状态（架构文档 §10.1 的 `phase1.status`）。 */
 export type ArchiveStatus = 'pending' | 'archived' | 'failed';
 
