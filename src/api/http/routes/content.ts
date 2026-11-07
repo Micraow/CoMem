@@ -126,11 +126,26 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const query = requireRecord(request.query, 'content/abstract');
         const uri = requireUri(query, 'uri');
         await authorizer.assert(uri, READ);
+
+        // 文件的 L0 存在索引里（§6.7：文件级摘要跟着文件走，写在 frontmatter 里
+        // 再物化进索引），目录的 L0 才是 `.abstract.md`。只读摘要文件会让文件详情
+        // 页永远显示「还没有摘要」，而摘要其实早就生成了。
+        const node = await services.index.stat(uri.toString());
+        if (node !== null && node.kind === 'document') {
+          return ok({
+            uri: uri.toString(),
+            abstract: node.abstract,
+            degraded: false,
+            source: 'index',
+          });
+        }
+
         const directory = await summary.read(uri);
         return ok({
           uri: uri.toString(),
           abstract: directory?.abstract ?? null,
           degraded: directory?.degraded ?? false,
+          source: 'summary',
         });
       });
 
@@ -138,11 +153,21 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const query = requireRecord(request.query, 'content/overview');
         const uri = requireUri(query, 'uri');
         await authorizer.assert(uri, READ);
+
+        // 文件没有 L1 概览：概览是**目录级**的（§9.1）。文件详情页的「概览」档
+        // 由前端用正文的标题树合成（`skeletonOverview` 的同一条逻辑），这里返回
+        // `null` 并在 `source` 里说清来源。
+        const node = await services.index.stat(uri.toString());
+        if (node !== null && node.kind === 'document') {
+          return ok({ uri: uri.toString(), overview: null, degraded: false, source: 'none' });
+        }
+
         const directory = await summary.read(uri);
         return ok({
           uri: uri.toString(),
           overview: directory?.overview ?? null,
           degraded: directory?.degraded ?? false,
+          source: 'summary',
         });
       });
 

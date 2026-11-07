@@ -286,6 +286,36 @@ describe('文件系统与内容', () => {
     );
     expect(typeof abstract['abstract']).toBe('string');
     expect(String(overview['overview'])).toContain('# memories');
+    expect(abstract['source']).toBe('summary');
+    expect(overview['source']).toBe('summary');
+  });
+
+  it('文件的 abstract 从索引读，不是摘要文件', async () => {
+    // 文件的 L0 存在索引的 `abstract` 字段里（§6.7）。只读 `.abstract.md` 会让
+    // 文件详情页永远显示「还没有摘要」，而摘要其实早就生成了。
+    const file = `${ROOT}/memories/preferences/code-style.md`;
+    await inject({
+      method: 'POST',
+      url: '/api/v1/content/write',
+      payload: {
+        uri: file,
+        content: '---\nsummary: 严格模式与两空格缩进\n---\n\n正文。',
+      },
+    });
+    await container.services.indexObserver.drain();
+
+    const result = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/abstract?uri=${encode(file)}` }),
+    );
+
+    expect(result['source']).toBe('index');
+
+    // 文件没有 L1 概览：概览是目录级的（§9.1）。
+    const overview = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/overview?uri=${encode(file)}` }),
+    );
+    expect(overview['overview']).toBeNull();
+    expect(overview['source']).toBe('none');
   });
 
   it('content/download 校验签名', async () => {

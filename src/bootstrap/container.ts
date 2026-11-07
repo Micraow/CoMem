@@ -684,6 +684,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     acl,
     authorizer,
     summary,
+    index,
     session,
     tasks: task,
     taskStore: taskRepository,

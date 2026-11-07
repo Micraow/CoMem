@@ -1,0 +1,6 @@
+# pnpm 12 起，依赖构建脚本的白名单只能写在 pnpm-workspace.yaml 里
+# （package.json 的 pnpm 字段被忽略）。web/ 是独立包，不参与根 workspace，
+# 所以白名单要在这一层写一份：esbuild 是 vite / nuxt 的传递依赖，
+# postinstall 只做二进制校验，必须允许。
+allowBuilds:
+  esbuild: true

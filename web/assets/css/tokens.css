@@ -1,0 +1,196 @@
+/* ==========================================================================
+   CoMem 控制台 — 设计令牌（架构文档 §16.1）
+
+   来源：docs/design/variants/apple/app.css 的 01 Tokens，逐值对齐。
+   这里只放变量，不写选择器语义；组件样式在 main.css。
+
+   深浅两套外观只换变量值：组件不写 `dark:` 变体，切主题改
+   `<html data-theme>` 即可。
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* 字体：SF Pro 系统栈；等宽用 SF Mono */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 桌面底色（材质背后的那层） */
+  --desktop: #05060a;
+
+  /* 表面层级 */
+  --bg: #0b0b0d;
+  --bg-2: #131315;
+  --surface: #1c1c1e;
+  --surface-2: #232326;
+  --surface-3: #2c2c2e;
+  --surface-4: #3a3a3c;
+
+  /* 材质（半透明 + 模糊 + 饱和） */
+  --material: rgba(24, 24, 27, 0.72);
+  --material-sidebar: rgba(28, 28, 31, 0.62);
+  --material-thick: rgba(28, 28, 30, 0.92);
+  --material-toolbar: rgba(20, 20, 22, 0.78);
+
+  /* 文本 */
+  --label: #f5f5f7;
+  --label-2: rgba(235, 235, 245, 0.74);
+  --label-3: rgba(235, 235, 245, 0.54);
+  --label-4: rgba(235, 235, 245, 0.38);
+
+  /* 描边与填充 */
+  --separator: rgba(255, 255, 255, 0.1);
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --fill-hover: rgba(255, 255, 255, 0.055);
+  --fill-press: rgba(255, 255, 255, 0.1);
+  --fill-2: rgba(120, 120, 128, 0.3);
+  --fill-3: rgba(120, 120, 128, 0.44);
+
+  /* 系统蓝 */
+  --accent: #0a84ff;
+  --accent-ink: #54a9ff;
+  --accent-fill: #0a6bd6;
+  --accent-fill-hover: #1280f0;
+  --accent-tint: rgba(10, 132, 255, 0.18);
+  --accent-tint-2: rgba(10, 132, 255, 0.1);
+
+  /* 语义色 */
+  --red: #ff453a;
+  --red-ink: #ff7a70;
+  --red-fill: #d3312a;
+  --red-tint: rgba(255, 69, 58, 0.15);
+  --orange: #ff9f0a;
+  --orange-ink: #ffb340;
+  --orange-fill: #b26a00;
+  --orange-tint: rgba(255, 159, 10, 0.15);
+  --green: #30d158;
+  --green-ink: #5ce383;
+  --green-fill: #1f7a3a;
+  --green-tint: rgba(48, 209, 88, 0.15);
+  --gray: #8e8e93;
+  --gray-ink: #b9b9be;
+  --gray-tint: rgba(142, 142, 147, 0.18);
+  --purple: #bf5af2;
+  --purple-ink: #d68bf7;
+  --purple-tint: rgba(191, 90, 242, 0.16);
+  --teal: #40c8e0;
+  --teal-ink: #6ddfef;
+  --teal-tint: rgba(64, 200, 224, 0.16);
+  --yellow: #ffd60a;
+  --yellow-ink: #ffe14d;
+  --yellow-tint: rgba(255, 214, 10, 0.16);
+
+  /* 分段控件的选中底色 */
+  --segment-on: #5a5a5f;
+
+  /* 阴影 */
+  --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.2), 0 6px 20px rgba(0, 0, 0, 0.18);
+  --shadow-pop: 0 0 0 0.5px rgba(0, 0, 0, 0.55), 0 18px 50px rgba(0, 0, 0, 0.62),
+    0 3px 10px rgba(0, 0, 0, 0.42);
+  --shadow-sheet: 0 -1px 0 rgba(255, 255, 255, 0.06), 0 -24px 70px rgba(0, 0, 0, 0.6);
+  --inset-hair: inset 0 0 0 0.5px rgba(255, 255, 255, 0.085);
+  --inset-top: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+
+  /* 圆角：连续圆角的观感靠「圆角 + 内高光 + 描边」一起给 */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-control: 10px;
+  --r-card: 18px;
+  --r-panel: 22px;
+  --r-sheet: 24px;
+  --r-pill: 999px;
+
+  /* 动效 */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: 0.28s;
+  --dur-fast: 0.16s;
+  --dur-slow: 0.42s;
+
+  /* 间距 4px 基准 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+  --s-9: 56px;
+
+  --sidebar-w: 240px;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --desktop: #e8e8ec;
+
+  --bg: #f5f5f7;
+  --bg-2: #eeeef1;
+  --surface: #ffffff;
+  --surface-2: #f7f7f9;
+  --surface-3: #ededf0;
+  --surface-4: #e0e0e5;
+
+  --material: rgba(255, 255, 255, 0.72);
+  --material-sidebar: rgba(246, 246, 248, 0.66);
+  --material-thick: rgba(255, 255, 255, 0.94);
+  --material-toolbar: rgba(250, 250, 252, 0.78);
+
+  --label: #1d1d1f;
+  --label-2: rgba(60, 60, 67, 0.82);
+  --label-3: rgba(60, 60, 67, 0.72);
+  --label-4: rgba(60, 60, 67, 0.4);
+
+  --separator: rgba(60, 60, 67, 0.16);
+  --hairline: rgba(60, 60, 67, 0.12);
+  --hairline-strong: rgba(60, 60, 67, 0.24);
+  --fill-hover: rgba(60, 60, 67, 0.07);
+  --fill-press: rgba(60, 60, 67, 0.12);
+  --fill-2: rgba(120, 120, 128, 0.16);
+  --fill-3: rgba(120, 120, 128, 0.26);
+
+  --accent: #007aff;
+  --accent-ink: #0060c7;
+  --accent-fill: #0071e3;
+  --accent-fill-hover: #0a7ef0;
+  --accent-tint: rgba(0, 122, 255, 0.14);
+  --accent-tint-2: rgba(0, 122, 255, 0.08);
+
+  --red: #ff3b30;
+  --red-ink: #c4271e;
+  --red-fill: #d3312a;
+  --red-tint: rgba(255, 59, 48, 0.11);
+  --orange: #ff9500;
+  --orange-ink: #9a5b00;
+  --orange-fill: #b26a00;
+  --orange-tint: rgba(255, 149, 0, 0.13);
+  --green: #34c759;
+  --green-ink: #1b7a3a;
+  --green-fill: #1f7a3a;
+  --green-tint: rgba(52, 199, 89, 0.14);
+  --gray: #8e8e93;
+  --gray-ink: #63636a;
+  --gray-tint: rgba(120, 120, 128, 0.13);
+  --purple: #af52de;
+  --purple-ink: #7b2fa8;
+  --purple-tint: rgba(175, 82, 222, 0.12);
+  --teal: #30b0c7;
+  --teal-ink: #0a6e84;
+  --teal-tint: rgba(48, 176, 199, 0.13);
+  --yellow: #ffcc00;
+  --yellow-ink: #8a6a00;
+  --yellow-tint: rgba(255, 204, 0, 0.16);
+
+  --segment-on: #ffffff;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.05);
+  --shadow-pop: 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 18px 50px rgba(0, 0, 0, 0.18),
+    0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-sheet: 0 -1px 0 rgba(0, 0, 0, 0.06), 0 -24px 70px rgba(0, 0, 0, 0.18);
+  --inset-hair: inset 0 0 0 0.5px rgba(0, 0, 0, 0.07);
+  --inset-top: inset 0 0.5px 0 rgba(255, 255, 255, 0.9);
+}

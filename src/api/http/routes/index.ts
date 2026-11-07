@@ -10,6 +10,7 @@
  */
 
 import type { ComemConfig } from '../../../config/index.js';
+import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
@@ -53,6 +54,13 @@ export interface HttpRouteServices {
    */
   readonly authorizer: Authorizer;
   readonly summary: SummaryService;
+  /**
+   * 检索索引的只读端口。
+   *
+   * 文件的 L0 摘要存在索引的 `abstract` 字段里（§6.7「文件级摘要不另存档」），
+   * 没有它，控制台的文件详情页只能显示「还没有摘要」——而摘要其实早就有了。
+   */
+  readonly index: RetrievalIndex;
   readonly session: SessionService;
   readonly tasks: TaskService;
   /** 任务行的只读查询端口；由 bootstrap 注入 `TaskRepository`。 */

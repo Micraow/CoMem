@@ -1,0 +1,11 @@
+# 依赖与构建产物
+node_modules/
+.nuxt/
+.output/
+dist/
+*.tsbuildinfo
+.vite/
+
+# 本地产物：删掉不影响源码
+.data/
+*.log
