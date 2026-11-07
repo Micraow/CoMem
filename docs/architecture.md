@@ -1152,27 +1152,29 @@ Template Method 固定「跳过已完成 → 执行 → 记录」的骨架，变
 
 ### 11.1 记忆类型
 
-用 YAML 描述，放在 `src/memory-types/`：
+用 **TypeScript 常量** 描述，放在 `src/domain/memory-types/`。不用 YAML：`domain/` 不许有 IO 和第三方运行时依赖，YAML 会让领域层需要一个解析器（§4.2）。每个类型导出 `satisfies MemoryTypeSchema` 的常量，`index.ts` 汇总成 `BUILTIN_MEMORY_TYPES`。
 
-```yaml
-type: preferences
-description: 用户在某个话题上的偏好
-directory: memories/preferences
-filename: "{topic}.md"
-operationMode: upsert        # upsert | addOnly
-fields:
-  - name: topic
-    type: string
-    identity: true
-    description: 偏好所属话题，小写短横线
-  - name: content
-    type: string
-    merge: patch
-    description: 偏好内容，一句话
-  - name: updatedAt
-    type: string
-    merge: replace
+```ts
+export const preferencesMemoryType = {
+  type: 'preferences',
+  description: '用户在某个话题上的偏好',
+  directory: 'memories/preferences',
+  filename: '{topic}.md',        // 可以带多段，如 '{scenario}/{rule}.md'
+  operationMode: 'upsert',       // upsert | addOnly
+  fields: [
+    { name: 'topic', type: 'string', identity: true, description: '偏好所属话题，小写短横线' },
+    { name: 'content', type: 'string', merge: 'patch', description: '偏好内容，一句话' },
+    { name: 'updatedAt', type: 'string', merge: 'replace' },
+  ],
+} satisfies MemoryTypeSchema;
 ```
+
+**`filename` 可以带多段，一个类型可以有多个 `identity` 字段。** `rules` 就是两级：`{scenario}/{rule}.md` → `memories/rules/license-review/must-locate-license.md`（§6.5 的示例）。规则两条：
+
+1. `filename` 里的每个占位符必须是 `identity` 字段。普通字段的占位符永远填不上，放行等于把「拼出带 `{x}` 的路径」留到运行时。
+2. `identity` 字段不必都出现在 `filename` 里。`profile` 的 `name` 只作为记录标识，文件名固定为 `profile.md`。
+
+`renderPath(schema, values)` 的 `values` 是 `Record<string, string>`：缺值报错（否则拼出带花括号的路径），多值报错（说明调用方搞错了类型），每段值做单段安全校验（拒绝 `/`、`..`、控制字符）。
 
 内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`identity`、`soul`、`experiences`、`rules`。
 
