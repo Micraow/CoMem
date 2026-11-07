@@ -1,0 +1,87 @@
+# 数据根。留空表示按运行形态推导（见 6.5），容器里由镜像钉死为 /var/lib/comem
+dataDir: ""
+
+providers:
+  llm:
+    default:
+      type: openai-compatible      # openai-compatible | anthropic
+      baseUrl: https://api.example.com/v1
+      model: gpt-4o-mini
+      apiKey: ${COMEM_LLM_KEY}
+      maxTokens: 32768
+      timeoutSeconds: 120
+      pricing:                  # 用于成本换算，按 1M token 计
+        inputPerMillion: 0.15
+        outputPerMillion: 0.60
+
+summary:
+  generator: llm          # llm | rule
+  abstractMaxChars: 256
+  overviewMaxChars: 4000
+
+retrieval:
+  engine: fts5            # fts5 | vector（v1 只有 fts5）
+  candidateMultiplier: 4  # 先取 limit×N 候选，再按权限过滤
+  levelWeights:           # 层级加权，用于 BM25 平局时打破
+    l0: 1.15
+    l1: 1.05
+    l2: 1.00
+  queryFilters: []        # sed 风格正则，作用在 prompt 上，产物才是查询
+  assembly:
+    maxTokens: 1600       # 注入模型的 token 预算
+    dedupTurns: 3         # 这么多轮内投过的 URI 不再投
+    quotaPreset: coding   # chat | coding
+  recall:
+    mode: balanced        # fast(0 次 LLM) | balanced(1) | deep(2)
+    expandOnlyWithContext: true   # 首轮自动 fast
+    escalateBelowScore: 0.5       # 快速检索 top1 低于此分则升级
+    expansionTimeoutMs: 5000
+    rewriteTimeoutMs: 30000
+    budgetMs: 500         # 超了就用已拿到的结果
+
+session:
+  autoCommit:
+    enabled: true
+    pendingTokenThreshold: 150000
+    messageCountThreshold: 100
+    minCommitIntervalSeconds: 0
+    idleTimeoutSeconds: 0     # 0 = 关；开了需要服务端扫描器
+    keepRecentCount: 0
+
+memory:
+  reviewRequired:
+    - experiences
+    - rules
+  workingMemory:
+    enabled: false        # 开它会多一次 LLM 调用
+
+acl:
+  enabled: true
+  groupDefaultLevel: write   # write | read
+
+server:
+  host: 127.0.0.1
+  port: 1933
+
+logging:
+  level: info
+  file: ""                   # 留空只写 stdout；填路径则额外写 error.log
+
+telemetry:
+  metrics:
+    enabled: true
+    includeAccountLabel: false   # 单账号部署没必要，开了会放大基数
+  requestLog:
+    enabled: true
+    retainDays: 7
+    retainRows: 100000
+    sampleRate: 1.0          # 1.0 = 全量；错误请求永远全量记录
+  hookOverhead:
+    enabled: true            # Hook 上报阻塞开销，控制台「监控」页用
+  hotness:
+    halfLifeHours: 168       # 一周
+
+task:
+  leaseSeconds: 60
+  maxAttempts: 3
+  concurrency: 4
