@@ -16,7 +16,6 @@
 import type { ComemConfig } from '../../config/index.js';
 import type { Logger } from '../../domain/log.js';
 import type { RetrievalIndex } from '../../domain/retrieval.js';
-import type { AclService } from '../../services/acl.js';
 import type { Authorizer } from '../../services/authorizer.js';
 import type { FileSystemService } from '../../services/filesystem.js';
 import type { MemoryService } from '../../services/memory.js';
@@ -47,9 +46,3 @@ export interface McpToolContext {
   /** 请求 ID，贯穿日志（§17.7） */
   readonly requestId: string;
 }
-
-/**
- * `AclService` 是 `Authorizer` 的生产实现。保留这个别名，让装配代码可以写
- * `acl: aclService`，而工具层只看见端口。
- */
-export type McpAclService = AclService;

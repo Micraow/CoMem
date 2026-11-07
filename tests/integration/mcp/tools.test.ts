@@ -1,0 +1,702 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { ContentStore } from '../../../src/adapters/fs/content-store.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
+import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
+import type { McpToolContext } from '../../../src/api/mcp/context.js';
+import type { McpToolName, McpToolResult } from '../../../src/api/mcp/registry.js';
+import { MCP_TOOLS } from '../../../src/api/mcp/tools/index.js';
+import { configSchema } from '../../../src/config/index.js';
+import { ComemError } from '../../../src/domain/errors.js';
+import type { Level } from '../../../src/domain/level.js';
+import type { Logger } from '../../../src/domain/log.js';
+import type { ContextType } from '../../../src/domain/node.js';
+import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import { Uri } from '../../../src/domain/uri.js';
+import {
+  AllowAllAuthorizer,
+  permissionDenied,
+  type AclAction,
+  type Authorizer,
+} from '../../../src/services/authorizer.js';
+import { ContextAssembler } from '../../../src/services/context-assembler.js';
+import { FileSystemService } from '../../../src/services/filesystem.js';
+import { MemoryService } from '../../../src/services/memory.js';
+import {
+  ResourceService,
+  type ReconcileEntry,
+  type ResourceStorage,
+  type StageUploadInput,
+  type StagedUpload,
+  type StagedUploadInfo,
+} from '../../../src/services/resource.js';
+import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
+import { SessionService } from '../../../src/services/session.js';
+import { SkillService } from '../../../src/services/skill.js';
+import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
+import { TaskService } from '../../../src/services/task.js';
+
+const SCOPE = 'comem://user/alice';
+const MEM = `${SCOPE}/mem`;
+const SUBJECT = 'user:alice';
+const PRINCIPALS = [SUBJECT, 'user:*'];
+
+/** 架构文档 §18 的 `retrieval` 段（与 search.test.ts 同一份）。 */
+const RETRIEVAL_SETTINGS: RetrievalSettings = {
+  candidateMultiplier: 4,
+  levelWeights: { l0: 1.15, l1: 1.05, l2: 1 },
+  queryFilters: [],
+  assembly: { maxTokens: 1600, dedupTurns: 3, quotaPreset: 'coding' },
+};
+
+function createLogger(): Logger {
+  const logger: Logger = {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: () => logger,
+  };
+  return logger;
+}
+
+/** `ResourceStorage` 的内存实现：测试不需要真实临时目录。 */
+class MemoryResourceStorage implements ResourceStorage {
+  readonly #staged = new Map<string, StagedUpload>();
+  readonly reconciled: ReconcileEntry[] = [];
+
+  async stage(input: StageUploadInput): Promise<string> {
+    this.#staged.set(input.uploadId, {
+      info: {
+        uploadId: input.uploadId,
+        fileName: input.fileName,
+        size: input.bytes.byteLength,
+        tempPath: `/tmp/${input.uploadId}`,
+        stagedAtMs: input.stagedAtMs,
+      },
+      bytes: input.bytes,
+    });
+    return `/tmp/${input.uploadId}`;
+  }
+
+  async readStaged(uploadId: string): Promise<StagedUpload | null> {
+    return this.#staged.get(uploadId) ?? null;
+  }
+
+  async listStaged(): Promise<readonly StagedUploadInfo[]> {
+    return [...this.#staged.values()].map((entry) => entry.info);
+  }
+
+  async removeStaged(uploadId: string): Promise<void> {
+    this.#staged.delete(uploadId);
+  }
+
+  async appendReconcile(entry: ReconcileEntry): Promise<void> {
+    this.reconciled.push(entry);
+  }
+}
+
+class DenyAllAuthorizer implements Authorizer {
+  async check(): Promise<boolean> {
+    return false;
+  }
+
+  async filterReadable(): Promise<ReadonlySet<string>> {
+    return new Set();
+  }
+
+  async assert(uri: Uri, action: AclAction): Promise<void> {
+    throw permissionDenied(uri, action);
+  }
+}
+
+interface Harness {
+  readonly context: McpToolContext;
+  readonly dataDir: string;
+  readonly db: DatabaseSync;
+  readonly index: SqliteFtsIndex;
+  readonly store: ContentStore;
+  readonly filesystem: FileSystemService;
+  close(): Promise<void>;
+}
+
+async function createHarness(options: { readonly authorizer?: Authorizer } = {}): Promise<Harness> {
+  const dataDir = await mkdtemp(join(tmpdir(), 'comem-mcp-tools-'));
+  const db = openDatabase(':memory:');
+  runMigrations(db);
+
+  const logger = createLogger();
+  const index = new SqliteFtsIndex({ db, logger });
+  const store = new ContentStore({ dataDir, logger });
+  const locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 1 });
+  const metadata = new MetadataFileStore({ dataDir, logger });
+  const nodes = new NodeRepository({ db, logger });
+  const permissions = new PermissionRepository({ db, logger });
+  const tasks = new TaskService({ tasks: new TaskRepository({ db, logger }), logger });
+  const authorizer = options.authorizer ?? new AllowAllAuthorizer();
+
+  const filesystem = new FileSystemService({ store, locks, authorizer, logger });
+  const assembler = new ContextAssembler({
+    store,
+    metadata,
+    authorizer,
+    logger,
+    estimateTokens: (text) => text.length,
+  });
+  const search = new SearchService({
+    index,
+    filesystem,
+    authorizer,
+    assembler,
+    logger,
+    config: RETRIEVAL_SETTINGS,
+  });
+  const summary = new SummaryService({
+    nodes,
+    index,
+    metadata,
+    store,
+    db,
+    generator: new RuleSummarizer(),
+    logger,
+    config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
+  });
+  const session = new SessionService({
+    store,
+    metadata,
+    locks,
+    tasks,
+    logger,
+    meta: metadata,
+    config: {
+      autoCommit: {
+        enabled: true,
+        pendingTokenThreshold: 150000,
+        messageCountThreshold: 100,
+        minCommitIntervalSeconds: 0,
+        idleTimeoutSeconds: 0,
+        keepRecentCount: 0,
+      },
+    },
+  });
+  const memory = new MemoryService({
+    filesystem: {
+      read: async (uri) => ({ text: Buffer.from(await store.readBytes(uri)).toString('utf8') }),
+      write: (uri, text) => store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8'))),
+      stat: (uri) => store.stat(uri),
+      remove: (uri) => store.remove(uri),
+      list: (uri) => store.list(uri),
+    },
+    search: { find: async () => [] },
+    logger,
+  });
+  const resource = new ResourceService({
+    store,
+    locks,
+    index,
+    summary,
+    storage: new MemoryResourceStorage(),
+    logger,
+  });
+  const skill = new SkillService({ store, locks, index, summary, permissions, logger });
+
+  const context: McpToolContext = {
+    filesystem,
+    search,
+    summary,
+    acl: authorizer,
+    session,
+    memory,
+    resource,
+    skill,
+    tasks,
+    index,
+    logger,
+    config: configSchema.parse({}),
+    subject: SUBJECT,
+    principals: PRINCIPALS,
+    requestId: 'req-test',
+  };
+
+  return {
+    context,
+    dataDir,
+    db,
+    index,
+    store,
+    filesystem,
+    close: async () => {
+      db.close();
+      await rm(dataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+let harness: Harness;
+
+beforeEach(async () => {
+  harness = await createHarness();
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await harness.close();
+});
+
+function tool(name: McpToolName) {
+  const found = MCP_TOOLS.find((candidate) => candidate.name === name);
+  if (found === undefined) {
+    throw new Error(`工具不存在：${name}`);
+  }
+  return found;
+}
+
+async function call(
+  name: McpToolName,
+  input: unknown,
+  context: McpToolContext = harness.context,
+): Promise<McpToolResult> {
+  return tool(name).execute(input, context);
+}
+
+async function callText(
+  name: McpToolName,
+  input: unknown,
+  context: McpToolContext = harness.context,
+): Promise<string> {
+  const result = await call(name, input, context);
+  if (result.type !== 'text') {
+    throw new Error(`期望文本结果，实际是 ${result.type}`);
+  }
+  return result.text;
+}
+
+interface SeedOverrides {
+  readonly level?: Level;
+  readonly contextType?: ContextType;
+  readonly memoryType?: string | null;
+  readonly abstract?: string | null;
+  readonly kind?: IndexRecord['kind'];
+}
+
+function record(uri: string, content: string, overrides: SeedOverrides = {}): IndexRecord {
+  return {
+    uri,
+    parentUri: uri.slice(0, uri.lastIndexOf('/')),
+    scope: 'user',
+    kind: overrides.kind ?? 'document',
+    contextType: overrides.contextType ?? 'memory',
+    memoryType: overrides.memoryType ?? null,
+    level: overrides.level ?? 'L2',
+    abstract: overrides.abstract ?? null,
+    content,
+    bodyDigest: '0000000000000000',
+    size: Buffer.byteLength(content),
+    updatedAt: '2026-11-08T00:00:00.000Z',
+    status: 'active',
+  };
+}
+
+async function seed(
+  uri: string,
+  content: string,
+  overrides: SeedOverrides = {},
+): Promise<void> {
+  await harness.index.upsert([record(uri, content, overrides)]);
+  harness.db
+    .prepare('INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, 1)')
+    .run(uri, SUBJECT);
+}
+
+describe('find', () => {
+  const DOC = `${MEM}/design.md`;
+
+  it('中文检索按 §13.2 的格式返回', async () => {
+    await seed(DOC, '上下文记忆数据库的设计', { abstract: '上下文记忆数据库' });
+
+    const text = await callText('find', { query: '记忆' });
+
+    expect(text).toMatch(/^Found 1 item\(s\):/);
+    expect(text).toMatch(/^- \[memory \d+\.\d{2}\] comem:\/\/user\/alice\/mem\/design\.md$/m);
+    expect(text).toContain('\n  上下文记忆数据库');
+  });
+
+  it('limit 生效', async () => {
+    for (const name of ['a', 'b', 'c']) {
+      await seed(`${MEM}/${name}.md`, '偏好 代码 风格');
+    }
+
+    const text = await callText('find', { query: '偏好', limit: 2 });
+
+    expect(text).toMatch(/^Found 2 item\(s\):/);
+  });
+
+  it('level 过滤', async () => {
+    await seed(`${MEM}/l0.md`, '偏好 代码 风格', { level: 'L0' });
+    await seed(`${MEM}/l2.md`, '偏好 代码 风格', { level: 'L2' });
+
+    const text = await callText('find', { query: '偏好', level: 'L0' });
+
+    expect(text).toContain(`${MEM}/l0.md`);
+    expect(text).not.toContain(`${MEM}/l2.md`);
+  });
+
+  it('contextType 过滤', async () => {
+    await seed(`${MEM}/mem.md`, '偏好 代码 风格', { contextType: 'memory' });
+    await seed(`${SCOPE}/sessions/s1/msg.md`, '偏好 代码 风格', { contextType: 'session' });
+
+    const text = await callText('find', { query: '偏好', contextType: 'session' });
+
+    expect(text).toContain('sessions/s1/msg.md');
+    expect(text).not.toContain('/mem/mem.md');
+  });
+});
+
+describe('read', () => {
+  const TEXT_URI = `${MEM}/text.txt`;
+
+  beforeEach(async () => {
+    await harness.filesystem.write(Uri.parse(TEXT_URI), 'abcdefghij');
+  });
+
+  it('offset / limit 按码点切片', async () => {
+    expect(await callText('read', { uri: TEXT_URI, offset: 2, limit: 3 })).toBe('cde');
+    expect(await callText('read', { uri: TEXT_URI })).toBe('abcdefghij');
+  });
+
+  it('多 URI 返回带边界的文本', async () => {
+    const other = `${MEM}/other.txt`;
+    await harness.filesystem.write(Uri.parse(other), 'xyz');
+
+    const text = await callText('read', { uris: [TEXT_URI, other] });
+
+    expect(text).toBe(`# ${TEXT_URI}\nabcdefghij\n\n# ${other}\nxyz`);
+  });
+
+  it('图片返回 binary', async () => {
+    const imageUri = `${MEM}/pic.png`;
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    await harness.store.writeBytes(Uri.parse(imageUri), bytes);
+
+    const result = await call('read', { uri: imageUri });
+
+    expect(result).toEqual({
+      type: 'binary',
+      mimeType: 'image/png',
+      base64: Buffer.from(bytes).toString('base64'),
+    });
+  });
+
+  it('limit 只能是正整数或 -1', async () => {
+    await expect(call('read', { uri: TEXT_URI, limit: 0 })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+  });
+});
+
+describe('list', () => {
+  const ROOT = `${MEM}`;
+
+  beforeEach(async () => {
+    await harness.filesystem.write(Uri.parse(`${ROOT}/b.md`), 'bb');
+    await harness.filesystem.write(Uri.parse(`${ROOT}/a.md`), 'a');
+    await harness.filesystem.write(Uri.parse(`${ROOT}/dirA/c.md`), 'ccc');
+  });
+
+  it('默认只列直接子项并按 name 升序', async () => {
+    const text = await callText('list', { uri: ROOT });
+
+    expect(text.split('\n')).toEqual(['[file] a.md', '[file] b.md', '[dir] dirA']);
+  });
+
+  it('recursive 展开子树', async () => {
+    const text = await callText('list', { uri: ROOT, recursive: true });
+
+    expect(text.split('\n')).toContain('[file] dirA/c.md');
+  });
+
+  it('sortBy 支持 size 与 _desc', async () => {
+    expect((await callText('list', { uri: ROOT, sortBy: 'size' })).split('\n')[0]).toBe(
+      '[file] a.md',
+    );
+    expect((await callText('list', { uri: ROOT, sortBy: 'name_desc' })).split('\n')[0]).toBe(
+      '[dir] dirA',
+    );
+  });
+});
+
+describe('tree', () => {
+  it('levelLimit 控制层数', async () => {
+    await harness.filesystem.write(Uri.parse(`${MEM}/a.md`), 'a');
+    await harness.filesystem.write(Uri.parse(`${MEM}/dirA/c.md`), 'c');
+
+    const level1 = await callText('tree', { uri: MEM, levelLimit: 1 });
+    expect(level1).toContain('  dirA/');
+    expect(level1).not.toContain('c.md');
+
+    const level2 = await callText('tree', { uri: MEM, levelLimit: 2 });
+    expect(level2).toContain('    c.md');
+  });
+});
+
+describe('grep', () => {
+  const FILE = `${MEM}/error.ts`;
+
+  beforeEach(async () => {
+    await harness.filesystem.write(Uri.parse(FILE), 'Boom\nok\nBOOM again\n');
+    await seed(FILE, 'Boom');
+  });
+
+  it('大小写敏感与不敏感', async () => {
+    expect(await callText('grep', { uri: MEM, pattern: 'boom' })).toContain(
+      'Found 0 match(es):',
+    );
+
+    const insensitive = await callText('grep', {
+      uri: MEM,
+      pattern: 'boom',
+      caseInsensitive: true,
+    });
+    expect(insensitive).toContain('Found 2 match(es):');
+    expect(insensitive).toContain('L1 [boom]: Boom');
+    expect(insensitive).toContain('L3 [boom]: BOOM again');
+  });
+
+  it('nodeLimit 截断命中', async () => {
+    const text = await callText('grep', {
+      uri: MEM,
+      pattern: 'boom',
+      caseInsensitive: true,
+      nodeLimit: 1,
+    });
+
+    expect(text).toContain('Found 1 match(es):');
+  });
+});
+
+describe('glob', () => {
+  const DIR = `${MEM}/files`;
+
+  beforeEach(async () => {
+    await seed(`${DIR}/a.md`, 'a');
+    await seed(`${DIR}/b.md`, 'b');
+    await seed(`${DIR}/c.txt`, 'c');
+  });
+
+  it('按扩展名匹配并遵守 nodeLimit', async () => {
+    const text = await callText('glob', { pattern: '**/*.md', uri: DIR, nodeLimit: 10 });
+    expect(text).toContain('Found 2 file(s):');
+    expect(text).toContain(`${DIR}/a.md`);
+
+    const limited = await callText('glob', { pattern: '**/*.md', uri: DIR, nodeLimit: 1 });
+    expect(limited).toContain('Found 1 file(s):');
+  });
+});
+
+describe('write / edit', () => {
+  const URI = `${MEM}/write.txt`;
+
+  it('三种 mode', async () => {
+    expect(await callText('write', { uri: URI, content: 'one', mode: 'create' })).toContain(
+      'created: true',
+    );
+    await callText('write', { uri: URI, content: 'two' });
+    expect(await callText('read', { uri: URI })).toBe('two');
+    await callText('write', { uri: URI, content: '!', mode: 'append' });
+    expect(await callText('read', { uri: URI })).toBe('two!');
+
+    await expect(
+      callText('write', { uri: URI, content: 'x', mode: 'create' }),
+    ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+  });
+
+  it('edit 默认唯一命中，replaceAll 替换全部', async () => {
+    const editUri = `${MEM}/edit.txt`;
+    await harness.filesystem.write(Uri.parse(editUri), 'foo foo foo');
+
+    await expect(
+      callText('edit', { uri: editUri, oldString: 'foo', newString: 'bar' }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    const text = await callText('edit', {
+      uri: editUri,
+      oldString: 'foo',
+      newString: 'bar',
+      replaceAll: true,
+    });
+    expect(text).toContain('Replaced 3 occurrence(s)');
+    expect(await callText('read', { uri: editUri })).toBe('bar bar bar');
+  });
+});
+
+describe('forget', () => {
+  it('非空目录需要 recursive', async () => {
+    const dir = `${MEM}/gone`;
+    await harness.filesystem.write(Uri.parse(`${dir}/child.md`), 'x');
+
+    await expect(callText('forget', { uri: dir })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+
+    const text = await callText('forget', { uri: dir, recursive: true });
+    expect(text).toContain(`Deleted: ${dir}`);
+    expect(await harness.store.exists(Uri.parse(dir))).toBe(false);
+  });
+});
+
+describe('health', () => {
+  it('返回索引条数与摘要降级标记', async () => {
+    await seed(`${MEM}/a.md`, 'a');
+    await seed(`${MEM}/b.md`, 'b');
+
+    const text = await callText('health', {});
+
+    expect(text).toContain('status: ok');
+    expect(text).toContain('index.nodes: 2');
+    expect(text).toContain('summary.degraded: false');
+  });
+});
+
+describe('search / rule_search', () => {
+  it('search 末尾附 Query plan', async () => {
+    await seed(`${MEM}/plan.md`, '上下文记忆数据库');
+
+    const text = await callText('search', { query: '记忆', sessionId: 'sess_1' });
+
+    expect(text).toContain('Query plan:');
+    expect(text).toContain('sessionId: sess_1');
+  });
+
+  it('rule_search 返回规则完整正文', async () => {
+    const ruleUri = `${SCOPE}/memories/rules/license-review/rule.md`;
+    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。');
+    await seed(ruleUri, '提交前必须检查许可证', {
+      memoryType: 'rules',
+      abstract: '许可证规则',
+    });
+
+    const text = await callText('rule_search', {
+      taskContext: '提交前必须检查许可证',
+      threshold: 0,
+    });
+
+    expect(text).toContain(ruleUri);
+    expect(text).toContain('提交前必须检查许可证。');
+  });
+});
+
+describe('remember / download', () => {
+  it('remember 走提交管线并返回 taskId', async () => {
+    const text = await callText('remember', {
+      messages: [
+        { role: 'user', content: '我偏好中文回答' },
+        { role: 'assistant', content: '收到' },
+      ],
+    });
+
+    expect(text).toMatch(/^taskId: [0-9a-f-]+/);
+    expect(text).toContain('Archived 2 message(s)');
+  });
+
+  it('download 返回签名 URL', async () => {
+    const uri = `${SCOPE}/resources/doc.md`;
+    await harness.filesystem.write(Uri.parse(uri), 'x');
+
+    const text = await callText('download', { uri });
+
+    expect(text).toContain('/api/v1/content/download?');
+    expect(text).toContain('expires=');
+    expect(text).toContain('signature=');
+    expect(text).toContain(encodeURIComponent(uri));
+  });
+
+  it('download 对目录返回 NOT_FOUND', async () => {
+    await expect(call('download', { uri: MEM })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe('add_resource / add_skill', () => {
+  it('add_resource 批量写入文件', async () => {
+    const parent = `${SCOPE}/resources`;
+    const text = await callText('add_resource', {
+      parentUri: parent,
+      files: [{ path: 'docs/api.md', content: '# API' }],
+    });
+
+    expect(text).toContain('Added 1 file(s)');
+    expect(await harness.store.exists(Uri.parse(`${parent}/docs/api.md`))).toBe(true);
+  });
+
+  it('add_skill 安装技能', async () => {
+    const parent = `${SCOPE}/skills`;
+    const text = await callText('add_skill', {
+      parentUri: parent,
+      name: 'demo-skill',
+      files: [
+        {
+          path: 'SKILL.md',
+          content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
+        },
+      ],
+    });
+
+    expect(text).toContain('Installed skill "demo-skill"');
+    expect(await harness.store.exists(Uri.parse(`${parent}/demo-skill/SKILL.md`))).toBe(true);
+  });
+});
+
+describe('权限', () => {
+  it('全部 16 个工具在无权限时抛 PERMISSION_DENIED', async () => {
+    const denied = await createHarness({ authorizer: new DenyAllAuthorizer() });
+    const file = `${MEM}/denied.md`;
+    const dir = `${MEM}`;
+
+    const inputs: Readonly<Record<McpToolName, unknown>> = {
+      find: { query: 'x' },
+      search: { query: 'x' },
+      rule_search: { taskContext: 'x' },
+      read: { uri: file },
+      list: { uri: dir },
+      tree: { uri: dir },
+      grep: { uri: dir, pattern: 'x' },
+      glob: { pattern: '**', uri: dir },
+      download: { uri: file },
+      health: {},
+      write: { uri: file, content: 'x' },
+      edit: { uri: file, oldString: 'a', newString: 'b' },
+      remember: { messages: [{ role: 'user', content: 'hi' }] },
+      forget: { uri: file },
+      add_resource: { parentUri: dir, files: [{ path: 'a.md', content: 'x' }] },
+      add_skill: {
+        parentUri: dir,
+        name: 'demo',
+        files: [{ path: 'SKILL.md', content: '# x' }],
+      },
+    };
+
+    try {
+      for (const name of Object.keys(inputs) as McpToolName[]) {
+        const error: unknown = await tool(name)
+          .execute(inputs[name], denied.context)
+          .catch((reason: unknown) => reason);
+        expect(error, `${name} 应当被拒绝`).toBeInstanceOf(ComemError);
+        if (error instanceof ComemError) {
+          expect(error.code, `${name} 的错误码`).toBe('PERMISSION_DENIED');
+        }
+      }
+    } finally {
+      await denied.close();
+    }
+  });
+});

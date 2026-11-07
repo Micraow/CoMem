@@ -379,7 +379,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
     conditions.push(permission.sql);
     params.push(...permission.params);
 
-    const sql = `SELECT n.uri, n.level, n.abstract, n.context_type, bm25(node_fts) AS rank
+    const sql = `SELECT n.uri, n.level, n.abstract, n.context_type, n.memory_type, bm25(node_fts) AS rank
        FROM node_fts
        JOIN node n ON n.uri = node_fts.uri
        WHERE ${conditions.join('\n         AND ')}

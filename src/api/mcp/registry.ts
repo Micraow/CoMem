@@ -26,12 +26,8 @@ import type { ScoredHit } from '../../services/search.js';
 
 import type { McpToolContext } from './context.js';
 
-/** §12.1：read = 1、write = 3、manage = 7。 */
+/** §12.1：read = 1。 */
 const READ: AclAction = 1;
-const WRITE: AclAction = 3;
-
-/** §12.1 的唯一通配主体。它不是可寻址的根（`comem://user/*` 不是合法 URI）。 */
-const USER_WILDCARD_ID = '*';
 
 /** §13.2 的 16 个工具名，顺序与表格一致。测试用 `toEqual` 对比硬编码数组。 */
 export type McpToolName =
@@ -212,25 +208,28 @@ export async function readScopes(
   context: McpToolContext,
   targetUri?: string,
 ): Promise<readonly string[]> {
-  const scopes =
-    targetUri === undefined ? defaultScopes(context) : [Uri.parse(targetUri).toString()];
-  for (const scope of scopes) {
-    await context.acl.assert(Uri.parse(scope), READ);
+  if (targetUri !== undefined) {
+    const uri = Uri.parse(targetUri);
+    await context.acl.assert(uri, READ);
+    return [uri.toString()];
   }
-  return scopes;
-}
 
-function defaultScopes(context: McpToolContext): string[] {
-  const scopes = new Set<string>();
+  // 个人根必须可读：读不到自己的空间是身份或装配错误，不是「范围为空」。
+  const personal = subjectScope(context);
+  await context.acl.assert(personal, READ);
+
+  // 组根按可读性过滤：退组后 `principals` 里没有这个组；组根尚未预置 ACL 时
+  // 也不该让整次查询失败——那只是「这个组没有可查的内容」。
+  const scopes = new Set<string>([personal.toString()]);
   for (const principal of context.principals) {
     const parsed = parsePrincipal(principal);
-    if (parsed.kind === 'user' && parsed.id === USER_WILDCARD_ID) {
+    if (parsed.kind !== 'group') {
       continue;
     }
-    scopes.add(`comem://${parsed.kind}/${parsed.id}`);
-  }
-  if (scopes.size === 0) {
-    scopes.add(subjectScope(context).toString());
+    const uri = Uri.parse(`comem://group/${parsed.id}`);
+    if (await context.acl.check(uri, READ)) {
+      scopes.add(uri.toString());
+    }
   }
   return [...scopes];
 }
@@ -466,5 +465,3 @@ export function stringArray(
     return item;
   });
 }
-
-export { READ, WRITE };

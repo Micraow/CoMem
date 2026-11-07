@@ -172,6 +172,22 @@ describe('search：中文', () => {
     const hit = (await search('数据库')).find((candidate) => candidate.uri === OTHER);
     expect(hit?.abstract).toBe('上 下 文 摘 要');
   });
+
+  it('返回记忆类型：§8.6 的 events 起始层级靠它', async () => {
+    // 少了这一列，事件类记忆只能从 L0 一句话摘要起投，永远升不到 L1 概览。
+    // 这条曾经被并发重写覆盖过一次，留着防回归。
+    await seed(OTHER, '数据库', { memoryType: 'events' });
+
+    const hit = (await search('数据库')).find((candidate) => candidate.uri === OTHER);
+    expect(hit?.memoryType).toBe('events');
+  });
+
+  it('非记忆文件的记忆类型是 null', async () => {
+    await seed(OTHER, '数据库', { contextType: 'resource', memoryType: null });
+
+    const hit = (await search('数据库')).find((candidate) => candidate.uri === OTHER);
+    expect(hit?.memoryType).toBeNull();
+  });
 });
 
 describe('search：FTS5 元字符', () => {

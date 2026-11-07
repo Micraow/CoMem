@@ -58,7 +58,10 @@ export const ruleSearchTool: McpToolDefinition = {
 
     const rules: string[] = [];
     for (const hit of hits) {
-      if (hit.memoryType !== 'rules') {
+      // `SearchHit.memoryType` 由 `RetrievalIndex.search` 透传；若索引实现没带这一列，
+      // 用 `stat` 补一次（只查 SQL，不读文件）。少了它，规则会退化成「所有记忆」。
+      const memoryType = hit.memoryType ?? (await context.index.stat(hit.uri))?.memoryType ?? null;
+      if (memoryType !== 'rules') {
         continue;
       }
       const uri = Uri.parse(hit.uri);
