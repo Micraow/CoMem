@@ -201,7 +201,7 @@ async function waitReady() {
 
 /** 步骤 1：写一条偏好记忆。frontmatter 里的 `memory_type` / `status` 是记忆的类型与复核状态。 */
 async function writePreference() {
-  const uri = `${SCOPE_ROOT}/memories/preferences/code-style`;
+  const uri = `${SCOPE_ROOT}/memories/preferences/code-style.md`;
   const content = [
     '---',
     'memory_type: preferences',
@@ -313,7 +313,7 @@ async function showArchive() {
 
 /** 步骤 5：复核闸门。`experiences` / `rules` 先 pending，approve 之后才进检索（§11.6）。 */
 async function reviewGate() {
-  const uri = `${SCOPE_ROOT}/memories/experiences/pnpm-verify`;
+  const uri = `${SCOPE_ROOT}/memories/experiences/pnpm-verify.md`;
   const content = [
     '---',
     'memory_type: experiences',
@@ -363,7 +363,7 @@ async function reviewGate() {
 
 /** 步骤 6：摘要生成。写一个资源文件，等父目录的 `.abstract.md` 落盘（§9.2、§9.3）。 */
 async function generateSummary() {
-  const uri = `${SCOPE_ROOT}/resources/docs/architecture`;
+  const uri = `${SCOPE_ROOT}/resources/docs/architecture.md`;
   await api.post('/content/write', {
     uri,
     content: [
