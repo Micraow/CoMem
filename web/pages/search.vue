@@ -143,7 +143,19 @@ async function runSearch(): Promise<void> {
   }
 }
 
-const planJson = computed(() => (plan.value === null ? '' : JSON.stringify(plan.value, null, 2)))
+/** 意图 → 界面文案。不把 `preference` 这类内部枚举直接摆给用户。 */
+const INTENT_LABEL: Readonly<Record<string, string>> = {
+  preference: '偏好',
+  fact: '事实',
+  decision: '决定',
+  event: '事件',
+  procedure: '流程',
+  other: '其他',
+}
+
+function intentLabel(intent: string): string {
+  return INTENT_LABEL[intent] ?? '其他'
+}
 
 const resultCaption = computed(() =>
   hits.value === null ? '' : `共 ${hits.value.length} 条 · 按分数降序`,
@@ -196,14 +208,40 @@ onMounted(() => {
         />
       </UiCard>
 
-      <details v-if="mode === 'search'" class="plan mt-16" open>
-        <summary class="plan__summary">
-          <span class="plan__title">查询计划</span>
-          <span class="caption">服务端实际执行的过滤条件</span>
-        </summary>
-        <pre v-if="plan !== null" class="plan__json">{{ planJson }}</pre>
-        <p v-else class="caption plan__empty">执行一次 search 后显示查询计划。</p>
-      </details>
+      <section v-if="mode === 'search'" class="plan mt-16">
+        <header class="plan__header">
+          <h2 class="plan__title">查询计划</h2>
+          <span v-if="plan !== null" class="caption plan__meta">
+            {{ plan.queries.length }} 条查询 · 耗时 {{ Math.round(plan.elapsedMs) }}ms
+          </span>
+        </header>
+
+        <template v-if="plan === null">
+          <p class="caption plan__empty">执行一次 search 后显示查询计划。</p>
+        </template>
+
+        <template v-else>
+          <!-- 降级不是错误，但必须可见：静默降级等于骗人（§17.9 的同一原则）。 -->
+          <p v-if="!plan.analyzed" class="plan__degraded">
+            意图分析没有完成，已用原查询检索。{{ plan.reason }}
+          </p>
+
+          <p v-else-if="plan.queries.length === 0" class="caption plan__empty">
+            这次查询不需要检索。模型判断没有需要召回的内容。
+          </p>
+
+          <ul v-else class="plan__list">
+            <li v-for="(query, index) in plan.queries" :key="index" class="plan__item">
+              <span class="plan__intent">{{ intentLabel(query.intent) }}</span>
+              <span class="plan__text">{{ query.text }}</span>
+              <span class="plan__confidence">{{ (query.confidence * 100).toFixed(0) }}%</span>
+              <span v-if="query.derivedFrom !== null" class="plan__derived">
+                来自「{{ query.derivedFrom }}」
+              </span>
+            </li>
+          </ul>
+        </template>
+      </section>
     </div>
   </div>
 </template>
@@ -215,41 +253,78 @@ onMounted(() => {
   box-shadow: var(--inset-hair);
 }
 
-.plan__summary {
+.plan__header {
   display: flex;
   align-items: baseline;
+  justify-content: space-between;
   gap: 10px;
   padding: 14px 16px;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-
-.plan__summary::-webkit-details-marker {
-  display: none;
-}
-
-.plan__summary:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-tint);
-  border-radius: var(--r-card);
 }
 
 .plan__title {
+  margin: 0;
   font-size: 15px;
   font-weight: 590;
   letter-spacing: -0.006em;
 }
 
-.plan__json {
+.plan__meta {
+  font-variant-numeric: tabular-nums;
+}
+
+.plan__degraded {
   margin: 0;
-  padding: 14px 16px 16px;
-  overflow-x: auto;
+  padding: 0 16px 14px;
+  font-size: 13px;
+  line-height: 1.47;
+  color: var(--label-2);
+}
+
+.plan__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px;
+  list-style: none;
   border-top: 0.5px solid var(--separator);
+}
+
+.plan__item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.plan__intent {
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.plan__text {
   font-family: var(--mono);
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.47;
+  overflow-wrap: anywhere;
+}
+
+.plan__confidence {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   color: var(--label-2);
+}
+
+.plan__derived {
+  grid-column: 2 / -1;
+  font-size: 13px;
+  color: var(--label-3);
 }
 
 .plan__empty {

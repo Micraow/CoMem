@@ -28,14 +28,29 @@ export interface SearchHitPayload {
   readonly abstract: string | null
   /** 排序分：`bm25 × levelWeight[level]`（§8.5）。 */
   readonly score: number
+  /** 哪条重写查询命中的；`find` 没有这一列。 */
+  readonly matchedQuery?: string
+}
+
+/**
+ * 查询计划（§8.4）：`search` 先做意图分析得到 0–5 条 TypedQuery，再逐条检索。
+ *
+ * `analyzed: false` 时**不是出错**，是降级：模型不可用、超时或被截断，服务端
+ * 用原查询跑了一次。`reason` 必有值，界面要如实显示「意图分析不可用」。
+ */
+export interface SearchTypedQueryPayload {
+  readonly text: string
+  readonly intent: string
+  readonly confidence: number
+  readonly derivedFrom: string | null
 }
 
 export interface SearchPlanPayload {
-  readonly scopes: readonly string[]
-  readonly limit: number
-  readonly contextTypes: readonly string[] | null
-  readonly levels: readonly string[] | null
-  readonly subject: string
+  readonly original: string
+  readonly queries: readonly SearchTypedQueryPayload[]
+  readonly analyzed: boolean
+  readonly reason: string | null
+  readonly elapsedMs: number
 }
 
 export interface SearchFindPayload {

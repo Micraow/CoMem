@@ -6,9 +6,14 @@
  * | 路由 | 服务方法 | 返回 |
  * |---|---|---|
  * | `POST /search/find` | `find` | 命中列表（uri / level / abstract / score） |
- * | `POST /search/search` | `find` + 查询计划 | 命中列表 + 实际执行的过滤条件 |
+ * | `POST /search/search` | `search` | 命中列表 + 查询计划（意图分析产出的 TypedQuery） |
  * | `POST /search/grep` | `grep` | 行级命中，带行号与前后文 |
  * | `POST /search/glob` | `glob` | 文件 URI 列表 |
+ *
+ * **`/search/search` 与 `/search/find` 的差别不是返回体形状。** 前者先做意图分析
+ * （§8.4）：模型把 query 重写成 0–5 条 TypedQuery，服务层逐条检索再合并。计划里
+ * 的 `analyzed` / `reason` 是排查「重写为什么没生效」的唯一入口——**故意不回传
+ * `sessionId`**：它是调用方的入参，回传只会让它出现在不该出现的日志与界面上。
  *
  * `grep` / `glob` 的范围必须先求 read 权限再调服务：`SearchService.glob` 只做
  * `filterReadable`，不抛 `PERMISSION_DENIED`——它挡的是「结果里出现无权节点」，
@@ -21,12 +26,13 @@ import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import type { Level } from '../../../domain/level.js';
 import type { ContextType } from '../../../domain/node.js';
-import type { GrepHit } from '../../../domain/retrieval.js';
+import type { GrepHit, SearchPlan, SearchResultHit } from '../../../domain/retrieval.js';
 import type { ScoredHit } from '../../../services/search.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import {
   optionalInteger,
+  optionalString,
   optionalStringArray,
   requireRecord,
   requireString,
@@ -105,6 +111,32 @@ function serializeGrepHit(hit: GrepHit): Record<string, unknown> {
   };
 }
 
+/**
+ * `search` 的命中：`find` 的字段 + 命中的是重写后的哪条查询。
+ *
+ * `matchedQuery` 不出现在 `/search/find` 的返回里——那条路径没有重写，多一个
+ * 恒为空的字段只会让调用方多写一个分支。
+ */
+function serializeSearchHit(hit: SearchResultHit): Record<string, unknown> {
+  return { ...serializeHit(hit), matchedQuery: hit.matchedQuery };
+}
+
+/** 查询计划。`SearchPlan` 本身不含 `sessionId`，回传自然也不会泄漏（§8.4）。 */
+function serializePlan(plan: SearchPlan): Record<string, unknown> {
+  return {
+    original: plan.original,
+    queries: plan.queries.map((query) => ({
+      text: query.text,
+      intent: query.intent,
+      confidence: query.confidence,
+      derivedFrom: query.derivedFrom,
+    })),
+    analyzed: plan.analyzed,
+    reason: plan.reason,
+    elapsedMs: plan.elapsedMs,
+  };
+}
+
 export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { search, authorizer } = services;
 
@@ -136,27 +168,21 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
         const levels = parseLevels(optionalStringArray(body, 'levels'));
+        // 会话只用于解析指代（§8.4）；不传也能检索，只是历史为空。
+        const sessionId = optionalString(body, 'sessionId');
 
-        const hits = await search.find(query, {
+        const result = await search.search(query, {
           scopes: scope,
           subject: context.subject,
           principals: context.principals,
           contextTypes,
           levels,
           limit,
+          sessionId,
         });
 
-        // 查询计划：排查「为什么没命中」时不用猜哪些过滤条件生效了（§13.2 的 search）。
-        return ok({
-          hits: hits.map(serializeHit),
-          plan: {
-            scopes: scope,
-            limit,
-            contextTypes: contextTypes ?? null,
-            levels: levels ?? null,
-            subject: context.subject,
-          },
-        });
+        // 查询计划：`analyzed: false` 时看 `reason` 就知道重写为什么没生效。
+        return ok({ hits: result.hits.map(serializeSearchHit), plan: serializePlan(result.plan) });
       });
 
       app.post<{ Body: unknown }>('/grep', async (request) => {

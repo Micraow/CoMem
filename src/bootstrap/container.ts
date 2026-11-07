@@ -549,16 +549,6 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     logger,
   });
 
-  const search = new SearchService({
-    index,
-    filesystem,
-    authorizer: acl,
-    assembler,
-    logger,
-    config: config.retrieval,
-    ledger,
-  });
-
   const task = new TaskService({
     tasks: taskRepository,
     logger,
@@ -566,6 +556,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     maxAttempts: config.task.maxAttempts,
   });
 
+  // `SessionService` 在 `SearchService` 之前：`search` 的意图分析要读最近几轮
+  // 消息做指代消解（§8.4 的「用 session」那一列）。两者没有反向往来，调换顺序
+  // 就够，不需要惰性引用。
   const session = new SessionService({
     store,
     metadata,
@@ -574,6 +567,18 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     logger,
     meta: metadata,
     config: { autoCommit: config.session.autoCommit },
+  });
+
+  const search = new SearchService({
+    index,
+    filesystem,
+    authorizer: acl,
+    assembler,
+    logger,
+    config: config.retrieval,
+    ledger,
+    llm,
+    sessions: session,
   });
 
   /**

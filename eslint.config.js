@@ -29,6 +29,37 @@ export default tseslint.config(
     },
   },
   {
+    // 纯 `.mjs` 脚本（`scripts/`、`integrations/`）跑在 Node 里，不是浏览器。
+    //
+    // `tseslint.configs.recommended` 只为 TypeScript 关掉 `no-undef`（类型检查
+    // 已经覆盖它），`.mjs` 拿不到这层豁免，又没声明 Node 全局，于是 `process` /
+    // `fetch` / `setTimeout` 全部报未定义。这不是代码问题，是配置缺口。
+    //
+    // `globals` 包没装（少一个依赖），手列 v1 用到的集合；新增全局时在这里补。
+    files: ['scripts/**/*.mjs', 'integrations/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        setImmediate: 'readonly',
+        queueMicrotask: 'readonly',
+        Buffer: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        TextEncoder: 'readonly',
+        TextDecoder: 'readonly',
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
+        structuredClone: 'readonly',
+      },
+    },
+  },
+  {
     files: ['src/domain/**/*.ts'],
     rules: {
       '@typescript-eslint/no-restricted-imports': [

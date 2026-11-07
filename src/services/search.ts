@@ -6,6 +6,7 @@
  * | 面 | 输入 | 返回 | 走索引 |
  * |---|---|---|---|
  * | `find` | 单条 query | 命中列表（uri / level / abstract / score） | 是（FTS5） |
+ * | `search` | query + sessionId | 同上，**先做意图分析得到 0–5 条 TypedQuery** | 是（每条一次） |
  * | `grep` | 正则 + 路径范围 | 行级命中，带行号与前后文 | 否（读文件） |
  * | `glob` | 路径通配 | 文件 URI 列表 | 是（GLOB） |
  * | `context` | 单条 query | 可直接注入模型的文本 | 是 + 组装 |
@@ -26,6 +27,7 @@
  * 不是按「索引实现看起来已经做了」。这是纵深防御，不是重复劳动。
  */
 
+import { parsePrincipal } from '../domain/acl.js';
 import {
   type AssemblyCandidate,
   type AssemblyOptions,
@@ -34,6 +36,7 @@ import {
 } from '../domain/assembly.js';
 import { ComemError } from '../domain/errors.js';
 import type { Level } from '../domain/level.js';
+import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType } from '../domain/node.js';
 import { rankCandidates, type LevelWeights, type RankedCandidate } from '../domain/ranking.js';
@@ -42,13 +45,31 @@ import {
   compileQueryFilters,
   type QueryFilter,
 } from '../domain/query-filter.js';
-import type { RetrievalIndex, GrepHit, SearchHit } from '../domain/retrieval.js';
+import {
+  MAX_TYPED_QUERIES,
+  type GrepHit,
+  type RetrievalIndex,
+  type SearchHit,
+  type SearchPlan,
+  type SearchResult,
+  type SearchResultHit,
+  type TypedQuery,
+} from '../domain/retrieval.js';
+import { renderMessageText, type SessionMessage } from '../domain/session.js';
 import { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
 import type { ContextAssembler } from './context-assembler.js';
 import type { FileSystemService } from './filesystem.js';
+import type { LlmService } from './llm.js';
+import {
+  buildRewriteUserPrompt,
+  REWRITE_SCHEMA,
+  REWRITE_SYSTEM_PROMPT,
+  type RewriteMessage,
+} from './prompts/rewrite.js';
 import { DEFAULT_RECALL_LEDGER_OPTIONS, type RecallLedger } from './recall-ledger.js';
+import type { SessionService } from './session.js';
 
 /**
  * 服务层需要的检索配置（§18 的 `retrieval` 段）。
@@ -83,6 +104,21 @@ export interface SearchServiceDeps {
    * `excludeDelivered` 会抛 `INVALID_ARGUMENT`——静默不去重比报错更难查。
    */
   readonly ledger?: Pick<RecallLedger, 'recentlyDelivered'>;
+  /**
+   * 意图分析（§8.4）。只有 `search` 用到。
+   *
+   * 不注入时 `search` 仍然可用：降级成单条原 query，`plan.analyzed = false` 且
+   * `plan.reason` 写明原因。降级不静默（§17.9 的同一原则）——但也不该因为「没有
+   * 模型」让整条只读路径不可用。
+   */
+  readonly llm?: Pick<LlmService, 'generateJson'>;
+  /**
+   * 最近消息的来源（§8.4 的「用 session」）。
+   *
+   * 只用来解析指代（「那它呢」）。不注入时按「历史为空」处理：查询仍然会重写，
+   * 只是省略的主语补不回来。
+   */
+  readonly sessions?: Pick<SessionService, 'load'>;
 }
 
 export interface FindOptions {
@@ -96,6 +132,13 @@ export interface FindOptions {
   readonly levels?: readonly Level[];
   readonly limit?: number;
   readonly scoreThreshold?: number;
+}
+
+export interface SearchOptions extends FindOptions {
+  /** 会话 ID。有它才能解析指代；没有也能分析，只是历史为空 */
+  readonly sessionId?: string;
+  /** 最多执行几条 TypedQuery；默认 5（§8.4 的「0–5 条」），传入更大值按 5 算 */
+  readonly maxQueries?: number;
 }
 
 export interface ContextOptions extends FindOptions {
@@ -153,6 +196,28 @@ const GREP_CANDIDATE_PATTERN = '**';
 /** 1 毫秒 = 1e6 纳秒。 */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
+/**
+ * 意图分析的历史窗口：最近 5 轮。
+ *
+ * 5 轮 = 10 条消息。§8.7 的轮次时钟取消息总数，一轮就是「一条 user + 一条
+ * assistant」，所以 5 轮是末尾 10 条。再往前翻对指代解析没有帮助（更早的话题
+ * 已经结束），只会挤占当前查询在提示词里的位置。
+ */
+const RECENT_MESSAGES = 10;
+
+/**
+ * 意图分析的单次超时，毫秒。
+ *
+ * 10000 是**经验值，来源未知**。§18 的 `providers.llm.default.timeoutSeconds`
+ * 默认 120 秒，那是后台任务（抽取、摘要）的预算；`search` 是交互路径，用户站在
+ * 前面等。「10 秒后降级」与「120 秒后降级」对用户是两件不同的事，所以这里显式
+ * 收窄，而不是继承后台任务的默认值。
+ */
+const REWRITE_TIMEOUT_MS = 10_000;
+
+/** §6.5 的 `sessions/sess_xxx/` 目录名（与 `services/session.ts` 指向同一个目录）。 */
+const SESSIONS_DIRECTORY_NAME = 'sessions';
+
 function elapsedMs(startedAt: bigint): number {
   return Number(process.hrtime.bigint() - startedAt) / NANOSECONDS_PER_MILLISECOND;
 }
@@ -167,6 +232,22 @@ function resolveLimit(limit: number | undefined): number {
   return limit;
 }
 
+/**
+ * `maxQueries` 的上限是 §8.4 的「0–5 条」。
+ *
+ * 传入更大的值按 5 截断而不是报错：调用方表达的是「最多跑几条」，而 5 是契约
+ * 上限，截断不改变它的意图。`0` 与负数报错——那多半是把「不限制」写错了。
+ */
+function resolveMaxQueries(maxQueries: number | undefined): number {
+  if (maxQueries === undefined) {
+    return MAX_TYPED_QUERIES;
+  }
+  if (!Number.isInteger(maxQueries) || maxQueries <= 0) {
+    throw new ComemError('INVALID_ARGUMENT', 'maxQueries 必须是正整数。', { maxQueries });
+  }
+  return Math.min(maxQueries, MAX_TYPED_QUERIES);
+}
+
 export class SearchService {
   readonly #index: RetrievalIndex;
   readonly #filesystem: FileSystemService;
@@ -175,6 +256,8 @@ export class SearchService {
   readonly #logger: Logger;
   readonly #config: RetrievalSettings;
   readonly #ledger: Pick<RecallLedger, 'recentlyDelivered'> | undefined;
+  readonly #llm: Pick<LlmService, 'generateJson'> | undefined;
+  readonly #sessions: Pick<SessionService, 'load'> | undefined;
   readonly #queryFilters: readonly QueryFilter[];
 
   constructor(deps: SearchServiceDeps) {
@@ -185,6 +268,8 @@ export class SearchService {
     this.#logger = deps.logger;
     this.#config = deps.config;
     this.#ledger = deps.ledger;
+    this.#llm = deps.llm;
+    this.#sessions = deps.sessions;
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
     this.#queryFilters = compileQueryFilters(deps.config.queryFilters);
   }
@@ -231,6 +316,216 @@ export class SearchService {
       durationMs: elapsedMs(startedAt),
     });
     return result;
+  }
+
+  /**
+   * §8.4 的 `search`：先做意图分析（0–5 条 TypedQuery），再逐条 `find` 并合并。
+   *
+   * 与 `find` 的差别不只是返回体：入口多了一层**重写**。指代（「那它呢」）与复合
+   * 意图（「之前那个 X 和 Y」）在 `find` 里只能得到一条字面查询。
+   *
+   * ## 三条不能静默的路径
+   *
+   * | 情况 | 结果 |
+   * |---|---|
+   * | 模型说「不该检索」 | 空命中，`analyzed: true`、`queries: []`——合法结论 |
+   * | 分析失败（超时 / 截断 / 不合法） | 降级成单条原 query，`analyzed: false` + `reason` |
+   * | 输入过滤后为空 | 空命中，`analyzed: true`，**不调模型**（§8.8） |
+   *
+   * 降级必须写进 `plan`：控制台要能显示「意图分析不可用，已用原查询」。静默降级
+   * 等于骗人。
+   *
+   * ## limit 语义
+   *
+   * 每条 TypedQuery 都用**同一个 limit** 取候选，不是 `limit / 条数`：去重之后
+   * 可能不足 limit 条，宁可多取再合并。5 条查询各返回 10 条，合并去重后仍然最多
+   * `limit` 条。
+   */
+  async search(query: string, options: SearchOptions): Promise<SearchResult> {
+    const startedAt = process.hrtime.bigint();
+    const limit = resolveLimit(options.limit);
+    const maxQueries = resolveMaxQueries(options.maxQueries);
+    const filtered = applyQueryFilters(query, this.#queryFilters);
+
+    if (filtered === '') {
+      const plan: SearchPlan = {
+        original: query,
+        queries: [],
+        analyzed: true,
+        reason: null,
+        elapsedMs: elapsedMs(startedAt),
+      };
+      this.#logger.info('检索查询过滤后为空，跳过意图分析', {
+        subject: options.subject,
+        queryLength: query.length,
+        returned: 0,
+        durationMs: plan.elapsedMs,
+      });
+      return { hits: [], plan };
+    }
+
+    const analysis = await this.#analyze(filtered, options, maxQueries);
+
+    if (analysis.queries.length === 0) {
+      const plan: SearchPlan = {
+        original: query,
+        queries: [],
+        analyzed: analysis.analyzed,
+        reason: analysis.reason,
+        elapsedMs: elapsedMs(startedAt),
+      };
+      this.#logger.info('意图分析判定不该检索，返回空命中', {
+        subject: options.subject,
+        queryLength: filtered.length,
+        returned: 0,
+        durationMs: plan.elapsedMs,
+      });
+      return { hits: [], plan };
+    }
+
+    // 并行：5 条查询串行执行会把一次 search 变成 5 倍延迟，而索引查询是可重入的只读。
+    const ran = await Promise.all(
+      analysis.queries.map(async (typedQuery) => ({
+        typedQuery,
+        hits: await this.find(typedQuery.text, {
+          scopes: options.scopes,
+          subject: options.subject,
+          principals: options.principals,
+          contextTypes: options.contextTypes,
+          levels: options.levels,
+          limit,
+          scoreThreshold: options.scoreThreshold,
+        }),
+      })),
+    );
+
+    const hits = mergeHits(ran, limit);
+    const plan: SearchPlan = {
+      original: query,
+      queries: analysis.queries,
+      analyzed: analysis.analyzed,
+      reason: analysis.reason,
+      elapsedMs: elapsedMs(startedAt),
+    };
+    this.#logger.info('检索完成（含意图分析）', {
+      subject: options.subject,
+      queryLength: filtered.length,
+      queries: analysis.queries.length,
+      analyzed: analysis.analyzed,
+      returned: hits.length,
+      durationMs: plan.elapsedMs,
+    });
+    return { hits, plan };
+  }
+
+  /**
+   * 意图分析。**只在这一处**决定 `analyzed` 与 `reason`，降级路径不会散落在
+   * 各个调用点。
+   *
+   * 失败一律降级成「单条原 query」，不重试、不抛错：`search` 是只读路径，检索
+   * 本身仍然成立，把一次降级变成一次请求失败是更差的结果。
+   */
+  async #analyze(
+    query: string,
+    options: SearchOptions,
+    maxQueries: number,
+  ): Promise<{
+    readonly queries: readonly TypedQuery[];
+    readonly analyzed: boolean;
+    readonly reason: string | null;
+  }> {
+    if (this.#llm === undefined) {
+      return {
+        queries: [fallbackQuery(query)],
+        analyzed: false,
+        reason: '没有注入 LlmService（SearchServiceDeps.llm），无法做意图分析。',
+      };
+    }
+
+    const recentMessages = await this.#recentMessages(options.sessionId, options.subject);
+    const prompt: LlmPrompt = {
+      system: REWRITE_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: buildRewriteUserPrompt({
+            query,
+            recentMessages,
+            knownScopes: options.scopes,
+          }),
+        },
+      ],
+    };
+
+    try {
+      const output = await this.#llm.generateJson(prompt, REWRITE_SCHEMA, {
+        timeoutMs: REWRITE_TIMEOUT_MS,
+      });
+      return { queries: output.queries.slice(0, maxQueries), analyzed: true, reason: null };
+    } catch (error) {
+      // 超时、截断（`details.truncated`）、结构化输出不合法都收敛成 `ComemError`
+      // （§19）。三种都不重试：同样的输入与上限只会再失败一次。
+      const failure = ComemError.from(error);
+      this.#logger.warn('意图分析不可用，已降级为原查询', {
+        subject: options.subject,
+        code: failure.code,
+        message: failure.message,
+        truncated: failure.details?.['truncated'] === true,
+      });
+      return {
+        queries: [fallbackQuery(query)],
+        analyzed: false,
+        reason: `意图分析失败（${failure.code}）：${failure.message}`,
+      };
+    }
+  }
+
+  /**
+   * 最近 5 轮（10 条）user / assistant 消息。
+   *
+   * `tool` 消息要过滤掉（与 §10.1「默认隐藏工具输出」同源）：它又长又噪声，一段
+   * 200 行的工具输出会把当前 query 挤出模型的注意力。`system` 同理——它不是对话。
+   *
+   * 会话读不到（已归档、ID 写错）时按「历史为空」处理并记 warn：历史只影响重写
+   * 质量，让整次检索失败代价更大。这不算静默降级——`analyzed` 仍然是 `true`，
+   * 因为分析确实跑了，只是没有历史可用。
+   */
+  async #recentMessages(
+    sessionId: string | undefined,
+    subject: string,
+  ): Promise<readonly RewriteMessage[]> {
+    if (sessionId === undefined) {
+      return [];
+    }
+    if (this.#sessions === undefined) {
+      this.#logger.warn('没有注入 SessionService，意图分析按「历史为空」处理', { sessionId });
+      return [];
+    }
+
+    let sessionUri: Uri;
+    try {
+      sessionUri = sessionUriOf(subject, sessionId);
+    } catch (error) {
+      this.#logger.warn('会话 ID 无法归属到调用方，意图分析按「历史为空」处理', {
+        sessionId,
+        code: ComemError.from(error).code,
+      });
+      return [];
+    }
+
+    try {
+      const session = await this.#sessions.load(sessionUri);
+      return session.messages
+        .filter(isConversational)
+        .slice(-RECENT_MESSAGES)
+        .map((message) => ({ role: message.role, text: renderMessageText(message) }));
+    } catch (error) {
+      this.#logger.warn('会话不可读，意图分析按「历史为空」处理', {
+        sessionId,
+        code: ComemError.from(error).code,
+      });
+      return [];
+    }
   }
 
   /**
@@ -492,4 +787,66 @@ function toScoredHits(
     });
   }
   return result;
+}
+
+/** 参与意图分析的消息角色。`tool` / `system` 不参与（见 `#recentMessages`）。 */
+function isConversational(message: SessionMessage): boolean {
+  return message.role === 'user' || message.role === 'assistant';
+}
+
+/**
+ * 会话 URI：`comem://user/{uid}/sessions/{sessionId}`（§6.5）。
+ *
+ * 身份来自 `options.subject`，与路由层 `scopeOfSubject` 是同一份推导：`sessionId`
+ * 只在它所属的作用域内唯一，拿它去拼 group 根会读到别人的会话。
+ */
+function sessionUriOf(subject: string, sessionId: string): Uri {
+  const principal = parsePrincipal(subject);
+  if (principal.kind !== 'user') {
+    throw new ComemError('INVALID_ARGUMENT', `会话只能归属 user 主体：${subject}`, { subject });
+  }
+  return Uri.parse(`comem://user/${principal.id}`).child(SESSIONS_DIRECTORY_NAME, sessionId);
+}
+
+/**
+ * 降级用的单条查询。
+ *
+ * `intent` 落 `other`（没有分类），`confidence` 记 1：兜底查询不经过模型，「置信
+ * 度」在这里没有含义，但它在语义上**一定执行**，取 0 会让按置信度排序的调用方把
+ * 降级结果当成「可丢弃」。
+ */
+function fallbackQuery(query: string): TypedQuery {
+  return { text: query, intent: 'other', confidence: 1, derivedFrom: null };
+}
+
+/**
+ * 合并多条 TypedQuery 的命中（§8.4 第 5 步）。
+ *
+ * 按 URI 去重、**保留最高分**，同时记下「哪条 TypedQuery 命中的」。同一个 URI
+ * 可能被多条查询命中：重写后的文本不同，BM25 分数不同，取高的那条才反映最好的
+ * 一次匹配。降序 + `slice(0, limit)` 与 `find` 的 `rankCandidates` 是同一套口径。
+ */
+function mergeHits(
+  ran: readonly { readonly typedQuery: TypedQuery; readonly hits: readonly ScoredHit[] }[],
+  limit: number,
+): SearchResultHit[] {
+  const byUri = new Map<string, SearchResultHit>();
+  for (const { typedQuery, hits } of ran) {
+    for (const hit of hits) {
+      const existing = byUri.get(hit.uri);
+      if (existing !== undefined && existing.score >= hit.score) {
+        continue;
+      }
+      byUri.set(hit.uri, {
+        uri: hit.uri,
+        contextType: hit.contextType,
+        memoryType: hit.memoryType,
+        level: hit.level,
+        abstract: hit.abstract,
+        score: hit.score,
+        matchedQuery: typedQuery.text,
+      });
+    }
+  }
+  return [...byUri.values()].sort((left, right) => right.score - left.score).slice(0, limit);
 }
