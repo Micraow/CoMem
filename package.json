@@ -14,9 +14,11 @@
     "test:watch": "vitest",
     "test:integrations": "node --test integrations/tests/",
     "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:integrations",
-    "dev": "tsx src/bootstrap/main.ts",
+    "dev": "bash scripts/dev.sh",
     "dev:server": "tsx src/bootstrap/main.ts",
-    "start": "tsx src/bootstrap/main.ts"
+    "start": "tsx src/bootstrap/main.ts",
+    "dev:web": "cd web && pnpm dev",
+    "test:e2e": "bash scripts/demo.sh"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.97",
