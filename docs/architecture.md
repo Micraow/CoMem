@@ -2118,6 +2118,7 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 
 | 入口 | 端点 | 说明 |
 |---|---|---|
+| 认证配置 | `GET /api/v1/auth/config` | 只读探测，**恒定 200**，只回 `{enabled: boolean}`。控制台在拿到身份之前调它 |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
 | 设密码 | `POST /api/v1/admin/users/{id}/password` | 管理面，需对自身根 `manage` |
@@ -2415,8 +2416,9 @@ Nuxt 3 + shadcn-vue + Tailwind。九个业务页面，外加一个只在多用�
 | 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 
 **身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
-`web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`POST /auth/logout`
-在 `auth.enabled: false` 时返回 404），再分两条路径：
+`web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`GET /auth/config`
+恒定 200，响应体只有 `{enabled}`；**不用** 404 推断，那会拿「错误」当正常信号，还会
+发一个登出语义的写请求去做只读探测），再分两条路径：
 
 - **单用户（默认）**：调一次 `GET /health`（§17.9），用返回的 `subject` 拼
   `x-comem-subject`；没有存过的选择时用 `scopes[0]` 作作用域根。
@@ -2688,7 +2690,10 @@ dataDir: ""
 providers:
   llm:
     default:
-      type: openai-compatible      # openai-compatible | anthropic
+      type: openai-compatible      # openai-compatible | anthropic | disabled
+      # 占位值：api.example.com 是 IANA 保留域名（RFC 2606），永远不可达。
+      # 保持它启动时会打 warn；不需要模型时把 type 改成 disabled 并把
+      # summary.generator 改成 rule（否则启动期交叉校验失败）。
       baseUrl: https://api.example.com/v1
       model: gpt-4o-mini
       apiKey: ${COMEM_LLM_KEY}

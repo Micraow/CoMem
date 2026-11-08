@@ -47,22 +47,24 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
   第一次调用模型时才出现。
 
 `config.example.yaml` 是全量模板。把它复制成 `config.yaml` 之后必须给 `COMEM_LLM_KEY` 赋值，
-否则启动直接失败（`apiKey: ${COMEM_LLM_KEY}`）。
+否则启动直接失败（`apiKey: ${COMEM_LLM_KEY}`）。没有模型凭据的部署（本地开发、CI、只用规则
+摘要）把 `providers.llm.default.type` 改成 `disabled`，同时把 `summary.generator` 改成 `rule`
+——两者不一致时启动期抛 `INVALID_ARGUMENT`，不会等到第一次写文件才静默失败。
 
 ### 配置项
 
 | 键 | 默认值 | 是什么 / 什么时候改 |
 |---|---|---|
 | `dataDir` | `""` | 数据根。空串表示按运行形态推导（§6.5）：容器里 `/var/lib/comem`、root 运行 `/var/lib/comem`、其余 `$XDG_DATA_HOME/comem`。挂卷或备份到别处时显式写 |
-| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic` |
-| `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。换成自建网关时改 |
+| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule` 且 `memory.consolidation.enabled` 必须是 `false`，否则启动失败 |
+| `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。**默认值是 IANA 保留域名（RFC 2606），永远不可达**；保持它启动时会打一条 `warn`，说明摘要、记忆抽取、合并与检索改写都不会工作。换成自建网关或真实供应商地址 |
 | `providers.llm.default.model` | `gpt-4o-mini` | 模型名。摘要质量与成本由它决定 |
 | `providers.llm.default.apiKey` | `""` | 密钥。模板里是 `${COMEM_LLM_KEY}`；空串时调用会失败，但没有密钥也能启动 |
 | `providers.llm.default.maxTokens` | `32768` | 单次生成的 token 上限。**截断（`finishReason = length`）不重试**，抽取被截断时调大它（§11.4） |
 | `providers.llm.default.timeoutSeconds` | `120` | 单次调用超时。长摘要或慢网关时调大 |
 | `providers.llm.default.pricing.inputPerMillion` | `0.15` | 每 100 万输入 token 的单价（美元）。`comem_llm_cost_usd_total` 用它换算（§17.4） |
 | `providers.llm.default.pricing.outputPerMillion` | `0.6` | 每 100 万输出 token 的单价 |
-| `summary.generator` | `llm` | `llm` 走模型；`rule` 断网降级（子节点名字 + 摘要首句拼接）。**`rule` 的结果恒带 `degraded: true`**，`/health` 会把它报成 `degraded` |
+| `summary.generator` | `llm` | `llm` 走模型（`providers.llm.default.type` 不能是 `disabled`）；`rule` 断网降级（子节点名字 + 摘要首句拼接）。**`rule` 的结果恒带 `degraded: true`**，`/health` 会把它报成 `degraded` |
 | `summary.abstractMaxChars` | `256` | L0 摘要的字符预算（§9.1）。超了截断，不重试 |
 | `summary.overviewMaxChars` | `4000` | L1 概览的字符预算 |
 | `retrieval.engine` | `fts5` | 检索后端：`fts5` / `vector` / `hybrid`。后两者需要 `providers.embedding`，没配时 `loadConfig` 直接报错 |
@@ -1339,8 +1341,9 @@ Codex」，导出目录是一次性的。
 
 **处理**：
 
-1. 先确认部署形态：`curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:1933/api/v1/auth/logout`
-   返回 404 是单用户，返回 200 是多用户。
+1. 先确认部署形态：`curl -s http://127.0.0.1:1933/api/v1/auth/config`
+   返回 `{"status":"ok","result":{"enabled":false}}` 是单用户，`enabled: true` 是多用户。
+   这个端点恒定 200，不需要凭据。
 2. 单用户：`curl -s http://127.0.0.1:1933/health | jq .result.subject`。不是期望的主体，
    说明 `server.subject` 没生效：检查 `COMEM_SERVER_SUBJECT` 环境变量与 `config.yaml`
    的优先级（CLI > 环境变量 > 配置文件 > 默认值），改完要重启后端。
