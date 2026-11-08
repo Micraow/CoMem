@@ -243,8 +243,9 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   主体」的有意设计，不是漏删。要连数据一起删，用文件系统显式删除该目录（不可逆，
   不在 HTTP 管理面）。
 - **召回账本是缓存，删账号 / 组时一起删。** `_meta/recall/*.recall_log.json` 记的是
-  「这个作用域投过哪些 URI」。删账号 / 组后账本仍在，同 ID 重建的账号会继承去重状态
-  ——第一次召回可能返回空。账本先于撤权删除，失败时什么都没动。
+  「这个作用域投过哪些 URI」。`DELETE /admin/users/{id}` 与 `/admin/groups/{id}` 在撤权
+  之前先删对应账本（`src/api/http/routes/admin.ts:303`、`:501`），同 ID 重建的账号不会继承
+  去重状态。账本是缓存，删除的代价只是「多投一次」；先删它，失败时什么都没动。
 - **`node_embedding` 按 URI 留旧向量。** 向量行带 `content_digest`：正文变了就重算，
   正文没变就复用。它只回答「这段正文的向量是什么」，不携带授权信息，所以删账号不清
   向量**不算越权**。要回收空间，删账号后用文件系统删目录、再重建索引。
@@ -682,11 +683,12 @@ docker run --rm comem:test-suite pnpm typecheck
 docker run --rm comem:0.1.0 node -e "require('node:sqlite'); require('sqlite-vec')"
 ```
 
-**容器内 `pnpm test` 有 3 个环境相关失败**（`tests/unit/config.test.ts` 的
-`dataDir` 推导）：`resolveDataDir` 用 `existsSync('/.dockerenv') || pid === 1` 判定
-容器，容器里必然推导成 `/var/lib/comem`，而测试期望桌面形态的
-`$XDG_DATA_HOME/comem`。这不是镜像缺依赖——`1910 passed | 3 failed | 1 skipped` 里
-失败的 3 条只断言这个路径。容器外 `pnpm test` 是 `1913 passed | 1 skipped`。
+**容器内外结果一致**（`1924 passed | 1 skipped`）。`resolveDataDir` 仍用
+`existsSync('/.dockerenv') || pid === 1` 判定容器，但 `loadConfig` 把 `container` /
+`isRoot` 做成可注入参数（`src/config/index.ts:270`），`tests/unit/config.test.ts` 的
+`dataDir` 用例显式传 `container: false`（`:132`）、`container: true`（`:156`）、
+`isRoot: true`（`:166`），断言与运行环境无关——之前那 3 条「容器里 dataDir 推导成
+XDG 路径」的失败因此不再出现。
 
 ### compose 拓扑
 
@@ -1313,8 +1315,10 @@ Codex」，导出目录是一次性的。
 
 1. **数据根是空的、还没初始化**：启动时会预置 `user/{uid}/` 与 `memories` / `resources` /
    `skills` / `sessions` 四个目录的权限行（`src/bootstrap/container.ts`）。没跑到说明启动自检失败。
-2. **`x-comem-subject` 与绑定身份不一致**：v1 单用户，服务图只有一份。请求头写了
+2. **`x-comem-subject` 与绑定身份不一致**：`auth.enabled: false` 时服务图只有一份。请求头写了
    `user:bob` 而装配时绑定的是 `user:local`，直接 `UNAUTHENTICATED`（401），不是 403。
+   打开 `auth.enabled` 后这个头被忽略，缺 Bearer 凭据同样是 401（`src/bootstrap/container.ts`
+   的 `resolveIdentity`）。
 3. **手动改过 `.acl.json`**：把 `user:{uid}` 那条删了。owner 恒 `manage` 不受影响，但如果改的是
    `restricted` 又没加直接授权，会真的没权限。
 

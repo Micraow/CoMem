@@ -2731,7 +2731,7 @@ acl:
 server:
   host: 127.0.0.1
   port: 1933
-  # 服务图绑定的主体：HTTP 的 x-comem-subject 与它不一致时 401。
+  # auth.enabled: false 时的绑定主体：HTTP 的 x-comem-subject 与它不一致时 401。
   # 默认 user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置。
   subject: user:local
 
@@ -2761,7 +2761,7 @@ task:
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
 
-**`server.subject` 是服务图绑定的身份，不是认证配置。** 服务图只有一份（§12.4 的 `Authorizer` 没有 subject 参数），所以启动时把主体写进服务图，之后每个请求的 `x-comem-subject` 必须与它一致，否则 401。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`），否则所有请求都以 `local` 的身份求权。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但服务图只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组身份要的是每请求一份服务图，不在 v1。
+**`server.subject` 是 `auth.enabled: false` 时的绑定身份，不是认证配置。** 认证关闭时每个请求的 `x-comem-subject` 必须与它一致，否则 401；`Authorizer` 收的是每请求的 `principals`，但这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container.ts` 的 `resolveIdentityOf`）。打开 `auth.enabled` 后身份来自凭据，每个请求独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
 
 **控制台跟随这个值，不重复配置。** `GET /health` 返回 `subject` 与 `scopes`（§17.9），控制台启动时拉一次，用 `subject` 拼请求头。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改 `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
 
