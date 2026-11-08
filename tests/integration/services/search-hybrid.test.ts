@@ -204,6 +204,9 @@ function createService(options: {
       ? {}
       : { embedding: options.embedding, vectors, nodes }),
     ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
+    // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
+    hotnessWeight: 0,
+    hotnessHalfLifeHours: 168,
   });
 }
 
@@ -528,6 +531,8 @@ describe('SearchService 构造', () => {
           logger,
           config: CONFIG,
           engine: 'vector',
+          hotnessWeight: 0,
+          hotnessHalfLifeHours: 168,
         }),
     ).toThrow(ComemError);
   });

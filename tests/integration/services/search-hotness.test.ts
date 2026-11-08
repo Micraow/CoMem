@@ -165,8 +165,9 @@ function createService(index: RetrievalIndex, hotness: HotnessOptions = {}): Sea
     logger,
     config: CONFIG,
     engine: 'fts5',
-    hotnessWeight: hotness.weight,
-    hotnessHalfLifeHours: hotness.halfLifeHours,
+    // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
+    hotnessWeight: hotness.weight ?? 0,
+    hotnessHalfLifeHours: hotness.halfLifeHours ?? 168,
     accessStats: hotness.accessStats,
     recordAccess: hotness.recordAccess,
   });
@@ -198,7 +199,7 @@ describe('weight = 0（默认）', () => {
     expect(recordAccess).not.toHaveBeenCalled();
   });
 
-  it('不传 hotnessWeight 时同样不查库（默认值就是 0）', async () => {
+  it('weight = 0 时同样不查库（默认值就是 0）', async () => {
     seedAccess([DOC], new Date());
     const accessStats = vi.fn(() => []);
 

@@ -199,6 +199,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     assembler,
     logger,
     config: RETRIEVAL_SETTINGS,
+    // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
+    hotnessWeight: 0,
+    hotnessHalfLifeHours: 168,
   });
   const summary = new SummaryService({
     nodes,

@@ -169,6 +169,9 @@ async function createService(options: {
         : { ...CONFIG, assembly: { ...CONFIG.assembly, maxTokens: options.maxTokens } },
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
     ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
+    // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
+    hotnessWeight: 0,
+    hotnessHalfLifeHours: 168,
   });
 }
 
@@ -697,6 +700,8 @@ describe('SearchService 构造', () => {
           assembler,
           logger,
           config: { ...CONFIG, queryFilters: ['not-a-rule'] },
+          hotnessWeight: 0,
+          hotnessHalfLifeHours: 168,
         }),
     ).toThrow(ComemError);
   });

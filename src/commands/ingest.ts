@@ -459,8 +459,7 @@ function renderReport(report: IngestReport, dryRun: boolean): string {
     lines.push('');
     lines.push('阶段二（记忆抽取）：');
     for (const batch of report.extraction.batches) {
-      const scope =
-        batch.sessions > 0 ? `${formatNumber(batch.sessions)} 个会话` : '队列积压';
+      const scope = `${formatNumber(batch.sessions)} 个会话`;
       if (batch.error !== null) {
         lines.push(`  第 ${batch.index} 批（${scope}）❌ 失败：${batch.error}`);
         continue;
@@ -478,7 +477,7 @@ function renderReport(report: IngestReport, dryRun: boolean): string {
     );
     if (total.memoriesPendingReview > 0) {
       lines.push(
-        '  待复核的记忆不会出现在检索结果里：用 `GET /api/v1/memories/pending` 查看，`POST /api/v1/memories/{id}/approve` 通过。',
+        '  待复核的记忆不会出现在检索结果里：`GET /api/v1/memories/pending` 查看，`POST /api/v1/memories/{uri}/approve` 通过（URI 需 URL 编码）。',
       );
     }
   } else if (dryRun) {

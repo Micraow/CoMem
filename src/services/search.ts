@@ -38,7 +38,7 @@ import {
   type QuotaPreset,
 } from '../domain/assembly.js';
 import { ComemError } from '../domain/errors.js';
-import { DEFAULT_HALF_LIFE_DAYS, hotnessScore } from '../domain/hotness.js';
+import { hotnessScore } from '../domain/hotness.js';
 import type { Level } from '../domain/level.js';
 import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
@@ -169,9 +169,9 @@ export interface SearchServiceDeps {
    * `0`（默认）= 不参与排序，`hotness` 字段仍然是 `null`，行为与接线前完全一致。
    * 非 0 时查询 `node.access_count` / `node.last_accessed_at` 并计算。
    */
-  readonly hotnessWeight?: number;
+  readonly hotnessWeight: number;
   /** 半衰期（小时）。`telemetry.hotness.halfLifeHours`，默认 168（一周）。 */
-  readonly hotnessHalfLifeHours?: number;
+  readonly hotnessHalfLifeHours: number;
   /** 读访问统计。缺省时不做热度计算（`hotness` 恒为 `null`）。 */
   readonly accessStats?: (uris: readonly string[]) => readonly NodeAccessStats[];
   /**
@@ -311,14 +311,6 @@ const DEFAULT_RESULT_LIMIT = 20;
 
 /** 一天的小时数。`hotnessHalfLifeHours` 的单位是小时，`hotnessScore` 的输入是天。 */
 const HOURS_PER_DAY = 24;
-
-/**
- * 默认半衰期（小时）：168。
- *
- * 从领域层的 `DEFAULT_HALF_LIFE_DAYS` 换算，而不是再写一遍 168：配置默认值与
- * 公式默认值不一致时，同一条记忆会得到两个冷热分档。
- */
-const DEFAULT_HALF_LIFE_HOURS = DEFAULT_HALF_LIFE_DAYS * HOURS_PER_DAY;
 
 /**
  * `grep` 的默认前后文行数。
@@ -472,8 +464,10 @@ export class SearchService {
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
     this.#queryFilters = compileQueryFilters(deps.config.queryFilters);
 
-    const hotnessWeight = deps.hotnessWeight ?? 0;
-    const halfLifeHours = deps.hotnessHalfLifeHours ?? DEFAULT_HALF_LIFE_HOURS;
+    // 默认值只在 `config/schema.ts` 一处。这里不再兜底：兜底会把「配置错了」变成
+    // 「配置被忽略」，正是本 wave 要消灭的那类静默失效。
+    const hotnessWeight = deps.hotnessWeight;
+    const halfLifeHours = deps.hotnessHalfLifeHours;
     if (!Number.isFinite(hotnessWeight) || hotnessWeight < 0) {
       throw new ComemError('INVALID_ARGUMENT', 'hotnessWeight 必须是非负有限数。', {
         hotnessWeight: deps.hotnessWeight,

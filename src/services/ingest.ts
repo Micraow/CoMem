@@ -170,9 +170,8 @@ export interface ExtractionRunner {
 export interface IngestExtractionBatchReport {
   /** 全局批次序号，从 1 开始。 */
   readonly index: number;
-  /** 这一批对应的来源；`null` 表示「队列积压」的收尾批。 */
-  readonly harness: IngestHarness | null;
-  /** 这一批包含多少个本次导入的会话；0 表示只处理了历史积压。 */
+  readonly harness: IngestHarness;
+  /** 这一批包含多少个本次导入的会话。 */
   readonly sessions: number;
   readonly tasksCompleted: number;
   readonly tasksFailed: number;
@@ -496,7 +495,7 @@ export class IngestService {
    * 轮跑完，这里再记一条「0 个任务」只会让报告变长。
    */
   async #drainExtraction(
-    harness: IngestHarness | null,
+    harness: IngestHarness,
     sessions: number,
     extraction: MutableExtraction,
     timeoutMs: number,
