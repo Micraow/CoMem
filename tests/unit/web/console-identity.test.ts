@@ -6,6 +6,8 @@ import {
   consoleIdentityState,
   fetchConsoleIdentity,
   identityHeaders,
+  probeAuthEnabled,
+  type ConsoleRequest,
   type HealthFetcher,
   type HealthResponseLike,
 } from '../../../web/composables/consoleIdentity.js';
@@ -116,3 +118,62 @@ describe('控制台身份引导', () => {
     expect(identity.scopes).toEqual([]);
   });
 });
+describe('认证探测（GET /auth/config）', () => {
+  function requestOf(
+    result: unknown,
+    status = 200,
+    calls: string[] = [],
+  ): ConsoleRequest {
+    return async (url, init) => {
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => ({ status: status >= 200 && status < 300 ? 'ok' : 'error', result }),
+      };
+    };
+  }
+
+  it('auth.enabled: false 返回 false，且是只读 GET', async () => {
+    const calls: string[] = [];
+    const request = requestOf({ enabled: false }, 200, calls);
+
+    await expect(probeAuthEnabled(BASE, request)).resolves.toBe(false);
+    // 旧实现是 `POST /auth/logout` + 404 推断；这里钉住「只读 + 200」。
+    expect(calls).toEqual([`GET ${BASE}/auth/config`]);
+  });
+
+  it('auth.enabled: true 返回 true', async () => {
+    await expect(probeAuthEnabled(BASE, requestOf({ enabled: true }))).resolves.toBe(true);
+  });
+
+  it('非 200 抛 AUTH_PROBE_FAILED，不猜开关', async () => {
+    await expect(probeAuthEnabled(BASE, requestOf({ enabled: false }, 500))).rejects.toMatchObject(
+      { code: 'AUTH_PROBE_FAILED' },
+    );
+  });
+
+  it('响应体缺 enabled 布尔值时抛 AUTH_PROBE_FAILED', async () => {
+    for (const result of [undefined, {}, { enabled: 'false' }, { enabled: 0 }]) {
+      await expect(probeAuthEnabled(BASE, requestOf(result))).rejects.toMatchObject({
+        code: 'AUTH_PROBE_FAILED',
+      });
+    }
+  });
+
+  it('响应体不是 JSON 时抛 AUTH_PROBE_FAILED', async () => {
+    const request: ConsoleRequest = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    });
+
+    await expect(probeAuthEnabled(BASE, request)).rejects.toMatchObject({
+      code: 'AUTH_PROBE_FAILED',
+    });
+  });
+});
+
+

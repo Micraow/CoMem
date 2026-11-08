@@ -60,12 +60,14 @@ const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   '/metrics',
   '/api/v1/health',
   '/api/v1/metrics',
-  // 登录时还没有身份，登出没有服务端状态可清（§12.7）。两个前缀各列一次，
-  // 与运维端点同理。
+  // 登录时还没有身份，登出没有服务端状态可清，`GET /auth/config` 是控制台在
+  // 「有没有登录」之前就要回答的问题（§12.7）。两个前缀各列一次，与运维端点同理。
   '/auth/login',
   '/auth/logout',
+  '/auth/config',
   '/api/v1/auth/login',
   '/api/v1/auth/logout',
+  '/api/v1/auth/config',
 ]);
 
 /** 请求路径（去掉查询串）。 */

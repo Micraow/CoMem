@@ -15,10 +15,10 @@
  *   `Authorization: Bearer <session token 或 API Key>`。此时控制台先探测认证是否
  *   打开，再读浏览器里的会话；没有会话就进登录页。
  *
- * 探测复用 `POST /auth/logout`：它是公开端点，认证关闭时按 `auth.ts` 的
- * `assertEnabled` 返回 404，打开时返回 `ok`。服务端没有「已签发 token」的表，
- * 这个请求不改变任何状态。加一个 `GET /auth/status` 需要改 `src/`，而控制台只允许
- * 改 `web/`。
+ * 探测走 `GET /auth/config`：公开、只读、200 恒定，响应体只有
+ * `{enabled: boolean}`。曾经用 `POST /auth/logout` 的 200 / 404 推断开关——那是
+ * 拿「错误」当正常信号（默认配置下每次加载都在 console 里留一条 404），而且
+ * 发了一个登出语义的写请求去做只读探测。
  *
  * ## 认证模式下为什么还要探测作用域
  *
@@ -256,27 +256,43 @@ export async function fetchConsoleIdentity(
 /**
  * 探测认证是否打开。
  *
- * 见文件头：登出端点在认证关闭时是 404，打开时是 200。除这两个状态之外的响应
- * 都不是「能继续往下走」的答案，直接整页报错。
+ * 见文件头：`GET /auth/config` 是只读端点，认证关闭与打开都返回 200，响应体是
+ * `{status:'ok', result:{enabled:boolean}}`。非 200 或字段缺失都不是「能继续往下
+ * 走」的答案，直接整页报错——猜一个默认值会让单用户部署以错误的分支启动。
  */
 export async function probeAuthEnabled(
   baseUrl: string,
   request: ConsoleRequest,
 ): Promise<boolean> {
-  const response = await request(`${trimBase(baseUrl)}/auth/logout`, {
-    method: 'POST',
+  const response = await request(`${trimBase(baseUrl)}/auth/config`, {
     headers: { accept: 'application/json' },
   })
-  if (response.ok) {
-    return true
+  if (!response.ok) {
+    throw new ConsoleIdentityError(
+      'AUTH_PROBE_FAILED',
+      `服务端 /auth/config 返回 HTTP ${String(response.status)}，控制台无法判断是否启用认证。`,
+    )
   }
-  if (response.status === 404) {
-    return false
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    throw new ConsoleIdentityError(
+      'AUTH_PROBE_FAILED',
+      '服务端 /auth/config 返回的不是 JSON，控制台无法判断是否启用认证。',
+    )
   }
-  throw new ConsoleIdentityError(
-    'AUTH_PROBE_FAILED',
-    `服务端 /auth/logout 返回 HTTP ${String(response.status)}，控制台无法判断是否启用认证。`,
-  )
+
+  const result = isRecord(payload) ? payload['result'] : undefined
+  const enabled = isRecord(result) ? result['enabled'] : undefined
+  if (typeof enabled !== 'boolean') {
+    throw new ConsoleIdentityError(
+      'AUTH_PROBE_FAILED',
+      '服务端 /auth/config 没有返回 enabled 布尔值，控制台无法判断是否启用认证。',
+    )
+  }
+  return enabled
 }
 
 /** `user:alice` → `comem://user/alice`；通配主体与非法形状返回 `null`。 */
@@ -483,6 +499,11 @@ export async function loginConsole(
  *
  * 服务端无状态，调用失败也不影响结果：本地清掉会话就是登出。仍然发一次请求，
  * 是为了让「登出」在访问日志里有一条记录，而不是客户端单方面忘记。
+ *
+ * **必须等响应体读完再返回。** `fetch` 在响应头到达时就 resolve，调用方紧接着
+ * `window.location.assign('/login')` 会让浏览器中止仍在进行的请求体读取，服务端
+ * 记 200、浏览器记 `net::ERR_ABORTED`（W59 的实测现象）。`finally` 保证请求失败
+ * 也会清掉本地会话——调用方负责跳转。
  */
 export async function logoutConsole(baseUrl: string, request: ConsoleRequest): Promise<void> {
   const session = readConsoleSession()

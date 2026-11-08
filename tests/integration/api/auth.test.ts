@@ -125,6 +125,16 @@ describe('登录', () => {
     expect(response.statusCode).toBe(200);
     expect(json(response)['result']).toEqual({ loggedOut: true });
   });
+
+  it('GET /auth/config 是只读探测：200 且只回 enabled（W59）', async () => {
+    const response = await inject({ method: 'GET', url: '/api/v1/auth/config' });
+
+    expect(response.statusCode).toBe(200);
+    expect(json(response)['result']).toEqual({ enabled: true });
+    // 敏感信息不进响应：控制台只需要一个布尔值。
+    expect(response.body).not.toContain('sessionTtl');
+    expect(response.body).not.toContain('secret');
+  });
 });
 
 describe('删账号与改密码撤销访问', () => {
@@ -318,6 +328,14 @@ describe('auth.enabled = false', () => {
         payload: { username: 'local', password: PASSWORD },
       });
       expect(loginResponse.statusCode).toBe(404);
+
+      // 回归（W59）：关闭时探测也是 200 + `{enabled:false}`，不是拿 404 当信号。
+      const configResponse = await disabledApp.inject({
+        method: 'GET',
+        url: '/api/v1/auth/config',
+      });
+      expect(configResponse.statusCode).toBe(200);
+      expect(json(configResponse)['result']).toEqual({ enabled: false });
 
       // v1 行为不变：不带认证头时用服务图绑定的主体。
       const health = await disabledApp.inject({ method: 'GET', url: '/health' });
