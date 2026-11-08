@@ -6,6 +6,7 @@ import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { ApiKeyRepository } from '../../../src/adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
@@ -740,6 +741,11 @@ describe('purgePrincipal 的事务边界', () => {
       permissions: new PermissionRepository({ db: container.db, logger: container.logger }),
       nodes: new NodeRepository({ db: container.db, logger: container.logger }),
       logger: container.logger,
+      locks: createPathLockManager({
+        dataDir,
+        logger: container.logger,
+        pollIntervalMs: 1,
+      }),
     });
     vi.spyOn(aclFile, 'write').mockRejectedValue(new Error('磁盘满'));
 

@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { AclFileStore } from '../adapters/fs/acl-file.js';
+import { createPathLockManager } from '../adapters/fs/lock.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
@@ -93,6 +94,8 @@ export async function setGroupOwner(
       permissions: new PermissionRepository({ db, logger }),
       nodes: new NodeRepository({ db, logger }),
       logger,
+      // 与容器同一把锁实现：ACL 写入的互斥靠它（§10.6）。
+      locks: createPathLockManager({ dataDir, logger }),
       groupDefaultLevel: config.acl.groupDefaultLevel === 'write' ? 3 : 1,
     });
 

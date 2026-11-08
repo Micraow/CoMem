@@ -96,6 +96,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     permissions,
     nodes,
     logger,
+    locks,
   });
   await acl.ensureRootPreset(Uri.parse(ROOT));
 

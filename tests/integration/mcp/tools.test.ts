@@ -183,6 +183,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
           permissions,
           nodes,
           logger,
+          locks,
         })
       : null;
   if (acl !== null) {

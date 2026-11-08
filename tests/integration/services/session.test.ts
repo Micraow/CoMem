@@ -129,6 +129,7 @@ beforeEach(async () => {
     permissions: new PermissionRepository({ db, logger }),
     nodes: new NodeRepository({ db, logger }),
     logger,
+    locks,
   });
   await acl.ensureRootPreset(Uri.parse(SCOPE_ROOT));
   authorizer = new InheritingAuthorizer(acl, store);

@@ -92,6 +92,7 @@ beforeEach(async () => {
     permissions,
     nodes: new NodeRepository({ db, logger }),
     logger,
+    locks,
   });
   summary = new SummaryService({
     nodes: new NodeRepository({ db, logger }),
