@@ -303,10 +303,58 @@ describe('删除', () => {
 });
 
 describe('规模', () => {
-  it('1 万条 × 1024 维的单次查询 < 50ms', async () => {
-    // 50ms 是本机实测（8–10ms）的 5 倍余量，给 CI 的共享 runner 与覆盖率插桩。
-    // 来源：本机（Node 26，单核）实测，不是供应商 SLA。超过它说明退化成了平方级
-    // 或每行都重新扫全表，不是「慢一点」。
+  /**
+   * 查询下推的**因果**断言。
+   *
+   * `vec0` 的 KNN 形态是 `MATCH ?` + `k = ?` 同时出现，距离在 C 层的 SIMD 内核
+   * 里算。一旦有人改成「把行读进 JS 再逐行算距离」，`prepare` 出来的语句里就没有
+   * 这两个子句——这条断言会失败。下面的墙钟断言抓不到这个回归：JS 逐行算
+   * 10,000 × 1024 只要约 45ms，远低于 500ms 的守卫。
+   */
+  it('KNN 下推给 vec0 的 MATCH 算子，不在 JS 里算距离', async () => {
+    openIndex(2);
+    store(uriFor('a'), angle(0));
+    store(uriFor('b'), angle(90));
+
+    const statements: string[] = [];
+    const recording = new Proxy(db, {
+      get(target, property) {
+        if (property === 'prepare') {
+          return (sql: string) => {
+            statements.push(sql);
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as DatabaseSync;
+
+    const hits = await new SqliteVectorIndex({ db: recording, logger }).search({
+      vector: [1, 0],
+      model: MODEL,
+      limit: 10,
+    });
+
+    expect(hits).toHaveLength(2);
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain('MATCH ?');
+    expect(statements[0]).toContain('k = ?');
+  });
+
+  /**
+   * 量级守卫，**不是性能目标**。
+   *
+   * 500ms 是本机实测（12–14ms）的 35 倍余量，高负载下的 GC 与调度抖动不会把它
+   * 顶穿。要测性能用 `pnpm bench`，不要为了「更严格」调小这个数——那样测的是
+   * 机器负载，不是实现。
+   *
+   * 这条断言**抓不到「退化成全表扫描」**：`vec0` 的 KNN 本来就是一次全表扫描
+   * （`EXPLAIN QUERY PLAN` 打印 `SCAN node_embedding VIRTUAL TABLE INDEX 0:...`），
+   * 距离在 C 层算。它抓的是量级回归：每行一次查询、O(n²) 的两两距离、把全部行
+   * 读出来再排序。查询是否下推到 `vec0` 由上一个用例的 `MATCH` / `k` 断言守着。
+   */
+  it('1 万条 × 1024 维的单次查询 < 500ms（量级守卫）', async () => {
     openIndex(SCALE_DIMENSION);
 
     let seed = 42;
@@ -339,7 +387,7 @@ describe('规模', () => {
     const duration = performance.now() - startedAt;
 
     expect(hits).toHaveLength(10);
-    expect(duration).toBeLessThan(50);
+    expect(duration).toBeLessThan(500);
     // 数字进 CI 日志：失败时先看实际耗时，不用重跑。
     console.log(`[vector-index] 1 万条 × 1024 维单次查询：${duration.toFixed(1)}ms`);
   }, 120_000);
