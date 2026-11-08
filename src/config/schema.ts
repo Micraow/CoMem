@@ -299,8 +299,9 @@ const configObjectSchema = z.object({
         })
         .prefault({}),
       /**
-       * 记忆的 TTL（架构文档 §11.7、`0010_ttl.sql`）。清扫只做**软过期**
-       * （`status = 'archived'`），物理删除由运维显式做。
+       * 记忆的 TTL（架构文档 §11.7、`0010_ttl.sql` / `0002_archived_at.sql`）。
+       * **两段式**：`defaultDays` 到点先把 `status` 置 `archived`（只标不删）；
+       * 归档后超过 `retentionDays` 再物理删除文件与索引行。
        */
       ttl: z
         .object({
@@ -308,6 +309,16 @@ const configObjectSchema = z.object({
           defaultDays: z.number().int().nonnegative().default(0),
           /** 每轮最多清扫多少条，防止一次清太多把库锁住 */
           sweepBatchSize: z.number().int().positive().default(100),
+          /**
+           * 归档后保留多少天才物理删除。`0`（默认）= 永不物理删除（只软归档）。
+           *
+           * **默认 0 而不是「立即删」**：物理删除不可逆，默认不能删任何东西。
+           * 要省磁盘必须显式配一个正数，先观察一轮归档量再定。
+           *
+           * 30 天是参考实现同类保留期的常见取值（目录 TTL 的会话 30 天），作为
+           * 「想开物理删除时」的经验起点，不是默认。
+           */
+          retentionDays: z.number().int().nonnegative().default(0),
         })
         .prefault({}),
       /**

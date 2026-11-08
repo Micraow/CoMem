@@ -36,6 +36,8 @@ import type { MemoryRecord, MemoryStatus } from '../../../src/services/memory.js
 import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 import { TtlService } from '../../../src/services/ttl.js';
+import { FileSystemService } from '../../../src/services/filesystem.js';
+import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
 
@@ -192,7 +194,15 @@ beforeEach(async () => {
     maxAttempts: 3,
   });
   nodes = new NodeRepository({ db, logger });
-  ttl = new TtlService({ nodes, logger });
+  const filesystem = new FileSystemService({
+    store,
+    locks,
+    authorizer: new AllowAllAuthorizer(),
+    logger,
+  });
+  // 调度器测试默认 retentionDays=0（物理删除关闭），与生产默认一致；删除路径本身
+  // 在 `tests/integration/services/ttl.test.ts` 里单独测。
+  ttl = new TtlService({ nodes, filesystem, principals: ['user:alice', 'user:*'], retentionDays: 0, logger });
   // 数据根的上一层必须存在；调度器从 `user/` 开始扫。
   await store.mkdir(Uri.parse(`${SCOPE}/sessions`), { recursive: true });
 });

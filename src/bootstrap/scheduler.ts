@@ -85,6 +85,7 @@ const SKIPPED_RESULT: SchedulerTickResult = Object.freeze({
   expired: 0,
   deleted: 0,
   ttlArchived: 0,
+  ttlPurged: 0,
 });
 
 /**
@@ -105,7 +106,7 @@ export interface SessionAutoCommitPort {
 
 /** TTL 清扫端口（`TtlService` 的结构子集）。 */
 export interface TtlPort {
-  sweep(options?: { readonly limit?: number }): Promise<{ readonly expired: number }>;
+  sweep(options?: { readonly limit?: number }): Promise<{ readonly expired: number; readonly purged: number }>;
 }
 
 /** 删除会话前检查「这个会话产出的记忆是否仍待复核」用的记忆读端口。 */
@@ -145,6 +146,8 @@ export interface SchedulerTickResult {
   readonly deleted: number;
   /** 这一轮被 TTL 归档的节点数 */
   readonly ttlArchived: number;
+  /** 这一轮被 TTL 物理删除（归档超保留期）的节点数 */
+  readonly ttlPurged: number;
 }
 
 /** 单个会话这一轮的结局。`scanned` 之外只关心「做了什么」。 */
@@ -327,7 +330,7 @@ export class Scheduler {
       }
     }
 
-    const ttlArchived = await this.#sweepTtl();
+    const { archived: ttlArchived, purged: ttlPurged } = await this.#sweepTtl();
 
     const result: SchedulerTickResult = {
       skipped: false,
@@ -336,6 +339,7 @@ export class Scheduler {
       expired,
       deleted,
       ttlArchived,
+      ttlPurged,
     };
     this.#logRound(result);
     return result;
@@ -533,14 +537,14 @@ export class Scheduler {
     }
   }
 
-  async #sweepTtl(): Promise<number> {
+  async #sweepTtl(): Promise<{ readonly archived: number; readonly purged: number }> {
     try {
-      const { expired } = await this.#ttl.sweep({ limit: this.#ttlSweepBatchSize });
-      return expired;
+      const { expired, purged } = await this.#ttl.sweep({ limit: this.#ttlSweepBatchSize });
+      return { archived: expired, purged };
     } catch (error) {
       // 清扫失败不能让整轮失败：自动提交与过期判定已经做完了。
       this.#logger.error('TTL 清扫失败，下一轮重试。', { error: errorMessage(error) });
-      return 0;
+      return { archived: 0, purged: 0 };
     }
   }
 
@@ -609,8 +613,9 @@ export class Scheduler {
       expired: result.expired,
       deleted: result.deleted,
       ttlArchived: result.ttlArchived,
+      ttlPurged: result.ttlPurged,
     };
-    if (result.committed + result.expired + result.ttlArchived === 0) {
+    if (result.committed + result.expired + result.ttlArchived + result.ttlPurged === 0) {
       this.#logger.debug('调度轮次完成（无动作）。', summary);
       return;
     }

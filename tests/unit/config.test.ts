@@ -101,7 +101,7 @@ function expectedDefaults(dataDir: string): unknown {
       reviewRequired: ['experiences', 'rules'],
       profile: { maxChars: 800 },
       workingMemory: { enabled: false },
-      ttl: { defaultDays: 0, sweepBatchSize: 100 },
+      ttl: { defaultDays: 0, sweepBatchSize: 100, retentionDays: 0 },
       consolidation: { enabled: false, maxIterations: 10 },
     },
     acl: { groupDefaultLevel: 'write' },

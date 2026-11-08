@@ -1718,22 +1718,42 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 ### 11.7 记忆 TTL 与过期清扫
 
 记忆可以有过期时间：`node.expires_at`（`0010_ttl.sql`，见 §8.1）。清扫由后台调度器
-（§10.7）周期性执行，**只做软过期**。
+（§10.7）周期性执行，**两段式：先归档、再物理删**。
 
 | 概念 | 语义 |
 |---|---|
 | `memory.ttl.defaultDays` | 记忆默认存活天数。`0`（默认）= 永不过期。写入时算成绝对时刻 |
 | `memory.ttl.sweepBatchSize` | 每轮最多清扫多少条（默认 100），给一次 UPDATE 一个上界 |
+| `memory.ttl.retentionDays` | 归档后保留多少天才物理删除。`0`（默认）= 永不物理删，只软归档 |
 | `TtlService.setExpiry(uris, at)` | 显式设过期时间；`null` = 取消过期 |
-| `TtlService.sweep()` | `expires_at < now` 的节点 `status` 置 `archived` |
+| `TtlService.sweep()` | 第一段：`expires_at < now` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行 |
+
+**两段式。** 第一段是软过期（`status = 'archived'`，写 `archived_at`）；第二段在归档
+后超过 `retentionDays` 时才物理删除。中间隔一个保留期，既让「配错 TTL」（把 7 天写成
+7 秒）在保留期里可观测、可撤销，又让 `memory.ttl.*` 真的能省磁盘——只有第一段时
+archived 行越积越多、磁盘一分没省。
+
+**「归档多久」怎么算。** `node.archived_at`（`0002_archived_at.sql`）在第一段归档的
+同一句 `UPDATE` 里写。`expires_at` 只说明「何时该过期」，`updated_at` 是内容写盘时间
+（归档不是内容修改，不动它），两者都算不出「归档了多久」。`archived_at IS NULL` 表示
+「不知道归档时刻」——迁移前就已是 archived 的历史行、或非 TTL 途径产生的 archived 行
+——第二段**永不删它们**：物理删除不可逆，不把未知当成「很久以前」。
+
+**第二段的安全性。** 只删 `status = 'archived' AND archived_at < cutoff AND
+kind = 'document'`（叶子文档，目录节点不入选——目录里可能有没归档的兄弟记忆）。删除
+复用 `forget` 的路径 `FileSystemService.remove`（求 MANAGE → 拿 TREE 锁 → 删文件 →
+通知 `IndexObserver` 删 `node` / `node_fts` / `node_permission`），不另写一套删除逻辑。
+单条删除失败只记 warn 跳过，不打断整轮。`retentionDays` 配得小时（< 7 天）记 warn，
+危险操作不静默。
 
 **为什么存绝对时间而不是相对时长。** 相对时长在写入时算成绝对时间，语义才稳定；存
 「30 天后过期」这种相对值，每次读都要重新算，而「从什么时候开始算」会漂。
 
-**为什么是软过期。** 清扫只改 `status`，不删文件、不动 `node_permission`。TTL 配错
-（把 7 天写成 7 秒）时归档状态还能改回来，物理删除没有回滚。归档只影响检索
-（`status = 'active'` 过滤），`read` / `download` 按路径仍然拿得到内容。物理删除是
-运维的显式动作（`forget` / `rm`），不是定时任务的默认行为。
+**为什么第一段仍是软过期。** 第一段只改 `status`，不删文件、不动 `node_permission`。
+TTL 配错（把 7 天写成 7 秒）时归档状态还能改回来，物理删除没有回滚；保留期就是这个
+「还能改回来」的窗口。归档只影响检索（`status = 'active'` 过滤），`read` / `download`
+按路径仍然拿得到内容。**物理删除只在第二段、且 `retentionDays > 0` 时发生**；默认
+`retentionDays = 0` 时物理删除仍是运维的显式动作（`forget` / `rm`）。
 
 **幂等。** `sweep` 的 `WHERE status <> 'archived'` 让同一条过期记忆只被计数一次；
 重复调用返回 0，不会把「已经归档」重复写一遍。
@@ -2154,7 +2174,7 @@ MCP 契约变更。`links` 不是「读这条记忆的正文」的一部分—�
   max）。`link_type` / `description` 以最新一次写入为准（说明是文字，取最新比留多版本
   好）。
 
-## 12. 权限模型
+
 
 ### 12.1 基本元素
 
@@ -3060,10 +3080,11 @@ memory:
     - rules
   workingMemory:
     enabled: false        # 开它会多一次 LLM 调用。没有可用 LLM 时启动失败（没有规则生成器，不能降级）
-  # 记忆的 TTL。清扫只做软过期（status = archived），物理删除由运维显式做。
+  # 记忆的 TTL。两段式：先软归档（status = archived），归档满 retentionDays 天再物理删除。
   ttl:
     defaultDays: 0        # 记忆默认存活天数。0 = 永不过期（默认）
     sweepBatchSize: 100   # 每轮最多清扫多少条，防止一次清太多把库锁住
+    retentionDays: 0      # 归档后保留多少天再物理删除。0 = 永不物理删除（默认）
   # 记忆合并（§11.8）。默认关：它会 delete，是破坏性操作，必须显式开启。
   # 开启时 summary.generator 必须是 llm，否则 loadConfig 抛 INVALID_ARGUMENT。
   consolidation:

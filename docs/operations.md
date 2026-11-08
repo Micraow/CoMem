@@ -84,6 +84,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `session.expiry.action` | `archive` | `archive`（只改 `status`，可逆）或 `delete`（物理删除会话目录，不可逆） |
 | `memory.ttl.defaultDays` | `0` | 记忆默认存活天数。0 = 永不过期。只影响之后写入的记忆 |
 | `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
+| `memory.ttl.retentionDays` | `0` | 归档后保留多少天才物理删除文件与索引行。`0` = 永不物理删除（默认），只软归档 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
 | `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
@@ -899,7 +900,13 @@ memory:
   ttl:
     defaultDays: 30       # 新写入的记忆 30 天后归档
     sweepBatchSize: 100   # 每轮最多清 100 条
+    retentionDays: 90     # 归档后再保留 90 天，物理删除文件与索引（默认 0 = 永不删）
 ```
+
+**两段式。** `defaultDays` 只负责归档（`status = 'archived'`，文件还在）。要把磁盘真正
+省下来，配 `retentionDays` 一个正数：归档满这么多天后，文件 + 索引行一起删掉，删了不
+可恢复。默认 `0` 表示永不物理删——只软归档。保留期配得很小（比如 1 天）时调度器日志会
+打 warning；先按默认 `0` 观察一轮归档量，再决定保留期。
 
 **只影响之后写入的记忆**：过期时间在写入时算成绝对时刻（`updated_at + defaultDays`），
 已有的记忆保持原值。要追平存量，只有显式设过期时间（v1 没有对应的 HTTP 接口，见

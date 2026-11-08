@@ -333,11 +333,15 @@ export class NodeRepository {
   }
 
   /**
-   * 清扫已过期的节点：`status` 置 `archived`，**不删文件**（软过期，架构文档 §11.7）。
+   * 清扫第一段：`expires_at < now` 的节点 `status` 置 `archived`，**这里不删文件**
+   * （软过期，架构文档 §11.7）。物理删除是第二段（`selectPurgeable` + 文件/索引删除），
+   * 由 `TtlService` 编排——仓储不碰文件系统，删文件需要 `FileSystemService`。
    *
-   * 为什么是软过期：TTL 配错（把 7 天写成 7 秒）时，`archived` 还能改回来；物理删除
-   * 没有回滚。物理删除是运维的显式动作，不是定时任务的默认行为。归档只影响检索
-   * （`status = 'active'` 过滤），`read` / `download` 按路径仍然拿得到内容。
+   * 为什么第一段仍是软过期：TTL 配错（把 7 天写成 7 秒）时，`archived` 还能改回来；
+   * 物理删除没有回滚。两段式让「配错」在 `retentionDays` 的宽度里可观测、可撤销。
+   *
+   * **同时写 `archived_at`**（`0002_archived_at.sql`）：第二段靠它算「归档了多久」。
+   * 归档是「内容状态的时间戳」，不是内容写入，所以**不动 `updated_at`**。
    *
    * **不动 `node_permission`**：归档节点仍要能按权限查到——「这条记忆归档了」是内容
    * 状态，不是「这个人失去了访问权」。删权限行会让「归档」变成「对所有人消失」。
@@ -363,9 +367,11 @@ export class NodeRepository {
       if (uris.length === 0) {
         return uris;
       }
-      const statement = this.#db.prepare(`UPDATE node SET status = 'archived' WHERE uri = ?`);
+      const statement = this.#db.prepare(
+        `UPDATE node SET status = 'archived', archived_at = ? WHERE uri = ?`,
+      );
       for (const uri of uris) {
-        statement.run(uri);
+        statement.run(nowIso, uri);
       }
       return uris;
     });
@@ -373,6 +379,34 @@ export class NodeRepository {
       this.#logger.info('TTL 清扫：过期节点已归档。', { count: expired.length, uris: expired });
     }
     return expired;
+  }
+
+  /**
+   * 清扫第二段的候选：已归档且归档时刻早于 `cutoff`（`archived_at < cutoff`）的节点。
+   *
+   * 只返回 `kind = 'document'` 的叶子节点。目录节点不入选：目录里可能还有子项，
+   * 整棵删掉会顺手删掉别人没归档的兄弟记忆；目录行随最后一条子项被删而残留为空行，
+   * 由后续重建索引清掉（与 §6.5「索引是派生」一致）。物理删除文件是逐文件的动作，
+   * 目标是「这条记忆」而不是「这个目录」。
+   *
+   * `archived_at IS NOT NULL` 是硬条件：`NULL` 表示「不知道归档时刻」（本迁移之前
+   * 的 archived 行、或非 TTL 途径产生的 archived 行），不把未知当成「很久以前」——
+   * 物理删除不可逆，宁可永远不删。
+   *
+   * `ORDER BY archived_at ASC LIMIT ?` 与第一段同一理由：先删最老的、每轮一个上界。
+   */
+  selectPurgeable(cutoff: Date, limit: number): readonly string[] {
+    const cutoffIso = cutoff.toISOString();
+    const rows = this.#db
+      .prepare(
+        `SELECT uri FROM node
+          WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?
+            AND kind = 'document'
+          ORDER BY archived_at ASC
+          LIMIT ?`,
+      )
+      .all(cutoffIso, limit);
+    return rows.map((row) => text(row['uri']));
   }
 
   /**

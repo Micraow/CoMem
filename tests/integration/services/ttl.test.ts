@@ -1,10 +1,15 @@
 /**
  * 记忆 TTL 的验收（架构文档 §11.7）。
  *
- * 用真实 SQLite（`:memory:`）与真实的 `NodeRepository` / `SqliteFtsIndex`：这一层
- * 的价值全在 SQL 上（部分索引、`status <> 'archived'` 的幂等、不碰 `updated_at`），
- * 用替身测等于测替身。
+ * 用真实 SQLite（`:memory:`）与真实的 `NodeRepository` / `SqliteFtsIndex` /
+ * `ContentStore` / `FileSystemService`：这一层的价值全在 SQL 与文件删除上（部分索引、
+ * `status <> 'archived'` 的幂等、不碰 `updated_at`、两段式物理删除），用替身测等于
+ * 测替身。
  */
+
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -13,21 +18,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { ContentStore } from '../../../src/adapters/fs/content-store.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import type { Logger } from '../../../src/domain/log.js';
+import { Uri } from '../../../src/domain/uri.js';
+import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { FileSystemService, type NodeWriteObserver } from '../../../src/services/filesystem.js';
 import { TtlService } from '../../../src/services/ttl.js';
 
 const NOW = new Date('2026-11-08T00:00:00.000Z');
 
-/** 一天，与 `TtlService` / `retrieval-index` 的换算同一份来源。 */
+/** 一天，与 `TtlService` 的换算同一份来源。 */
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 const EXPIRED = 'comem://user/alice/memories/preferences/expired.md';
 const FRESH = 'comem://user/alice/memories/preferences/fresh.md';
 const NEVER = 'comem://user/alice/memories/preferences/never.md';
 
+/** 系统动作求权用的主体集合（`AllowAllAuthorizer` 下无所谓，接口要它）。 */
+const PRINCIPALS = ['user:alice', 'user:*'];
+
+let dataDir: string;
 let db: DatabaseSync;
 let logger: Logger;
 let nodes: NodeRepository;
+let store: ContentStore;
+let fts: SqliteFtsIndex;
+let filesystem: FileSystemService;
 let ttl: TtlService;
 
 function createLogger(): Logger {
@@ -62,9 +79,22 @@ function insertNode(uri: string, overrides: Record<string, unknown> = {}): void 
   nodes.upsert([row]);
 }
 
+/** 在磁盘上写一个真实文件并给它建索引行，模拟一条「被 TTL 管理的记忆」。 */
+async function createMemoryFile(uri: string): Promise<void> {
+  const parsed = Uri.parse(uri);
+  await store.writeBytes(parsed, Uint8Array.from(Buffer.from('# 记忆正文\n', 'utf8')));
+  insertNode(uri);
+}
+
 function expiryOf(uri: string): string | null {
   const row = db.prepare('SELECT expires_at FROM node WHERE uri = ?').get(uri);
   const value = row?.['expires_at'];
+  return value === null || value === undefined ? null : String(value);
+}
+
+function archivedAtOf(uri: string): string | null {
+  const row = db.prepare('SELECT archived_at FROM node WHERE uri = ?').get(uri);
+  const value = row?.['archived_at'];
   return value === null || value === undefined ? null : String(value);
 }
 
@@ -72,16 +102,50 @@ function statusOf(uri: string): string {
   return String(db.prepare('SELECT status FROM node WHERE uri = ?').get(uri)?.['status']);
 }
 
-beforeEach(() => {
+async function fileExists(uri: string): Promise<boolean> {
+  return (await store.stat(Uri.parse(uri))) !== null;
+}
+
+/** 归档一条记忆并把它「据称已经归档了若干天」——用于第二段（物理删除）的测试。 */
+function archiveDaysAgo(uri: string, days: number): void {
+  db.prepare(`UPDATE node SET status = 'archived', archived_at = ? WHERE uri = ?`).run(
+    new Date(NOW.getTime() - days * MILLISECONDS_PER_DAY).toISOString(),
+    uri,
+  );
+}
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'comem-ttl-'));
   db = openDatabase(':memory:');
   runMigrations(db);
   logger = createLogger();
   nodes = new NodeRepository({ db, logger });
-  ttl = new TtlService({ nodes, logger, now: () => NOW });
+  fts = new SqliteFtsIndex({ db, logger });
+  store = new ContentStore({ dataDir, logger });
+  // 最小的派生数据观察者：删除时把 `node` 行一并删掉，模拟生产里 `IndexObserver`
+  // 通过 `deleteByUri` 做的事（`forget` 与 TTL 第二段共用同一条删除路径，
+  // 索引行由观察者清）。只测第二段关心的「文件 + 索引行一起消失」，不引入整个
+  // IndexObserver 的依赖图。
+  const indexCleanup: NodeWriteObserver = {
+    onNodeWritten: async () => {},
+    onNodeMoved: async () => {},
+    onNodeRemoved: async (uri) => {
+      await fts.deleteByUri(uri.toString(), { recursive: true });
+    },
+  };
+  filesystem = new FileSystemService({
+    store,
+    locks: createPathLockManager({ dataDir, logger }),
+    authorizer: new AllowAllAuthorizer(),
+    logger,
+    observers: [indexCleanup],
+  });
+  ttl = new TtlService({ nodes, filesystem, principals: PRINCIPALS, retentionDays: 0, logger, now: () => NOW });
 });
 
-afterEach(() => {
+afterEach(async () => {
   db.close();
+  await rm(dataDir, { recursive: true, force: true });
 });
 
 describe('setExpiry', () => {
@@ -137,7 +201,7 @@ describe('setExpiry', () => {
   });
 });
 
-describe('sweep', () => {
+describe('sweep 第一段：归档', () => {
   it('只归档 expires_at < now 的节点，未到期与永不过期的不动', async () => {
     insertNode(EXPIRED);
     insertNode(FRESH);
@@ -154,7 +218,7 @@ describe('sweep', () => {
     expect(expiryOf(NEVER)).toBeNull();
   });
 
-  it('软过期：节点行还在（不删除），只是 status 变了', async () => {
+  it('软过期：retentionDays=0 时节点行还在（不删除），只是 status 变了', async () => {
     insertNode(EXPIRED);
     await ttl.setExpiry([EXPIRED], new Date('2026-11-07T00:00:00.000Z'));
 
@@ -162,6 +226,17 @@ describe('sweep', () => {
 
     expect(nodes.get(EXPIRED)).not.toBeNull();
     expect(nodes.get(EXPIRED)?.status).toBe('archived');
+  });
+
+  it('归档时写 archived_at（= now），不动 updated_at', async () => {
+    insertNode(EXPIRED);
+    await ttl.setExpiry([EXPIRED], new Date('2026-11-07T00:00:00.000Z'));
+    const beforeUpdated = db.prepare('SELECT updated_at FROM node WHERE uri = ?').get(EXPIRED);
+
+    await ttl.sweep();
+
+    expect(archivedAtOf(EXPIRED)).toBe(NOW.toISOString());
+    expect(db.prepare('SELECT updated_at FROM node WHERE uri = ?').get(EXPIRED)).toEqual(beforeUpdated);
   });
 
   it('不动 node_permission：归档节点仍要能按权限查到', async () => {
@@ -181,9 +256,9 @@ describe('sweep', () => {
     insertNode(EXPIRED);
     await ttl.setExpiry([EXPIRED], new Date('2026-11-07T00:00:00.000Z'));
 
-    await expect(ttl.sweep()).resolves.toEqual({ expired: 1 });
-    await expect(ttl.sweep()).resolves.toEqual({ expired: 0 });
-    await expect(ttl.sweep()).resolves.toEqual({ expired: 0 });
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
   });
 
   it('limit 是每轮上界：先清最老的，剩下的下一轮再清', async () => {
@@ -194,12 +269,12 @@ describe('sweep', () => {
       await ttl.setExpiry([uri], new Date(`2026-11-0${String(index + 1)}T00:00:00.000Z`));
     }
 
-    await expect(ttl.sweep({ limit: 2 })).resolves.toEqual({ expired: 2 });
+    await expect(ttl.sweep({ limit: 2 })).resolves.toEqual({ expired: 2, purged: 0 });
     expect(statusOf(uris[0] ?? '')).toBe('archived');
     expect(statusOf(uris[1] ?? '')).toBe('archived');
     expect(statusOf(uris[2] ?? '')).toBe('active');
 
-    await expect(ttl.sweep({ limit: 2 })).resolves.toEqual({ expired: 1 });
+    await expect(ttl.sweep({ limit: 2 })).resolves.toEqual({ expired: 1, purged: 0 });
   });
 
   it('清扫查询走 idx_node_expires（部分索引）', () => {
@@ -215,6 +290,125 @@ describe('sweep', () => {
 
     const detail = plan.map((row) => String(row['detail'])).join('\n');
     expect(detail).toContain('idx_node_expires');
+  });
+});
+
+describe('sweep 第二段：归档超保留期物理删除', () => {
+  function withRetention(days: number): TtlService {
+    return new TtlService({ nodes, filesystem, principals: PRINCIPALS, retentionDays: days, logger, now: () => NOW });
+  }
+
+  it('归档超期的记忆被物理删除，文件也消失', async () => {
+    await createMemoryFile(EXPIRED);
+    archiveDaysAgo(EXPIRED, 40);
+    await expect(fileExists(EXPIRED)).resolves.toBe(true);
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(1);
+    expect(nodes.get(EXPIRED)).toBeNull();
+    await expect(fileExists(EXPIRED)).resolves.toBe(false);
+  });
+
+  it('未超保留期的不删（归档 10 天，保留 30 天）', async () => {
+    await createMemoryFile(EXPIRED);
+    archiveDaysAgo(EXPIRED, 10);
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(0);
+    expect(nodes.get(EXPIRED)).not.toBeNull();
+    await expect(fileExists(EXPIRED)).resolves.toBe(true);
+  });
+
+  it('retentionDays=0 时永不删（归档再久也物理不动）', async () => {
+    await createMemoryFile(EXPIRED);
+    archiveDaysAgo(EXPIRED, 1000);
+
+    const result = await withRetention(0).sweep();
+
+    expect(result.purged).toBe(0);
+    expect(nodes.get(EXPIRED)).not.toBeNull();
+    await expect(fileExists(EXPIRED)).resolves.toBe(true);
+  });
+
+  it('没有 archived_at 的旧 archived 行永不删（NULL 不当成「很久以前」）', async () => {
+    await createMemoryFile(EXPIRED);
+    // status 是 archived，但 archived_at 是 NULL（迁移前的历史行）。
+    db.prepare(`UPDATE node SET status = 'archived' WHERE uri = ?`).run(EXPIRED);
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(0);
+    expect(nodes.get(EXPIRED)).not.toBeNull();
+    await expect(fileExists(EXPIRED)).resolves.toBe(true);
+  });
+
+  it('只删叶子文档：目录节点不入选（即便它 archived 且超期）', async () => {
+    // 目录行存在但磁盘上没有子项；它不该被删除逻辑盯上。
+    insertNode('comem://user/alice/memories/old', {
+      kind: 'directory',
+      contextType: 'memory',
+      memoryType: null,
+      level: 'L0',
+    });
+    archiveDaysAgo('comem://user/alice/memories/old', 40);
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(0);
+    expect(nodes.get('comem://user/alice/memories/old')).not.toBeNull();
+  });
+
+  it('删除失败不打断整轮：一个 URI 删失败，其余照删', async () => {
+    const A = 'comem://user/alice/memories/preferences/a.md';
+    const B = 'comem://user/alice/memories/preferences/b.md';
+    await createMemoryFile(A);
+    await createMemoryFile(B);
+    archiveDaysAgo(A, 40);
+    archiveDaysAgo(B, 40);
+
+    // 让第一个候选的删除抛错（URI 合法、但文件系统请求打空）。用 spy 只对一次失败。
+    const original = filesystem.remove.bind(filesystem);
+    let call = 0;
+    vi.spyOn(filesystem, 'remove').mockImplementation(async (uri, principals) => {
+      call += 1;
+      if (call === 1) {
+        throw new Error('模拟删除失败');
+      }
+      return original(uri, principals);
+    });
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(1);
+    // 失败的那条仍在（下一轮重试），成功的没了。
+    const survivors = [A, B].filter((uri) => nodes.get(uri) !== null);
+    expect(survivors).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('保留期很短（< 7 天）时记 warning', async () => {
+    await createMemoryFile(EXPIRED);
+    archiveDaysAgo(EXPIRED, 3);
+
+    await withRetention(1).sweep();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      'TTL 保留期很短，归档记忆将在数天内被物理删除。',
+      expect.objectContaining({ retentionDays: 1 }),
+    );
+  });
+
+  it('归档节点重新变 active 后不再被删（例如复核通过）', async () => {
+    await createMemoryFile(EXPIRED);
+    archiveDaysAgo(EXPIRED, 40);
+    db.prepare(`UPDATE node SET status = 'active' WHERE uri = ?`).run(EXPIRED);
+
+    const result = await withRetention(30).sweep();
+
+    expect(result.purged).toBe(0);
+    await expect(fileExists(EXPIRED)).resolves.toBe(true);
   });
 });
 

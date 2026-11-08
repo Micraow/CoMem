@@ -124,6 +124,7 @@ memory:
   ttl:
     defaultDays: 0         # 记忆默认存活天数。0 = 永不过期（默认）
     sweepBatchSize: 100    # 每轮最多清扫多少条，防止一次清太多把库锁住
+    retentionDays: 0       # 归档后保留多少天再物理删除。0 = 永不物理删除（默认）
   # 记忆合并（agentic 循环：模型先读正文再给 add / update / delete）。
   #
   # 默认关：合并会 delete，是破坏性操作，必须显式开启。关着的时候端点明确拒绝。

@@ -1091,7 +1091,16 @@ async function ensureUserNamespace(userId: string): Promise<void> {
    *
    * 装配位置在 `MemoryService` 之后：删除会话前要读「它产出的记忆是否还在待复核」。
    */
-  const ttl = new TtlService({ nodes, logger });
+  const ttl = new TtlService({
+    nodes,
+    // 物理删除（第二段）复用 `FileSystemService.remove`：它与 `forget` 同一条路径，
+    // 先求 MANAGE、拿 TREE 锁、删文件、通知观察者删索引（node / node_fts /
+    // node_permission）。`principals` 是调度器求权用的主体集合，与 API 请求同源。
+    filesystem,
+    principals,
+    retentionDays: config.memory.ttl.retentionDays,
+    logger,
+  });
 
   const scheduler = new Scheduler({
     logger,
