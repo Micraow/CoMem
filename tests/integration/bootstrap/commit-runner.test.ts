@@ -541,7 +541,7 @@ describe('CommitRunner 的失败与收尾', () => {
   it('API Key 无效时步骤不重试，任务直接失败', async () => {
     // 回归：`UNAUTHENTICATED` 曾经两个重试分类都不在——模型调用层正确地不重试，
     // 步骤层却把它当成瞬态失败、任务层再重新排队。一把错的 API Key 因此要等满
-    // `stepAttempts × taskAttempts` 次超时（LLM 默认 120 秒，共 8 分钟）。
+    // `(stepAttempts + 1) × taskAttempts` 次超时（默认 2 × 3 = 6 次）。
     const stepRun = vi.fn(async (): Promise<void> => {
       throw new ComemError(
         'UNAUTHENTICATED',
