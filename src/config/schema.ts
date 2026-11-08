@@ -274,6 +274,24 @@ const configObjectSchema = z.object({
   memory: z
     .object({
       reviewRequired: z.array(z.string()).default(['experiences', 'rules']),
+      /**
+       * 用户画像的收敛预算（架构文档 §11.1）。
+       *
+       * 画像正文整段注入每次会话的开头，是每次请求的固定成本。超过 `maxChars` 时，
+       * 抽取提示词要求这次输出一条 `replace content` 的整份重写，只保留稳定身份。
+       * **这不是额外一次模型调用**：压缩骑在本来就要跑的 `memory_extract` 上。
+       *
+       * 默认 800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字
+       * 日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时
+       * 把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。实测样本
+       * 8 次归档累计 1,259 字，超过默认值——正是要触发的形态。
+       */
+      profile: z
+        .object({
+          /** 画像正文的字符上限。超过即整份重写。 */
+          maxChars: z.number().int().positive().default(800),
+        })
+        .prefault({}),
       /** 开它会多一次 LLM 调用 */
       workingMemory: z
         .object({

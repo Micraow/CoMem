@@ -194,16 +194,30 @@ describe('六条提示词的渲染快照', () => {
         {
           pageId: 1,
           uri: 'comem://user/alice/memories/preferences/code-style.md',
+          memoryType: 'preferences',
           content: '---\ntype: preferences\n---\n\n## content\n\n两空格缩进。',
         },
-        { pageId: 2, uri: 'comem://user/alice/memories/profile.md', content: 'alice' },
+        {
+          pageId: 2,
+          uri: 'comem://user/alice/memories/profile.md',
+          memoryType: 'profile',
+          content: 'alice',
+        },
       ],
       previousOverview: '上次聊到代码风格。',
+      profileMaxChars: 800,
+      today: '2026-11-08',
     });
   }
 
   function extractWithout() {
-    return buildExtractPrompt({ messages: [], memoryTypes, pages: [] });
+    return buildExtractPrompt({
+      messages: [],
+      memoryTypes,
+      pages: [],
+      profileMaxChars: 800,
+      today: '2026-11-08',
+    });
   }
 
   function summaryWithChildren() {
@@ -272,5 +286,56 @@ describe('六条提示词的渲染快照', () => {
     }
     const text = renderPromptBody(id, readPromptDefault(id), variables);
     expect(text).not.toContain('{{');
+  });
+});
+
+/**
+ * `renderProfileDirective` 的三个分支（架构文档 §11.1「超阈值重写」）。
+ *
+ * 快照只覆盖「未超上限」一个分支；另外两个分支如果走错，画像要么不收敛（超上限
+ * 时不重写），要么根本没有画像时也不新建。这两条是收敛机制真正生效的地方，必须
+ * 单独断言，不能只靠一条快照。
+ */
+describe('画像收敛指令（profileDirective）', () => {
+  const memoryTypes = Object.values(BUILTIN_MEMORY_TYPES);
+  const profilePage = (content: string) => ({
+    pageId: 7,
+    uri: 'comem://user/alice/memories/profile.md',
+    memoryType: 'profile',
+    content,
+  });
+
+  function systemWith(pages: ReturnType<typeof profilePage>[], profileMaxChars: number): string {
+    return buildExtractPrompt({
+      messages: [],
+      memoryTypes,
+      pages,
+      profileMaxChars,
+      today: '2026-11-08',
+    }).system ?? '';
+  }
+
+  it('没有画像时要求新建，并带上今天日期', () => {
+    const system = systemWith([], 800);
+    expect(system).toContain('没有读到用户画像');
+    expect(system).toContain('新建一条 `profile`');
+    expect(system).toContain('2026-11-08');
+  });
+
+  it('超过上限时要求整份重写，而非增量 patch', () => {
+    const body = '甲'.repeat(801); // 801 > 800
+    const system = systemWith([profilePage(body)], 800);
+    expect(system).toContain('已超上限');
+    expect(system).toContain('replace content');
+    expect(system).toContain('正文 801 字，上限 800 字');
+    expect(system).not.toContain('未超上限');
+  });
+
+  it('未超上限时走增量维护，但保留格式不合规也要重写的出口', () => {
+    const system = systemWith([profilePage('alice')], 800);
+    expect(system).toContain('未超上限');
+    expect(system).toContain('`patch` 增量维护');
+    expect(system).toContain('整份重写');
+    expect(system).not.toContain('已超上限');
   });
 });

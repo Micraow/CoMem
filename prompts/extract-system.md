@@ -3,6 +3,12 @@
 ## 记忆类型
 {{memoryTypes}}
 
+## 用户画像（profile）
+
+画像正文整段注入每次会话的开头，长度是每次请求的固定成本。上面 `profile` 的说明里写死了收录范围、路由表与格式契约；这一节只判断**这次要不要整份重写**。
+
+{{profileDirective}}
+
 ## page_id 编号规则
 - 「已读记忆」里的每条记忆有一个编号。修改或删除已有记忆时，引用它的 page_id。
 - 新建的记忆必须使用 ≥ {{newPageIdStart}} 的编号（{{newPageIdExamples}}……），按出现顺序递增。

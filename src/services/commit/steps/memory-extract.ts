@@ -90,6 +90,16 @@ export interface MemoryExtractStepDeps {
   };
   readonly logger: Logger;
   /**
+   * 用户画像的收敛预算（架构文档 §11.1）。
+   *
+   * 画像整段注入每次会话的开头，超过 `maxChars` 时提示词要求这次整份重写。
+   * **必填**：漏传会让画像无限增长，而配置自检的 L2 会把它当成「配置值进入可选
+   * 属性」报出来（`scripts/check-config.ts`）。
+   */
+  readonly profile: {
+    readonly maxChars: number;
+  };
+  /**
    * 每个多文件记忆类型预取的条数。
    *
    * 默认 5：来源是架构文档 §11.3 的 `max(5, prefetchTopN)`。5 是「够判断新增还是
@@ -136,11 +146,6 @@ const extractOperationSchema = z.discriminatedUnion('kind', [
 const extractOutputSchema = z.object({ operations: z.array(extractOperationSchema) });
 
 type ExtractOutput = z.infer<typeof extractOutputSchema>;
-
-/** 预取到的一条记忆：`ExtractPage` 加上记忆类型。 */
-interface ExtractedPage extends ExtractPage {
-  readonly memoryType: string;
-}
 
 function skip(
   memoryType: string,
@@ -196,6 +201,18 @@ function pageContent(record: MemoryRecord): string {
 }
 
 /**
+ * 今天的本地日期，`YYYY-MM-DD`。
+ *
+ * 用本地时间而不是 `toISOString()` 的 UTC：画像的 `(as of YYYY-MM-DD)` 后缀是写给
+ * 人看的，UTC 在 UTC+8 的 0–8 点会显示成昨天。日期只用于「只留最新值」的判定，
+ * 差一天不影响语义，但差一天是错的。
+ */
+function localDate(now: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${String(now.getFullYear())}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
  * 把模型输出解析成可应用的操作。
  *
  * 弱校验（§11.4）逐条做，失败的操作进 `skipped` 而不是抛错：
@@ -208,7 +225,7 @@ function pageContent(record: MemoryRecord): string {
 function resolveOperations(
   output: ExtractOutput,
   scopeUri: Uri,
-  pages: ReadonlyMap<number, ExtractedPage>,
+  pages: ReadonlyMap<number, ExtractPage>,
 ): MemoryExtractResult {
   const operations: BatchOperation[] = [];
   const skipped: SkippedMemoryOperation[] = [];
@@ -381,6 +398,7 @@ export class MemoryExtractStep extends CommitStep {
   readonly #llm: MemoryExtractStepDeps['llm'];
   readonly #archive: MemoryExtractStepDeps['archive'];
   readonly #logger: Logger;
+  readonly #profileMaxChars: number;
   readonly #prefetchTopN: number;
 
   constructor(deps: MemoryExtractStepDeps) {
@@ -389,6 +407,7 @@ export class MemoryExtractStep extends CommitStep {
     this.#llm = deps.llm;
     this.#archive = deps.archive;
     this.#logger = deps.logger;
+    this.#profileMaxChars = deps.profile.maxChars;
     this.#prefetchTopN = deps.prefetchTopN ?? DEFAULT_PREFETCH_TOP_N;
   }
 
@@ -400,6 +419,8 @@ export class MemoryExtractStep extends CommitStep {
       memoryTypes: Object.values(BUILTIN_MEMORY_TYPES),
       pages: [...pages.values()],
       previousOverview: context.latestArchiveOverview ?? undefined,
+      profileMaxChars: this.#profileMaxChars,
+      today: localDate(new Date()),
     });
 
     const output = await this.#llm.generateJson(prompt, extractOutputSchema);
@@ -444,9 +465,9 @@ export class MemoryExtractStep extends CommitStep {
   }
 
   /** §11.3 的预取：每个记忆类型各一次，编号跨类型连续。 */
-  async #prefetchPages(context: StepContext): Promise<Map<number, ExtractedPage>> {
+  async #prefetchPages(context: StepContext): Promise<Map<number, ExtractPage>> {
     const query = retrievalQuery(context.messages);
-    const pages = new Map<number, ExtractedPage>();
+    const pages = new Map<number, ExtractPage>();
     let nextPageId = 1;
 
     for (const schema of Object.values(BUILTIN_MEMORY_TYPES)) {

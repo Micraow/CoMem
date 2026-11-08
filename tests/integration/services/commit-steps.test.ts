@@ -175,6 +175,7 @@ function createExtractStep(
     llm,
     archive: artifacts.archive,
     logger,
+    profile: { maxChars: 800 },
     ...(options.prefetchTopN === undefined ? {} : { prefetchTopN: options.prefetchTopN }),
   });
   return { step, fakeMemory, written: artifacts.written };

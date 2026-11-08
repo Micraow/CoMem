@@ -264,8 +264,17 @@ describe('提示词模板', () => {
     const prompt = buildExtractPrompt({
       messages: [{ role: 'user', content: '我更喜欢 2 空格缩进。' }],
       memoryTypes,
-      pages: [{ pageId: 1, uri: 'comem://user/alice/memories/profile.md', content: 'alice' }],
+      pages: [
+        {
+          pageId: 1,
+          uri: 'comem://user/alice/memories/profile.md',
+          memoryType: 'profile',
+          content: 'alice',
+        },
+      ],
       previousOverview: '上次聊到代码风格。',
+      profileMaxChars: 800,
+      today: '2026-11-08',
     });
 
     const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
@@ -280,12 +289,80 @@ describe('提示词模板', () => {
   });
 
   it('没有已读记忆与上一次概览时也给出明确说明', () => {
-    const prompt = buildExtractPrompt({ messages: [], memoryTypes, pages: [] });
+    const prompt = buildExtractPrompt({
+      messages: [],
+      memoryTypes,
+      pages: [],
+      profileMaxChars: 800,
+      today: '2026-11-08',
+    });
     const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
 
     expect(rendered).toContain('没有预取到已读记忆');
     expect(rendered).toContain('没有会话消息');
     expect(rendered).not.toContain('上一次归档的概览');
+  });
+
+  /**
+   * 画像的收敛指令：只给规则不给数字，模型判断不了「现在算不算超」。三个分支
+   * （没有画像 / 未超 / 已超）给出的动作必须不同——写成同一句的话，模型要么永远
+   * 重写，要么永远增量维护。
+   */
+  describe('用户画像的收敛指令', () => {
+    const profilePage = (content: string) => ({
+      pageId: 2,
+      uri: 'comem://user/alice/memories/profile.md',
+      memoryType: 'profile',
+      content,
+    });
+
+    it('没有画像时要求新建，并给出日期后缀', () => {
+      const prompt = buildExtractPrompt({
+        messages: [],
+        memoryTypes,
+        pages: [],
+        profileMaxChars: 800,
+        today: '2026-11-08',
+      });
+      const rendered = prompt.system ?? '';
+
+      expect(rendered).toContain('没有读到用户画像');
+      expect(rendered).toContain('≥ 100');
+      expect(rendered).toContain('2026-11-08');
+    });
+
+    it('未超上限时要求 patch 增量维护', () => {
+      const prompt = buildExtractPrompt({
+        messages: [],
+        memoryTypes,
+        pages: [profilePage('alice，后端工程师。')],
+        profileMaxChars: 800,
+        today: '2026-11-08',
+      });
+      const rendered = prompt.system ?? '';
+
+      expect(rendered).toContain('正文 12 字');
+      expect(rendered).toContain('上限 800 字');
+      expect(rendered).toContain('`patch` 增量维护');
+      expect(rendered).not.toContain('已超上限');
+    });
+
+    it('超上限时要求整份重写，并点名 pageId 与 replace content', () => {
+      const prompt = buildExtractPrompt({
+        messages: [],
+        memoryTypes,
+        pages: [profilePage('x'.repeat(801))],
+        profileMaxChars: 800,
+        today: '2026-11-08',
+      });
+      const rendered = prompt.system ?? '';
+
+      expect(rendered).toContain('正文 801 字');
+      expect(rendered).toContain('已超上限');
+      expect(rendered).toContain('`replace content`');
+      expect(rendered).toContain('`pageId` 用 2');
+      expect(rendered).toContain('2026-11-08');
+    });
   });
 
   it('摘要 prompt 写清四段结构且要求不输出 frontmatter', () => {

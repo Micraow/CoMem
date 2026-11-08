@@ -12,6 +12,7 @@ import {
   BUILTIN_MEMORY_TYPES,
   getMemoryType,
   preferencesMemoryType,
+  profileMemoryType,
 } from '../../../src/domain/memory-types/index.js';
 
 function schema(overrides: Partial<MemoryTypeSchema> = {}): MemoryTypeSchema {
@@ -269,6 +270,32 @@ describe('内置记忆类型', () => {
 
   it('getMemoryType 命中内置类型', () => {
     expect(getMemoryType('preferences')).toBe(preferencesMemoryType);
+  });
+
+  /**
+   * `profile` 的说明会原样进抽取提示词。它退化回一行摘要时，模型没有判据，就会把
+   * 类型签名、配置值与性格评价一起写进画像（实测 8 次归档 1,259 字）。
+   *
+   * 这条测试守的是「规则密度」：收录范围、路由表、格式契约各有一条可被模型读到的
+   * 明确规则。只改措辞不会失败，删掉一整类判定才会。
+   */
+  it('profile 的说明写清收录范围、路由表与格式契约', () => {
+    const description = profileMemoryType.description;
+
+    // 收录：只有稳定身份
+    expect(description).toContain('稳定身份');
+    // 不收录：技术细节、临时状态、性格评价
+    expect(description).toContain('一次性技术细节');
+    expect(description).toContain('临时状态');
+    expect(description).toContain('性格评价');
+    // 路由表：三类最容易塞错的内容各有明确的归位
+    expect(description).toContain('`events`');
+    expect(description).toContain('`preferences`');
+    expect(description).toContain('`entities`');
+    // 格式契约：日期后缀、单条上限、只留最新值
+    expect(description).toContain('(as of YYYY-MM-DD)');
+    expect(description).toContain('30 字');
+    expect(description).toContain('只保留最新值');
   });
 
   it('getMemoryType 不命中原型链上的名字', () => {

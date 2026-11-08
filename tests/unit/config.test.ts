@@ -99,6 +99,7 @@ function expectedDefaults(dataDir: string): unknown {
     },
     memory: {
       reviewRequired: ['experiences', 'rules'],
+      profile: { maxChars: 800 },
       workingMemory: { enabled: false },
       ttl: { defaultDays: 0, sweepBatchSize: 100 },
       consolidation: { enabled: false, maxIterations: 10 },

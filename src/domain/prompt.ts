@@ -84,6 +84,10 @@ export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
     description: '记忆抽取 · 系统提示词',
     variables: [
       { name: 'memoryTypes', description: '内置记忆类型清单（类型、目录、字段与合并策略）' },
+      {
+        name: 'profileDirective',
+        description: '用户画像的当前字数、上限与这次的整份重写判断',
+      },
       { name: 'newPageIdStart', description: '新建记忆的起始编号' },
       { name: 'newPageIdExamples', description: '从起始编号起连续三个编号，用于示例' },
     ],

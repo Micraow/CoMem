@@ -110,6 +110,11 @@ memory:
   reviewRequired:
     - experiences
     - rules
+  # 用户画像的收敛预算（架构文档 §11.1）。画像正文整段注入每次会话的开头，
+  # 超过 maxChars 时抽取提示词要求这次整份重写，只保留稳定身份。
+  # 压缩不额外调用模型：它骑在本来就要跑的 memory_extract 上。
+  profile:
+    maxChars: 800          # 画像正文的字符上限；超过即整份重写
   workingMemory:
     # 开它会多一次 LLM 调用（7 段工作记忆，架构文档 §10.5）。
     # 没有可用 LLM（providers.llm.default.type: disabled）时启动失败：工作记忆没有
