@@ -272,7 +272,12 @@ function variantEnvironment(variant: EvalVariant): NodeJS.ProcessEnv {
  * 权限过滤会看不到它们（`IndexObserver` 只物化祖先的 ACL，不建索引行）。
  * 目录去重后按字符串排序，父目录先于子目录被创建。
  */
-async function seedCorpus(container: Container, dataset: EvalDataset, scope: string): Promise<void> {
+async function seedCorpus(
+  container: Container,
+  dataset: EvalDataset,
+  scope: string,
+  principals: readonly string[],
+): Promise<void> {
   const directories = new Set<string>();
   for (const uri of Object.keys(dataset.corpus)) {
     let parent = Uri.parse(uri).parent();
@@ -282,10 +287,10 @@ async function seedCorpus(container: Container, dataset: EvalDataset, scope: str
     }
   }
   for (const directory of [...directories].sort()) {
-    await container.services.filesystem.mkdir(Uri.parse(directory));
+    await container.services.filesystem.mkdir(Uri.parse(directory), principals);
   }
   for (const [uri, text] of Object.entries(dataset.corpus)) {
-    await container.services.filesystem.write(Uri.parse(uri), text);
+    await container.services.filesystem.write(Uri.parse(uri), text, principals);
   }
   // 写操作的索引是同步的，嵌入是排期的。不等它跑完，第一条查询会撞上一个
   // 「文档行在、向量还没写」的中间态，语义检索的召回率会随机偏低。
@@ -402,7 +407,7 @@ export class EvalRunner {
         subject,
       });
 
-      await seedCorpus(container, dataset, scope);
+      await seedCorpus(container, dataset, scope, [subject, 'user:*']);
 
       const perQuery: QueryMetrics[] = [];
       const medians: number[] = [];

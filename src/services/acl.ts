@@ -121,14 +121,6 @@ export interface AclServiceOptions {
   readonly logger: Logger;
   /** §18 的 acl.groupDefaultLevel，默认 'write' */
   readonly groupDefaultLevel?: AclLevel;
-  /**
-   * 当前请求的身份。`Authorizer` 的三个方法没有 subject 参数（§12.4），所以身份
-   * 在装配期绑定——每请求一个实例，请求结束丢弃。管理面的方法额外收显式
-   * `subject`，用于「控制台以管理员身份改别人的 ACL」。
-   */
-  readonly subject: string;
-  /** 当前请求身份所属的组，形如 `group:eng`。 */
-  readonly groups?: readonly string[];
 }
 
 function isAclLevel(value: unknown): value is AclLevel {
@@ -301,9 +293,6 @@ export class AclService implements Authorizer {
   readonly #nodes: NodeRepository;
   readonly #logger: Logger;
   readonly #groupDefaultLevel: AclLevel;
-  readonly #subject: string;
-  readonly #groups: readonly string[];
-  readonly #principals: readonly string[];
 
   constructor(options: AclServiceOptions) {
     if (options.groupDefaultLevel !== undefined && !isAclLevel(options.groupDefaultLevel)) {
@@ -320,15 +309,16 @@ export class AclService implements Authorizer {
     this.#nodes = options.nodes;
     this.#logger = options.logger;
     this.#groupDefaultLevel = options.groupDefaultLevel ?? DEFAULT_GROUP_LEVEL;
-    this.#subject = options.subject;
-    this.#groups = [...(options.groups ?? [])];
-    this.#principals = this.resolvePrincipals(this.#subject, this.#groups);
   }
 
   // ── Authorizer ──
 
-  async check(uri: Uri, action: AclAction): Promise<boolean> {
-    return this.#checkPrincipals(uri, action, this.#principals);
+  async check(
+    uri: Uri,
+    action: AclAction,
+    principals: readonly string[],
+  ): Promise<boolean> {
+    return this.#checkPrincipals(uri, action, principals);
   }
 
   /**
@@ -337,27 +327,44 @@ export class AclService implements Authorizer {
    * 查询本身固定 `level >= read`（`readableUris` 的语义），所以这个方法是「过滤
    * 出可读的」，不是「按任意动作过滤」——`Authorizer` 只要求 read。
    */
-  async filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>> {
+  async filterReadable(
+    uris: readonly Uri[],
+    principals: readonly string[],
+  ): Promise<ReadonlySet<string>> {
     if (uris.length === 0) {
       return new Set<string>();
     }
     return this.#permissions.readableUris(
       uris.map((uri) => uri.toString()),
-      this.#principals,
+      principals,
     );
   }
 
-  async assert(uri: Uri, action: AclAction): Promise<void> {
-    if (!(await this.check(uri, action))) {
+  async assert(
+    uri: Uri,
+    action: AclAction,
+    principals: readonly string[],
+  ): Promise<void> {
+    if (!(await this.check(uri, action, principals))) {
       throw permissionDenied(uri, action);
     }
   }
 
   // ── 管理面（只走 HTTP，不进 MCP，§12.2 第 3 条）──
 
-  /** 读 ACL 快照 + 链式求值结果。调用方必须对 uri 有 manage 权限（§12.4）。 */
-  async getAcl(uri: Uri, subject: string): Promise<AclSnapshot> {
-    await this.#assertManage(uri, subject);
+  /**
+   * 读 ACL 快照 + 链式求值结果。调用方必须对 uri 有 manage 权限（§12.4）。
+   *
+   * `subject` 只用于日志：授权判定用 `principals`。管理面可能以管理员身份操作
+   * 别人的节点，所以这里不把 `subject` 拼进主体集合——那会让「管理员是谁」和
+   * 「被操作的是谁的节点」混成一份身份。
+   */
+  async getAcl(
+    uri: Uri,
+    subject: string,
+    principals: readonly string[],
+  ): Promise<AclSnapshot> {
+    await this.#assertManage(uri, principals);
     this.#assertDirectory(uri);
 
     const file = await this.#aclFile.read(uri);
@@ -395,8 +402,9 @@ export class AclService implements Authorizer {
     uri: Uri,
     acl: { readonly mode: AclMode; readonly entries: readonly AclEntry[] },
     subject: string,
+    principals: readonly string[],
   ): Promise<void> {
-    await this.#assertManage(uri, subject);
+    await this.#assertManage(uri, principals);
     this.#assertDirectory(uri);
 
     if (acl.mode !== 'inherit' && acl.mode !== 'restricted') {
@@ -621,13 +629,11 @@ export class AclService implements Authorizer {
   /**
    * 管理面授权：调用方在 uri 上必须有 manage（§12.4）。
    *
-   * 用显式 `subject` 而不是实例绑定的身份：控制台可能以管理员身份操作别人的
-   * 节点。组身份只在「操作者就是当前请求身份」时可用——管理面的签名里没有
-   * groups，跨身份调用拿不到组。
+   * 用调用方自己的 `principals` 求权，而不是把被操作节点的 owner 当身份。管理面
+   * 可能以管理员身份操作别人的节点——授权判定回答的是「管理员能不能动这个节点」，
+   * 不是「节点所有者能不能动自己」。
    */
-  async #assertManage(uri: Uri, subject: string): Promise<void> {
-    const groups = subject === this.#subject ? this.#groups : [];
-    const principals = this.resolvePrincipals(subject, groups);
+  async #assertManage(uri: Uri, principals: readonly string[]): Promise<void> {
     if (!(await this.#checkPrincipals(uri, MANAGE_LEVEL, principals))) {
       throw permissionDenied(uri, MANAGE_LEVEL);
     }

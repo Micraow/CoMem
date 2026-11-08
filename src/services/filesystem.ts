@@ -145,18 +145,18 @@ export class FileSystemService {
     this.#observers = deps.observers ?? [];
   }
 
-  async read(uri: Uri): Promise<TextDocument> {
-    await this.#authorizer.assert(uri, READ);
+  async read(uri: Uri, principals: readonly string[]): Promise<TextDocument> {
+    await this.#authorizer.assert(uri, READ, principals);
     return this.#locks.withLock(uri, 'exact', () => this.#store.readText(uri));
   }
 
-  async readBytes(uri: Uri): Promise<Uint8Array> {
-    await this.#authorizer.assert(uri, READ);
+  async readBytes(uri: Uri, principals: readonly string[]): Promise<Uint8Array> {
+    await this.#authorizer.assert(uri, READ, principals);
     return this.#locks.withLock(uri, 'exact', () => this.#store.readBytes(uri));
   }
 
-  async stat(uri: Uri): Promise<StoredStat | null> {
-    await this.#authorizer.assert(uri, READ);
+  async stat(uri: Uri, principals: readonly string[]): Promise<StoredStat | null> {
+    await this.#authorizer.assert(uri, READ, principals);
     return this.#locks.withLock(uri, 'exact', () => this.#store.stat(uri));
   }
 
@@ -166,9 +166,9 @@ export class FileSystemService {
    * 无权限的节点完全不出现：文件名和摘要本身就是信息，返回「存在但无权」的占位
    * 等于泄露。
    */
-  async list(uri: Uri): Promise<readonly TreeEntry[]> {
-    await this.#authorizer.assert(uri, READ);
-    return this.#locks.withLock(uri, 'exact', () => this.#listChildren(uri));
+  async list(uri: Uri, principals: readonly string[]): Promise<readonly TreeEntry[]> {
+    await this.#authorizer.assert(uri, READ, principals);
+    return this.#locks.withLock(uri, 'exact', () => this.#listChildren(uri, principals));
   }
 
   /**
@@ -179,11 +179,12 @@ export class FileSystemService {
    */
   async tree(
     uri: Uri,
+    principals: readonly string[],
     options: { readonly depth?: number; readonly limit?: number } = {},
   ): Promise<TreeResult> {
     const depth = options.depth ?? DEFAULT_TREE_DEPTH;
     const limit = options.limit ?? DEFAULT_TREE_LIMIT;
-    await this.#authorizer.assert(uri, READ);
+    await this.#authorizer.assert(uri, READ, principals);
 
     return this.#locks.withLock(uri, 'tree', async () => {
       const entries: TreeEntry[] = [];
@@ -193,7 +194,7 @@ export class FileSystemService {
         if (truncated) {
           return;
         }
-        const visible = await this.#visibleChildren(directory);
+        const visible = await this.#visibleChildren(directory, principals);
         if (remainingDepth <= 0) {
           if (visible.length > 0) {
             truncated = true;
@@ -226,8 +227,13 @@ export class FileSystemService {
    * `options` 原样透传：`expectedDigest` 由 `ContentStore` 做乐观并发，
    * 不传 `frontmatter` 时保留磁盘上现有的（§10.6 元数据写保护）。
    */
-  async write(uri: Uri, text: string, options: WriteTextOptions = {}): Promise<WriteResult> {
-    await this.#authorizer.assert(uri, WRITE);
+  async write(
+    uri: Uri,
+    text: string,
+    principals: readonly string[],
+    options: WriteTextOptions = {},
+  ): Promise<WriteResult> {
+    await this.#authorizer.assert(uri, WRITE, principals);
     return this.#locks.withLock(uri, 'exact', async () => {
       const created = !(await this.#store.exists(uri));
       const stat = await this.#store.writeText(uri, text, options);
@@ -243,8 +249,12 @@ export class FileSystemService {
    * 都会把正文改成模型没预期的样子。写入用 `expectedDigest` 做乐观并发，保证
    * 「读到的正文」与「写回的正文」之间没有被别人插过。
    */
-  async edit(uri: Uri, blocks: readonly PatchBlock[]): Promise<EditResult> {
-    await this.#authorizer.assert(uri, WRITE);
+  async edit(
+    uri: Uri,
+    blocks: readonly PatchBlock[],
+    principals: readonly string[],
+  ): Promise<EditResult> {
+    await this.#authorizer.assert(uri, WRITE, principals);
     return this.#locks.withLock(uri, 'exact', async () => {
       const document = await this.#store.readText(uri);
       const result = applyPatch(document.text, blocks);
@@ -274,8 +284,8 @@ export class FileSystemService {
   }
 
   /** 建目录，父目录不存在时一并建（`recursive`），已存在不报错。 */
-  async mkdir(uri: Uri): Promise<void> {
-    await this.#authorizer.assert(uri, WRITE);
+  async mkdir(uri: Uri, principals: readonly string[]): Promise<void> {
+    await this.#authorizer.assert(uri, WRITE, principals);
     await this.#locks.withLock(uri, 'tree', async () => {
       await this.#store.mkdir(uri, { recursive: true });
       await this.#notifyWritten(uri, 'directory');
@@ -283,8 +293,8 @@ export class FileSystemService {
   }
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */
-  async remove(uri: Uri): Promise<RemoveResult> {
-    await this.#authorizer.assert(uri, MANAGE);
+  async remove(uri: Uri, principals: readonly string[]): Promise<RemoveResult> {
+    await this.#authorizer.assert(uri, MANAGE, principals);
     return this.#locks.withLock(uri, 'tree', async () => {
       const removedFiles = await this.#store.remove(uri, { recursive: true });
       await this.#notifyRemoved(uri);
@@ -299,9 +309,9 @@ export class FileSystemService {
    * 直接拒绝——`move a → a/b` 会在拿第二把锁时等自己，报一个误导性的超时。
    * 同一路径只拿一把锁，让 `ContentStore.move` 抛它自己的 `ALREADY_EXISTS`。
    */
-  async move(from: Uri, to: Uri): Promise<void> {
-    await this.#authorizer.assert(from, MANAGE);
-    await this.#authorizer.assert(to, MANAGE);
+  async move(from: Uri, to: Uri, principals: readonly string[]): Promise<void> {
+    await this.#authorizer.assert(from, MANAGE, principals);
+    await this.#authorizer.assert(to, MANAGE, principals);
 
     if (from.isAncestorOf(to) || to.isAncestorOf(from)) {
       throw new ComemError(
@@ -380,14 +390,23 @@ export class FileSystemService {
   }
 
   /** 有 read 权限的直接子项。 */
-  async #visibleChildren(directory: Uri): Promise<readonly StoredStat[]> {
+  async #visibleChildren(
+    directory: Uri,
+    principals: readonly string[],
+  ): Promise<readonly StoredStat[]> {
     const children = await this.#store.list(directory);
-    const readable = await this.#authorizer.filterReadable(children.map((child) => child.uri));
+    const readable = await this.#authorizer.filterReadable(
+      children.map((child) => child.uri),
+      principals,
+    );
     return children.filter((child) => readable.has(child.uri.toString()));
   }
 
-  async #listChildren(directory: Uri): Promise<readonly TreeEntry[]> {
-    return (await this.#visibleChildren(directory)).map(toTreeEntry);
+  async #listChildren(
+    directory: Uri,
+    principals: readonly string[],
+  ): Promise<readonly TreeEntry[]> {
+    return (await this.#visibleChildren(directory, principals)).map(toTreeEntry);
   }
 }
 

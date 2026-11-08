@@ -9,6 +9,7 @@ import { currentVersion } from '../../../src/adapters/sqlite/database.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import { Uri } from '../../../src/domain/uri.js';
 
+
 const ROOT = 'comem://user/local';
 const SUBJECT = 'user:local';
 const PRINCIPALS = [SUBJECT, 'user:*'];
@@ -66,7 +67,9 @@ describe('createContainer', () => {
       [
         'acl',
         'assembler',
+        'auth',
         'filesystem',
+        'identity',
         'index',
         'indexObserver',
         'ledger',
@@ -102,7 +105,7 @@ describe('createContainer', () => {
       await expect(stat(join(dataDir, 'user', 'local', name))).resolves.toBeDefined();
     }
 
-    const listed = await container.services.filesystem.list(root);
+    const listed = await container.services.filesystem.list(root, PRINCIPALS);
     expect(listed.map((entry) => entry.uri.name).sort()).toEqual([
       'memories',
       'resources',
@@ -110,8 +113,8 @@ describe('createContainer', () => {
       'skills',
     ]);
 
-    // 会话页走的是 `filesystem.list(scope.child('sessions'))`，不是 `SessionService`。
-    const sessions = await container.services.filesystem.list(root.child('sessions'));
+    // 会话页走的是 `filesystem.list(scope.child('sessions'), PRINCIPALS)`，不是 `SessionService`。
+    const sessions = await container.services.filesystem.list(root.child('sessions'), PRINCIPALS);
     expect(sessions).toEqual([]);
   });
 
@@ -126,7 +129,7 @@ describe('createContainer', () => {
     await acl.ensureRootPreset(root);
 
     const file = root.child('memories', 'preferences', 'code-style.md');
-    await filesystem.write(file, '用户偏好 TypeScript 严格模式。', {
+    await filesystem.write(file, '用户偏好 TypeScript 严格模式。', PRINCIPALS, {
       frontmatter: { summary: '偏好 TypeScript 严格模式' },
     });
     await container.services.indexObserver.drain();

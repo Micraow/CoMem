@@ -77,7 +77,7 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_PENDING_LIMIT, { min: 1 });
         const scopeUri = optionalString(query, 'scopeUri') ?? scopeOfSubject(context.subject);
         const scope = Uri.parse(scopeUri);
-        await authorizer.assert(scope, READ);
+        await authorizer.assert(scope, READ, context.principals);
         const records = await memory.listPending(scope, { limit });
         return ok({ scope: scope.toString(), memories: records.map(serializeRecord) });
       });
@@ -89,7 +89,7 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const dryRun = optionalBoolean(body, 'dryRun');
 
         // **不展开组**：合并是写操作，scope 必须显式指定（§11.8）。
-        await authorizer.assert(scope, MANAGE);
+        await authorizer.assert(scope, MANAGE, context.principals);
 
         if (!config.memory.consolidation.enabled) {
           // 不返回空结果：那会让「没开」看起来像「没有可合并的记忆」。
@@ -112,17 +112,17 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
       app.post<{ Params: { uri: string } }>('/:uri/approve', async (request) => {
         const context = requestContextOf(request);
         const uri = parseMemoryUri(request.params.uri);
-        await authorizer.assert(uri, WRITE);
+        await authorizer.assert(uri, WRITE, context.principals);
         await memory.approve(uri);
         return ok({ uri: uri.toString(), status: 'active', subject: context.subject });
       });
 
       app.post<{ Params: { uri: string }; Body: unknown }>('/:uri/reject', async (request) => {
-        requestContextOf(request);
+        const context = requestContextOf(request);
         const body = requireRecord(request.body, 'memories/reject');
         const uri = parseMemoryUri(request.params.uri);
         const reason = requireRecordReason(body);
-        await authorizer.assert(uri, WRITE);
+        await authorizer.assert(uri, WRITE, context.principals);
         await memory.reject(uri, reason);
         return ok({ uri: uri.toString(), removed: true, reason });
       });

@@ -267,7 +267,11 @@ export class SessionService {
   }
 
   /** 建会话。目录 `sessions/sess_xxx/`，写 `messages.jsonl`（空）与 `.meta.json`。 */
-  async create(scopeUri: Uri, options: { readonly sessionId?: string } = {}): Promise<Uri> {
+  async create(
+    scopeUri: Uri,
+    principals: readonly string[],
+    options: { readonly sessionId?: string } = {},
+  ): Promise<Uri> {
     const sessionId = options.sessionId ?? createSessionId();
     const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
     await this.#store.mkdir(sessionUri, { recursive: true });
@@ -285,7 +289,7 @@ export class SessionService {
     });
     // §12.4 的「写时算」：会话目录与 `messages.jsonl` 都没有经过观察者。不物化的话
     // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空。
-    await this.#materialize(sessionUri);
+    await this.#materialize(sessionUri, principals);
     this.#logger.info('会话已创建', { uri: sessionUri.toString() });
     return sessionUri;
   }
@@ -301,14 +305,18 @@ export class SessionService {
    * `create` 先写消息、后写元数据，所以「目录在、元数据不在」只可能是崩溃留下的
    * 空会话，重新创建不会丢消息。
    */
-  async ensure(scopeUri: Uri, sessionId: string): Promise<Uri> {
+  async ensure(
+    scopeUri: Uri,
+    sessionId: string,
+    principals: readonly string[],
+  ): Promise<Uri> {
     const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
     try {
       await this.#requireSession(sessionUri);
       return sessionUri;
     } catch (error) {
       if (error instanceof ComemError && error.code === 'NOT_FOUND') {
-        return this.create(scopeUri, { sessionId });
+        return this.create(scopeUri, principals, { sessionId });
       }
       throw error;
     }
@@ -627,13 +635,13 @@ export class SessionService {
    * 失败只记日志：目录与 `messages.jsonl` 已经落盘，回滚反而丢数据（§7 的同一
    * 原则）；下一次 `GET /sessions/{id}` 的读路径还会补一次。
    */
-  async #materialize(sessionUri: Uri): Promise<void> {
+  async #materialize(sessionUri: Uri, principals: readonly string[]): Promise<void> {
     const authorizer = this.#authorizer;
     if (authorizer === undefined) {
       return;
     }
     try {
-      await authorizer.assert(sessionUri, WRITE);
+      await authorizer.assert(sessionUri, WRITE, principals);
     } catch (error) {
       this.#logger.error('会话目录权限物化失败，已忽略。', {
         uri: sessionUri.toString(),

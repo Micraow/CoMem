@@ -29,6 +29,7 @@ import type { Uri } from '../../../domain/uri.js';
 import { verifyDownloadToken } from '../../mcp/tools/download.js';
 
 import { ok } from '../envelope.js';
+import { requestContextOf } from '../middleware.js';
 import {
   optionalQueryInteger,
   requireRecord,
@@ -91,9 +92,13 @@ function parsePatchBlocks(value: unknown): readonly PatchBlock[] {
   });
 }
 
-async function readExisting(services: HttpRouteServices, uri: Uri): Promise<string> {
+async function readExisting(
+  services: HttpRouteServices,
+  uri: Uri,
+  principals: readonly string[],
+): Promise<string> {
   try {
-    return (await services.filesystem.read(uri)).text;
+    return (await services.filesystem.read(uri, principals)).text;
   } catch (error) {
     if (error instanceof ComemError && error.code === 'NOT_FOUND') {
       return '';
@@ -113,8 +118,9 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const uri = requireUri(query, 'uri');
         const offset = optionalQueryInteger(query, 'offset', 0, { min: 0 });
         const limit = optionalQueryInteger(query, 'limit', -1, { min: -1 });
-        await authorizer.assert(uri, READ);
-        const document = await filesystem.read(uri);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, READ, principals);
+        const document = await filesystem.read(uri, principals);
         return ok({
           uri: uri.toString(),
           text: sliceText(document.text, offset, limit),
@@ -125,7 +131,7 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
       app.get<{ Querystring: Record<string, unknown> }>('/abstract', async (request) => {
         const query = requireRecord(request.query, 'content/abstract');
         const uri = requireUri(query, 'uri');
-        await authorizer.assert(uri, READ);
+        await authorizer.assert(uri, READ, requestContextOf(request).principals);
 
         // 文件的 L0 存在索引里（§6.7：文件级摘要跟着文件走，写在 frontmatter 里
         // 再物化进索引），目录的 L0 才是 `.abstract.md`。只读摘要文件会让文件详情
@@ -152,7 +158,7 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
       app.get<{ Querystring: Record<string, unknown> }>('/overview', async (request) => {
         const query = requireRecord(request.query, 'content/overview');
         const uri = requireUri(query, 'uri');
-        await authorizer.assert(uri, READ);
+        await authorizer.assert(uri, READ, requestContextOf(request).principals);
 
         // 文件没有 L1 概览：概览是**目录级**的（§9.1）。文件详情页的「概览」档
         // 由前端用正文的标题树合成（`skeletonOverview` 的同一条逻辑），这里返回
@@ -185,15 +191,16 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
           );
         }
 
-        await authorizer.assert(uri, READ);
-        const stat = await filesystem.stat(uri);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, READ, principals);
+        const stat = await filesystem.stat(uri, principals);
         if (stat === null || stat.kind !== 'file') {
           throw new ComemError('NOT_FOUND', `下载目标不是文件：${uri.toString()}`, {
             uri: uri.toString(),
           });
         }
 
-        const bytes = await filesystem.readBytes(uri);
+        const bytes = await filesystem.readBytes(uri, requestContextOf(request).principals);
         return reply
           .header('content-type', DOWNLOAD_CONTENT_TYPE)
           .header(
@@ -209,25 +216,26 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const uri = requireUri(body, 'uri');
         const content = requireText(body, 'content');
         const mode = parseWriteMode(body['mode']);
-        await authorizer.assert(uri, WRITE);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, WRITE, principals);
 
         switch (mode) {
           case 'replace': {
-            const result = await filesystem.write(uri, content);
+            const result = await filesystem.write(uri, content, principals);
             return ok({ uri: uri.toString(), created: result.created, size: result.stat.size });
           }
           case 'append': {
-            const existing = await readExisting(services, uri);
-            const result = await filesystem.write(uri, `${existing}${content}`);
+            const existing = await readExisting(services, uri, principals);
+            const result = await filesystem.write(uri, `${existing}${content}`, principals);
             return ok({ uri: uri.toString(), created: result.created, size: result.stat.size });
           }
           case 'create': {
-            if ((await filesystem.stat(uri)) !== null) {
+            if ((await filesystem.stat(uri, principals)) !== null) {
               throw new ComemError('ALREADY_EXISTS', `目标已存在：${uri.toString()}`, {
                 uri: uri.toString(),
               });
             }
-            const result = await filesystem.write(uri, content);
+            const result = await filesystem.write(uri, content, principals);
             return ok({ uri: uri.toString(), created: result.created, size: result.stat.size });
           }
         }
@@ -237,8 +245,9 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const body = requireRecord(request.body, 'content/edit');
         const uri = requireUri(body, 'uri');
         const blocks = parsePatchBlocks(body['blocks']);
-        await authorizer.assert(uri, WRITE);
-        const result = await filesystem.edit(uri, blocks);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, WRITE, principals);
+        const result = await filesystem.edit(uri, blocks, principals);
         return ok({
           uri: uri.toString(),
           applied: result.applied,

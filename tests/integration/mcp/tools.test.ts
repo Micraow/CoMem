@@ -56,6 +56,7 @@ import { SkillService } from '../../../src/services/skill.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
+
 const SCOPE = 'comem://user/alice';
 const MEM = `${SCOPE}/mem`;
 const SUBJECT = 'user:alice';
@@ -182,7 +183,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
           permissions,
           nodes,
           logger,
-          subject: SUBJECT,
         })
       : null;
   if (acl !== null) {
@@ -443,7 +443,7 @@ describe('read', () => {
   const TEXT_URI = `${MEM}/text.txt`;
 
   beforeEach(async () => {
-    await harness.filesystem.write(Uri.parse(TEXT_URI), 'abcdefghij');
+    await harness.filesystem.write(Uri.parse(TEXT_URI), 'abcdefghij', PRINCIPALS);
   });
 
   it('offset / limit 按码点切片', async () => {
@@ -453,7 +453,7 @@ describe('read', () => {
 
   it('多 URI 返回带边界的文本', async () => {
     const other = `${MEM}/other.txt`;
-    await harness.filesystem.write(Uri.parse(other), 'xyz');
+    await harness.filesystem.write(Uri.parse(other), 'xyz', PRINCIPALS);
 
     const text = await callText('read', { uris: [TEXT_URI, other] });
 
@@ -485,9 +485,9 @@ describe('list', () => {
   const ROOT = `${MEM}`;
 
   beforeEach(async () => {
-    await harness.filesystem.write(Uri.parse(`${ROOT}/b.md`), 'bb');
-    await harness.filesystem.write(Uri.parse(`${ROOT}/a.md`), 'a');
-    await harness.filesystem.write(Uri.parse(`${ROOT}/dirA/c.md`), 'ccc');
+    await harness.filesystem.write(Uri.parse(`${ROOT}/b.md`), 'bb', PRINCIPALS);
+    await harness.filesystem.write(Uri.parse(`${ROOT}/a.md`), 'a', PRINCIPALS);
+    await harness.filesystem.write(Uri.parse(`${ROOT}/dirA/c.md`), 'ccc', PRINCIPALS);
   });
 
   it('默认只列直接子项并按 name 升序', async () => {
@@ -514,8 +514,8 @@ describe('list', () => {
 
 describe('tree', () => {
   it('levelLimit 控制层数', async () => {
-    await harness.filesystem.write(Uri.parse(`${MEM}/a.md`), 'a');
-    await harness.filesystem.write(Uri.parse(`${MEM}/dirA/c.md`), 'c');
+    await harness.filesystem.write(Uri.parse(`${MEM}/a.md`), 'a', PRINCIPALS);
+    await harness.filesystem.write(Uri.parse(`${MEM}/dirA/c.md`), 'c', PRINCIPALS);
 
     const level1 = await callText('tree', { uri: MEM, levelLimit: 1 });
     expect(level1).toContain('  dirA/');
@@ -530,7 +530,7 @@ describe('grep', () => {
   const FILE = `${MEM}/error.ts`;
 
   beforeEach(async () => {
-    await harness.filesystem.write(Uri.parse(FILE), 'Boom\nok\nBOOM again\n');
+    await harness.filesystem.write(Uri.parse(FILE), 'Boom\nok\nBOOM again\n', PRINCIPALS);
     await seed(FILE, 'Boom');
   });
 
@@ -608,7 +608,7 @@ describe('write / edit', () => {
 
   it('edit 默认唯一命中，replaceAll 替换全部', async () => {
     const editUri = `${MEM}/edit.txt`;
-    await harness.filesystem.write(Uri.parse(editUri), 'foo foo foo');
+    await harness.filesystem.write(Uri.parse(editUri), 'foo foo foo', PRINCIPALS);
 
     await expect(
       callText('edit', { uri: editUri, oldString: 'foo', newString: 'bar' }),
@@ -628,7 +628,7 @@ describe('write / edit', () => {
 describe('forget', () => {
   it('非空目录需要 recursive', async () => {
     const dir = `${MEM}/gone`;
-    await harness.filesystem.write(Uri.parse(`${dir}/child.md`), 'x');
+    await harness.filesystem.write(Uri.parse(`${dir}/child.md`), 'x', PRINCIPALS);
 
     await expect(callText('forget', { uri: dir })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
@@ -664,7 +664,7 @@ describe('~ 别名（§6.1）', () => {
   const ALIAS = '~/mem/alias.md';
 
   it('每个需要 URI 的工具都接受 ~ 开头的路径', async () => {
-    await harness.filesystem.write(Uri.parse(`${MEM}/alias.md`), 'x');
+    await harness.filesystem.write(Uri.parse(`${MEM}/alias.md`), 'x', PRINCIPALS);
     // `grep` / `find` / `search` / `glob` 走索引；别名展开后的 URI 必须与索引里的
     // 绝对 URI 是同一个。
     await seed(`${MEM}/alias.md`, 'x');
@@ -738,7 +738,7 @@ describe('search / rule_search', () => {
 
   it('rule_search 返回规则完整正文（默认阈值）', async () => {
     const ruleUri = `${SCOPE}/memories/rules/license-review/rule.md`;
-    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。');
+    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。', PRINCIPALS);
     await seed(ruleUri, '提交前必须检查许可证', {
       memoryType: 'rules',
       abstract: '许可证规则',
@@ -758,7 +758,7 @@ describe('search / rule_search', () => {
     harness = await createHarness({ engine: 'hybrid' });
 
     const ruleUri = `${SCOPE}/memories/rules/hybrid/rule.md`;
-    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。');
+    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。', PRINCIPALS);
     await seed(ruleUri, '提交前必须检查许可证', {
       memoryType: 'rules',
       abstract: '许可证规则',
@@ -783,8 +783,8 @@ describe('search / rule_search', () => {
   it('rule_search 默认阈值只保留与最佳规则接近的（相对阈值）', async () => {
     const strong = `${SCOPE}/memories/rules/strong/rule.md`;
     const weak = `${SCOPE}/memories/rules/weak/rule.md`;
-    await harness.filesystem.write(Uri.parse(strong), '提交前必须检查许可证。');
-    await harness.filesystem.write(Uri.parse(weak), '提交前必须检查许可证，这条是弱相关。');
+    await harness.filesystem.write(Uri.parse(strong), '提交前必须检查许可证。', PRINCIPALS);
+    await harness.filesystem.write(Uri.parse(weak), '提交前必须检查许可证，这条是弱相关。', PRINCIPALS);
     // 两条都含查询短语，但 weak 的文档长度把 bm25 拉到最佳规则的一半左右：
     // 绝对阈值（0.65）下两条都会被丢，相对阈值（0.65 × 最高分）只留 strong。
     await seed(strong, '提交前必须检查许可证', {
@@ -877,7 +877,7 @@ describe('remember / download', () => {
 
   it('download 返回签名 URL', async () => {
     const uri = `${SCOPE}/resources/doc.md`;
-    await harness.filesystem.write(Uri.parse(uri), 'x');
+    await harness.filesystem.write(Uri.parse(uri), 'x', PRINCIPALS);
 
     const text = await callText('download', { uri });
 
@@ -945,10 +945,10 @@ describe('写后物化权限', () => {
         context,
       );
 
-      const topLevel = await filesystem.list(Uri.parse(parent));
+      const topLevel = await filesystem.list(Uri.parse(parent), PRINCIPALS);
       expect(topLevel.map((entry) => entry.uri.name)).toEqual(['docs']);
 
-      const documents = await filesystem.list(Uri.parse(`${parent}/docs`));
+      const documents = await filesystem.list(Uri.parse(`${parent}/docs`), PRINCIPALS);
       expect(documents.map((entry) => entry.uri.toString())).toEqual([`${parent}/docs/api.md`]);
     });
   });
@@ -971,10 +971,10 @@ describe('写后物化权限', () => {
         context,
       );
 
-      const listed = await filesystem.list(Uri.parse(parent));
+      const listed = await filesystem.list(Uri.parse(parent), PRINCIPALS);
       expect(listed.map((entry) => entry.uri.toString())).toEqual([`${parent}/demo-skill`]);
 
-      const nested = await filesystem.list(Uri.parse(`${parent}/demo-skill`));
+      const nested = await filesystem.list(Uri.parse(`${parent}/demo-skill`), PRINCIPALS);
       expect(nested.map((entry) => entry.uri.name).sort()).toEqual(['SKILL.md', 'scripts']);
     });
   });
@@ -986,7 +986,7 @@ describe('写后物化权限', () => {
         context,
       );
 
-      const listed = await filesystem.list(Uri.parse(`${SCOPE}/sessions`));
+      const listed = await filesystem.list(Uri.parse(`${SCOPE}/sessions`), PRINCIPALS);
       expect(listed).toHaveLength(1);
       expect(listed[0]?.kind).toBe('directory');
       expect(listed[0]?.uri.name).toMatch(/^sess_[0-9a-f]{8}$/);

@@ -48,6 +48,7 @@
  * 覆盖管理员改过的显示名或状态。
  */
 
+import { randomBytes } from 'node:crypto';
 import { constants as fsConstants, mkdirSync } from 'node:fs';
 import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -64,6 +65,7 @@ import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { HttpRerankProvider } from '../adapters/llm/rerank-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
+import { ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
@@ -96,7 +98,8 @@ import { ConsolidationService } from '../services/consolidation.js';
 import { ContextAssembler } from '../services/context-assembler.js';
 import { EmbeddingService } from '../services/embedding.js';
 import { FileSystemService } from '../services/filesystem.js';
-import { IdentityService } from '../services/identity.js';
+import { AuthService, bearerCredential } from '../services/auth.js';
+import { IdentityService, type UserNamespace } from '../services/identity.js';
 import { IndexObserver } from '../services/index-observer.js';
 import { LlmService } from '../services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../services/memory.js';
@@ -213,6 +216,10 @@ export interface ContainerServices {
    * 控制台里的修改。推导写在 `services/prompts/registry.ts`。
    */
   readonly prompts: PromptService;
+  /** 用户与组用例（`/admin/*`、登录）。 */
+  readonly identity: IdentityService;
+  /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
+  readonly auth: AuthService;
 }
 
 function fsErrorCode(error: unknown): string | null {
@@ -411,16 +418,27 @@ export class InheritingAuthorizer implements Authorizer {
     this.#store = store;
   }
 
-  async check(uri: Uri, action: AclAction): Promise<boolean> {
-    return this.#acl.check(uri, action);
+  async check(
+    uri: Uri,
+    action: AclAction,
+    principals: readonly string[],
+  ): Promise<boolean> {
+    return this.#acl.check(uri, action, principals);
   }
 
-  async filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>> {
-    return this.#acl.filterReadable(uris);
+  async filterReadable(
+    uris: readonly Uri[],
+    principals: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    return this.#acl.filterReadable(uris, principals);
   }
 
-  async assert(uri: Uri, action: AclAction): Promise<void> {
-    if (await this.#acl.check(uri, action)) {
+  async assert(
+    uri: Uri,
+    action: AclAction,
+    principals: readonly string[],
+  ): Promise<void> {
+    if (await this.#acl.check(uri, action, principals)) {
       return;
     }
     // 写操作的目标可能还不存在（新建节点），读操作只有「磁盘上有、物化表里没有」
@@ -429,7 +447,7 @@ export class InheritingAuthorizer implements Authorizer {
     const exists = action >= 3 ? true : (await this.#store.stat(uri)) !== null;
     if (exists) {
       await this.#acl.materializeNode(uri);
-      if (await this.#acl.check(uri, action)) {
+      if (await this.#acl.check(uri, action, principals)) {
         return;
       }
     }
@@ -505,9 +523,25 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const permissions = new PermissionRepository({ db, logger });
   const userRepository = new UserRepository({ db, logger });
   const groupRepository = new GroupRepository({ db, logger });
+  const userNamespace: UserNamespace = {
+    ensure: (userId) => ensureUserNamespace(userId),
+  };
   const identityService = new IdentityService({
     users: userRepository,
     groups: groupRepository,
+    apiKeys: new ApiKeyRepository({ db, logger }),
+    namespace: userNamespace,
+    logger,
+  });
+  // `auth.sessionSecret` 为空时生成进程随机值：重启即失效，不需要运维配置；
+  // 要跨重启保持登录就显式配置同一个 secret。
+  const authService = new AuthService({
+    identity: identityService,
+    sessionSecret:
+      config.auth.sessionSecret === ''
+        ? randomBytes(32).toString('base64url')
+        : config.auth.sessionSecret,
+    sessionTtlSeconds: config.auth.sessionTtlSeconds,
     logger,
   });
   const taskRepository = new TaskRepository({ db, logger });
@@ -659,31 +693,33 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     nodes,
     logger,
     groupDefaultLevel: config.acl.groupDefaultLevel === 'write' ? 3 : 1,
-    subject,
-    groups,
   });
 
-  // §12.6 根预置：`comem://user/{uid}/` 要有 `user:{uid} = manage` 这一行。
-  //
-  // 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：`list` /
-  // `tree` / `GET /sessions` 都走 `filterReadable`，它是纯 SQL 查询，物化表里没有
-  // 根行就一条都返回不了。写路径上 `InheritingAuthorizer` 会顺手补，但只读路径
-  // 不会——一个刚装好、还没写过东西的实例，控制台是空的。
-  //
-  // 幂等：行已存在就是覆盖成同样的值。
-  const userRoot = Uri.parse(`comem://user/${subject.replace(/^user:/u, '')}`);
+/**
+ * 预置用户命名空间：`comem://user/{uid}/` 的根行 + 四个上下文目录。
+ *
+ * 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：`list` /
+ * `tree` / `GET /sessions` 都走 `filterReadable`，它是纯 SQL 查询，物化表里没有
+ * 根行就一条都返回不了。写路径上 `InheritingAuthorizer` 会顺手补，但只读路径
+ * 不会——一个刚装好、还没写过东西的实例，控制台是空的。
+ *
+ * `POST /admin/users` 也要调它（通过 `IdentityService.ensureUserNamespace`）：
+ * 新建的账号第一次登录时，会话页必须是空列表而不是 403。
+ */
+async function ensureUserNamespace(userId: string): Promise<void> {
+  const userRoot = Uri.parse(`comem://user/${userId}`);
   await acl.materializeNode(userRoot);
-
-  // §6.5 的四个上下文目录在建库时就建出来。
-  //
-  // 不建的话，「全新部署 + 打开会话页」会拿到 403 而不是空列表：`list` 会先对目录
-  // 求 read 权限，而目录不存在就物化不出行，`InheritingAuthorizer` 只能拒绝。
-  // 空列表和「没有权限」是两件事，前者是正确状态。
   for (const name of ['memories', 'resources', 'skills', 'sessions']) {
     const directory = userRoot.child(name);
     await store.mkdir(directory, { recursive: true });
     await acl.materializeNode(directory);
   }
+}
+
+  // §12.6 根预置 + §6.5 的四个上下文目录。见 `ensureUserNamespace` 的注释。
+  //
+  // 幂等：行已存在就是覆盖成同样的值。
+  await userNamespace.ensure(boundPrincipal.id);
 
   const summary = new SummaryService({
     nodes,
@@ -988,8 +1024,17 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   });
 
   const mcpRegistry = createToolRegistry();
-  const resolveIdentity: IdentityResolver = async (headers: IdentityHeaders) =>
-    resolveIdentityOf(headers, subject, identityService);
+  const resolveIdentity: IdentityResolver = async (headers: IdentityHeaders) => {
+    if (!config.auth.enabled) {
+      return resolveIdentityOf(headers, subject, identityService);
+    }
+    const credential = bearerCredential(headers['authorization']);
+    if (credential === null) {
+      throw new ComemError('UNAUTHENTICATED', '缺少 Authorization: Bearer 凭据。');
+    }
+    const context = await authService.resolveBearer(credential);
+    return { subject: context.subject, principals: context.principals };
+  };
 
   const mcp = new McpHttpServer({
     registry: mcpRegistry,
@@ -1028,6 +1073,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     indexObserver,
     taskStore: taskRepository,
     prompts,
+    identity: identityService,
+    auth: authService,
   };
 
   const routes = createHttpRouteGroups({
@@ -1047,6 +1094,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     skill,
     search,
     identity: identityService,
+    auth: authService,
     prompts,
     // `/health` 回给控制台的绑定身份（§16 的身份引导）。传装配后的值而不是
     // `config.server.subject`：`options.subject` 覆盖时两者不同，回配置值会让
@@ -1130,7 +1178,7 @@ async function resolveIdentityOf(
   // 用户目录是身份的真相：不存在的用户、已禁用的用户都不该拿到 principals。
   // 启动时已经预置了绑定主体（`createUser` 忽略 CONFLICT），所以这里对正常部署
   // 不会返回 null；返回 null 只可能是控制台把当前用户删了或禁用了。
-  const identity = identityService.resolve(subject);
+  const identity = identityService.resolveSubject(subject);
   if (identity === null) {
     throw new ComemError('UNAUTHENTICATED', `用户不存在或已禁用：${subject}`, { subject });
   }

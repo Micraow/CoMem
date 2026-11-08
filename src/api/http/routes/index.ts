@@ -11,6 +11,7 @@
 
 import type { ComemConfig } from '../../../config/index.js';
 import type { RetrievalIndex } from '../../../domain/retrieval.js';
+import type { AuthService } from '../../../services/auth.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
 import type { ConsolidationService } from '../../../services/consolidation.js';
@@ -29,6 +30,7 @@ import type { HttpRouteGroup } from '../server.js';
 
 import { createAclRoutes } from './acl.js';
 import { createAdminRoutes, type AdminAccess } from './admin.js';
+import { createAuthRoutes } from './auth.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
 import { createMemoryRoutes } from './memories.js';
@@ -77,6 +79,8 @@ export interface HttpRouteServices {
   readonly search: SearchService;
   /** 用户与组用例（`/admin/*`）。 */
   readonly identity: IdentityService;
+  /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
+  readonly auth: AuthService;
   /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
   readonly adminAccess: AdminAccess;
   /**
@@ -117,6 +121,7 @@ export function createHttpRouteGroups(
     createResourceRoutes(services),
     createSkillRoutes(services),
     createAdminRoutes(services),
+    createAuthRoutes(services),
     createPromptRoutes(services),
     createOpsRoutes(services),
     createTelemetryRoutes(services),

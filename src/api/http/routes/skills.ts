@@ -92,7 +92,7 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
         }
         const files = parseFiles(body['files']);
 
-        await authorizer.assert(parentUri, WRITE);
+        await authorizer.assert(parentUri, WRITE, context.principals);
         const result = await skill.addSkill({
           parentUri,
           name,
@@ -112,7 +112,7 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
         const context = requestContextOf(request);
         const scopeUri = optionalString(query, 'scopeUri');
         const scope = scopeUri === undefined ? scopeOfSubject(context.subject) : Uri.parse(scopeUri);
-        await authorizer.assert(scope, READ);
+        await authorizer.assert(scope, READ, context.principals);
         const skills = await skill.listSkills(scope, {
           subject: context.subject,
           principals: context.principals,

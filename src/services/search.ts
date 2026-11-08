@@ -609,7 +609,7 @@ export class SearchService {
         ranks: null,
       }));
       return {
-        hits: this.#applyHotness((await this.#applyRerank(text, ranked)).slice(0, limit)),
+        hits: this.#applyHotness((await this.#applyRerank(text, ranked, options.principals)).slice(0, limit)),
         degradation: null,
       };
     }
@@ -668,7 +668,7 @@ export class SearchService {
       }),
     );
     return {
-      hits: this.#applyHotness((await this.#applyRerank(text, ranked)).slice(0, limit)),
+      hits: this.#applyHotness((await this.#applyRerank(text, ranked, options.principals)).slice(0, limit)),
       degradation: null,
     };
   }
@@ -751,7 +751,7 @@ export class SearchService {
       }));
 
     return {
-      hits: this.#applyHotness((await this.#applyRerank(text, scored)).slice(0, limit)),
+      hits: this.#applyHotness((await this.#applyRerank(text, scored, options.principals)).slice(0, limit)),
       degradation,
     };
   }
@@ -1104,7 +1104,7 @@ export class SearchService {
 
       let text: string;
       try {
-        text = (await this.#filesystem.read(uri)).text;
+        text = (await this.#filesystem.read(uri, options.principals)).text;
       } catch (error) {
         // 索引与磁盘短暂不一致（刚删、刚移动）是正常状态：跳过这一条，
         // 不打断整次 grep。权限在 filesystem 里已经拒过，同样跳过。
@@ -1172,7 +1172,7 @@ export class SearchService {
         candidates.push(uri);
       }
     }
-    const readable = await this.#authorizer.filterReadable(candidates);
+    const readable = await this.#authorizer.filterReadable(candidates, options.principals);
     const result = candidates
       .map((uri) => uri.toString())
       .filter((value) => readable.has(value));
@@ -1216,7 +1216,7 @@ export class SearchService {
       quotaPreset: options.quotaPreset ?? this.#config.assembly.quotaPreset,
       excludedUris: await this.#excludedUris(clock),
     };
-    const result = await this.#assembler.assemble(candidates, assembly);
+    const result = await this.#assembler.assemble(candidates, assembly, options.principals);
     await this.#recordDelivered(clock, result.items);
 
     this.#logger.info('上下文组装完成', {
@@ -1330,7 +1330,11 @@ export class SearchService {
    * 失败全部兜底：`applyRerank` 逐条兜底，`score` 抛错时整批退化成融合分，只记
    * warn——重排是质量增强，不能让检索失败。
    */
-  async #applyRerank(query: string, hits: readonly PreHotnessHit[]): Promise<PreHotnessHit[]> {
+  async #applyRerank(
+    query: string,
+    hits: readonly PreHotnessHit[],
+    principals: readonly string[],
+  ): Promise<PreHotnessHit[]> {
     const rerank = this.#rerank;
     if (rerank === undefined || hits.length === 0) {
       return [...hits];
@@ -1339,7 +1343,7 @@ export class SearchService {
     const limited = hits.slice(0, rerank.topN);
     // 候选文本有 I/O（摘要为空时要读正文），先并发取齐再一次性送模型：串行读
     // 会把 N 次磁盘延迟叠在用户身上，而 topN 上限是配置里的 50 条。
-    const texts = await Promise.all(limited.map((hit) => this.#rerankText(hit)));
+    const texts = await Promise.all(limited.map((hit) => this.#rerankText(hit, principals)));
     const candidates: RerankCandidate[] = limited.map((hit, index) => ({
       uri: hit.uri,
       text: texts[index] ?? '',
@@ -1409,7 +1413,7 @@ export class SearchService {
    * 融合分兜底：重排是质量增强，不能让一次读盘失败变成整次检索失败。**不降级成
    * 「用别的候选的正文」**——那会把两条不相干的文档混在一起。
    */
-  async #rerankText(hit: PreHotnessHit): Promise<string> {
+  async #rerankText(hit: PreHotnessHit, principals: readonly string[]): Promise<string> {
     const abstract = hit.abstract?.trim() ?? '';
     if (abstract !== '') {
       return truncateToChars(abstract, RERANK_TEXT_MAX_CHARS);
@@ -1420,7 +1424,7 @@ export class SearchService {
       return '';
     }
     try {
-      const document = await this.#filesystem.read(uri);
+      const document = await this.#filesystem.read(uri, principals);
       return truncateToChars(document.text.trim(), RERANK_TEXT_MAX_CHARS);
     } catch (error) {
       this.#logger.warn('重排候选正文不可读，改用融合分', {

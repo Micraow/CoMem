@@ -14,12 +14,12 @@ import {
   type PermissionRow,
 } from '../../../src/adapters/sqlite/permission-repository.js';
 import { levelSatisfies } from '../../../src/domain/acl.js';
-import type { AclEntry, AclLevel } from '../../../src/domain/acl.js';
+import type { AclEntry, AclLevel, AclMode } from '../../../src/domain/acl.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { NodeKind } from '../../../src/domain/node.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { AclService } from '../../../src/services/acl.js';
+import { AclService, type AclSnapshot } from '../../../src/services/acl.js';
 
 const ROOT = 'comem://user/alice';
 const GROUP_ROOT = 'comem://group/eng';
@@ -58,24 +58,58 @@ function createLogger(): Logger {
   return logger;
 }
 
+/**
+ * 绑定了请求身份的 ACL 门面。
+ *
+ * `AclService` 的 `Authorizer` 方法收显式 `principals`（§12.4）：身份是参数，不是
+ * 构造期绑定。测试用这个门面把 `subject` / `groups` 展开成 principals 再传进去，
+ * 用例读起来仍然像「某个用户发了一次请求」。
+ */
+interface BoundAcl {
+  check(uri: Uri, action: AclLevel): Promise<boolean>;
+  filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>>;
+  getAcl(uri: Uri, subject: string): Promise<AclSnapshot>;
+  setAcl(
+    uri: Uri,
+    acl: { readonly mode: AclMode; readonly entries: readonly AclEntry[] },
+    subject: string,
+  ): Promise<void>;
+  ensureRootPreset(uri: Uri): Promise<void>;
+  materializeNode(uri: Uri): Promise<void>;
+  purgePrincipal(principal: string): Promise<number>;
+  resolvePrincipals(subject: string, groups: readonly string[]): readonly string[];
+}
+
 function createService(
   options: {
     readonly subject?: string;
     readonly groups?: readonly string[];
     readonly groupDefaultLevel?: AclLevel;
   } = {},
-): AclService {
-  return new AclService({
+): BoundAcl {
+  const subject = options.subject ?? 'user:alice';
+  const groups = options.groups ?? [];
+  const acl = new AclService({
     dataDir,
     db,
     aclFile,
     permissions,
     nodes,
     logger,
-    subject: options.subject ?? 'user:alice',
-    groups: options.groups ?? [],
     groupDefaultLevel: options.groupDefaultLevel,
   });
+  const principals = acl.resolvePrincipals(subject, groups);
+  return {
+    check: (uri, action) => acl.check(uri, action, principals),
+    filterReadable: (uris) => acl.filterReadable(uris, principals),
+    getAcl: (uri, requester) => acl.getAcl(uri, requester, principals),
+    setAcl: (uri, input, requester) => acl.setAcl(uri, input, requester, principals),
+    ensureRootPreset: (uri) => acl.ensureRootPreset(uri),
+    materializeNode: (uri) => acl.materializeNode(uri),
+    purgePrincipal: (principal) => acl.purgePrincipal(principal),
+    resolvePrincipals: (requester, requesterGroups) =>
+      acl.resolvePrincipals(requester, requesterGroups),
+  };
 }
 
 function allow(principal: string, level: AclLevel): AclEntry {

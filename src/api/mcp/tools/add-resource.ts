@@ -85,7 +85,7 @@ export const addResourceTool: McpToolDefinition = {
     const wait = optionalBoolean(args, 'wait', false, 'add_resource');
 
     // §12.4：摄取是 write 出口，服务层之外的授权在工具层先做。
-    await context.acl.assert(parentUri, WRITE);
+    await context.acl.assert(parentUri, WRITE, context.principals);
 
     const result = await context.resource.addResource({
       parentUri,

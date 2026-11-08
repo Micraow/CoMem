@@ -149,8 +149,17 @@ export class ContextAssembler {
   /**
    * 给外部直接用的端口。不做跨调用缓存：概览与原文都会随写入变化，长期缓存等于
    * 返回过期内容。`assemble` 走的是每次新建的那一份（见 `assemble`）。
+   *
+   * 比 domain 的 `AssemblyPorts` 多一个 `principals` 参数：授权是请求期的身份，
+   * 领域层不持有身份，端口必须由调用方传进来。不传就没有默认值——漏传在类型
+   * 检查期报错，不会静默退化成「无主体」。
    */
-  readonly ports: AssemblyPorts;
+  readonly ports: {
+    readOverview(uri: string, principals: readonly string[]): Promise<string | null>;
+    readBody(uri: string, principals: readonly string[]): Promise<string | null>;
+    estimateTokens(text: string): number;
+    logger: Logger;
+  };
 
   constructor(deps: ContextAssemblerDeps) {
     const concurrency = deps.readConcurrency ?? DEFAULT_READ_CONCURRENCY;
@@ -168,8 +177,8 @@ export class ContextAssembler {
     this.#semaphore = new Semaphore(concurrency);
 
     this.ports = {
-      readOverview: (uri) => this.#readOverview(uri, null),
-      readBody: (uri) => this.#readBody(uri, null),
+      readOverview: (uri, principals) => this.#readOverview(uri, null, principals),
+      readBody: (uri, principals) => this.#readBody(uri, null, principals),
       estimateTokens: this.#estimateTokens,
       logger: this.#logger,
     };
@@ -185,11 +194,12 @@ export class ContextAssembler {
   async assemble(
     candidates: readonly AssemblyCandidate[],
     options: AssemblyOptions,
+    principals: readonly string[],
   ): Promise<AssemblyResult> {
     const cache: ReadCache = { overview: new Map(), body: new Map() };
     const ports: AssemblyPorts = {
-      readOverview: (uri) => this.#readOverview(uri, cache),
-      readBody: (uri) => this.#readBody(uri, cache),
+      readOverview: (uri) => this.#readOverview(uri, cache, principals),
+      readBody: (uri) => this.#readBody(uri, cache, principals),
       estimateTokens: this.#estimateTokens,
       logger: this.#logger,
     };
@@ -203,17 +213,24 @@ export class ContextAssembler {
    * 「摘要还没生成」时的降级产物，不是替代品。两者都拿不到（正文也读不到）返回
    * `null`，由 `assembly.ts` 继续降到 L0 摘要。
    */
-  async #readOverview(value: string, cache: ReadCache | null): Promise<string | null> {
+  async #readOverview(
+    value: string,
+    cache: ReadCache | null,
+    principals: readonly string[],
+  ): Promise<string | null> {
     const memoized = cache?.overview.get(value);
     if (memoized !== undefined) {
       return memoized;
     }
-    const pending = this.#loadOverview(value);
+    const pending = this.#loadOverview(value, principals);
     cache?.overview.set(value, pending);
     return pending;
   }
 
-  async #loadOverview(value: string): Promise<string | null> {
+  async #loadOverview(
+    value: string,
+    principals: readonly string[],
+  ): Promise<string | null> {
     const startedAt = process.hrtime.bigint();
     const uri = Uri.tryParse(value);
     if (uri === null) {
@@ -222,7 +239,7 @@ export class ContextAssembler {
       return null;
     }
 
-    const allowed = await this.#authorizer.check(uri, READ);
+    const allowed = await this.#authorizer.check(uri, READ, principals);
     if (!allowed) {
       this.#logger.debug('概览读取无权限', {
         uri: value,
@@ -272,17 +289,24 @@ export class ContextAssembler {
   }
 
   /** 读 L2 原文。读不到（不存在、是目录、无权限）返回 `null`，不抛错。 */
-  async #readBody(value: string, cache: ReadCache | null): Promise<string | null> {
+  async #readBody(
+    value: string,
+    cache: ReadCache | null,
+    principals: readonly string[],
+  ): Promise<string | null> {
     const memoized = cache?.body.get(value);
     if (memoized !== undefined) {
       return memoized;
     }
-    const pending = this.#loadBody(value);
+    const pending = this.#loadBody(value, principals);
     cache?.body.set(value, pending);
     return pending;
   }
 
-  async #loadBody(value: string): Promise<string | null> {
+  async #loadBody(
+    value: string,
+    principals: readonly string[],
+  ): Promise<string | null> {
     const startedAt = process.hrtime.bigint();
     const uri = Uri.tryParse(value);
     if (uri === null) {
@@ -290,7 +314,7 @@ export class ContextAssembler {
       return null;
     }
 
-    const allowed = await this.#authorizer.check(uri, READ);
+    const allowed = await this.#authorizer.check(uri, READ, principals);
     if (!allowed) {
       this.#logger.debug('原文读取无权限', {
         uri: value,

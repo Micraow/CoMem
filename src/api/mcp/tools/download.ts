@@ -79,7 +79,7 @@ export const downloadTool: McpToolDefinition = {
     const uri = Uri.parse(requiredString(args, 'uri', 'download'));
 
     // `stat` 会先过 Authorizer（read），不存在时返回 null。
-    const stat = await context.filesystem.stat(uri);
+    const stat = await context.filesystem.stat(uri, context.principals);
     if (stat === null || stat.kind !== 'file') {
       throw new ComemError('NOT_FOUND', `下载目标不是文件：${uri.toString()}`, {
         uri: uri.toString(),

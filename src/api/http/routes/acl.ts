@@ -108,8 +108,8 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const query = requireRecord(request.query, 'acl/get');
         const context = requestContextOf(request);
         const uri = requireUri(query, 'uri');
-        await authorizer.assert(uri, MANAGE);
-        const snapshot = await acl.getAcl(uri, context.subject);
+        await authorizer.assert(uri, MANAGE, context.principals);
+        const snapshot = await acl.getAcl(uri, context.subject, context.principals);
         return ok({
           uri: snapshot.uri.toString(),
           mode: snapshot.mode,
@@ -124,8 +124,8 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const uri = requireUri(body, 'uri');
         const mode = parseMode(body['mode']);
         const entries = parseEntries(body['entries']);
-        await authorizer.assert(uri, MANAGE);
-        await acl.setAcl(uri, { mode, entries }, context.subject);
+        await authorizer.assert(uri, MANAGE, context.principals);
+        await acl.setAcl(uri, { mode, entries }, context.subject, context.principals);
         return ok({ uri: uri.toString(), mode, entries });
       });
 
@@ -138,15 +138,15 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
           level: parseLevel(body['level']),
           effect: parseEffect(body['effect']),
         };
-        await authorizer.assert(uri, MANAGE);
+        await authorizer.assert(uri, MANAGE, context.principals);
 
-        const snapshot = await acl.getAcl(uri, context.subject);
+        const snapshot = await acl.getAcl(uri, context.subject, context.principals);
         // 同一主体只能有一条（`acl_entry` 的主键是 `(uri, principal)`），后写的覆盖。
         const entries = [
           ...snapshot.entries.filter((candidate) => candidate.principal !== entry.principal),
           entry,
         ];
-        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject);
+        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject, context.principals);
         return ok({ uri: uri.toString(), entry });
       });
 
@@ -155,9 +155,9 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const context = requestContextOf(request);
         const uri = requireUri(body, 'uri');
         const principal = requirePrincipal(body);
-        await authorizer.assert(uri, MANAGE);
+        await authorizer.assert(uri, MANAGE, context.principals);
 
-        const snapshot = await acl.getAcl(uri, context.subject);
+        const snapshot = await acl.getAcl(uri, context.subject, context.principals);
         const entries = snapshot.entries.filter((candidate) => candidate.principal !== principal);
         if (entries.length === snapshot.entries.length) {
           throw new ComemError('NOT_FOUND', `该主体没有直接授权：${principal}`, {
@@ -165,7 +165,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
             principal,
           });
         }
-        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject);
+        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject, context.principals);
         return ok({ uri: uri.toString(), principal, revoked: true });
       });
     },

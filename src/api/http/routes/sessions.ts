@@ -180,9 +180,13 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const body = requireRecord(request.body, 'sessions/create');
         const context = requestContextOf(request);
         const scope = scopeFrom(body, context.subject);
-        await authorizer.assert(scope, WRITE);
+        await authorizer.assert(scope, WRITE, context.principals);
         const sessionId = optionalString(body, 'sessionId');
-        const uri = await session.create(scope, sessionId === undefined ? {} : { sessionId });
+        const uri = await session.create(
+          scope,
+          context.principals,
+          sessionId === undefined ? {} : { sessionId },
+        );
         return ok({ uri: uri.toString() });
       });
 
@@ -191,7 +195,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const context = requestContextOf(request);
         const scope = scopeFrom(body, context.subject);
         const sessionUri = sessionUriOf(scope, request.params.id);
-        await authorizer.assert(sessionUri, WRITE);
+        await authorizer.assert(sessionUri, WRITE, context.principals);
 
         // **批量形状是规范形状。** 采集侧（Hook 插件）一次可能补投多条消息，
         // 逐条发 HTTP 会让「游标确认」变成 N 次往返，而游标一旦在中间失败就会
@@ -212,7 +216,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const context = requestContextOf(request);
         const scope = scopeFrom(body, context.subject);
         const sessionUri = sessionUriOf(scope, request.params.id);
-        await authorizer.assert(sessionUri, WRITE);
+        await authorizer.assert(sessionUri, WRITE, context.principals);
         const result = await session.commitPhase1(sessionUri);
         return ok({
           sessionUri: sessionUri.toString(),
@@ -227,10 +231,13 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const context = requestContextOf(request);
         const scope = scopeFrom(query, context.subject);
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_LIST_LIMIT, { min: 1 });
-        await authorizer.assert(scope, READ);
+        await authorizer.assert(scope, READ, context.principals);
 
         const sessions: Record<string, unknown>[] = [];
-        for (const child of await filesystem.list(scope.child('sessions'))) {
+        for (const child of await filesystem.list(
+          scope.child('sessions'),
+          context.principals,
+        )) {
           if (child.kind !== 'directory' || sessions.length >= limit) {
             continue;
           }
@@ -254,7 +261,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
           const context = requestContextOf(request);
           const scope = scopeFrom(query, context.subject);
           const sessionUri = sessionUriOf(scope, request.params.id);
-          await authorizer.assert(sessionUri, READ);
+          await authorizer.assert(sessionUri, READ, context.principals);
           return ok(serializeSession(await session.load(sessionUri)));
         },
       );

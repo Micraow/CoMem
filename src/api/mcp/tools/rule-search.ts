@@ -91,7 +91,7 @@ export const ruleSearchTool: McpToolDefinition = {
       }
       const uri = Uri.parse(hit.uri);
       try {
-        const document = await context.filesystem.read(uri);
+        const document = await context.filesystem.read(uri, context.principals);
         rules.push(`## ${hit.uri}\n${document.text.trim()}`);
       } catch (error) {
         // 索引与磁盘短暂不一致（刚删、刚移动）是正常状态：跳过这一条，不打断整次查询。

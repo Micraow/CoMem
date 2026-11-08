@@ -21,6 +21,8 @@ import { FileSystemService } from '../../../src/services/filesystem.js';
 import { SkillService } from '../../../src/services/skill.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const SCOPE = 'comem://user/alice';
 const SKILLS = `${SCOPE}/skills`;
 const SKILL = `${SKILLS}/code-review`;
@@ -101,7 +103,6 @@ beforeEach(async () => {
     permissions,
     nodes: new NodeRepository({ db, logger }),
     logger,
-    subject: 'user:alice',
   });
   await acl.ensureRootPreset(Uri.parse(SCOPE));
   const authorizer = new InheritingAuthorizer(acl, store);
@@ -155,7 +156,7 @@ describe('addSkill', () => {
 
     // 技能服务直接写 `ContentStore`，观察者收不到通知。物化权限漏掉时 `list` 与
     // `listSkills` 都会把技能整个过滤掉——装成功了，列表里却没有。
-    const listed = await filesystem.list(Uri.parse(SKILLS));
+    const listed = await filesystem.list(Uri.parse(SKILLS), AUTH_PRINCIPALS);
     expect(listed.map((entry) => entry.uri.toString())).toContain(SKILL);
 
     const visible = await service.listSkills(Uri.parse(SCOPE), {

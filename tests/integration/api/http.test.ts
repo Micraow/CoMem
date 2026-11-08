@@ -10,6 +10,8 @@ import { createHttpServer, PROMETHEUS_CONTENT_TYPE } from '../../../src/api/http
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import { Uri } from '../../../src/domain/uri.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
+
 const ROOT = 'comem://user/local';
 const SUBJECT = 'user:local';
 
@@ -396,7 +398,7 @@ describe('文件系统与内容', () => {
       (await inject({ method: 'POST', url: '/api/v1/fs/cp', payload: { from: moved, to: copied } }))
         .statusCode,
     ).toBe(200);
-    expect((await container.services.filesystem.read(Uri.parse(copied))).text).toContain(
+    expect((await container.services.filesystem.read(Uri.parse(copied), AUTH_PRINCIPALS)).text).toContain(
       'JavaScript',
     );
 
@@ -544,7 +546,7 @@ describe('检索 mode = context', () => {
   async function seedMemory(): Promise<void> {
     await container.services.filesystem.write(
       Uri.parse(FILE),
-      '# 标题\n\n上下文记忆数据库。',
+      '# 标题\n\n上下文记忆数据库。', AUTH_PRINCIPALS,
       { frontmatter: { summary: '一句话摘要' } },
     );
     await container.services.indexObserver.drain();
@@ -834,9 +836,9 @@ describe('资源与技能', () => {
 
     // 写后物化：资源服务直接写 `ContentStore`，不走观察者。不物化时 `list` 会因为
     // 缺 `node_permission` 行把新文件整个过滤掉——写成功了，树里什么都没有。
-    const listed = await container.services.filesystem.list(Uri.parse(parentUri));
+    const listed = await container.services.filesystem.list(Uri.parse(parentUri), AUTH_PRINCIPALS);
     expect(listed.map((entry) => entry.uri.name)).toEqual(['docs']);
-    const documents = await container.services.filesystem.list(Uri.parse(`${parentUri}/docs`));
+    const documents = await container.services.filesystem.list(Uri.parse(`${parentUri}/docs`), AUTH_PRINCIPALS);
     expect(documents.map((entry) => entry.uri.toString())).toEqual([
       `${parentUri}/docs/architecture.md`,
     ]);
@@ -873,7 +875,7 @@ describe('资源与技能', () => {
 
     // 写后物化：技能目录没有自己的 `node_permission` 行时，上面的 `listSkills`
     // 会把它整个过滤掉。
-    const directories = await container.services.filesystem.list(Uri.parse(parentUri));
+    const directories = await container.services.filesystem.list(Uri.parse(parentUri), AUTH_PRINCIPALS);
     expect(directories.map((entry) => entry.uri.name)).toEqual(['code-review']);
   });
 });
@@ -1046,7 +1048,7 @@ describe('重排接线', () => {
 
     try {
       const file = `${ROOT}/memories/rerank.md`;
-      await created.services.filesystem.write(Uri.parse(file), '上下文记忆数据库。', {
+      await created.services.filesystem.write(Uri.parse(file), '上下文记忆数据库。', AUTH_PRINCIPALS, {
         frontmatter: { summary: '一句话摘要' },
       });
       // 没有 frontmatter 摘要的普通文档（存量记忆、非记忆文件都是这种形态）。
@@ -1054,7 +1056,7 @@ describe('重排接线', () => {
       const bodyOnly = `${ROOT}/memories/rerank-body.md`;
       await created.services.filesystem.write(
         Uri.parse(bodyOnly),
-        '上下文记忆数据库的正文兜底。',
+        '上下文记忆数据库的正文兜底。', AUTH_PRINCIPALS,
       );
       await created.services.indexObserver.drain();
 

@@ -9,6 +9,15 @@
  * 报错」，写路径用 `assert` 直接抛 `PERMISSION_DENIED`。两者语义不同，不能合并成
  * 一个返回布尔值的方法让调用方各自 if。
  *
+ * ## 身份是参数，不是构造期绑定
+ *
+ * 三个方法都收 `principals`：一次请求展开后的主体集合（`user:{uid}` +
+ * `group:{gid}` + `user:*`）。装配期绑定身份是 v1 单用户的遗留——服务图只有
+ * 一份，而多用户部署里每个请求的身份不同。把它改成参数，求值层就不需要「每请求
+ * 一份服务图」。
+ *
+ * **不传 principals 的调用点不存在**：没有默认值，漏传在类型检查期就报错。
+ *
  * 列表语义（§12.4）：无权限节点**完全不出现**，不返回「存在但无权」的占位。
  * 文件名和摘要本身就是信息，占位等于泄露。
  */
@@ -22,7 +31,7 @@ export type AclAction = AclLevel;
 
 export interface Authorizer {
   /** 单个节点求权。 */
-  check(uri: Uri, action: AclAction): Promise<boolean>;
+  check(uri: Uri, action: AclAction, principals: readonly string[]): Promise<boolean>;
 
   /**
    * 批量求权，返回有权限的 URI 字符串集合。
@@ -30,10 +39,13 @@ export interface Authorizer {
    * 用字符串集合而不是 `Uri` 集合：调用方大多刚从 `ContentStore` 拿到字符串形态的
    * 节点标识，用 `Uri.toString()` 查表不用每次重建值对象。
    */
-  filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>>;
+  filterReadable(
+    uris: readonly Uri[],
+    principals: readonly string[],
+  ): Promise<ReadonlySet<string>>;
 
   /** 求权失败抛 `PERMISSION_DENIED` 的便捷包装。 */
-  assert(uri: Uri, action: AclAction): Promise<void>;
+  assert(uri: Uri, action: AclAction, principals: readonly string[]): Promise<void>;
 }
 
 /** 级别的人类可读名，只用于错误消息。 */

@@ -74,12 +74,12 @@ export const listTool: McpToolDefinition = {
 
     const entries = recursive
       ? (
-          await context.filesystem.tree(uri, {
+          await context.filesystem.tree(uri, context.principals, {
             depth: RECURSIVE_DEPTH,
             limit: RECURSIVE_LIMIT,
           })
         ).entries
-      : await context.filesystem.list(uri);
+      : await context.filesystem.list(uri, context.principals);
 
     const sorted = [...entries].sort((left, right) => compareEntries(left, right, sortBy));
     const page = sorted.slice(offset, limit < 0 ? undefined : offset + limit);

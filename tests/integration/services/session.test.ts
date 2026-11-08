@@ -25,6 +25,8 @@ import { FileSystemService } from '../../../src/services/filesystem.js';
 import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const SCOPE_ROOT = 'comem://user/alice';
 
 /** 架构文档 §10.2.1 的默认策略；各用例只覆盖需要变化的字段。 */
@@ -127,7 +129,6 @@ beforeEach(async () => {
     permissions: new PermissionRepository({ db, logger }),
     nodes: new NodeRepository({ db, logger }),
     logger,
-    subject: 'user:alice',
   });
   await acl.ensureRootPreset(Uri.parse(SCOPE_ROOT));
   authorizer = new InheritingAuthorizer(acl, store);
@@ -144,12 +145,12 @@ afterEach(async () => {
 
 describe('create / load', () => {
   it('建完之后 list(sessions) 能看到会话目录，且它有自己的物化权限行', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
 
     // 会话服务直接写 `ContentStore`，观察者收不到通知。物化权限漏掉时
     // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空——
     // 会话建成功了，列表里却没有。
-    const listed = await filesystem.list(Uri.parse(`${SCOPE_ROOT}/sessions`));
+    const listed = await filesystem.list(Uri.parse(`${SCOPE_ROOT}/sessions`), AUTH_PRINCIPALS);
     expect(listed.map((entry) => entry.uri.toString())).toContain(sessionUri.toString());
 
     const rows = db
@@ -159,7 +160,7 @@ describe('create / load', () => {
   });
 
   it('建目录、空 messages.jsonl 与 .meta.json', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
 
     expect(sessionUri.toString()).toMatch(
       /^comem:\/\/user\/alice\/sessions\/sess_[0-9a-f]{8}$/,
@@ -189,7 +190,7 @@ describe('create / load', () => {
   });
 
   it('可以指定 sessionId（幂等重放时复用同一个会话）', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), { sessionId: 'sess_manual' });
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, { sessionId: 'sess_manual' });
 
     expect(sessionUri.toString()).toBe(`${SCOPE_ROOT}/sessions/sess_manual`);
   });
@@ -203,7 +204,7 @@ describe('create / load', () => {
 
 describe('addMessage', () => {
   it('追加 JSONL 并累加 turn 与 pendingTokens', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
 
     const first = await service.addMessage(sessionUri, message('m1', '第一句'));
     const second = await service.addMessage(sessionUri, message('m2', '第二句'));
@@ -228,7 +229,7 @@ describe('addMessage', () => {
 
 describe('commitPhase1', () => {
   it('六步落盘：messages.jsonl 在 .meta.json 之前写，phase1 从 preparing 到 ready，不写 .done', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1', '记得用严格模式'));
     await service.addMessage(sessionUri, message('m2', '好的'));
 
@@ -281,7 +282,7 @@ describe('commitPhase1', () => {
   });
 
   it('归档文件是 JSONL：一行一条消息，不是 JSON 数组', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
     await service.addMessage(sessionUri, message('m2'));
 
@@ -297,7 +298,7 @@ describe('commitPhase1', () => {
   });
 
   it('sha256 记录归档消息的摘要；篡改后摘要对不上', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
 
     const result = await service.commitPhase1(sessionUri);
@@ -311,7 +312,7 @@ describe('commitPhase1', () => {
   });
 
   it('归档序号单调递增，删除中间的归档后不复用被删编号', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     const archiveIds: string[] = [];
     for (let index = 1; index <= 3; index += 1) {
       await service.addMessage(sessionUri, message(`m${index}`));
@@ -328,7 +329,7 @@ describe('commitPhase1', () => {
   it('删掉最新的归档后也不复用它的编号', async () => {
     // 这条是「从 history/ 最大序号 + 1」的回归：那种实现删掉最新的归档之后，
     // 下一个归档会重新拿到同一个编号，两条不同的归档指向同一个名字。
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     for (let index = 1; index <= 2; index += 1) {
       await service.addMessage(sessionUri, message(`m${index}`));
       await service.commitPhase1(sessionUri);
@@ -342,7 +343,7 @@ describe('commitPhase1', () => {
 
   it('keepRecentCount = 2 时 5 条消息归档 3 条、live 留 2 条', async () => {
     service = createService({ keepRecentCount: 2 });
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     for (let index = 1; index <= 5; index += 1) {
       await service.addMessage(sessionUri, message(`m${index}`, `第 ${index} 条`));
     }
@@ -361,7 +362,7 @@ describe('commitPhase1', () => {
   });
 
   it('空会话提交被拒绝（INVALID_ARGUMENT）', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
 
     await expect(service.commitPhase1(sessionUri)).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
@@ -371,7 +372,7 @@ describe('commitPhase1', () => {
 
   it('keepRecentCount 覆盖全部消息时也拒绝（归档 0 条没有意义）', async () => {
     service = createService({ keepRecentCount: 10 });
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
 
     await expect(service.commitPhase1(sessionUri)).rejects.toMatchObject({
@@ -382,7 +383,7 @@ describe('commitPhase1', () => {
 
 describe('重放', () => {
   it('preparing 的归档不被当成完整：重放时补完同一个归档', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1', '第一句'));
     await service.addMessage(sessionUri, message('m2', '第二句'));
 
@@ -422,7 +423,7 @@ describe('重放', () => {
   });
 
   it('崩溃在步骤 1 与 2 之间（只有空目录）时删掉重来', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await store.mkdir(sessionUri.child('history', 'archive_001'), { recursive: true });
     await service.addMessage(sessionUri, message('m1'));
 
@@ -465,7 +466,7 @@ describe('readArchiveMeta / writeArchiveMeta', () => {
 
 describe('并发', () => {
   it('addMessage 与 commitPhase1 并发执行不丢消息', async () => {
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
 
     const operations: Promise<unknown>[] = [];
     for (let index = 0; index < 20; index += 1) {
@@ -502,7 +503,7 @@ describe('并发', () => {
 describe('shouldAutoCommit', () => {
   it('消息数超过阈值时触发', async () => {
     service = createService({ messageCountThreshold: 0 });
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
 
     expect(service.shouldAutoCommit(await service.load(sessionUri), new Date())).toBe(true);
@@ -510,7 +511,7 @@ describe('shouldAutoCommit', () => {
 
   it('enabled = false 时永不触发', async () => {
     const disabled = createService({ enabled: false, messageCountThreshold: 0 });
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
 
     expect(disabled.shouldAutoCommit(await service.load(sessionUri), new Date())).toBe(false);
@@ -518,7 +519,7 @@ describe('shouldAutoCommit', () => {
 
   it('最小提交间隔内不触发（限速器是全局闸门）', async () => {
     service = createService({ messageCountThreshold: 0, minCommitIntervalSeconds: 100 });
-    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
     await service.addMessage(sessionUri, message('m1'));
 
     const session = {

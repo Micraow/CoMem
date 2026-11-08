@@ -275,7 +275,7 @@ export async function assertSubjectScope(
   action: AclAction,
 ): Promise<Uri> {
   const scope = subjectScope(context);
-  await context.acl.assert(scope, action);
+  await context.acl.assert(scope, action, context.principals);
   return scope;
 }
 
@@ -294,13 +294,13 @@ export async function readScopes(
 ): Promise<readonly string[]> {
   if (targetUri !== undefined) {
     const uri = Uri.parse(targetUri);
-    await context.acl.assert(uri, READ);
+    await context.acl.assert(uri, READ, context.principals);
     return [uri.toString()];
   }
 
   // 个人根必须可读：读不到自己的空间是身份或装配错误，不是「范围为空」。
   const personal = subjectScope(context);
-  await context.acl.assert(personal, READ);
+  await context.acl.assert(personal, READ, context.principals);
 
   // 组根按可读性过滤：退组后 `principals` 里没有这个组；组根尚未预置 ACL 时
   // 也不该让整次查询失败——那只是「这个组没有可查的内容」。
@@ -311,7 +311,7 @@ export async function readScopes(
       continue;
     }
     const uri = Uri.parse(`comem://group/${parsed.id}`);
-    if (await context.acl.check(uri, READ)) {
+    if (await context.acl.check(uri, READ, context.principals)) {
       scopes.add(uri.toString());
     }
   }

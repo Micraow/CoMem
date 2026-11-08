@@ -18,6 +18,8 @@ import {
 } from '../../../src/services/authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 
+const AUTH_PRINCIPALS: readonly string[] = [];
+
 let dataDir: string;
 let store: ContentStore;
 let metadata: MetadataFileStore;
@@ -103,7 +105,7 @@ describe('readOverview', () => {
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(DIRECTORY.toString())).resolves.toBe('L1 概览正文');
+    await expect(assembler.ports.readOverview(DIRECTORY.toString(), AUTH_PRINCIPALS)).resolves.toBe('L1 概览正文');
   });
 
   it('文件候选拿不到目录的 L1，降级成自己的骨架', async () => {
@@ -113,14 +115,14 @@ describe('readOverview', () => {
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBe('标题\n\n原文正文');
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('标题\n\n原文正文');
   });
 
   it('L1 缺失时用「标题树 + 首段」降级', async () => {
     await writeBody(BODY, ['# 标题', '', '首段。', '', '## 子标题', '', '其余。'].join('\n'));
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBe('标题\n  子标题\n\n首段。');
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('标题\n  子标题\n\n首段。');
   });
 
   it('摘要文件存在但正文为空时同样降级', async () => {
@@ -128,19 +130,19 @@ describe('readOverview', () => {
     await metadata.writeSummary(DIRECTORY, '一句话摘要', '');
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBe('首段。');
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('首段。');
   });
 
   it('摘要与正文都没有时返回 null', async () => {
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBeNull();
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
   });
 
   it('正文只有标题时返回标题树', async () => {
     await writeBody(BODY, '# 只有标题');
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBe('只有标题');
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('只有标题');
   });
 
   it('无权限时返回 null，且不读文件', async () => {
@@ -148,7 +150,7 @@ describe('readOverview', () => {
     const spy = vi.spyOn(store, 'readText');
 
     const assembler = createAssembler({ authorizer: new DenyAllAuthorizer() });
-    await expect(assembler.ports.readOverview(BODY)).resolves.toBeNull();
+    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -157,14 +159,14 @@ describe('readOverview', () => {
     const check = vi.spyOn(authorizer, 'check');
 
     const assembler = createAssembler({ authorizer });
-    await assembler.ports.readOverview(BODY);
+    await assembler.ports.readOverview(BODY, AUTH_PRINCIPALS);
     expect(check).toHaveBeenCalledTimes(1);
     expect((check.mock.calls[0]?.[0] as Uri).toString()).toBe(BODY);
   });
 
   it('URI 无法解析时返回 null', async () => {
     const assembler = createAssembler();
-    await expect(assembler.ports.readOverview('not-a-uri')).resolves.toBeNull();
+    await expect(assembler.ports.readOverview('not-a-uri', AUTH_PRINCIPALS)).resolves.toBeNull();
   });
 });
 
@@ -175,26 +177,26 @@ describe('readBody', () => {
     });
 
     const assembler = createAssembler();
-    await expect(assembler.ports.readBody(BODY)).resolves.toBe('正文');
+    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBe('正文');
   });
 
   it('读不到原文返回 null，不抛错', async () => {
     const assembler = createAssembler();
-    await expect(assembler.ports.readBody(BODY)).resolves.toBeNull();
+    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
   });
 
   it('目标是目录时返回 null', async () => {
     await writeBody(BODY, '正文');
     const assembler = createAssembler();
 
-    await expect(assembler.ports.readBody(DIRECTORY.toString())).resolves.toBeNull();
+    await expect(assembler.ports.readBody(DIRECTORY.toString(), AUTH_PRINCIPALS)).resolves.toBeNull();
   });
 
   it('无权限时返回 null', async () => {
     await writeBody(BODY, '正文');
     const assembler = createAssembler({ authorizer: new DenyAllAuthorizer() });
 
-    await expect(assembler.ports.readBody(BODY)).resolves.toBeNull();
+    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
   });
 });
 
@@ -228,7 +230,7 @@ describe('assemble', () => {
     const result = await assembler.assemble([candidate(BODY, { abstract: '一句话摘要' })], {
       maxTokens: 10_000,
       quotaPreset: 'chat',
-    });
+    }, AUTH_PRINCIPALS);
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.detail).toBe('full');
@@ -246,7 +248,7 @@ describe('assemble', () => {
         candidate(BODY, { level: 'L0', abstract: '一句话摘要' }),
         candidate(BODY, { level: 'L2', score: 0.5, abstract: '一句话摘要' }),
       ],
-      { maxTokens: 10_000, quotaPreset: 'chat' },
+      { maxTokens: 10_000, quotaPreset: 'chat' }, AUTH_PRINCIPALS,
     );
 
     // 概览一次（骨架要读原文），全文一次；两个候选不产生额外 IO。
@@ -276,7 +278,7 @@ describe('assemble', () => {
     const assembler = createAssembler({ readConcurrency: 2 });
     await assembler.assemble(
       uris.map((uri) => candidate(uri)),
-      { maxTokens: 100_000, quotaPreset: 'chat' },
+      { maxTokens: 100_000, quotaPreset: 'chat' }, AUTH_PRINCIPALS,
     );
 
     expect(peak).toBe(2);
@@ -303,7 +305,7 @@ describe('assemble', () => {
     const assembler = createAssembler({ readConcurrency: 1 });
     await assembler.assemble(
       uris.map((uri) => candidate(uri)),
-      { maxTokens: 100_000, quotaPreset: 'chat' },
+      { maxTokens: 100_000, quotaPreset: 'chat' }, AUTH_PRINCIPALS,
     );
 
     expect(peak).toBe(1);
@@ -319,7 +321,7 @@ describe('assemble', () => {
     const result = await assembler.assemble([candidate(BODY, { abstract: null })], {
       maxTokens: 10_000,
       quotaPreset: 'chat',
-    });
+    }, AUTH_PRINCIPALS);
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.detail).toBeNull();

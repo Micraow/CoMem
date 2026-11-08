@@ -439,7 +439,7 @@ export class ResourceService {
       // 放在 `index.upsert` 之后：`materializeNode` 从 `node` 表读 kind 决定链的
       // 起点。索引写失败时仍然要物化——权限是独立的派生数据，而且 `kind` 缺失时
       // 的兜底（按目录算）得到的是同一条有效权限。
-      await this.#materialize([...written, ...attachments]);
+      await this.#materialize([...written, ...attachments], options.principals);
     });
 
     // §10.6 第 3 步：提交后统一投递摘要重算，每个父目录一次。
@@ -634,7 +634,10 @@ export class ResourceService {
    *
    * 失败只记日志 + 对账：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
    */
-  async #materialize(uris: readonly Uri[]): Promise<void> {
+  async #materialize(
+    uris: readonly Uri[],
+    principals: readonly string[],
+  ): Promise<void> {
     const directories = new Map<string, Uri>();
     for (const uri of uris) {
       let current: Uri | null = uri;
@@ -651,7 +654,7 @@ export class ResourceService {
 
     for (const [key, uri] of directories) {
       try {
-        await this.#authorizer.assert(uri, WRITE);
+        await this.#authorizer.assert(uri, WRITE, principals);
       } catch (error) {
         const reason = errorMessage(error);
         this.#logger.error('资源节点权限物化失败，已忽略。', { uri: key, reason });

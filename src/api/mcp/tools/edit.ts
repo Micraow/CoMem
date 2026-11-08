@@ -44,7 +44,7 @@ export const editTool: McpToolDefinition = {
 
     const applied = replaceAll
       ? await replaceEverywhere(context, uri, oldString, newString)
-      : (await context.filesystem.edit(uri, [{ search: oldString, replace: newString }])).applied;
+      : (await context.filesystem.edit(uri, [{ search: oldString, replace: newString }], context.principals)).applied;
 
     const index = await indexStatus(context, uri, 'indexed');
     context.logger.debug('MCP edit 完成', {
@@ -71,7 +71,7 @@ async function replaceEverywhere(
   oldString: string,
   newString: string,
 ): Promise<number> {
-  const document = await context.filesystem.read(uri);
+  const document = await context.filesystem.read(uri, context.principals);
   const applied = document.text.split(oldString).length - 1;
   if (applied === 0) {
     throw new ComemError('INVALID_ARGUMENT', `补丁应用失败：没有命中 ${oldString}`, {
@@ -79,7 +79,7 @@ async function replaceEverywhere(
       reason: 'not_found',
     });
   }
-  await context.filesystem.write(uri, document.text.split(oldString).join(newString), {
+  await context.filesystem.write(uri, document.text.split(oldString).join(newString), context.principals, {
     expectedDigest: stableDigest(document.text),
   });
   return applied;

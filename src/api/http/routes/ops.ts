@@ -54,14 +54,17 @@ function statusOf(ruleGenerator: boolean, degradedSummaries: number): HealthStat
  */
 async function readableScopes(
   acl: AclService,
-  subject: string,
-  groups: readonly string[],
+  principals: readonly string[],
 ): Promise<readonly string[]> {
   const scopes: string[] = [];
-  for (const principal of [subject, ...groups]) {
+  for (const principal of principals) {
     const parsed = parsePrincipal(principal);
+    // `user:*` 是通配主体，它不是一条可寻址的根——`comem://user/*` 不是合法 URI。
+    if (parsed.id === '*') {
+      continue;
+    }
     const uri = Uri.parse(`comem://${parsed.kind}/${parsed.id}`);
-    if (await acl.check(uri, 1)) {
+    if (await acl.check(uri, 1, principals)) {
       scopes.push(uri.toString());
     }
   }
@@ -82,7 +85,7 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
           status: statusOf(ruleGenerator, health.degradedSummaries),
           // 控制台的身份引导读这两个字段（§16）；与 MCP `health` 的字段同名同义。
           subject,
-          scopes: await readableScopes(acl, subject, groups),
+          scopes: await readableScopes(acl, acl.resolvePrincipals(subject, groups)),
           index: { nodes: health.indexNodes },
           queue: {
             pending: tasks.countByStatus('pending'),

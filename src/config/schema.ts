@@ -304,6 +304,39 @@ const configObjectSchema = z.object({
     })
     .prefault({}),
 
+  auth: z
+    .object({
+      /**
+       * 是否启用多用户认证（架构文档 §12.7）。
+       *
+       * **默认 false = v1 单用户行为**：身份由反向代理注入 `x-comem-subject`，
+       * 且必须等于 `server.subject`，否则 401。现有部署与测试全部依赖这条路径，
+       * 打开它是一次显式的部署选择。
+       *
+       * 打开后 `x-comem-subject` **被忽略**，必须带
+       * `Authorization: Bearer <session token>` 或 `Authorization: Bearer comem_...`
+       * （API key）。缺失或非法一律 401 `UNAUTHENTICATED`。
+       */
+      enabled: z.boolean().default(false),
+      /**
+       * session token 的 HMAC 密钥。
+       *
+       * 留空时进程启动生成随机值：**重启即失效**，多实例部署必须显式配置同一个
+       * 值，否则一个实例签发的 token 在另一个实例上校验失败。这是「单机默认可用、
+       * 多实例必须配置」的取舍，不提供静默降级。
+       */
+      sessionSecret: z.string().default(''),
+      /**
+       * session token 有效期，秒。默认 86400（一天）。
+       *
+       * 来源：一天是「agent 长任务跑得完、泄露窗口又可接受」的常见经验值；
+       * 不是测量结果。API key 的有效期由创建时的 `expiresAt` 单独控制，不受
+       * 这个值影响。
+       */
+      sessionTtlSeconds: z.number().int().positive().default(86400),
+    })
+    .prefault({}),
+
   logging: z
     .object({
       level: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),

@@ -37,6 +37,8 @@ import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 import { TtlService } from '../../../src/services/ttl.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const SCOPE = 'comem://user/alice';
 
 /** 架构文档 §10.2.1 的默认策略；各用例只覆盖需要变化的字段。 */
@@ -204,7 +206,7 @@ afterEach(async () => {
 describe('自动提交', () => {
   it('超过 token 阈值后提交一次：归档目录出现，live 只剩 keepRecentCount 条', async () => {
     const session = createSession({ pendingTokenThreshold: 100, keepRecentCount: 2 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     for (let index = 0; index < 4; index += 1) {
       // 每条 140 个汉字 ≈ 140 token，超过阈值 100。
       await session.addMessage(sessionUri, message(`m${index}`, '记得用严格模式'.repeat(20)));
@@ -230,7 +232,7 @@ describe('自动提交', () => {
 
   it('提交后建了归档任务（阶段二执行器靠它）', async () => {
     const session = createSession({ messageCountThreshold: 0 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
 
     await createScheduler({ sessions: session }).scheduler.tick();
@@ -240,7 +242,7 @@ describe('自动提交', () => {
 
   it('minCommitIntervalSeconds 内不再提交：归档不会碎成一堆', async () => {
     const session = createSession({ messageCountThreshold: 0, minCommitIntervalSeconds: 3600 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
 
     const { scheduler } = createScheduler({ sessions: session });
@@ -259,7 +261,7 @@ describe('自动提交', () => {
     // 一条超长消息也会满足 token 阈值，而 `commitPhase1` 对「归档 0 条」抛
     // INVALID_ARGUMENT。按 error 记会每 30 秒写一行，把真正的故障埋掉。
     const session = createSession({ pendingTokenThreshold: 100, keepRecentCount: 10 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1', '记得用严格模式'.repeat(20)));
 
     const result = await createScheduler({ sessions: session }).scheduler.tick();
@@ -274,7 +276,7 @@ describe('自动提交', () => {
 
   it('已归档的会话不再自动提交', async () => {
     const session = createSession({ messageCountThreshold: 0 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
     await session.archive(sessionUri);
 
@@ -287,7 +289,7 @@ describe('自动提交', () => {
 describe('会话过期', () => {
   it('archive（默认）：只改 status，消息与归档都还在', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1', '这条消息不该丢'));
 
     const { scheduler } = createScheduler({
@@ -302,7 +304,7 @@ describe('会话过期', () => {
 
   it('archive 幂等：已归档的会话不重复计数', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
 
     const { scheduler } = createScheduler({
@@ -315,7 +317,7 @@ describe('会话过期', () => {
 
   it('delete：物理删除会话目录，日志里带「删了什么」', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
     await session.addMessage(sessionUri, message('m2'));
 
@@ -334,7 +336,7 @@ describe('会话过期', () => {
 
   it('delete 跳过有 pending 记忆来源的会话，并记 warn', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
     const archiveUri = sessionUri.child('history', 'archive_001');
     await store.mkdir(archiveUri, { recursive: true });
@@ -357,7 +359,7 @@ describe('会话过期', () => {
 
   it('delete 只在记忆仍是 pending 时跳过：已复核的记忆不挡删除', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
     await store.mkdir(sessionUri.child('history', 'archive_001'), { recursive: true });
     await writeMemoryDiff(sessionUri, 'archive_001', [
@@ -374,7 +376,7 @@ describe('会话过期', () => {
 
   it('memory_diff.json 读不出来时保守跳过删除（无法证明安全）', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
     await store.mkdir(sessionUri.child('history', 'archive_001'), { recursive: true });
     await writeFile(
@@ -398,7 +400,7 @@ describe('会话过期', () => {
 
   it('idleTimeoutSeconds = 0（默认）时永不过期', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
 
     const result = await createScheduler().scheduler.tick();
@@ -409,7 +411,7 @@ describe('会话过期', () => {
 
   it('从没写过消息、也没提交过的会话没有「空闲」参照点，不过期', async () => {
     const session = createSession();
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
 
     const result = await createScheduler({
       expiry: { idleTimeoutSeconds: 1, action: 'archive' },
@@ -449,7 +451,7 @@ describe('TTL 清扫', () => {
 
   it('清扫失败只记日志，不影响这一轮的其它动作', async () => {
     const session = createSession({ messageCountThreshold: 0 });
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m1'));
 
     const { scheduler } = createScheduler({
@@ -473,9 +475,9 @@ describe('TTL 清扫', () => {
 describe('健壮性与关闭', () => {
   it('一个会话的元数据坏掉不影响其它会话', async () => {
     const session = createSession({ messageCountThreshold: 0 });
-    const good = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_good' });
+    const good = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_good' });
     await session.addMessage(good, message('m1'));
-    const bad = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_bad' });
+    const bad = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_bad' });
     await writeFile(join(sessionDirectory(bad), '.meta.json'), '{不是 JSON', 'utf8');
 
     const { scheduler } = createScheduler({ sessions: session });
@@ -490,7 +492,7 @@ describe('健壮性与关闭', () => {
 
   it('建了一半的会话（有目录、没有 .meta.json）被跳过，不记错误', async () => {
     const session = createSession();
-    await session.create(Uri.parse(SCOPE), { sessionId: 'sess_half' });
+    await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_half' });
     await rm(join(sessionDirectory(Uri.parse(`${SCOPE}/sessions/sess_half`)), '.meta.json'));
 
     const result = await createScheduler().scheduler.tick();

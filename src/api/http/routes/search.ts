@@ -256,7 +256,7 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
         const contextLines = optionalInteger(body, 'contextLines', 3, { min: 0 });
 
-        await authorizer.assert(uri, READ);
+        await authorizer.assert(uri, READ, context.principals);
         const hits = await search.grep(pattern, {
           scopes: [uri.toString()],
           subject: context.subject,
@@ -274,7 +274,7 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const pattern = requireString(body, 'pattern');
         const limit = optionalInteger(body, 'limit', 100, { min: 1 });
 
-        await authorizer.assert(uri, READ);
+        await authorizer.assert(uri, READ, context.principals);
         const files = await search.glob(pattern, {
           scopes: [uri.toString()],
           subject: context.subject,

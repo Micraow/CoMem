@@ -44,7 +44,7 @@ export const treeTool: McpToolDefinition = {
     const levelLimit = nonNegativeInteger(args, 'levelLimit', DEFAULT_LEVEL_LIMIT, 'tree');
     const includeAbstract = optionalBoolean(args, 'includeAbstract', false, 'tree');
 
-    const result = await context.filesystem.tree(uri, { depth: levelLimit, limit: TREE_LIMIT });
+    const result = await context.filesystem.tree(uri, context.principals, { depth: levelLimit, limit: TREE_LIMIT });
     const lines = [uri.toStringAsDirectory()];
     for (const entry of result.entries) {
       const depth = Math.max(1, entry.uri.segments.length - uri.segments.length);

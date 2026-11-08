@@ -601,6 +601,7 @@ async function runWithConfig(
     const service = new IngestService({
       sources: createSources(config, logger),
       scopeUri: scopeUriOf(config.server.subject),
+      principals: [config.server.subject, 'user:*'],
       logger,
       batchSize: config.ingest.batchSize,
       extractionBatchSize: config.ingest.extractionBatchSize,

@@ -204,6 +204,8 @@ export interface IngestReport {
 export interface IngestServiceOptions {
   readonly sources: readonly LogSource[];
   readonly scopeUri: Uri;
+  /** 导入以绑定主体的身份写会话；展开后的主体集合（含 `user:*`）。 */
+  readonly principals: readonly string[];
   readonly logger: Logger;
   readonly batchSize: number;
   /**
@@ -314,6 +316,7 @@ function isBefore(value: string | null, since: string): boolean {
 export class IngestService {
   readonly #sources: readonly LogSource[];
   readonly #scopeUri: Uri;
+  readonly #principals: readonly string[];
   readonly #logger: Logger;
   readonly #batchSize: number;
   readonly #sessions: IngestServiceOptions['sessions'];
@@ -346,6 +349,7 @@ export class IngestService {
     }
     this.#sources = options.sources;
     this.#scopeUri = options.scopeUri;
+    this.#principals = options.principals;
     this.#logger = options.logger;
     this.#batchSize = options.batchSize;
     this.#sessions = options.sessions;
@@ -695,7 +699,7 @@ export class IngestService {
       return current;
     }
     const sessions = this.#requireWriter();
-    const created = await sessions.create(this.#scopeUri);
+    const created = await sessions.create(this.#scopeUri, this.#principals);
     onCreated();
     return created;
   }

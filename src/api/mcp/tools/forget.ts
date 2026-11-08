@@ -34,14 +34,14 @@ export const forgetTool: McpToolDefinition = {
     const uri = Uri.parse(requiredString(args, 'uri', 'forget'));
     const recursive = optionalBoolean(args, 'recursive', false, 'forget');
 
-    const stat = await context.filesystem.stat(uri);
+    const stat = await context.filesystem.stat(uri, context.principals);
     if (stat === null) {
       throw new ComemError('NOT_FOUND', `要删除的节点不存在：${uri.toString()}`, {
         uri: uri.toString(),
       });
     }
     if (!recursive && stat.kind === 'directory') {
-      const children = await context.filesystem.list(uri);
+      const children = await context.filesystem.list(uri, context.principals);
       if (children.length > 0) {
         throw new ComemError(
           'INVALID_ARGUMENT',
@@ -51,7 +51,7 @@ export const forgetTool: McpToolDefinition = {
       }
     }
 
-    const removed = await context.filesystem.remove(uri);
+    const removed = await context.filesystem.remove(uri, context.principals);
     const index = await indexStatus(context, uri, 'removed');
     context.logger.info('MCP forget 完成', {
       requestId: context.requestId,

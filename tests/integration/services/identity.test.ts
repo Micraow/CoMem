@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiKeyRepository } from '../../../src/adapters/sqlite/api-key-repository.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
 import { UserRepository } from '../../../src/adapters/sqlite/user-repository.js';
@@ -54,7 +55,14 @@ beforeEach(() => {
   const logger = createLogger();
   users = new UserRepository({ db, logger });
   groups = new GroupRepository({ db, logger });
-  service = new IdentityService({ users, groups, logger });
+  const apiKeys = new ApiKeyRepository({ db, logger });
+  service = new IdentityService({
+    users,
+    groups,
+    apiKeys,
+    namespace: { ensure: async () => {} },
+    logger,
+  });
 });
 
 afterEach(() => {
@@ -68,7 +76,7 @@ describe('createUser / resolve', () => {
     expect(created.createdAt).toBe(NOW.toISOString());
     expect(created.email).toBeNull();
     expect(created.status).toBe('active');
-    expect(service.resolve('user:alice')).toEqual({
+    expect(service.resolveSubject('user:alice')).toEqual({
       userId: 'alice',
       principals: ['user:alice'],
     });
@@ -88,37 +96,37 @@ describe('createUser / resolve', () => {
     service.addMember('ops', 'alice', 'member', NOW);
     service.addMember('eng', 'alice', 'member', NOW);
 
-    const identity = service.resolve('user:alice');
+    const identity = service.resolveSubject('user:alice');
     expect(identity?.principals).toEqual(['group:eng', 'group:ops', 'user:alice']);
     // 同一份成员关系重复展开得到同一个数组（可重放）。
-    expect(service.resolve('user:alice')?.principals).toEqual(identity?.principals);
+    expect(service.resolveSubject('user:alice')?.principals).toEqual(identity?.principals);
   });
 
   it('resolve 不存在的用户返回 null', () => {
-    expect(service.resolve('user:missing')).toBeNull();
+    expect(service.resolveSubject('user:missing')).toBeNull();
   });
 
   it('resolve 对 disabled 用户返回 null', () => {
     createUser('alice');
     service.updateUser('alice', { status: 'disabled' }, LATER);
 
-    expect(service.resolve('user:alice')).toBeNull();
+    expect(service.resolveSubject('user:alice')).toBeNull();
 
     service.updateUser('alice', { status: 'active' }, LATER);
-    expect(service.resolve('user:alice')).not.toBeNull();
+    expect(service.resolveSubject('user:alice')).not.toBeNull();
   });
 
   it('resolve 对畸形主体返回 null 而不是抛错', () => {
     for (const subject of ['bad subject', 'alice', '', 'user:', 'user:alice:extra', 'admin:alice']) {
-      expect(service.resolve(subject), subject).toBeNull();
+      expect(service.resolveSubject(subject), subject).toBeNull();
     }
   });
 
   it('resolve 只接受 user 主体，user:* 不是真实用户', () => {
     createGroup('eng');
 
-    expect(service.resolve('group:eng')).toBeNull();
-    expect(service.resolve('user:*')).toBeNull();
+    expect(service.resolveSubject('group:eng')).toBeNull();
+    expect(service.resolveSubject('user:*')).toBeNull();
   });
 });
 
@@ -198,7 +206,7 @@ describe('组管理', () => {
     service.deleteGroup('ops');
 
     expect(service.getGroup('ops')).toBeNull();
-    expect(service.resolve('user:alice')?.principals).toEqual(['group:eng', 'user:alice']);
+    expect(service.resolveSubject('user:alice')?.principals).toEqual(['group:eng', 'user:alice']);
     expectCode('NOT_FOUND', () => service.deleteGroup('ops'));
   });
 });
@@ -236,5 +244,111 @@ describe('成员管理', () => {
 
   it('listMembers 对不存在的组抛 NOT_FOUND', () => {
     expectCode('NOT_FOUND', () => service.listMembers('missing'));
+  });
+});
+
+describe('认证', () => {
+  beforeEach(() => {
+    createUser('alice');
+  });
+
+  it('密码登录展开 user:{uid} 与 group 主体，末尾带通配符', async () => {
+    createGroup('eng');
+    service.addMember('eng', 'alice', 'member', NOW);
+    await service.setPassword('alice', 'correct-password');
+
+    await expect(
+      service.resolve({ kind: 'password', username: 'alice', password: 'correct-password' }),
+    ).resolves.toEqual({
+      subject: 'user:alice',
+      principals: ['group:eng', 'user:alice', 'user:*'],
+      apiKeyId: null,
+    });
+  });
+
+  it('密码错误、账号不存在、未设密码都是 UNAUTHENTICATED', async () => {
+    await service.setPassword('alice', 'correct-password');
+    for (const credential of [
+      { kind: 'password' as const, username: 'alice', password: 'wrong' },
+      { kind: 'password' as const, username: 'missing', password: 'correct-password' },
+      { kind: 'password' as const, username: 'alice', password: '' },
+    ]) {
+      await expect(service.resolve(credential)).rejects.toMatchObject({
+        code: 'UNAUTHENTICATED',
+      });
+    }
+  });
+
+  it('禁用账号即使密码正确也不通过', async () => {
+    await service.setPassword('alice', 'correct-password');
+    service.updateUser('alice', { status: 'disabled' }, NOW);
+
+    await expect(
+      service.resolve({ kind: 'password', username: 'alice', password: 'correct-password' }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  it('API Key 认证带出 keyId；撤销后立即失效', async () => {
+    const { raw, record } = await service.createApiKey('alice', { name: 'ci' });
+
+    await expect(service.resolve({ kind: 'api-key', apiKey: raw })).resolves.toEqual({
+      subject: 'user:alice',
+      principals: ['user:alice', 'user:*'],
+      apiKeyId: record.id,
+    });
+
+    service.revokeApiKey(record.id);
+    await expect(service.resolve({ kind: 'api-key', apiKey: raw })).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+    });
+  });
+
+  it('过期的 API Key 不通过', async () => {
+    const { raw } = await service.createApiKey('alice', {
+      name: 'expired',
+      expiresAt: new Date(NOW.getTime() - 1000).toISOString(),
+    });
+
+    await expect(service.resolve({ kind: 'api-key', apiKey: raw })).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+    });
+  });
+
+  it('格式不合法、前缀不存在的 API Key 都是 UNAUTHENTICATED', async () => {
+    for (const apiKey of ['comem_bad', 'comem_abcd1234_missing', 'not-a-key']) {
+      await expect(service.resolve({ kind: 'api-key', apiKey })).rejects.toMatchObject({
+        code: 'UNAUTHENTICATED',
+      });
+    }
+  });
+
+  it('列表不返回明文与哈希', async () => {
+    const { raw } = await service.createApiKey('alice', { name: 'ci' });
+    const keys = service.listApiKeys('alice');
+
+    expect(keys).toHaveLength(1);
+    expect(JSON.stringify(keys)).not.toContain(raw);
+    expect(JSON.stringify(keys)).not.toContain('keyHash');
+  });
+
+  it('退组立即生效：下一次 resolve 不再包含 group 主体', async () => {
+    createGroup('eng');
+    service.addMember('eng', 'alice', 'member', NOW);
+
+    const before = await service.resolve({ kind: 'session', userId: 'alice' });
+    expect(before.principals).toContain('group:eng');
+
+    service.removeMember('eng', 'alice');
+    const after = await service.resolve({ kind: 'session', userId: 'alice' });
+    expect(after.principals).not.toContain('group:eng');
+  });
+
+  it('删除用户时一并清掉它的 API Key', async () => {
+    const { raw } = await service.createApiKey('alice', { name: 'ci' });
+    service.deleteUser('alice');
+
+    await expect(service.resolve({ kind: 'api-key', apiKey: raw })).rejects.toMatchObject({
+      code: 'UNAUTHENTICATED',
+    });
   });
 });

@@ -79,6 +79,9 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
+| `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
+| `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
+| `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码不会提前失效已签发的 token |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
 | `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
 | `logging.level` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
@@ -131,6 +134,77 @@ pnpm check:config
 
 **遗留债务**：`LEGACY_OPTIONAL_CONFIG_DEPS` 记录 17 处已经存在的「配置值进入可选属性」。
 清单只允许缩小，新增项直接报错。全部改必填要动 10 个接口与 62 处构造点，排在后续 wave。
+
+## 多用户部署
+
+默认配置是单用户：身份来自反向代理注入的 `x-comem-subject`，且必须等于
+`server.subject`。要让多个用户各自登录，打开 `auth`：
+
+```yaml
+auth:
+  enabled: true
+  # 留空 = 进程随机值：重启后已签发的 token 全部失效。要跨重启保持登录就配一个
+  # 足够长的随机串（`openssl rand -base64 48`），并保证它不泄露。
+  sessionSecret: ""
+  sessionTtlSeconds: 86400
+```
+
+打开之后：
+
+- 所有非公开端点要求 `Authorization: Bearer <凭据>`，缺失或无效一律 401
+  `UNAUTHENTICATED`。
+- 凭据有两种：登录拿到的 session token，或 `POST /api/v1/admin/users/{id}/api-keys`
+  签发的 API Key（`comem_...`）。
+- `x-comem-subject` 被忽略。仍然拒绝 `group:` 主体——组永远不能当认证主体。
+
+### 建第一个账号
+
+`user:local`（或 `server.subject` 指定的主体）在启动时自动创建，但没有密码。
+管理面设密码的端点自己也要认证，全新实例没有任何凭据，所以第一次用命令：
+
+```bash
+# 密码从 stdin 读，不进 shell history / ps。
+printf '%s' '新密码' | pnpm password local
+```
+
+设好之后用登录端点换 token：
+
+```bash
+curl -sS http://127.0.0.1:1933/api/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"local","password":"..."}'
+```
+
+响应里的 `token` 就是后续请求的 `Authorization: Bearer <token>`。
+
+### 管理 API Key
+
+```bash
+# 签发（明文 key 只在这一次响应里出现）
+curl -sS http://127.0.0.1:1933/api/v1/admin/users/alice/api-keys \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"ci"}'
+
+# 列出（只有 prefix，永不回哈希）
+curl -sS http://127.0.0.1:1933/api/v1/admin/users/alice/api-keys \
+  -H "authorization: Bearer $TOKEN"
+
+# 撤销
+curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
+  -H "authorization: Bearer $TOKEN"
+```
+
+一把 key 就是那个用户的完整凭证，没有 scope。共享范围靠路径级 ACL（架构文档
+§12.5）。
+
+### 已知限制
+
+- **登出只是客户端丢弃 token。** token 是无状态 HMAC，服务端没有「已签发」的
+  表，无法提前作废。要立刻失效只能撤销 API Key 或改密码。
+- **改密码不会踢掉已签发的 session token。** 同上。
+- **`sessionSecret` 留空时重启会让所有登录失效。** 这是刻意的默认值：不配置就
+  不需要运维记住一个密钥，代价是重启后重新登录。
+- **组关系每请求查库。** 退组、加组立即生效，不需要重启。
 
 ## 提示词
 

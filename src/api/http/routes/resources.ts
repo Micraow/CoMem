@@ -149,7 +149,7 @@ export function createResourceRoutes(services: HttpRouteServices): HttpRouteGrou
         });
         const maxFiles = optionalInteger(body, 'maxFiles', 1000, { min: 1 });
 
-        await authorizer.assert(parentUri, WRITE);
+        await authorizer.assert(parentUri, WRITE, context.principals);
         const result = await resource.addResource({
           parentUri,
           files,

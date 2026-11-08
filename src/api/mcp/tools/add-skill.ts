@@ -68,7 +68,7 @@ export const addSkillTool: McpToolDefinition = {
     const files = recordArray(args, 'files', 'add_skill').map(toFileInput);
 
     // §12.4：安装技能是 write 出口。
-    await context.acl.assert(parentUri, WRITE);
+    await context.acl.assert(parentUri, WRITE, context.principals);
 
     const result = await context.skill.addSkill({
       parentUri,

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { ApiKeyRepository } from '../../../src/adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
@@ -25,6 +26,8 @@ import { Uri } from '../../../src/domain/uri.js';
 import { AclService } from '../../../src/services/acl.js';
 import type { Authorizer } from '../../../src/services/authorizer.js';
 import { IdentityService } from '../../../src/services/identity.js';
+
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
 
 let dataDir: string;
 let container: Container;
@@ -359,7 +362,7 @@ describe('删除账号的授权清理', () => {
     await container.services.acl.ensureRootPreset(aliceRoot);
     const child = aliceRoot.child('project');
     await container.services.acl.materializeNode(child);
-    await container.services.acl.setAcl(child, { mode: 'inherit', entries: [] }, 'user:alice');
+    await container.services.acl.setAcl(child, { mode: 'inherit', entries: [] }, 'user:alice', AUTH_PRINCIPALS);
 
     const before = countRows(
       'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?',
@@ -437,7 +440,7 @@ describe('删除账号的授权清理', () => {
         mode: 'inherit',
         entries: [{ principal: 'user:bob', level: 1, effect: 'allow' }],
       },
-      'user:alice',
+      'user:alice', AUTH_PRINCIPALS,
     );
 
     const aclPath = join(dataDir, 'user', 'alice', '.acl.json');
@@ -471,7 +474,7 @@ describe('删除账号的授权清理', () => {
         mode: 'inherit',
         entries: [{ principal: 'group:eng', level: 1, effect: 'allow' }],
       },
-      'user:alice',
+      'user:alice', AUTH_PRINCIPALS,
     );
 
     const aclPath = join(dataDir, 'user', 'alice', '.acl.json');
@@ -501,7 +504,7 @@ describe('删除账号的授权清理', () => {
         mode: 'inherit',
         entries: [{ principal: 'user:bob', level: 3, effect: 'allow' }],
       },
-      'user:alice',
+      'user:alice', AUTH_PRINCIPALS,
     );
 
     await inject({ method: 'DELETE', url: '/api/v1/admin/users/bob' });
@@ -512,9 +515,23 @@ describe('删除账号的授权清理', () => {
 
     const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/users' }));
     const bob = (listed['users'] as Record<string, unknown>[]).find((row) => row['id'] === 'bob');
-    expect(bob?.['permissionCount']).toBe(0);
+    // 新账号只该拿到自己的命名空间（根 + 四个上下文目录各一行），alice 根下的
+    // 那条 `write` 授权必须消失。
+    expect(bob?.['permissionCount']).toBe(5);
+    const aliceRootUri = aliceRoot.toString();
     expect(
-      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+      countRows(
+        'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ? AND node_uri = ?',
+        'user:bob',
+        aliceRootUri,
+      ),
+    ).toBe(0);
+    expect(
+      countRows(
+        'SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ? AND uri = ?',
+        'user:bob',
+        aliceRootUri,
+      ),
     ).toBe(0);
   });
 
@@ -561,7 +578,7 @@ describe('purgePrincipal 的事务边界', () => {
         mode: 'inherit',
         entries: [{ principal: 'user:bob', level: 1, effect: 'allow' }],
       },
-      'user:alice',
+      'user:alice', AUTH_PRINCIPALS,
     );
     const permissionsBefore = countRows(
       'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?',
@@ -578,7 +595,6 @@ describe('purgePrincipal 的事务边界', () => {
       permissions: new PermissionRepository({ db: container.db, logger: container.logger }),
       nodes: new NodeRepository({ db: container.db, logger: container.logger }),
       logger: container.logger,
-      subject: 'user:local',
     });
     vi.spyOn(aclFile, 'write').mockRejectedValue(new Error('磁盘满'));
 
@@ -644,6 +660,8 @@ describe('授权', () => {
     const identity = new IdentityService({
       users: new UserRepository({ db, logger }),
       groups: new GroupRepository({ db, logger }),
+      apiKeys: new ApiKeyRepository({ db, logger }),
+      namespace: { ensure: async () => {} },
       logger,
     });
     const authorizer: Authorizer = {

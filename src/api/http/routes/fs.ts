@@ -21,6 +21,7 @@ import { ComemError } from '../../../domain/errors.js';
 import type { Uri } from '../../../domain/uri.js';
 import type { TreeEntry, TreeResult } from '../../../services/filesystem.js';
 import { ok } from '../envelope.js';
+import { requestContextOf } from '../middleware.js';
 import {
   optionalQueryInteger,
   requireRecord,
@@ -80,8 +81,9 @@ async function copyNode(
   services: HttpRouteServices,
   from: Uri,
   to: Uri,
+  principals: readonly string[],
 ): Promise<void> {
-  const stat = await services.filesystem.stat(from);
+  const stat = await services.filesystem.stat(from, principals);
   if (stat === null) {
     throw new ComemError('NOT_FOUND', `复制源不存在：${from.toString()}`, {
       uri: from.toString(),
@@ -89,17 +91,18 @@ async function copyNode(
   }
 
   if (stat.kind === 'directory') {
-    await services.filesystem.mkdir(to);
-    for (const child of await services.filesystem.list(from)) {
-      await copyNode(services, child.uri, to.child(child.uri.name));
+    await services.filesystem.mkdir(to, principals);
+    for (const child of await services.filesystem.list(from, principals)) {
+      await copyNode(services, child.uri, to.child(child.uri.name), principals);
     }
     return;
   }
 
-  const document = await services.filesystem.read(from);
+  const document = await services.filesystem.read(from, principals);
   await services.filesystem.write(
     to,
     document.text,
+    principals,
     document.frontmatter === null ? {} : { frontmatter: document.frontmatter },
   );
 }
@@ -113,8 +116,12 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
       app.get<{ Querystring: Record<string, unknown> }>('/ls', async (request) => {
         const query = requireRecord(request.query, 'fs/ls');
         const uri = requireUri(query, 'uri');
-        await authorizer.assert(uri, READ);
-        return ok({ uri: uri.toString(), entries: (await filesystem.list(uri)).map(serializeEntry) });
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, READ, principals);
+        return ok({
+          uri: uri.toString(),
+          entries: (await filesystem.list(uri, principals)).map(serializeEntry),
+        });
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/tree', async (request) => {
@@ -122,15 +129,17 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const uri = requireUri(query, 'uri');
         const depth = optionalQueryInteger(query, 'depth', DEFAULT_TREE_DEPTH, { min: 0 });
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_TREE_LIMIT, { min: 1 });
-        await authorizer.assert(uri, READ);
-        return ok(serializeTree(await filesystem.tree(uri, { depth, limit })));
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, READ, principals);
+        return ok(serializeTree(await filesystem.tree(uri, principals, { depth, limit })));
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/stat', async (request) => {
         const query = requireRecord(request.query, 'fs/stat');
         const uri = requireUri(query, 'uri');
-        await authorizer.assert(uri, READ);
-        const stat = await filesystem.stat(uri);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, READ, principals);
+        const stat = await filesystem.stat(uri, principals);
         return ok({
           uri: uri.toString(),
           stat:
@@ -143,8 +152,9 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
       app.post<{ Body: unknown }>('/mkdir', async (request) => {
         const body = requireRecord(request.body, 'fs/mkdir');
         const uri = requireUri(body, 'uri');
-        await authorizer.assert(uri, WRITE);
-        await filesystem.mkdir(uri);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, WRITE, principals);
+        await filesystem.mkdir(uri, principals);
         return ok({ uri: uri.toString(), created: true });
       });
 
@@ -152,9 +162,10 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const body = requireRecord(request.body, 'fs/mv');
         const from = requireUri(body, 'from');
         const to = requireUri(body, 'to');
-        await authorizer.assert(from, MANAGE);
-        await authorizer.assert(to, MANAGE);
-        await filesystem.move(from, to);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(from, MANAGE, principals);
+        await authorizer.assert(to, MANAGE, principals);
+        await filesystem.move(from, to, principals);
         return ok({ from: from.toString(), to: to.toString() });
       });
 
@@ -162,9 +173,10 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const body = requireRecord(request.body, 'fs/cp');
         const from = requireUri(body, 'from');
         const to = requireUri(body, 'to');
-        await authorizer.assert(from, READ);
-        await authorizer.assert(to, WRITE);
-        await copyNode(services, from, to);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(from, READ, principals);
+        await authorizer.assert(to, WRITE, principals);
+        await copyNode(services, from, to, principals);
         return ok({ from: from.toString(), to: to.toString() });
       });
 
@@ -173,8 +185,9 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const uri = requireUri(query, 'uri');
         // 固定递归删（§12.4 的 `rm -r` 语义）。不提供「只删空目录」的开关：
         // 非空目录要删就得显式知道自己在删整棵子树，多一个参数不改变误删的后果。
-        await authorizer.assert(uri, MANAGE);
-        const removed = await filesystem.remove(uri);
+        const principals = requestContextOf(request).principals;
+        await authorizer.assert(uri, MANAGE, principals);
+        const removed = await filesystem.remove(uri, principals);
         return ok({ uri: uri.toString(), removedFiles: removed.removedFiles });
       });
     },

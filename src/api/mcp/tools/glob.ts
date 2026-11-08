@@ -38,7 +38,7 @@ export const globTool: McpToolDefinition = {
     const nodeLimit = positiveInteger(args, 'nodeLimit', DEFAULT_NODE_LIMIT, 'glob');
 
     // §12.4：`SearchService.glob` 只做 filterReadable，范围本身要先求权。
-    await context.acl.assert(uri, 1);
+    await context.acl.assert(uri, 1, context.principals);
 
     const matched = await context.search.glob(pattern, {
       scopes: [uri.toString()],

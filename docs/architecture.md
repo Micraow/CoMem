@@ -1960,6 +1960,58 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 
 **为什么要真改 `.acl.json`。** 根预置与普通授权一样，`node_permission` 是它的物化结果。删用户 / 删组时只删物化行不够：下次 `materializeNode` 会把文件里的条目重新算出来，删掉的账号重新创建同 ID 的用户就继承了旧授权（提权）。撤销主体走 `AclService.purgePrincipal`，它改写所有 `.acl.json` 再删两张表的行。
 
+### 12.7 请求身份与认证
+
+ACL 求值需要「这次请求是谁」。v1 是单用户部署，身份由反向代理注入的
+`x-comem-subject` 决定，并且必须等于服务图绑定的主体（`server.subject`）；
+多用户部署打开 `auth.enabled` 之后，身份来自凭据，`x-comem-subject` 被忽略。
+
+```ts
+interface RequestContext {
+  readonly subject: string;              // 恒为 `user:{uid}`，组不能当认证主体
+  readonly principals: readonly string[]; // [user:{uid}, ...group:{gid}, user:*]
+  readonly apiKeyId: string | null;      // 走了哪把 key；session token 认证时为 null
+}
+
+type Credential =
+  | { kind: 'password'; username: string; password: string }
+  | { kind: 'api-key'; apiKey: string }
+  | { kind: 'session'; userId: string };
+```
+
+**两种凭据。** 用户名 + 密码（`app_user.password_hash`，`node:crypto` 的 scrypt，
+`N=16384, r=8, p=1`，16 字节盐）换 session token；API Key（`api_key` 表，一个
+用户多把，`name` 区分用途）直接作为 `Authorization: Bearer comem_...`。
+
+**API Key 没有 scope。** 一把 key 就是 `(user_id)` 的完整凭证，范围由路径级 ACL
+决定。加 key 级 scope 会让每次求权变成两次范围求交，排查「为什么这把 key 看不到」
+时要同时看 key 和路径；而且 scope 与「owner 恒 manage」不变量冲突（owner 的 key
+被 scope 限制住就不是 owner 了）。用户 + 组 + 路径已经足够表达共享。
+
+**组关系每请求查库，不缓存。** `resolve(credential)` 每次都调
+`GroupRepository.listGroupIdsOfUser`。SQLite 单机是微秒级；缓存只会把「退组立即
+生效」变成「重启后生效」——§12.5 的那条承诺就是靠这里兑现的。
+
+**Session token 是无状态 HMAC。** 形如 `v1.<base64url(payload)>.<签名>`，服务端
+不存 session 行。代价是**登出只能客户端丢弃 token**：服务端无法提前作废一个还没
+过期的 token。要立刻失效必须撤销 API Key 或改密码（改密码不影响已签发的 token）。
+`auth.sessionSecret` 为空时装配层生成进程随机值，重启即失效。
+
+**认证失败一律 401 `UNAUTHENTICATED`，不区分原因**（用户不存在 / 密码错 / key
+过期 / key 已撤销）。区分开就是账号枚举。
+
+| 入口 | 端点 | 说明 |
+|---|---|---|
+| 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
+| 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
+| 设密码 | `POST /api/v1/admin/users/{id}/password` | 管理面，需对自身根 `manage` |
+| 签发 key | `POST /api/v1/admin/users/{id}/api-keys` | 明文只在创建响应里出现一次 |
+| 列出 key | `GET /api/v1/admin/users/{id}/api-keys` | 只回 `prefix`，永不回哈希 |
+| 撤销 key | `DELETE /api/v1/admin/api-keys/{keyId}` | 幂等 |
+
+`auth.enabled: false` 时登录端点返回 404：签发一个不会被接受的 token 比明确的
+404 更难发现。
+
 ## 13. MCP 工具契约
 
 16 个，只读 10 个、写 4 个、摄取 2 个。**不含 `get_acl` / `set_acl`**。

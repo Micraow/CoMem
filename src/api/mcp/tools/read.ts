@@ -107,10 +107,10 @@ export const readTool: McpToolDefinition = {
             { tool: 'read', uri: uri.toString() },
           );
         }
-        const bytes = await context.filesystem.readBytes(uri);
+        const bytes = await context.filesystem.readBytes(uri, context.principals);
         return { type: 'binary', mimeType, base64: Buffer.from(bytes).toString('base64') };
       }
-      const document = await context.filesystem.read(uri);
+      const document = await context.filesystem.read(uri, context.principals);
       documents.push({ uri: uri.toString(), text: sliceText(document.text, offset, limit) });
     }
 

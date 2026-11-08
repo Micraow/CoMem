@@ -50,6 +50,8 @@ import { SessionService } from '../../../src/services/session.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const SCOPE = 'comem://user/alice';
 const SESSION = `${SCOPE}/sessions/sess_1`;
 const ARCHIVE = `${SESSION}/history/archive_001`;
@@ -312,7 +314,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('建会话 → 写消息 → 提交 → tick 跑完 → .done + pending 记忆', async () => {
     const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
 
-    const sessionUri = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_1' });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
     await session.addMessage(sessionUri, message('msg_2', '需要收窄时用 unknown。', 'assistant'));
     const committed = await session.commitPhase1(sessionUri);
@@ -348,7 +350,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('重放幂等：重新入队后四步全部跳过，不重复写', async () => {
     const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
 
-    const sessionUri = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_1' });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
     const committed = await session.commitPhase1(sessionUri);
     await runner.tick();
@@ -378,7 +380,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     // 能直接 SQL 查出来。不接回调的话任务行永远是空的，而演示/运维看到的正是它。
     const { runner } = createRunner([{ json: EXTRACT_RESPONSE }]);
 
-    const sessionUri = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_1' });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
     const committed = await session.commitPhase1(sessionUri);
     await runner.tick();
@@ -395,7 +397,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('任务已完成时不再认领：清空 stepsDone 也不会重放', async () => {
     const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
 
-    const sessionUri = await session.create(Uri.parse(SCOPE), { sessionId: 'sess_1' });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
     const committed = await session.commitPhase1(sessionUri);
     await runner.tick();

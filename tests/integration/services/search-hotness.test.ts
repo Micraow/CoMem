@@ -30,6 +30,8 @@ import { Uri } from '../../../src/domain/uri.js';
 import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
+
+const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
 import {
   SearchService,
   type FindOptions,
@@ -434,8 +436,8 @@ describe('装配接线（真实 createContainer）', () => {
       const HOT = Uri.parse('comem://user/local/memories/hot.md');
       const COLD = Uri.parse('comem://user/local/memories/cold.md');
       // 正文相同 → BM25 相同 → 排序只能由热度决定。
-      await container.services.filesystem.write(HOT, '热度接线验证');
-      await container.services.filesystem.write(COLD, '热度接线验证');
+      await container.services.filesystem.write(HOT, '热度接线验证', AUTH_PRINCIPALS);
+      await container.services.filesystem.write(COLD, '热度接线验证', AUTH_PRINCIPALS);
       await container.services.indexObserver.drain();
 
       // 访问计数是热度公式里唯一随时间变化的部分；直接写库构造「HOT 刚被读过 100 次」。

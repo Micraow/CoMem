@@ -90,6 +90,11 @@ export type AdminIdentity = Pick<
   | 'addMember'
   | 'removeMember'
   | 'listMembers'
+  | 'ensureUserNamespace'
+  | 'setPassword'
+  | 'createApiKey'
+  | 'listApiKeys'
+  | 'revokeApiKey'
 >;
 
 /**
@@ -184,7 +189,7 @@ function ownRootOf(request: FastifyRequest): Uri {
 }
 
 async function assertManage(request: FastifyRequest, authorizer: Authorizer): Promise<void> {
-  await authorizer.assert(ownRootOf(request), MANAGE);
+  await authorizer.assert(ownRootOf(request), MANAGE, requestContextOf(request).principals);
 }
 
 export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup {
@@ -231,6 +236,9 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           displayName,
           ...(email === undefined ? {} : { email }),
         });
+        // 新账号的根与四个上下文目录要立刻预置：不预置的话，第一次登录看到的是
+        // 403 而不是空列表（`ensureUserNamespace` 的注释）。
+        await identity.ensureUserNamespace(id);
         return ok({ user });
       });
 
@@ -265,6 +273,68 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         await acl.purgePrincipal(principal);
         identity.deleteUser(id);
         return ok({ id, deleted: true, revokedPermissions });
+      });
+
+      // ── 密码 ──
+
+      app.post<{ Params: { id: string }; Body: unknown }>(
+        '/users/:id/password',
+        async (request) => {
+          const id = assertValidUserId(request.params.id);
+          const body = requireRecord(request.body, 'admin/users/:id/password');
+          const password = requireString(body, 'password');
+          await assertManage(request, authorizer);
+
+          await identity.setPassword(id, password);
+          return ok({ id, passwordSet: true });
+        },
+      );
+
+      // ── API Key ──
+      //
+      // 明文只出现在创建响应里一次。列表与其它出口只回 `prefix`——它是查找键，
+      // 不是秘密；`keyHash` 永不出现在任何响应里。
+
+      app.post<{ Params: { id: string }; Body: unknown }>(
+        '/users/:id/api-keys',
+        async (request) => {
+          const id = assertValidUserId(request.params.id);
+          const body = requireRecord(request.body, 'admin/users/:id/api-keys');
+          const name = requireString(body, 'name');
+          const expiresAt = optionalString(body, 'expiresAt');
+          await assertManage(request, authorizer);
+
+          const { raw, record } = await identity.createApiKey(id, {
+            name,
+            expiresAt: expiresAt ?? null,
+          });
+          return ok({
+            id: record.id,
+            name: record.name,
+            prefix: record.prefix,
+            createdAt: record.createdAt,
+            expiresAt: record.expiresAt,
+            // 唯一一次明文返回。写进响应体的注释提醒未来的改动：不要把它加进
+            // 列表端点。
+            key: raw,
+          });
+        },
+      );
+
+      app.get<{ Params: { id: string } }>('/users/:id/api-keys', async (request) => {
+        const id = assertValidUserId(request.params.id);
+        await assertManage(request, authorizer);
+        return ok({ keys: identity.listApiKeys(id) });
+      });
+
+      app.delete<{ Params: { keyId: string } }>('/api-keys/:keyId', async (request) => {
+        const keyId = request.params.keyId;
+        await assertManage(request, authorizer);
+        const revoked = identity.revokeApiKey(keyId);
+        if (!revoked) {
+          throw new ComemError('NOT_FOUND', `API Key 不存在：${keyId}`, { keyId });
+        }
+        return ok({ keyId, revoked: true });
       });
 
       // ── 组 ──

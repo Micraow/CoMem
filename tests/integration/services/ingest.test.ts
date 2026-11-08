@@ -201,6 +201,7 @@ function createService(
   return new IngestService({
     sources,
     scopeUri: SCOPE,
+    principals: ['user:alice', 'user:*'],
     logger,
     batchSize: 100,
     sessions,
@@ -390,6 +391,7 @@ describe('IngestService', () => {
     const service = new IngestService({
       sources: [new QwenSource({ paths: [repaired, broken], logger })],
       scopeUri: SCOPE,
+      principals: ['user:alice', 'user:*'],
       logger,
       batchSize: 100,
       sessions,

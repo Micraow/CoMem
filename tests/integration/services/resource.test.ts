@@ -30,6 +30,8 @@ import {
 } from '../../../src/services/resource.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const PARENT = 'comem://user/alice/resources';
 const DOCS = `${PARENT}/docs`;
 const SPEC = `${DOCS}/spec.md`;
@@ -188,7 +190,6 @@ beforeEach(async () => {
     permissions: new PermissionRepository({ db, logger }),
     nodes: new NodeRepository({ db, logger }),
     logger,
-    subject: 'user:alice',
   });
   // 根预置（§12.6）：没有 `user:alice = manage` 这一行，新建节点从父目录复制不到
   // 任何权限，`list` 会把它们全部过滤掉。
@@ -245,10 +246,10 @@ describe('addResource', () => {
     // 资源服务直接写 `ContentStore`，不经过 `FileSystemService` 的观察者。物化权限
     // 漏掉时 `list` / `tree` 会因为缺 `node_permission` 行把子项整个过滤掉——写成功
     // 了，树里却什么都没有。
-    const topLevel = await filesystem.list(Uri.parse(PARENT));
+    const topLevel = await filesystem.list(Uri.parse(PARENT), AUTH_PRINCIPALS);
     expect(topLevel.map((entry) => entry.uri.toString())).toContain(DOCS);
 
-    const documents = await filesystem.list(Uri.parse(DOCS));
+    const documents = await filesystem.list(Uri.parse(DOCS), AUTH_PRINCIPALS);
     expect(documents.map((entry) => entry.uri.toString())).toContain(SPEC);
 
     for (const uri of [DOCS, SPEC]) {

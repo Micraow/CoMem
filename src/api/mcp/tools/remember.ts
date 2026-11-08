@@ -220,8 +220,8 @@ export const rememberTool: McpToolDefinition = {
 
     const sessionUri =
       requestedSessionId === undefined
-        ? await context.session.create(scope)
-        : await context.session.ensure(scope, requestedSessionId);
+        ? await context.session.create(scope, context.principals)
+        : await context.session.ensure(scope, requestedSessionId, context.principals);
     const known =
       requestedSessionId === undefined
         ? new Set<string>()

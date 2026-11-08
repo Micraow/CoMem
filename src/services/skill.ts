@@ -247,7 +247,7 @@ export class SkillService {
       await this.#index.upsert(records);
       // §12.4 的「写时算」：技能文件不经过 `FileSystemService`，观察者收不到通知。
       // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。
-      await this.#materialize([skillUri, ...written]);
+      await this.#materialize([skillUri, ...written], options.principals);
     });
 
     await this.#invalidateDirectories(written);
@@ -313,7 +313,10 @@ export class SkillService {
    *
    * 失败只记日志：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
    */
-  async #materialize(uris: readonly Uri[]): Promise<void> {
+  async #materialize(
+    uris: readonly Uri[],
+    principals: readonly string[],
+  ): Promise<void> {
     const directories = new Map<string, Uri>();
     for (const uri of uris) {
       let current: Uri | null = uri;
@@ -330,7 +333,7 @@ export class SkillService {
 
     for (const [key, uri] of directories) {
       try {
-        await this.#authorizer.assert(uri, WRITE);
+        await this.#authorizer.assert(uri, WRITE, principals);
       } catch (error) {
         this.#logger.error('技能节点权限物化失败，已忽略。', {
           uri: key,

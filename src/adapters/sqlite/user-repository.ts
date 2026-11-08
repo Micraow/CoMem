@@ -128,6 +128,33 @@ export class UserRepository {
   }
 
   /**
+   * 读密码哈希。**不放进 `User`**：`User` 会进管理面响应，带着哈希的 DTO 只要
+   * 有一次 `JSON.stringify` 就会泄露。哈希只在登录校验这一处被读到。
+   *
+   * 没设置密码（迁移前的行、只建了账号没设密码）返回 `null`。
+   */
+  getPasswordHash(id: string): string | null {
+    const row = this.#db.prepare('SELECT password_hash FROM app_user WHERE id = ?').get(id);
+    if (row === undefined || row['password_hash'] === null || row['password_hash'] === undefined) {
+      return null;
+    }
+    return String(row['password_hash']);
+  }
+
+  /** 写密码哈希。用户不存在返回 `false`（不抛，与 `update` 一致）。 */
+  setPasswordHash(id: string, passwordHash: string, now: Date): boolean {
+    const changed = Number(
+      withWriteTransaction(this.#db, () =>
+        this.#db
+          .prepare('UPDATE app_user SET password_hash = ?, updated_at = ? WHERE id = ?')
+          .run(passwordHash, now.toISOString(), id).changes,
+      ),
+    );
+    this.#logger.debug('用户密码已更新', { userId: id, changed });
+    return changed > 0;
+  }
+
+  /**
    * 按 ID 批量取，按 `id` 升序。
    *
    * 一次 `IN (...)` 查询；空数组直接返回空——`IN ()` 是语法错误。结果按 `id`

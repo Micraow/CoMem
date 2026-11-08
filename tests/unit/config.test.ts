@@ -103,6 +103,7 @@ function expectedDefaults(dataDir: string): unknown {
       consolidation: { enabled: false, maxIterations: 10 },
     },
     acl: { groupDefaultLevel: 'write' },
+    auth: { enabled: false, sessionSecret: '', sessionTtlSeconds: 86400 },
     server: { host: '127.0.0.1', port: 1933, subject: 'user:local' },
     logging: { level: 'info', file: '' },
     telemetry: {

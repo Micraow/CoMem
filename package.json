@@ -20,6 +20,7 @@
     "start": "tsx src/bootstrap/main.ts",
     "dev:web": "cd web && pnpm dev",
     "reindex": "tsx src/commands/reindex.ts",
+    "password": "tsx src/commands/password.ts",
     "eval": "tsx src/commands/eval.ts",
     "test:e2e": "bash scripts/demo.sh",
     "ingest": "tsx src/commands/ingest.ts"

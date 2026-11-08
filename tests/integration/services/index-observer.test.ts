@@ -81,7 +81,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     permissions,
     nodes,
     logger,
-    subject: SUBJECT,
   });
   await acl.ensureRootPreset(Uri.parse(ROOT));
 
@@ -155,7 +154,7 @@ function permissionRowsOf(uri: string): readonly Record<string, unknown>[] {
 describe('IndexObserver.onNodeWritten', () => {
   it('写文件后索引能命中，contextType / memoryType / abstract 从磁盘读回', async () => {
     const file = Uri.parse(`${ROOT}/memories/preferences/code-style.md`);
-    await harness.filesystem.write(file, '用户偏好 TypeScript 严格模式。', {
+    await harness.filesystem.write(file, '用户偏好 TypeScript 严格模式。', PRINCIPALS, {
       frontmatter: { summary: '偏好 TypeScript 严格模式' },
     });
     await harness.observer.drain();
@@ -184,7 +183,7 @@ describe('IndexObserver.onNodeWritten', () => {
     // 复核闸门（§11.6）：experiences 写入时是 pending。
     await harness.filesystem.write(
       file,
-      ['---', 'memory_type: experiences', 'status: pending', '---', '', '迁移到 monorepo。'].join('\n'),
+      ['---', 'memory_type: experiences', 'status: pending', '---', '', '迁移到 monorepo。'].join('\n'), PRINCIPALS,
     );
     await harness.observer.drain();
 
@@ -195,7 +194,7 @@ describe('IndexObserver.onNodeWritten', () => {
 
   it('物化权限：新节点继承根预置的 manage', async () => {
     const file = Uri.parse(`${ROOT}/memories/note.md`);
-    await harness.filesystem.write(file, '正文。');
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
 
     expect(permissionRowsOf(file.toString())).toEqual([
       { node_uri: file.toString(), principal: SUBJECT, level: 7, effect: 'allow' },
@@ -207,12 +206,12 @@ describe('IndexObserver.onNodeWritten', () => {
     // 但观察者只收到文件 URI。不补物化的话这两个目录在 `list` / `tree` 里整个消失
     // ——用户看到「写成功了，但树里什么都没有」。
     const file = Uri.parse(`${ROOT}/memories/preferences/code-style.md`);
-    await harness.filesystem.write(file, '正文。');
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
 
-    const listed = await harness.filesystem.list(Uri.parse(ROOT));
+    const listed = await harness.filesystem.list(Uri.parse(ROOT), PRINCIPALS);
     expect(listed.map((entry) => entry.uri.name)).toContain('memories');
 
-    const nested = await harness.filesystem.list(Uri.parse(`${ROOT}/memories`));
+    const nested = await harness.filesystem.list(Uri.parse(`${ROOT}/memories`), PRINCIPALS);
     expect(nested.map((entry) => entry.uri.name)).toContain('preferences');
 
     for (const directory of [`${ROOT}/memories`, `${ROOT}/memories/preferences`]) {
@@ -225,7 +224,7 @@ describe('IndexObserver.onNodeWritten', () => {
     const file = directory.child('note.md');
     const stale = vi.spyOn(harness.summary, 'markStale');
 
-    await harness.filesystem.write(file, '正文。');
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
     await harness.observer.drain();
 
     expect(stale).toHaveBeenCalledWith(directory);
@@ -238,10 +237,10 @@ describe('IndexObserver.onNodeWritten', () => {
 
   it('重写正文后 bodyDigest 跟着变', async () => {
     const file = Uri.parse(`${ROOT}/memories/note.md`);
-    await harness.filesystem.write(file, '第一版。');
+    await harness.filesystem.write(file, '第一版。', PRINCIPALS);
     const before = harness.nodes.get(file.toString())?.bodyDigest;
 
-    await harness.filesystem.write(file, '第二版。');
+    await harness.filesystem.write(file, '第二版。', PRINCIPALS);
     const after = harness.nodes.get(file.toString())?.bodyDigest;
 
     expect(before).toBeDefined();
@@ -251,7 +250,7 @@ describe('IndexObserver.onNodeWritten', () => {
 
   it('建目录写 L0 行，且目录可被 stat', async () => {
     const directory = Uri.parse(`${ROOT}/resources/docs`);
-    await harness.filesystem.mkdir(directory);
+    await harness.filesystem.mkdir(directory, PRINCIPALS);
     await harness.observer.drain();
 
     const row = harness.nodes.get(directory.toString());
@@ -269,13 +268,13 @@ describe('IndexObserver.onNodeMoved', () => {
   it('移动目录后整棵子树的索引与物化权限都跟着搬过去', async () => {
     const from = Uri.parse(`${RESOURCES}/spec`);
     const to = Uri.parse(`${RESOURCES}/spec-v2`);
-    await harness.filesystem.mkdir(from);
+    await harness.filesystem.mkdir(from, PRINCIPALS);
     for (const name of ['one.md', 'two.md', 'three.md']) {
-      await harness.filesystem.write(from.child(name), `${name} 的正文。`);
+      await harness.filesystem.write(from.child(name), `${name} 的正文。`, PRINCIPALS);
     }
     await harness.observer.drain();
 
-    await harness.filesystem.move(from, to);
+    await harness.filesystem.move(from, to, PRINCIPALS);
     await harness.observer.drain();
 
     // 源路径一条不剩。
@@ -291,10 +290,10 @@ describe('IndexObserver.onNodeMoved', () => {
     }
 
     // `list` / `tree` / `find` 都能看到子项。
-    const listed = await harness.filesystem.list(to);
+    const listed = await harness.filesystem.list(to, PRINCIPALS);
     expect(listed.map((entry) => entry.uri.name)).toEqual(['one.md', 'three.md', 'two.md']);
 
-    const tree = await harness.filesystem.tree(Uri.parse(RESOURCES));
+    const tree = await harness.filesystem.tree(Uri.parse(RESOURCES), PRINCIPALS);
     expect(tree.entries.map((entry) => entry.uri.toString())).toEqual(
       expect.arrayContaining(['one.md', 'two.md', 'three.md'].map((name) => to.child(name).toString())),
     );
@@ -311,14 +310,14 @@ describe('IndexObserver.onNodeMoved', () => {
   it('摘要失效只投给源与目标的父目录各一次，不给每个子项失效', async () => {
     const from = Uri.parse(`${RESOURCES}/spec`);
     const to = Uri.parse(`${ROOT}/memories/spec`);
-    await harness.filesystem.mkdir(from);
+    await harness.filesystem.mkdir(from, PRINCIPALS);
     for (const name of ['one.md', 'two.md', 'three.md']) {
-      await harness.filesystem.write(from.child(name), `${name} 的正文。`);
+      await harness.filesystem.write(from.child(name), `${name} 的正文。`, PRINCIPALS);
     }
     await harness.observer.drain();
 
     const stale = vi.spyOn(harness.summary, 'markStale');
-    await harness.filesystem.move(from, to);
+    await harness.filesystem.move(from, to, PRINCIPALS);
     await harness.observer.drain();
 
     // 源与目标各一个父目录；三个子项不再各投一次（那会把整条祖先链打穿）。
@@ -332,12 +331,12 @@ describe('IndexObserver.onNodeMoved', () => {
 
   it('同一个父目录内改名只投递一次摘要失效', async () => {
     const from = Uri.parse(`${RESOURCES}/spec`);
-    await harness.filesystem.mkdir(from);
-    await harness.filesystem.write(from.child('one.md'), '正文。');
+    await harness.filesystem.mkdir(from, PRINCIPALS);
+    await harness.filesystem.write(from.child('one.md'), '正文。', PRINCIPALS);
     await harness.observer.drain();
 
     const stale = vi.spyOn(harness.summary, 'markStale');
-    await harness.filesystem.move(from, Uri.parse(`${RESOURCES}/spec-v2`));
+    await harness.filesystem.move(from, Uri.parse(`${RESOURCES}/spec-v2`), PRINCIPALS);
     await harness.observer.drain();
 
     expect(stale).toHaveBeenCalledTimes(1);
@@ -347,10 +346,10 @@ describe('IndexObserver.onNodeMoved', () => {
   it('移动单个文件：源行清掉、目标行建出来', async () => {
     const from = Uri.parse(`${RESOURCES}/one.md`);
     const to = Uri.parse(`${RESOURCES}/renamed.md`);
-    await harness.filesystem.write(from, '正文。');
+    await harness.filesystem.write(from, '正文。', PRINCIPALS);
     await harness.observer.drain();
 
-    await harness.filesystem.move(from, to);
+    await harness.filesystem.move(from, to, PRINCIPALS);
     await harness.observer.drain();
 
     expect(harness.nodes.get(from.toString())).toBeNull();
@@ -367,13 +366,13 @@ describe('IndexObserver.onNodeMoved', () => {
 
       const from = Uri.parse(`${RESOURCES}/one.md`);
       const to = Uri.parse(`${RESOURCES}/renamed.md`);
-      await local.filesystem.write(from, '正文。');
+      await local.filesystem.write(from, '正文。', PRINCIPALS);
       await local.observer.drain();
       embeddings.upsert([
         { uri: from.toString(), model: 'test-model', contentDigest: 'digest', vector: [0.1, 0.2, 0.3] },
       ]);
 
-      await local.filesystem.move(from, to);
+      await local.filesystem.move(from, to, PRINCIPALS);
       await local.observer.drain();
 
       expect(embeddings.get(from.toString())).toBeNull();
@@ -395,12 +394,12 @@ describe('IndexObserver.onNodeRemoved', () => {
     try {
       const directory = Uri.parse(`${ROOT}/memories`);
       const file = directory.child('note.md');
-      await local.filesystem.write(file, '正文。');
+      await local.filesystem.write(file, '正文。', PRINCIPALS);
       await local.observer.drain();
       expect(local.db.prepare('SELECT 1 FROM node_permission WHERE node_uri = ?').all(file.toString())).toHaveLength(1);
 
       const stale = vi.spyOn(local.summary, 'markStale');
-      await local.filesystem.remove(file);
+      await local.filesystem.remove(file, PRINCIPALS);
       await local.observer.drain();
 
       // 向量那一步确实失败了（日志里有一条），但权限与摘要照常完成。
@@ -420,13 +419,13 @@ describe('IndexObserver.onNodeRemoved', () => {
   it('删文件后索引无残留、权限行被清、父目录摘要重算', async () => {
     const directory = Uri.parse(`${ROOT}/memories`);
     const file = directory.child('note.md');
-    await harness.filesystem.write(file, '正文。');
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
     await harness.observer.drain();
     expect(harness.nodes.get(file.toString())).not.toBeNull();
     expect(permissionRowsOf(file.toString()).length).toBeGreaterThan(0);
 
     const stale = vi.spyOn(harness.summary, 'markStale');
-    await harness.filesystem.remove(file);
+    await harness.filesystem.remove(file, PRINCIPALS);
     await harness.observer.drain();
 
     expect(harness.nodes.get(file.toString())).toBeNull();
@@ -445,12 +444,12 @@ describe('IndexObserver.onNodeRemoved', () => {
   it('删目录清掉整棵子树的索引行与权限行', async () => {
     const directory = Uri.parse(`${ROOT}/resources/docs`);
     const nested = directory.child('guides', 'intro.md');
-    await harness.filesystem.write(nested, '入门。');
+    await harness.filesystem.write(nested, '入门。', PRINCIPALS);
     await harness.observer.drain();
     expect(harness.nodes.get(nested.toString())).not.toBeNull();
     expect(permissionRowsOf(nested.toString()).length).toBeGreaterThan(0);
 
-    await harness.filesystem.remove(directory);
+    await harness.filesystem.remove(directory, PRINCIPALS);
     await harness.observer.drain();
 
     expect(harness.nodes.get(nested.toString())).toBeNull();
@@ -463,7 +462,7 @@ describe('IndexObserver 的错误隔离', () => {
     const file = Uri.parse(`${ROOT}/memories/note.md`);
     vi.spyOn(harness.index, 'upsert').mockRejectedValueOnce(new Error('索引坏了'));
 
-    await expect(harness.filesystem.write(file, '正文。')).resolves.toBeDefined();
+    await expect(harness.filesystem.write(file, '正文。', PRINCIPALS)).resolves.toBeDefined();
     // 文件已经落盘（写操作成功），索引是派生数据。`store.stat` 不求权，
     // 因为这次失败发生在物化之前，`filesystem.stat` 会以 PERMISSION_DENIED 拒绝。
     expect(await harness.store.stat(file)).not.toBeNull();

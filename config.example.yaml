@@ -114,6 +114,21 @@ server:
   # user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置成实际的用户。
   subject: user:local
 
+auth:
+  # 多用户认证（架构文档 §12.7）。默认 false = v1 单用户行为：
+  # x-comem-subject 必须等于 server.subject。
+  #
+  # 打开后 x-comem-subject 被忽略，必须带
+  #   Authorization: Bearer <session token>        （POST /api/v1/auth/login 换得）
+  #   Authorization: Bearer comem_<prefix>_<secret>（POST /api/v1/admin/users/{id}/api-keys 创建）
+  # 缺失或非法一律 401 UNAUTHENTICATED。组主体仍然不能当认证身份。
+  enabled: false
+  # session token 的 HMAC 密钥。留空时进程启动生成随机值——重启即失效。
+  # 多实例部署必须显式配置同一个值，否则一个实例签发的 token 在另一个实例上无效。
+  sessionSecret: ""
+  # session token 有效期（秒）。默认 86400 = 一天。
+  sessionTtlSeconds: 86400
+
 logging:
   level: info
   file: ""                   # 留空只写 stdout；填路径则额外写 error.log

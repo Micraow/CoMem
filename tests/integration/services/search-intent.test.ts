@@ -31,6 +31,8 @@ import {
 import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
 const SCOPE = 'comem://user/alice';
 const PRINCIPALS = ['user:alice'];
 const NOW = '2026-11-08T00:00:00.000Z';
@@ -355,7 +357,7 @@ describe('search 的意图分析', () => {
     const { service, provider, sessions } = createHarness({
       responses: [{ json: { queries: [draft('部署 流程')] } }],
     });
-    const sessionUri = await sessions.create(Uri.parse(SCOPE), { sessionId: 'sess_intent' });
+    const sessionUri = await sessions.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_intent' });
     await sessions.addMessage(sessionUri, {
       id: 'm1',
       role: 'user',

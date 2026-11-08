@@ -30,7 +30,7 @@ type WriteMode = (typeof MODES)[number];
 /** `append` / `create` 需要先读现有正文；不存在按空串处理。 */
 async function readExisting(context: McpToolContext, uri: Uri): Promise<string> {
   try {
-    return (await context.filesystem.read(uri)).text;
+    return (await context.filesystem.read(uri, context.principals)).text;
   } catch (error) {
     if (error instanceof ComemError && error.code === 'NOT_FOUND') {
       return '';
@@ -84,18 +84,18 @@ async function writeWithMode(
 ): Promise<{ readonly created: boolean }> {
   switch (mode) {
     case 'replace':
-      return context.filesystem.write(uri, content);
+      return context.filesystem.write(uri, content, context.principals);
     case 'append': {
       const existing = await readExisting(context, uri);
-      return context.filesystem.write(uri, `${existing}${content}`);
+      return context.filesystem.write(uri, `${existing}${content}`, context.principals);
     }
     case 'create': {
-      if ((await context.filesystem.stat(uri)) !== null) {
+      if ((await context.filesystem.stat(uri, context.principals)) !== null) {
         throw new ComemError('ALREADY_EXISTS', `目标已存在：${uri.toString()}`, {
           uri: uri.toString(),
         });
       }
-      return context.filesystem.write(uri, content);
+      return context.filesystem.write(uri, content, context.principals);
     }
   }
 }

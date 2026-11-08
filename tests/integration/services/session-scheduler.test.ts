@@ -19,6 +19,8 @@ import type { SessionMessage } from '../../../src/domain/session.js';
 import { estimateTokens, renderMessageText } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 
+const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
+
 const SCOPE = 'comem://user/local';
 
 /** 一天的毫秒数；`memory.ttl.defaultDays` 的换算来源。 */
@@ -92,7 +94,7 @@ describe('自动提交（container → tick）', () => {
     expect(started.scheduler.started).toBe(true);
 
     const session = started.services.session;
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     for (let index = 0; index < 5; index += 1) {
       await session.addMessage(sessionUri, message(`m${index}`));
     }
@@ -145,7 +147,7 @@ describe('自动提交（container → tick）', () => {
     container = started;
 
     const session = started.services.session;
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     for (let index = 0; index < 5; index += 1) {
       await session.addMessage(sessionUri, message(`m${index}`));
     }
@@ -177,7 +179,7 @@ describe('会话过期（container → tick）', () => {
     expect(started.scheduler.started).toBe(true);
 
     const session = started.services.session;
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m0'));
 
     await expect(started.scheduler.tick()).resolves.toMatchObject({ expired: 1, deleted: 0 });
@@ -201,7 +203,7 @@ describe('会话过期（container → tick）', () => {
     container = started;
 
     const session = started.services.session;
-    const sessionUri = await session.create(Uri.parse(SCOPE));
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
     await session.addMessage(sessionUri, message('m0'));
 
     await expect(started.scheduler.tick()).resolves.toMatchObject({ deleted: 1 });
@@ -216,7 +218,7 @@ describe('记忆 TTL（container → 写入）', () => {
     expect(started.scheduler.started).toBe(true);
 
     const memory = Uri.parse(SCOPE).child('memories', 'preferences', 'code-style.md');
-    await started.services.filesystem.write(memory, '用户偏好 TypeScript 严格模式。');
+    await started.services.filesystem.write(memory, '用户偏好 TypeScript 严格模式。', AUTH_PRINCIPALS);
     await started.services.indexObserver.drain();
 
     const row = started.db.prepare('SELECT expires_at FROM node WHERE uri = ?').get(memory.toString());
