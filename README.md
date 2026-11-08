@@ -230,21 +230,41 @@ L0 从 L1 正文提取，两层不会互相矛盾。**摘要是目录级的**，
 
 ## 🔌 接入你的 Agent
 
-CoMem 通过 **MCP**（Streamable HTTP）和 **Hook 插件**接入 agent。Hook 在会话开始时检索并注入相关记忆，在会话结束时采集消息。
+CoMem 通过 **MCP**（Streamable HTTP）和 **Hook 插件**接入 agent。Hook 在会话开始时检索并注入相关记忆，在会话结束时采集消息。**已适配三个宿主：Claude Code、Codex、DSH**——同一套命令，`--host` 选宿主。
 
 <details>
 <summary><strong>Claude Code</strong></summary>
 
 ```bash
-# 在项目根目录
 claude mcp add --transport http comem http://127.0.0.1:1933/mcp
+npx co-mem install --host claude-code    # 写入 ~/.claude/settings.json
 ```
 
-再把 `integrations/` 下的 Hook 配置按 [`integrations/README.md`](integrations/README.md) 装进 Claude Code 的 settings，它就自动采集会话、注入记忆了。
+装完它就自动采集会话、注入记忆了。
 </details>
 
 <details>
-<summary><strong>DSH / 其他 MCP 客户端</strong></summary>
+<summary><strong>Codex</strong></summary>
+
+Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），六个事件与 CoMem 一一对应。
+
+```bash
+npx co-mem install --host codex          # 写入 ~/.codex/hooks.json
+```
+
+首次使用需在 Codex 的 `/hooks` 里**信任一次** Hook（Codex 的安全机制，改动后需重审）。MCP 也可单独接 `http://127.0.0.1:1933/mcp`。
+</details>
+
+<details>
+<summary><strong>DSH</strong></summary>
+
+```bash
+npx co-mem install --host dsh            # 写入 ~/.dsh/settings.json
+```
+</details>
+
+<details>
+<summary><strong>其他 MCP 客户端</strong></summary>
 
 任何支持 Streamable HTTP 的 MCP 客户端都可以接 `http://127.0.0.1:1933/mcp`。不带 Hook 也能用——只是要自己调 `remember` / `find`，由你来决定存什么、取什么。
 </details>
