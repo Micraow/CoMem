@@ -19,19 +19,33 @@
  * ## 读哪些文件
  *
  * - `comem://user/{uid}/memories/profile.md`（§6.5 的个人档案）
- * - `comem://user/{uid}/memories/preferences/.overview.md`（L1 概览，§9.1 的 4000 字符预算）
+ * - `comem://user/{uid}/memories/preferences`（**目录**，取它的 L1 概览 §9.1 的
+ *   4000 字符预算）
+ *
+ * **偏好必须按目录读，不能拼 `.overview.md`。** `.overview.md` 是保留名
+ * （`domain/uri.ts` 的 `RESERVED_SEGMENT_NAMES`），`Uri.parse` 对它抛
+ * `INVALID_URI`（HTTP 400）。曾经这里直接 `content/read` 那个文件名，又被
+ * `.catch(() => null)` 吞成「没有偏好」——`<comem-preferences>` 从上线起就没注入过，
+ * 而文件一直在盘上。`GET /content/overview` 接的是目录 URI，服务端自己读
+ * `.overview.md`（`SummaryService.read`）。
  *
  * 文件不存在不是错误：用户可能刚装好插件，还没写过 profile。静默跳过该块。
+ * 其余错误（400 / 5xx / 网络）记一条 warn 再降级——它们不是「没有偏好」，是配置
+ * 或部署坏了。
  */
 
 import { pathToFileURL } from 'node:url';
 
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
-import { createHttpClient } from '../lib/http.mjs';
+import { ComemHookError, createHttpClient } from '../lib/http.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const CONTENT_READ_PATH = '/api/v1/content/read';
+const CONTENT_OVERVIEW_PATH = '/api/v1/content/overview';
 const SKILLS_PATH = '/api/v1/skills';
+
+/** 目录不存在 / 不可读时服务端返回的状态：还没写过偏好，不是错误。 */
+const MISSING_NODE_STATUSES = new Set([403, 404]);
 
 /** 注入块标签。 */
 const PROFILE_OPEN = '<comem-profile>';
@@ -112,6 +126,61 @@ function readText(result) {
   return null;
 }
 
+/** `GET /content/overview` 的结果是 `{overview: string | null, degraded, source}`。 */
+function readOverview(result) {
+  if (typeof result === 'object' && result !== null) {
+    const overview = result.overview;
+    if (typeof overview === 'string' && overview.trim() !== '') {
+      return overview;
+    }
+  }
+  return null;
+}
+
+/**
+ * 诊断出口：stderr 一行 JSON。
+ *
+ * 为什么不写 stdout：那是注入协议的通道，混进一行 warn 会被宿主当成上下文。
+ * 格式与 `mcp-proxy.mjs` 的 `log()` 一致，便于统一采集。
+ */
+function warnToStderr(message, data) {
+  try {
+    process.stderr.write(
+      `${JSON.stringify({ level: 'warn', component: 'session-start', message, ...data })}\n`,
+    );
+  } catch {
+    // 写不了 stderr 就只能放弃诊断。
+  }
+}
+
+/** 目录还没建 / 不可读 = 「没有偏好」。其余错误不是。 */
+function isMissingNode(error) {
+  return error instanceof ComemHookError && MISSING_NODE_STATUSES.has(error.status);
+}
+
+/**
+ * 读偏好目录的 L1 概览。
+ *
+ * 三种结果：字符串（有偏好）、`null`（目录不存在，静默跳过）、`null` + 一条 warn
+ * （读取失败）。**不能把失败静默成「没有偏好」**——那正是这个块从上线起就没出现过
+ * 的原因。
+ */
+async function readPreferences(preferencesUri, deps) {
+  try {
+    return readOverview(await deps.http.get(CONTENT_OVERVIEW_PATH, { uri: preferencesUri }));
+  } catch (error) {
+    if (!isMissingNode(error)) {
+      (deps.warn ?? warnToStderr)('读取偏好概览失败，本次不注入 <comem-preferences>。', {
+        uri: preferencesUri,
+        code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+        status: error instanceof ComemHookError ? (error.status ?? null) : null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return null;
+  }
+}
+
 /** 技能列表既可能是名字数组，也可能是 `{name, description}` 数组。 */
 function readSkills(result) {
   const value = Array.isArray(result) ? result : result?.skills;
@@ -151,7 +220,12 @@ function readSkills(result) {
 
 /**
  * @param {{ sessionId: string, cwd: string, source: string | null }} event
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv }} deps
+ * @param {{
+ *   config: Awaited<ReturnType<typeof loadConfig>>,
+ *   http: ReturnType<typeof createHttpClient>,
+ *   env?: NodeJS.ProcessEnv,
+ *   warn?: (message: string, data: Record<string, unknown>) => void,
+ * }} deps
  * @returns {Promise<{ context?: string } | undefined>}
  */
 export async function handleSessionStart(event, deps) {
@@ -173,10 +247,7 @@ export async function handleSessionStart(event, deps) {
       .get(CONTENT_READ_PATH, { uri: `${memoriesRoot}/profile.md` })
       .then(readText)
       .catch(() => null),
-    deps.http
-      .get(CONTENT_READ_PATH, { uri: `${memoriesRoot}/preferences/.overview.md` })
-      .then(readText)
-      .catch(() => null),
+    readPreferences(`${memoriesRoot}/preferences`, deps),
     deps.http
       .get(SKILLS_PATH)
       .then(readSkills)

@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { ComemHookError } from '../lib/http.mjs';
 import { estimateTokens, handleSessionStart, renderSkillCatalog } from '../servers/session-start.mjs';
 
 const SKILLS = [
@@ -58,7 +59,9 @@ test('没有技能时不输出空块', () => {
 test('注入 profile 与偏好（read 的结果可以是对象也可以是字符串）', async () => {
   const http = fakeHttp({
     '/api/v1/content/read?comem://user/alice/memories/profile.md': { text: '# alice\n后端工程师' },
-    '/api/v1/content/read?comem://user/alice/memories/preferences/.overview.md': '偏好 TypeScript strict',
+    '/api/v1/content/overview?comem://user/alice/memories/preferences': {
+      overview: '偏好 TypeScript strict',
+    },
     '/api/v1/skills': { skills: SKILLS },
   });
 
@@ -75,7 +78,9 @@ test('注入 profile 与偏好（read 的结果可以是对象也可以是字符
 
 test('profile 不存在时跳过该块，其它照常注入', async () => {
   const http = fakeHttp({
-    '/api/v1/content/read?comem://user/alice/memories/preferences/.overview.md': '偏好 TypeScript',
+    '/api/v1/content/overview?comem://user/alice/memories/preferences': {
+      overview: '偏好 TypeScript',
+    },
     '/api/v1/skills': { skills: [] },
   });
 
@@ -87,10 +92,98 @@ test('profile 不存在时跳过该块，其它照常注入', async () => {
   assert.match(result.context, /comem-preferences/);
 });
 
+/**
+ * 回归（P1）：偏好必须按**目录**读。
+ *
+ * 曾经的实现是 `content/read?uri=.../preferences/.overview.md`，而 `.overview.md`
+ * 是保留名，`Uri.parse` 抛 `INVALID_URI`（HTTP 400），`.catch(() => null)` 把它吞成
+ * 「没有偏好」——块从上线起就没注入过，文件却一直在盘上。这个用例钉住「发的是
+ * `content/overview`，参数是目录 URI」。
+ */
+test('偏好走 content/overview + 目录 URI（不再拼保留名 .overview.md）', async () => {
+  const http = fakeHttp({
+    '/api/v1/content/overview?comem://user/alice/memories/preferences': {
+      overview: '偏好 TypeScript strict',
+    },
+  });
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    { config: { userId: 'alice', skillBudgetTokens: 1000, tmpDir: '/tmp' }, http, env: {} },
+  );
+
+  assert.match(result.context, /<comem-preferences>/);
+  assert.ok(
+    http.calls.some(
+      (call) =>
+        call.path === '/api/v1/content/overview' &&
+        call.query?.uri === 'comem://user/alice/memories/preferences',
+    ),
+  );
+  assert.ok(http.calls.every((call) => !String(call.query?.uri ?? '').includes('.overview.md')));
+});
+
+test('偏好目录不存在（403 / 404）时静默跳过，不记 warn', async () => {
+  const warnings = [];
+  const http = {
+    async get(path) {
+      if (path === '/api/v1/content/read') {
+        return { text: '# alice' };
+      }
+      if (path === '/api/v1/content/overview') {
+        throw new ComemHookError('目录不存在', { code: 'HOOK_HTTP_ERROR', status: 404, path });
+      }
+      return { skills: [] };
+    },
+  };
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, tmpDir: '/tmp' },
+      http,
+      env: {},
+      warn: (message, data) => warnings.push({ message, data }),
+    },
+  );
+
+  assert.doesNotMatch(result.context, /comem-preferences/);
+  assert.deepEqual(warnings, []);
+});
+
+test('读取偏好失败时记一条 warn，不静默', async () => {
+  const warnings = [];
+  const http = {
+    async get(path) {
+      if (path === '/api/v1/content/read') {
+        return { text: '# alice' };
+      }
+      // 400 = INVALID_URI：配置或代码错误，绝不能当成「没有偏好」。
+      throw new ComemHookError('URI 不合法', { code: 'HOOK_HTTP_ERROR', status: 400, path });
+    },
+  };
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, tmpDir: '/tmp' },
+      http,
+      env: {},
+      warn: (message, data) => warnings.push({ message, data }),
+    },
+  );
+
+  assert.doesNotMatch(result.context, /comem-preferences/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].message, /comem-preferences/);
+  assert.equal(warnings[0].data.status, 400);
+  assert.equal(warnings[0].data.uri, 'comem://user/alice/memories/preferences');
+});
+
 test('技能列表是 URI 数组时取最后一段当名字', async () => {
   const http = fakeHttp({
     '/api/v1/content/read?comem://user/alice/memories/profile.md': 'x',
-    '/api/v1/content/read?comem://user/alice/memories/preferences/.overview.md': 'y',
+    '/api/v1/content/overview?comem://user/alice/memories/preferences': { overview: 'y' },
     '/api/v1/skills': { skills: ['comem://user/alice/skills/code-review'] },
   });
   const result = await handleSessionStart(

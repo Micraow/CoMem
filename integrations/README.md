@@ -270,6 +270,14 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 **`<comem-recall>` 里没有分数。** 分数只在同一次检索的同一引擎内可比（§13.2），写进
 注入块会暗示一个不存在的精度；顺序是这里唯一稳定的信息，所以只编号。
 
+**偏好按目录读，不能拼 `.overview.md`。** `.abstract.md` / `.overview.md` 是保留名
+（`src/domain/uri.ts` 的 `RESERVED_SEGMENT_NAMES`），`Uri.parse` 对它们抛
+`INVALID_URI`（HTTP 400）。`SessionStart` 因此走
+`GET /api/v1/content/overview?uri=comem://user/{uid}/memories/preferences`（参数是
+**目录**），由服务端 `SummaryService.read` 读那个文件。曾经这里直接 `content/read`
+文件名、再用 `.catch(() => null)` 吞掉 400——`<comem-preferences>` 从上线起就没注入
+过，而文件一直在盘上。读取失败（不是 403 / 404）现在记一条 stderr 的 `warn`。
+
 ### 为什么不用 `mcp-remote` 这类现成代理
 
 生态里已经有一个成熟的 stdio → 远程 MCP 代理（`npx mcp-remote <url>`，支持
