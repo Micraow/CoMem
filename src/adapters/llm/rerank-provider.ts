@@ -27,11 +27,11 @@ export interface HttpRerankProviderOptions {
   /** 为空时不发 `Authorization` 头（本地部署的重排服务通常不校验）。 */
   readonly apiKey: string;
   /**
-   * 单次重排超时，秒。默认 10（`config/schema.ts` 的 `providers.rerank.timeoutSeconds`）。
+   * 单次重排超时，秒。默认 30（`config/schema.ts` 的 `providers.rerank.timeoutSeconds`）。
    *
-   * 重排在检索路径上串行执行，超时预算直接加在用户等待时间上，所以它比 LLM 的
-   * 120 秒小一个数量级：10 秒是经验值，一次 50 条文档的交叉编码通常 200–800ms，
-   * 10 秒足够覆盖供应商的尾延迟。
+   * 重排在检索路径上串行执行，超时预算直接加在用户等待时间上。30 秒来自实测：
+   * 本地 `Qwen3-Reranker-0.6B` 重排 50 条候选 8.05 秒 p50 / 9.35 秒 p95
+   * （`eval/README.md` 的 105 条基线）。远程 8B 重排 50 条只要 1.8–2.7 秒。
    */
   readonly timeoutSeconds: number;
   readonly logger: Logger;

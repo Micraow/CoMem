@@ -650,6 +650,9 @@ describe('health', () => {
     expect(text).toContain('status: ok');
     expect(text).toContain('index.nodes: 2');
     expect(text).toContain('summary.degraded: false');
+    // 重排没配时不是降级：`degraded` 为 false，计数器为 0。
+    expect(text).toContain('rerank.degraded: false');
+    expect(text).toContain('rerank.failures: 0');
   });
 
   it('返回绑定主体与可寻址的根', async () => {

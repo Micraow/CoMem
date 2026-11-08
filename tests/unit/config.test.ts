@@ -73,7 +73,7 @@ function expectedDefaults(dataDir: string): unknown {
         baseUrl: '',
         model: 'BAAI/bge-reranker-v2-m3',
         apiKey: '',
-        timeoutSeconds: 10,
+        timeoutSeconds: 30,
         topN: 50,
       },
     },
@@ -283,7 +283,7 @@ describe('loadConfig', () => {
           baseUrl: '',
           model: 'BAAI/bge-reranker-v2-m3',
           apiKey: '',
-          timeoutSeconds: 10,
+          timeoutSeconds: 30,
           topN: 50,
         },
       },
@@ -521,7 +521,7 @@ describe('loadConfig', () => {
         type: 'http',
         baseUrl: 'https://rerank.example.test/v1',
         model: 'test-reranker',
-        timeoutSeconds: 10,
+        timeoutSeconds: 30,
         topN: 50,
       });
     });

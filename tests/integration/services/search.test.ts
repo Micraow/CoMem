@@ -671,7 +671,7 @@ describe('rerank', () => {
     expect(hits.map((hit) => hit.uri)).toEqual([B, C]);
   });
 
-  it('重排失败时退化为融合分，并记 warn', async () => {
+  it('重排失败时退化为融合分，并记 warn（带 reason / 耗时 / topN）', async () => {
     const service = await createService({
       index: threeHits(),
       rerank: {
@@ -686,10 +686,60 @@ describe('rerank', () => {
     const hits = await service.find('记忆', findOptions());
 
     expect(hits.map((hit) => hit.uri)).toEqual([A, B, C]);
+    // 没有状态码的 PROVIDER_UNAVAILABLE 是网络不可达（fetch 抛 TypeError）。
     expect(logger.warn).toHaveBeenCalledWith(
       '重排失败，使用融合分',
-      expect.objectContaining({ model: 'test-reranker', candidates: 3 }),
+      expect.objectContaining({
+        model: 'test-reranker',
+        reason: 'network',
+        topN: 3,
+        durationMs: expect.any(Number),
+      }),
     );
+  });
+
+  it('重排健康度：失败后 degraded 为真，成功一次即复位', async () => {
+    let fail = true;
+    const service = await createService({
+      index: threeHits(),
+      rerank: {
+        provider: provider(async () => {
+          if (fail) {
+            throw new ComemError('PROVIDER_UNAVAILABLE', '重排调用超时（10000 毫秒）。', {
+              timeout: true,
+              timeoutMs: 10_000,
+            });
+          }
+          return [0.1, 0.9, 0.5];
+        }),
+        topN: 50,
+        keepTopN: 0,
+      },
+    });
+
+    expect(service.rerankHealth).toMatchObject({
+      configured: true,
+      degraded: false,
+      failures: 0,
+      lastFailure: null,
+    });
+
+    await service.find('记忆', findOptions());
+    const degraded = service.rerankHealth;
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.failures).toBe(1);
+    expect(degraded.lastFailure?.reason).toBe('timeout');
+    expect(degraded.lastFailure?.topN).toBe(3);
+
+    fail = false;
+    await service.find('记忆', findOptions());
+    // 最近一次成功：degraded 复位，累计失败次数保留（间歇性失败仍看得见）。
+    expect(service.rerankHealth).toMatchObject({
+      configured: true,
+      degraded: false,
+      failures: 1,
+      lastFailure: null,
+    });
   });
 });
 

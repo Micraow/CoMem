@@ -134,17 +134,27 @@ const rerankProviderSchema = z
     /**
      * 单次重排超时，秒。
      *
-     * 10 秒是经验值：重排在检索路径上串行执行，超时直接加在用户等待时间上。一次
-     * 50 条文档的交叉编码通常 200–800ms，10 秒足够覆盖尾延迟，又不会让一次
-     * 「查一下」卡住十几秒。
+     * 30 秒来自实测，不是拍的：本地 `Qwen3-Reranker-0.6B` 重排 50 条候选要
+     * 8.05 秒 p50、9.35 秒 p95（`eval/README.md` 的 105 条基线，含候选正文读取
+     * 与查询嵌入）。原来的 10 秒低于 p95，105 条里超过一半的查询在重排返回前被
+     * 中止、静默退回融合分——用户以为用了重排，实际用的是融合分。30 秒是 p95 的
+     * 3.2 倍，也与 `providers.embedding.timeoutSeconds` 的默认值一致。
+     *
+     * 远程供应商（`bge-reranker-v2-m3` / `Qwen3-Reranker-8B`）50 条只要
+     * 1.8–2.7 秒，30 秒同样够用。延迟敏感、且能接受候选宽度变窄时，把 `topN`
+     * 降到 20：本地约 3.6 秒。
+     *
+     * 超时不是异常路径：它退化成融合分（检索仍然成功），但会在 `warn` 日志里带
+     * `reason: timeout`，并把最近一次失败写进 `GET /health` 的 `rerank.degraded`。
      */
-    timeoutSeconds: z.number().int().positive().default(10),
+    timeoutSeconds: z.number().int().positive().default(30),
     /**
      * 最多重排多少条候选。
      *
      * 50 是经验值：重排是串行的额外延迟，5 条以内的区别用户感知不到；而向量召回
      * 的 top-50 里噪声比 BM25 大，重排正是为了解决这一段。取 50 与「混合检索先
-     * 取 `candidateMultiplier × limit` 候选」的量级一致。
+     * 取 `candidateMultiplier × limit` 候选」的量级一致（4 × 10 = 40，向上取到
+     * 50）。本地 0.6B 重排 50 条约 8 秒，由 `timeoutSeconds` 的 30 秒默认值覆盖。
      */
     topN: z.number().int().positive().default(50),
   })

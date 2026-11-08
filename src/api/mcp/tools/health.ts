@@ -26,7 +26,7 @@ export const healthTool: McpToolDefinition = {
   name: 'health',
   kind: 'read',
   description:
-    '怀疑检索结果不对、或想知道后台任务是否堆积时先调这个，它不读内容也不改状态。返回里的 subject 是当前身份（拼绝对 URI 用），scopes 是它能看到的根（`~` 展开的目标）。它统计的是当前身份可见的索引条数，不是全库总量。summary.degraded 为 true 表示摘要走的是规则降级，此时摘要质量会下降。',
+    '怀疑检索结果不对、或想知道后台任务是否堆积时先调这个，它不读内容也不改状态。返回里的 subject 是当前身份（拼绝对 URI 用），scopes 是它能看到的根（`~` 展开的目标）。它统计的是当前身份可见的索引条数，不是全库总量。summary.degraded 为 true 表示摘要走的是规则降级，此时摘要质量会下降。rerank.degraded 为 true 表示最近一次重排调用失败、这次检索用的是融合分；rerank.failures 是进程启动以来的累计失败次数。',
   inputSchema: {
     type: 'object',
     properties: {},
@@ -56,6 +56,11 @@ export const healthTool: McpToolDefinition = {
     const pending = context.tasks.countByStatus('pending');
     const running = context.tasks.countByStatus('running');
     const degraded = context.config.summary.generator === 'rule';
+    // 重排降级与摘要降级是同一类「配了但没生效」：必须在 status 与明细里同时可见。
+    const rerank = context.search.rerankHealth;
+    if (rerank.degraded) {
+      status = 'degraded';
+    }
 
     return textResult(
       [
@@ -65,6 +70,8 @@ export const healthTool: McpToolDefinition = {
         `index.nodes: ${nodes}`,
         `queue: pending=${pending} running=${running}`,
         `summary.degraded: ${String(degraded)}`,
+        `rerank.degraded: ${String(rerank.degraded)}`,
+        `rerank.failures: ${rerank.failures}`,
         `version: ${SERVICE_VERSION}`,
       ].join('\n'),
     );

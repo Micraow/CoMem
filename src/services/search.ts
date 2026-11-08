@@ -37,7 +37,7 @@ import {
   type AssemblyResult,
   type QuotaPreset,
 } from '../domain/assembly.js';
-import { ComemError } from '../domain/errors.js';
+import { ComemError, type ComemErrorCode } from '../domain/errors.js';
 import { hotnessScore } from '../domain/hotness.js';
 import type { Level } from '../domain/level.js';
 import type { LlmPrompt } from '../domain/llm.js';
@@ -104,6 +104,53 @@ export interface RetrievalSettings {
     readonly dedupTurns: number;
     readonly quotaPreset: QuotaPreset;
   };
+}
+
+/**
+ * 重排降级原因。取值与 `adapters/llm/rerank-provider.ts` 的错误映射一一对应：
+ *
+ * - `timeout`：`AbortController` 超时（`details.timeout === true`）；
+ * - `http_5xx`：供应商回了 5xx（`details.statusCode >= 500`）；
+ * - `network`：连不上（fetch 抛 `TypeError`，没有状态码）；
+ * - `other`：4xx 配置错误（API Key、模型名、请求体）与其它未分类异常。
+ *
+ * 分开是为了让「调大超时」与「换 API Key」在日志里一眼能分辨——两者的处置完全不同。
+ */
+export type RerankFailureReason = 'timeout' | 'network' | 'http_5xx' | 'other';
+
+/**
+ * 最近一次重排失败。进程内状态，不落盘：重排是质量增强，失败只影响这一次检索。
+ *
+ * **它必须可见**（§17.9 的「降级不静默」）：配了重排但一半查询超时退化成融合分
+ * 的部署，比明确报错的部署难发现得多。
+ */
+export interface RerankFailure {
+  /** 失败时刻（ISO 8601） */
+  readonly at: string;
+  readonly reason: RerankFailureReason;
+  /** 模型调用耗时（毫秒）。不含候选正文读取——那部分失败走自己的 warn */
+  readonly durationMs: number;
+  /** 这次送去重排的候选条数（`providers.rerank.topN` 截断后的实际条数） */
+  readonly topN: number;
+  readonly code: ComemErrorCode;
+  readonly message: string;
+}
+
+/**
+ * 重排健康度（`/health` 与 MCP `health` 读它）。
+ *
+ * `failures` 是进程启动以来的累计失败次数；`lastFailure` 在最近一次调用成功后清空，
+ * 所以 `degraded` 回答的是「**现在**重排还在不在跑」，`failures` 保留「间歇性失败过
+ * 几次」——两者缺一不可：只看累计次数会把一次启动抖动永久标成降级，只看当前状态
+ * 又看不出 30% 的查询在超时。
+ */
+export interface RerankHealth {
+  /** 是否配置了重排（`retrieval.rerank.enabled` 且 `providers.rerank` 可用） */
+  readonly configured: boolean;
+  /** 最近一次重排调用是否失败（失败即退化成融合分） */
+  readonly degraded: boolean;
+  readonly failures: number;
+  readonly lastFailure: RerankFailure | null;
 }
 
 export interface SearchServiceDeps {
@@ -428,6 +475,29 @@ function resolveMaxQueries(maxQueries: number | undefined): number {
   return Math.min(maxQueries, MAX_TYPED_QUERIES);
 }
 
+/**
+ * 把重排错误收敛成降级原因。
+ *
+ * 规则与 `adapters/llm/rerank-provider.ts` 的 `mapRerankError` 一致，但**不按
+ * 错误码分支**：`PROVIDER_UNAVAILABLE` 同时覆盖「超时」「5xx」「网络不可达」三种，
+ * 只看 code 会把它们都记成同一件事，而「调大超时」与「换 API Key」的处置完全不同。
+ */
+function rerankFailureReason(error: ComemError): RerankFailureReason {
+  if (error.details?.['timeout'] === true) {
+    return 'timeout';
+  }
+  const statusCode = error.details?.['statusCode'];
+  if (typeof statusCode === 'number' && statusCode >= 500) {
+    return 'http_5xx';
+  }
+  // 没有状态码的 PROVIDER_UNAVAILABLE 是 fetch 抛 TypeError（DNS / 连接被拒）。
+  // 4xx 落到 other：那是配置错误，重试同样的请求结果一样。
+  if (statusCode === undefined && error.code === 'PROVIDER_UNAVAILABLE') {
+    return 'network';
+  }
+  return 'other';
+}
+
 export class SearchService {
   readonly #index: RetrievalIndex;
   readonly #filesystem: FileSystemService;
@@ -453,6 +523,10 @@ export class SearchService {
   readonly #hotnessHalfLifeDays: number;
   readonly #accessStats: SearchServiceDeps['accessStats'];
   readonly #recordAccess: SearchServiceDeps['recordAccess'];
+  /** 进程启动以来重排失败的次数。只增不清，作为「间歇性降级」的历史。 */
+  #rerankFailures = 0;
+  /** 最近一次重排失败；成功一次即清空，`degraded` 因此表达「现在」而不是「曾经」。 */
+  #rerankLastFailure: RerankFailure | null = null;
 
   constructor(deps: SearchServiceDeps) {
     this.#index = deps.index;
@@ -512,6 +586,23 @@ export class SearchService {
         nodes: deps.nodes,
       };
     }
+  }
+
+  /**
+   * 重排健康度快照（`/health` 与 MCP `health` 读它）。
+   *
+   * 返回新对象而不是内部字段：调用方拿到的是快照，改它不会影响下一次查询。
+   * `configured: false` 时 `degraded` 恒为 `false`——没配重排不是降级，是正常的
+   * 「不做语义重排」配置（与 `providers.rerank.type: disabled` 的默认值一致）。
+   */
+  get rerankHealth(): RerankHealth {
+    const configured = this.#rerank !== undefined;
+    return {
+      configured,
+      degraded: configured && this.#rerankLastFailure !== null,
+      failures: this.#rerankFailures,
+      lastFailure: this.#rerankLastFailure,
+    };
   }
 
   /**
@@ -1327,8 +1418,11 @@ export class SearchService {
    * 可以是负数；按原值降序才是模型给出的顺序。等同分时按 URI 码点序，与
    * `rankCandidates` 同一套口径。
    *
-   * 失败全部兜底：`applyRerank` 逐条兜底，`score` 抛错时整批退化成融合分，只记
-   * warn——重排是质量增强，不能让检索失败。
+   * 失败全部兜底：`applyRerank` 逐条兜底，`score` 抛错时整批退化成融合分，**只
+   * 记 warn、不让检索失败**。但降级不静默（§17.9 的同一原则）：warn 里带
+   * `reason`（`timeout` / `http_5xx` / `network` / `other`）、耗时与 `topN`，
+   * 并把最近一次失败写进 `rerankHealth` 供 `/health` 暴露——「配了重排但一半查询
+   * 在超时」必须能被查出来，否则用户以为用了重排，实际用的是融合分。
    */
   async #applyRerank(
     query: string,
@@ -1362,16 +1456,35 @@ export class SearchService {
     }
 
     let modelScores: readonly (number | null)[] | null = null;
+    // 只计模型调用本身：候选正文读取是本地 I/O，不属于「重排有多慢」。
+    const startedAt = Date.now();
     try {
       modelScores = await rerank.provider.score(
         query,
         candidates.map((candidate) => candidate.text),
       );
+      // 最近一次成功：`degraded` 回答的是「现在」，历史次数留在 `failures` 里。
+      this.#rerankLastFailure = null;
     } catch (error) {
       const failure = ComemError.from(error);
+      const reason = rerankFailureReason(failure);
+      const durationMs = Date.now() - startedAt;
+      this.#rerankFailures += 1;
+      this.#rerankLastFailure = {
+        at: new Date().toISOString(),
+        reason,
+        durationMs,
+        topN: candidates.length,
+        code: failure.code,
+        message: failure.message,
+      };
+      // `reason` 是给「调大超时」还是「换 API Key」分流用的：只看 code 的话
+      // 超时、5xx、网络不可达都是 PROVIDER_UNAVAILABLE，运维无从下手。
       this.#logger.warn('重排失败，使用融合分', {
         model: rerank.provider.model,
-        candidates: candidates.length,
+        reason,
+        durationMs,
+        topN: candidates.length,
         code: failure.code,
         message: failure.message,
       });

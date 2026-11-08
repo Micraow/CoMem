@@ -8,7 +8,8 @@
  * `/health` 的 `status` 判定（§17.9）：
  *
  * - `degraded`：摘要生成器配成 `rule`（模型不可用时的降级路径），或存在降级摘要的
- *   目录。**降级必须可见**——静默降级等于骗人；
+ *   目录，或最近一次重排调用失败（已退回融合分）。**降级必须可见**——静默降级等于
+ *   骗人；
  * - `ok`：其余。
  *
  * 索引与文件系统对账不一致也是 `degraded` 的判定条件，v1 没有对账任务（backlog 的
@@ -38,8 +39,12 @@ import type { HttpRouteServices } from './index.js';
 
 type HealthStatus = 'ok' | 'degraded';
 
-function statusOf(ruleGenerator: boolean, degradedSummaries: number): HealthStatus {
-  return ruleGenerator || degradedSummaries > 0 ? 'degraded' : 'ok';
+function statusOf(
+  ruleGenerator: boolean,
+  degradedSummaries: number,
+  rerankDegraded: boolean,
+): HealthStatus {
+  return ruleGenerator || degradedSummaries > 0 || rerankDegraded ? 'degraded' : 'ok';
 }
 
 /**
@@ -72,7 +77,7 @@ async function readableScopes(
 }
 
 export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { acl, observability, tasks, config, subject, groups } = services;
+  const { acl, observability, tasks, config, subject, groups, search } = services;
 
   return {
     // 空前缀 = 挂根路径（`/health`、`/metrics`），同时也会挂到 `/api/v1` 下。
@@ -81,8 +86,11 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
       app.get('/health', async () => {
         const health = await observability.health();
         const ruleGenerator = config.summary.generator === 'rule';
+        // 重排是「配了就必须能查」的质量增强：`degraded` 为真表示最近一次重排
+        // 调用失败、这次检索用的是融合分。与 `summary.degraded` 同一个判定模式。
+        const rerank = search.rerankHealth;
         return ok({
-          status: statusOf(ruleGenerator, health.degradedSummaries),
+          status: statusOf(ruleGenerator, health.degradedSummaries, rerank.degraded),
           // 控制台的身份引导读这两个字段（§16）；与 MCP `health` 的字段同名同义。
           subject,
           scopes: await readableScopes(acl, acl.resolvePrincipals(subject, groups)),
@@ -95,6 +103,14 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             degraded: ruleGenerator,
             pendingDirs: health.staleSummaries,
             degradedDirs: health.degradedSummaries,
+          },
+          // 重排健康度。`failures` 是累计值（看得出间歇性失败），`lastFailure`
+          // 在成功一次后清空（看得出「现在」还在不在跑）。
+          rerank: {
+            configured: rerank.configured,
+            degraded: rerank.degraded,
+            failures: rerank.failures,
+            lastFailure: rerank.lastFailure,
           },
           // §17.5 的记忆健康度。`ObservabilityService.health()` 已经算出来了，
           // 不往封套里带的话控制台只能去 `GET /memories/pending` 拉一页再数，
