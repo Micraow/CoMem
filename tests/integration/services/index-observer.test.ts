@@ -14,11 +14,14 @@ import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repo
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import type { EmbeddingProvider, EmbeddingResult } from '../../../src/domain/embedding.js';
+import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { AclService } from '../../../src/services/acl.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
+import { EmbeddingService } from '../../../src/services/embedding.js';
 import { IndexObserver } from '../../../src/services/index-observer.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 
@@ -47,6 +50,17 @@ interface HarnessOptions {
    * （`providers.embedding.type === 'disabled'`，`ensureSchema` 不跑）。
    */
   readonly embeddings?: boolean;
+  /**
+   * 注入一个真实的 `EmbeddingService`，外面套一个记录调用的假 provider。
+   *
+   * 用真服务而不是假服务：`embed()` 内部还按 `maxBatchSize` 切一次，只有让
+   * provider 的调用次数直接等于 HTTP 请求次数，「N 条记录 → ceil(N/maxBatchSize)
+   * 次请求」才是被测的契约本身。
+   */
+  readonly embedding?: {
+    readonly provider: EmbeddingProvider;
+    readonly maxBatchSize: number;
+  };
 }
 
 function createLogger(): Logger {
@@ -106,6 +120,20 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     permissions,
     logger,
     ...(options.embeddings === true ? { embeddings: new EmbeddingRepository({ db, logger }) } : {}),
+    ...(options.embedding === undefined
+      ? {}
+      : {
+          embedding: new EmbeddingService({
+            provider: options.embedding.provider,
+            logger,
+            cache: null,
+            config: {
+              dimension: options.embedding.provider.dimension,
+              maxBatchSize: options.embedding.maxBatchSize,
+              timeoutMs: 30_000,
+            },
+          }),
+        }),
   });
   const filesystem = new FileSystemService({
     store,
@@ -494,5 +522,186 @@ describe('IndexObserver 的错误隔离', () => {
     // 文件已经落盘（写操作成功），索引是派生数据。`store.stat` 不求权，
     // 因为这次失败发生在物化之前，`filesystem.stat` 会以 PERMISSION_DENIED 拒绝。
     expect(await harness.store.stat(file)).not.toBeNull();
+  });
+});
+
+/**
+ * 批量嵌入（架构文档 §8.1 的 `node_embedding`、§17.2 的异步阶段）。
+ *
+ * 这一组钉住的是「写路径真的用了批量」：`embedding.maxBatchSize` 从「没人读的
+ * 配置项」变成「一次 `drain()` 里 N 条记录 → `ceil(N / maxBatchSize)` 次请求」。
+ * 用真实的 `EmbeddingService` 套一个记录调用的假 provider，provider 的调用次数
+ * 就是 HTTP 请求次数，中间没有第二层切分可以虚增或虚减这个数。
+ */
+describe('IndexObserver 批量嵌入', () => {
+  const MODEL = 'test-embedding';
+  const RESOURCES = `${ROOT}/resources`;
+
+  /** 每条输入返回同一个单位向量；记录每次调用的条数。 */
+  function createProvider(
+    implementation?: (texts: readonly string[]) => Promise<EmbeddingResult>,
+  ): EmbeddingProvider & { readonly embed: ReturnType<typeof vi.fn> } {
+    return {
+      model: MODEL,
+      dimension: 3,
+      embed: vi.fn(
+        implementation ??
+          ((texts: readonly string[]) =>
+            Promise.resolve({
+              vectors: texts.map(() => [1, 0, 0]),
+              usage: { promptTokens: texts.length, totalTokens: texts.length },
+            })),
+      ),
+    };
+  }
+
+  /** 建 N 个文件（不经过观察者），再让观察者逐个通知——这样 N 条都在同一个窗口里。 */
+  async function writeFiles(local: Harness, count: number): Promise<readonly Uri[]> {
+    const uris: Uri[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const uri = Uri.parse(`${RESOURCES}/note-${String(index)}.md`);
+      await local.store.writeText(uri, `正文 ${String(index)}`);
+      uris.push(uri);
+    }
+    return uris;
+  }
+
+  it('N 条记录 → ceil(N / maxBatchSize) 次请求，不是 N 次', async () => {
+    const provider = createProvider();
+    const local = await createHarness({ embeddings: true, embedding: { provider, maxBatchSize: 4 } });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, MODEL);
+      const uris = await writeFiles(local, 10);
+
+      await Promise.all(uris.map((uri) => local.observer.onNodeWritten(uri, 'file')));
+      await local.observer.drain();
+
+      // 10 条 / 每批 4 条 = 3 次请求（4 + 4 + 2）。
+      expect(provider.embed).toHaveBeenCalledTimes(3);
+      expect(provider.embed.mock.calls.map(([texts]) => (texts as string[]).length)).toEqual([
+        4, 4, 2,
+      ]);
+      // 每条记录都写回了向量，一条不少。
+      expect(embeddings.count()).toBe(10);
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('顺序对回：供应商返回的向量按下标写回各自的 URI', async () => {
+    // 每条输入返回 `[序号 + 1, 1, 0]`。归一化会统一缩放两个分量，但比值
+    // `x / y = 序号 + 1` 不变——顺序错位时这个比值就对不上。
+    const provider = createProvider(async (texts) => ({
+      vectors: texts.map((text) => [Number(text.replace('正文 ', '')) + 1, 1, 0]),
+      usage: { promptTokens: texts.length, totalTokens: texts.length },
+    }));
+    const local = await createHarness({ embeddings: true, embedding: { provider, maxBatchSize: 8 } });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, MODEL);
+      const uris = await writeFiles(local, 5);
+
+      await Promise.all(uris.map((uri) => local.observer.onNodeWritten(uri, 'file')));
+      await local.observer.drain();
+
+      // 一次请求拿回 5 条，按输入下标拆开写回。
+      expect(provider.embed).toHaveBeenCalledTimes(1);
+      for (const [index, uri] of uris.entries()) {
+        const vector = embeddings.get(uri.toString())?.vector;
+        expect(vector).toBeDefined();
+        const x = vector?.[0] ?? 0;
+        const y = vector?.[1] ?? 1;
+        expect(x / y).toBeCloseTo(index + 1, 5);
+      }
+      expect(new Set(uris.map((uri) => embeddings.get(uri.toString())?.contentDigest)).size).toBe(5);
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('一条坏输入不让整批丢：二分重试把失败收敛到它自己', async () => {
+    const provider = createProvider(async (texts) => {
+      if (texts.includes('正文 1')) {
+        throw new ComemError('INVALID_ARGUMENT', '输入过长。', {});
+      }
+      return {
+        vectors: texts.map(() => [1, 0, 0]),
+        usage: { promptTokens: texts.length, totalTokens: texts.length },
+      };
+    });
+    const local = await createHarness({ embeddings: true, embedding: { provider, maxBatchSize: 4 } });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, MODEL);
+      const uris = await writeFiles(local, 6);
+
+      await Promise.all(uris.map((uri) => local.observer.onNodeWritten(uri, 'file')));
+      await local.observer.drain();
+
+      // 只有坏记录没写进去，其余 5 条都在。
+      expect(embeddings.count()).toBe(5);
+      expect(embeddings.get(uris[1]?.toString() ?? '')).toBeNull();
+      expect(local.logger.warn).toHaveBeenCalledWith(
+        '嵌入降级，跳过写入',
+        expect.objectContaining({ uris: [uris[1]?.toString()] }),
+      );
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('同一段正文挂在两个 URI 下只占一个输入位', async () => {
+    const provider = createProvider();
+    const local = await createHarness({ embeddings: true, embedding: { provider, maxBatchSize: 8 } });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, MODEL);
+      const first = Uri.parse(`${RESOURCES}/copy-a.md`);
+      const second = Uri.parse(`${RESOURCES}/copy-b.md`);
+      await local.store.writeText(first, '同一段正文。');
+      await local.store.writeText(second, '同一段正文。');
+
+      await Promise.all([
+        local.observer.onNodeWritten(first, 'file'),
+        local.observer.onNodeWritten(second, 'file'),
+      ]);
+      await local.observer.drain();
+
+      expect(provider.embed).toHaveBeenCalledTimes(1);
+      expect(provider.embed.mock.calls[0]?.[0]).toEqual(['同一段正文。']);
+      // 两个 URI 各写一行，向量相同。
+      expect(embeddings.count()).toBe(2);
+      expect(embeddings.get(first.toString())?.contentDigest).toBe(
+        embeddings.get(second.toString())?.contentDigest,
+      );
+    } finally {
+      await local.close();
+    }
+  });
+
+  it('正文没变不重新嵌入', async () => {
+    const provider = createProvider();
+    const local = await createHarness({ embeddings: true, embedding: { provider, maxBatchSize: 8 } });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, MODEL);
+      const [uri] = await writeFiles(local, 1);
+      if (uri === undefined) {
+        throw new Error('没有建出文件。');
+      }
+
+      await local.observer.onNodeWritten(uri, 'file');
+      await local.observer.drain();
+      expect(provider.embed).toHaveBeenCalledTimes(1);
+
+      // 同一份正文再通知一次：`content_digest` 相同，不需要重嵌。
+      await local.observer.onNodeWritten(uri, 'file');
+      await local.observer.drain();
+      expect(provider.embed).toHaveBeenCalledTimes(1);
+      expect(embeddings.count()).toBe(1);
+    } finally {
+      await local.close();
+    }
   });
 });

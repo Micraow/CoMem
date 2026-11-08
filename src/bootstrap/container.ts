@@ -64,6 +64,7 @@ import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { HttpRerankProvider } from '../adapters/llm/rerank-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
+import { EmbeddingCacheRepository } from '../adapters/sqlite/embedding-cache.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
@@ -605,6 +606,16 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const embedding = new EmbeddingService({
     provider: embeddingProvider,
     logger,
+    // 缓存按 `(model, content_digest)` 去重，与「配了哪个引擎」无关：`reindex`
+    // 回填、检索查询、写路径都该共享同一份结果。关掉只对「每次都要新向量」的
+    // 调试场景有意义。
+    cache: embeddingConfig.cache.enabled
+      ? new EmbeddingCacheRepository({
+          db,
+          logger,
+          maxEntries: embeddingConfig.cache.maxEntries,
+        })
+      : null,
     config: {
       dimension: embeddingConfig.dimension,
       maxBatchSize: embeddingConfig.maxBatchSize,

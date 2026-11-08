@@ -8,6 +8,7 @@ import type {
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { EmbeddingService } from '../../../src/services/embedding.js';
+import type { EmbeddingCachePort } from '../../../src/services/embedding.js';
 
 const DIMENSION = 3;
 const MODEL = 'test-embedding';
@@ -52,10 +53,15 @@ function createProvider(
   };
 }
 
-function createService(provider: EmbeddingProvider | null, maxBatchSize = 128): EmbeddingService {
+function createService(
+  provider: EmbeddingProvider | null,
+  maxBatchSize = 128,
+  cache: EmbeddingCachePort | null = null,
+): EmbeddingService {
   return new EmbeddingService({
     provider,
     logger: createLogger(),
+    cache,
     config: { ...CONFIG, maxBatchSize },
   });
 }
@@ -310,9 +316,9 @@ describe('构造校验', () => {
       { ...CONFIG, maxBatchSize: 0 },
       { ...CONFIG, timeoutMs: 0 },
     ]) {
-      expect(() => new EmbeddingService({ provider, logger: createLogger(), config })).toThrow(
-        ComemError,
-      );
+      expect(
+        () => new EmbeddingService({ provider, logger: createLogger(), cache: null, config }),
+      ).toThrow(ComemError);
     }
   });
 });

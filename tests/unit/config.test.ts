@@ -66,6 +66,7 @@ function expectedDefaults(dataDir: string): unknown {
         dimension: 1536,
         maxBatchSize: 128,
         timeoutSeconds: 30,
+        cache: { enabled: true, maxEntries: 20_000 },
       },
       rerank: {
         type: 'disabled',
@@ -228,6 +229,9 @@ describe('loadConfig', () => {
           dimension: 1024,
           maxBatchSize: 64,
           timeoutSeconds: 30,
+          // config.example.yaml 与 schema 的默认值不同时以 example 为准：
+          // example 里显式写了 cache 段，所以这里也是默认值。
+          cache: { enabled: true, maxEntries: 20_000 },
         },
         rerank: {
           type: 'disabled',

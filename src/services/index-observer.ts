@@ -97,6 +97,30 @@ const BYTE_ORDER_MARK = '\uFEFF';
 const MEMORY_TYPE_KEY = 'memory_type';
 const STATUS_KEY = 'status';
 
+/**
+ * 嵌入队列的合并窗口，毫秒。
+ *
+ * **为什么需要窗口而不是 `setImmediate`。** 排期的目的有两个：把嵌入推到
+ * `withLock` 的 `finally` 之后（不能在路径锁里打网络），以及**把同一段时间里产生
+ * 的记录合成一批**。`setImmediate` 只做到第一个——一次导入是「写一条 → await →
+ * 写一条」，每次 `await` 都会让出事件循环，`setImmediate` 的回调在两次写之间就
+ * 跑掉了，队列里永远只有一条，「按 `maxBatchSize` 分批」退化成「每条一次请求」。
+ * 这正是这个 wave 修的缺陷。
+ *
+ * **批量收益的主要来源不是这个窗口，是 `#scheduleEmbedding` 里「攒满一批立刻发」
+ * 那一条。** 窗口只负责两件事：把并发写入（`Promise.all` 批量提交）攒成一批，
+ * 以及在导入的尾巴上把不满一批的余数送出去。窗口调大能让余数等得更久，但**不会**
+ * 让稳态的请求数更优——稳态由「攒满即发」决定。
+ *
+ * 50 毫秒的来源：本机一次写入（`writeText` + 索引 upsert + 物化权限）实测约
+ * 12 毫秒（`local/bench/embedding-stage.ts` 的缓存重跑：64 条 788 毫秒），
+ * 50 毫秒覆盖约 4 条并发写入的突发。再大只会让「空闲之后的第一条」多等，而嵌入
+ * 本来就在写操作的异步阶段（§17.2），不在用户的阻塞路径上。
+ *
+ * `drain()` 会**提前**触发它，所以测试与 `close()` 不必等满 50 毫秒。
+ */
+const EMBED_COALESCE_MS = 50;
+
 export interface IndexObserverDeps {
   readonly store: ContentStore;
   readonly index: RetrievalIndex;
@@ -118,8 +142,11 @@ export interface IndexObserverDeps {
    * 可选是给「只关心检索索引」的调用方（存量测试、只读脚本）留的：不注入就
    * 完全不产生嵌入调用，而不是每次写入都打一次必定降级的网络。生产装配
    * （`bootstrap/container.ts`）总是注入。
+   *
+   * `maxBatchSize` 与 `available` 是批量排期要用的：前者决定队列怎么切片，后者让
+   * 「供应商整体不可用」时不再二分重试（切分只会放大请求数）。
    */
-  readonly embedding?: Pick<EmbeddingService, 'embed' | 'model'>;
+  readonly embedding?: Pick<EmbeddingService, 'embed' | 'model' | 'maxBatchSize' | 'available'>;
   /**
    * 向量仓储。与 `embedding` 成对出现；只注入一个时嵌入阶段整体跳过。
    *
@@ -213,6 +240,33 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 队列里的一条待嵌入记录。
+ *
+ * `digest` 是 `stableDigest(text)`，进队列时就算好：它既用来「正文没变就跳过」，
+ * 也用来把「同一段正文挂在两个 URI 下」合并成一个供应商输入。
+ */
+interface PendingEmbedding {
+  readonly uri: string;
+  readonly text: string;
+  readonly digest: string;
+}
+
+/** 同一份正文对应的所有 URI（一次嵌入写回多行）。 */
+interface EmbeddingGroup {
+  readonly text: string;
+  readonly uris: readonly string[];
+}
+
+/** 一批里实际涉及多少个节点（去重后的输入数不等于 URI 数）。 */
+function countUris(entries: readonly (readonly [string, EmbeddingGroup])[]): number {
+  let total = 0;
+  for (const [, group] of entries) {
+    total += group.uris.length;
+  }
+  return total;
+}
+
 export class IndexObserver implements NodeWriteObserver {
   readonly #store: ContentStore;
   readonly #index: RetrievalIndex;
@@ -221,10 +275,19 @@ export class IndexObserver implements NodeWriteObserver {
   readonly #nodes: NodeRepository;
   readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'>;
   readonly #logger: Logger;
-  readonly #embedding: Pick<EmbeddingService, 'embed' | 'model'> | undefined;
+  readonly #embedding: Pick<
+    EmbeddingService,
+    'embed' | 'model' | 'maxBatchSize' | 'available'
+  > | undefined;
   readonly #embeddings: EmbeddingRepository | undefined;
   /** 已排期但未完成的摘要失效 / 嵌入任务（见文件头「延后」）。 */
   readonly #pending = new Set<Promise<void>>();
+  /** 等待 flush 的嵌入记录。见 `#enqueueEmbedding`。 */
+  readonly #embedQueue: PendingEmbedding[] = [];
+  /** 合并窗口的定时器；`drain()` 会提前触发它。 */
+  #embedTimer: NodeJS.Timeout | null = null;
+  /** 正在跑的 flush；同一时刻只有一个（见 `#startEmbeddingFlush`）。 */
+  #embedFlush: Promise<void> | null = null;
 
   constructor(deps: IndexObserverDeps) {
     this.#store = deps.store;
@@ -368,13 +431,21 @@ export class IndexObserver implements NodeWriteObserver {
   }
 
   /**
-   * 等全部已排期的摘要失效完成。
+   * 等全部已排期的摘要失效与嵌入完成。
    *
    * 测试要一个确定点（写完之后摘要到底是「已重算」还是「已标脏」）；`close()` 要它
    * 来保证 `db.close()` 之后没有任务还在写库。
+   *
+   * **嵌入队列的契约**：返回时队列已空，每个排队项要么写进了 `node_embedding`，
+   * 要么已降级（记了日志）。所以这里要**提前触发**合并窗口，而不是等 50 毫秒。
+   * 循环里再触发一次是因为 `await` 期间可能又有新的写入进队列。
    */
   async drain(): Promise<void> {
-    while (this.#pending.size > 0) {
+    for (;;) {
+      this.#flushEmbeddingsNow();
+      if (this.#pending.size === 0) {
+        return;
+      }
       await Promise.all([...this.#pending]);
     }
   }
@@ -559,13 +630,18 @@ export class IndexObserver implements NodeWriteObserver {
   }
 
   /**
-   * 排期一次嵌入。
+   * 一条记录进嵌入队列。
    *
-   * **正文没变就跳过**（`contentDigest` 相同）：重复写同一内容不应该重复调模型。
-   * 模型名也参与比较——换模型之后旧向量必须重算，否则向量空间混着两个模型的
-   * 结果，余弦相似度全是噪音。
+   * **为什么不在这里直接调模型。** 一次导入是「写一条 → await → 写一条」，
+   * 每条各调一次供应商就是「单条 1140ms × N」。集中到 `#flushEmbeddings` 之后，
+   * 一个合并窗口里排队的 N 条按 `maxBatchSize` 切成 `ceil(N / maxBatchSize)` 次
+   * 请求（见 `EMBED_COALESCE_MS` 的说明）。
    *
-   * 失败只记日志（降级），不抛：写操作已经落盘，嵌入是派生数据（§7 的同一原则）。
+   * **为什么先算 digest。** 它同时承担两件事：`node_embedding` 的「正文没变就
+   * 跳过」，以及「同一段正文出现在两个 URI 下只嵌一次」（见 `#embedRecords`）。
+   *
+   * 没配供应商（`type: disabled`，默认值）时静默跳过：这是「不做语义检索」的
+   * 正常配置，不是降级。每次写都记 warn 只会把真正的故障淹掉。
    */
   #scheduleEmbedding(uri: Uri, text: string): void {
     const embedding = this.#embedding;
@@ -573,56 +649,203 @@ export class IndexObserver implements NodeWriteObserver {
     if (embedding === undefined || embeddings === undefined || text === '') {
       return;
     }
-    const model = embedding.model;
-    // 没配供应商（`type: disabled`，默认值）时静默跳过：这是「不做语义检索」的
-    // 正常配置，不是降级。每次写都记 warn 只会把真正的故障淹掉。
-    if (model === null) {
+    if (embedding.model === null) {
       return;
     }
 
-    const digest = stableDigest(text);
-    const task = new Promise<void>((resolve) => {
-      // 与摘要失效同一个理由：推到 `withLock` 的 `finally` 之后。嵌入要打网络，
-      // 在路径锁里做会把一次写操作拖成秒级。
-      setImmediate(resolve);
-    })
-      .then(async () => {
-        const existing = embeddings.get(uri.toString());
-        if (existing !== null && existing.model === model && existing.contentDigest === digest) {
-          return;
-        }
+    this.#embedQueue.push({ uri: uri.toString(), text, digest: stableDigest(text) });
+    // 已经有 flush 在跑：`#flushEmbeddings` 的循环会吃掉新到的记录。
+    if (this.#embedFlush !== null) {
+      return;
+    }
+    // 攒满一批立刻发。这是「N 条记录 → ceil(N / maxBatchSize) 次请求」的直接
+    // 来源；只靠定时器时，一次导入会在窗口边界上切出很多不满的批。
+    if (this.#embedQueue.length >= embedding.maxBatchSize) {
+      this.#flushEmbeddingsNow();
+      return;
+    }
+    // 不满一批：等合并窗口，把零散写入攒成一批。
+    if (this.#embedTimer !== null) {
+      return;
+    }
+    this.#embedTimer = setTimeout(() => {
+      this.#embedTimer = null;
+      this.#startEmbeddingFlush();
+    }, EMBED_COALESCE_MS);
+  }
 
-        const outcome = await embedding.embed([text]);
-        const vector = outcome.vectors[0];
-        if (outcome.degraded || vector === undefined) {
-          this.#logger.warn('嵌入降级，跳过写入', {
-            uri: uri.toString(),
-            reason: outcome.reason ?? '没有返回向量。',
-          });
-          return;
-        }
+  /**
+   * 把合并窗口提前到此刻（`drain()` 用）。
+   *
+   * 没有排期时是空操作；有排期时取消定时器并立刻开始 flush。
+   */
+  #flushEmbeddingsNow(): void {
+    if (this.#embedTimer !== null) {
+      clearTimeout(this.#embedTimer);
+      this.#embedTimer = null;
+    }
+    this.#startEmbeddingFlush();
+  }
 
-        embeddings.upsert([
-          {
-            uri: uri.toString(),
-            model,
-            contentDigest: digest,
-            vector,
-          },
-        ]);
-      })
-      .then(
-        () => undefined,
-        (error: unknown) => {
-          this.#logger.error('嵌入写入失败，已忽略。', {
-            uri: uri.toString(),
-            error: errorMessage(error),
-          });
-        },
-      );
+  /**
+   * 启动一次 flush。同一时刻只有一个。
+   *
+   * 任务进 `#pending`，`drain()` 因此能等它；失败的日志要带得上「哪一批」，所以
+   * 这里只兜住「flush 自己抛了」——**单个记录**的失败在 `#embedChunk` 里已经
+   * 降级成日志，不会再往上抛。
+   */
+  #startEmbeddingFlush(): void {
+    if (this.#embedFlush !== null || this.#embedQueue.length === 0) {
+      return;
+    }
+    const task = this.#flushEmbeddings();
+    this.#embedFlush = task;
     this.#pending.add(task);
-    void task.then(() => {
-      this.#pending.delete(task);
+    void task.then(
+      () => {
+        this.#pending.delete(task);
+      },
+      (error: unknown) => {
+        this.#pending.delete(task);
+        this.#logger.error('嵌入批次失败，已忽略。', { error: errorMessage(error) });
+      },
+    );
+  }
+
+  /**
+   * 排空队列。
+   *
+   * 循环是必需的：`await` 期间写路径可能继续入队（`#scheduleEmbedding` 看到
+   * `#embedFlush !== null` 就不会再开定时器，只能由这里接着吃）。`finally` 里清
+   * `#embedFlush` 而不是在 `.then` 里清，是为了让「while 退出」与「允许新 flush」
+   * 之间没有 await——否则这段时间入队的记录会永远留在队列里。
+   */
+  async #flushEmbeddings(): Promise<void> {
+    try {
+      while (this.#embedQueue.length > 0) {
+        const records = this.#embedQueue.splice(0, this.#embedQueue.length);
+        await this.#embedRecords(records);
+      }
+    } finally {
+      this.#embedFlush = null;
+    }
+  }
+
+  /**
+   * 把一批记录按 `maxBatchSize` 切片交给供应商。
+   *
+   * 两步去重，各解决一件事：
+   *
+   * 1. **按 URI 去重**：`node_embedding` 里已经是同一个 `(model, contentDigest)`
+   *    的节点不用重嵌——重复写同一份正文不该重复调模型。
+   * 2. **按 digest 去重**：同一段正文挂在两个 URI 下时只占一个输入位，结果写回
+   *    两行。这是「两个 URI 共享正文」从「嵌两次」变成「嵌一次」的地方。
+   *
+   * 去重之后才切片：切的是**供应商真正要看的输入数**，不是记录数。
+   */
+  async #embedRecords(records: readonly PendingEmbedding[]): Promise<void> {
+    const embedding = this.#embedding;
+    const embeddings = this.#embeddings;
+    const model = embedding?.model;
+    if (embedding === undefined || embeddings === undefined || model === null || model === undefined) {
+      return;
+    }
+
+    const existing = new Map(
+      embeddings.getMany(records.map((record) => record.uri)).map((row) => [row.uri, row]),
+    );
+    const groups = new Map<string, { text: string; uris: string[] }>();
+    for (const record of records) {
+      const row = existing.get(record.uri);
+      if (row !== undefined && row.model === model && row.contentDigest === record.digest) {
+        continue;
+      }
+      const group = groups.get(record.digest);
+      if (group === undefined) {
+        groups.set(record.digest, { text: record.text, uris: [record.uri] });
+      } else {
+        group.uris.push(record.uri);
+      }
+    }
+
+    const entries = [...groups.entries()];
+    const batchSize = embedding.maxBatchSize;
+    for (let start = 0; start < entries.length; start += batchSize) {
+      await this.#embedChunk(entries.slice(start, start + batchSize), model);
+    }
+  }
+
+  /**
+   * 一次供应商调用。**失败隔离**在这里。
+   *
+   * 顺序靠 `#embedding.embed` 的契约保证：`vectors[i]` 与 `texts[i]` 一一对应
+   * （供应商返回的 `data[].index` 由 `adapters/llm/embedding-provider.ts` 的
+   * `embedMany` 按 `index` 排好，不假设响应数组顺序）。所以这里按下标写回，
+   * 不需要在服务层再对一次。
+   *
+   * 失败隔离分两种：
+   *
+   * - **整批降级**（供应商挂了、限流、超时）：这一批的记录跳过，记一条 warn。
+   *   其它批不受影响，这与批量之前「一条失败只影响它自己」的语义在**批**这一级
+   *   上一致。
+   * - **单条坏输入**（超长、非法字符，供应商回 400）：不能让它把同批 64 条一起
+   *   丢掉。降级时**二分重试**，把失败收敛到那条记录自己；剩下的一半照常写入。
+   *
+   * 二分不会放大请求数：供应商整体不可用时 `embedding.available` 会转成 `false`
+   * （熔断打开且仍在冷却），下面的前置判断让整棵子树直接跳过，不打网络。所以
+   * 「供应商挂了」最多打出 `FAILURE_THRESHOLD` 次（5 次）真实请求，而不是
+   * `2N - 1` 次。
+   */
+  async #embedChunk(
+    entries: readonly (readonly [string, EmbeddingGroup])[],
+    model: string,
+  ): Promise<void> {
+    const embedding = this.#embedding;
+    const embeddings = this.#embeddings;
+    if (embedding === undefined || embeddings === undefined || entries.length === 0) {
+      return;
+    }
+
+    if (!embedding.available) {
+      this.#logger.warn('嵌入不可用，跳过本批记录', {
+        records: countUris(entries),
+        reason: '熔断打开或未配置供应商。',
+      });
+      return;
+    }
+
+    const outcome = await embedding.embed(entries.map(([, group]) => group.text));
+    if (!outcome.degraded) {
+      const rows: EmbeddingRow[] = [];
+      for (const [offset, entry] of entries.entries()) {
+        const [digest, group] = entry;
+        const vector = outcome.vectors[offset];
+        if (vector === undefined) {
+          continue;
+        }
+        for (const uri of group.uris) {
+          rows.push({ uri, model, contentDigest: digest, vector });
+        }
+      }
+      if (rows.length > 0) {
+        embeddings.upsert(rows);
+        this.#logger.debug('嵌入写入', { records: rows.length });
+      }
+      return;
+    }
+
+    // 一条坏输入不能拖掉整批：二分重试，让失败收敛到它自己。
+    if (entries.length > 1) {
+      const middle = Math.ceil(entries.length / 2);
+      await this.#embedChunk(entries.slice(0, middle), model);
+      await this.#embedChunk(entries.slice(middle), model);
+      return;
+    }
+
+    const only = entries[0];
+    this.#logger.warn('嵌入降级，跳过写入', {
+      uris: only?.[1].uris ?? [],
+      reason: outcome.reason ?? '没有返回向量。',
     });
   }
 

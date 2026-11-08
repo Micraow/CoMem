@@ -39,6 +39,32 @@ const llmProviderSchema = z.object({
 });
 
 /**
+ * 嵌入结果缓存（架构文档 §8.1 的 `embedding_cache` 表）。
+ *
+ * 缓存是**派生数据的派生**：`(model, content_digest) → 向量`。命中就不打供应商，
+ * 未命中照常打。读失败 / 写失败一律降级成「没命中」，生产写入路径不受影响。
+ *
+ * 默认开启：省掉的是**重复**的网络调用，不影响正确性——同样的模型、同样的正文，
+ * 供应商返回的向量是同一个。关掉只对「每次都要拿新向量」的调试场景有意义。
+ */
+const embeddingCacheSchema = z
+  .object({
+    /** 关掉之后每次嵌入都打供应商（调试 / 排障用）。 */
+    enabled: z.boolean().default(true),
+    /**
+     * 最多保留多少行，超过按插入顺序淘汰最旧的行。
+     *
+     * 20,000 是**保守取值**，不是容量上限：1024 维每行约 4 KiB（共约 80 MiB），
+     * 1536 维约 120 MiB。磁盘不是无限的，而缓存未命中的代价只是多一次供应商调用
+     * ——延迟成本，不是正确性成本。按 1,000 条/秒的导入速度，20,000 条足够覆盖
+     * 一次中等规模导入里重复出现的正文。推导与失效场景见
+     * `adapters/sqlite/embedding-cache.ts` 的文件头。
+     */
+    maxEntries: z.number().int().positive().default(20_000),
+  })
+  .prefault({});
+
+/**
  * 嵌入供应商（架构文档 §18 的 `providers.embedding`）。
  *
  * `type: 'disabled'` 是默认值：没配就不该产生嵌入调用。线上写记忆是热路径，一次
@@ -70,10 +96,15 @@ const embeddingProviderSchema = z
      * 128 是经验值，来源是「供应商常见上限」：OpenAI 单次最多 2048 条，Azure
      * 只有 16 条，多数兼容实现落在 100–2048 之间。取 128 对常见供应商都安全，
      * 真实供应商有更小的上限时用这个字段覆盖。
+     *
+     * 写路径按它把**一次 `drain()` 里排队的记录**切片：N 条记录产生
+     * `ceil(N / maxBatchSize)` 次请求，而不是 N 次。取 1 会退化成「每条一次」，
+     * 大于供应商上限会被拒绝（400）。
      */
     maxBatchSize: z.number().int().positive().default(128),
     /** 单批超时，秒。30 秒是经验值：嵌入是短请求，卡住不该占着租约等两分钟。 */
     timeoutSeconds: z.number().int().positive().default(30),
+    cache: embeddingCacheSchema.prefault({}),
   })
   .prefault({});
 

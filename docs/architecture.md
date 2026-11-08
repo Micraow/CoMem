@@ -787,6 +787,19 @@ CREATE TABLE embedding_model (
   created_at TEXT NOT NULL
 );
 
+-- 嵌入缓存（0015）。**不是索引**，是「这份正文嵌过没有」的跨进程记忆。
+-- 两张表的分工见下面「node_embedding 与 embedding_cache 的职责边界」。
+-- 派生数据：可以随时清空，清空只让下一次重新打供应商，结果逐位相同。
+CREATE TABLE embedding_cache (
+  model          TEXT NOT NULL,   -- 进主键：不同模型的向量不可比，换模型必须全量重算
+  content_digest TEXT NOT NULL,   -- 进主键：同一段正文只嵌一次
+  vector         BLOB NOT NULL,   -- Float32Array 原始字节
+  dimension      INTEGER NOT NULL,  -- 与配置不一致的行当未命中
+  created_at     TEXT NOT NULL,   -- 淘汰按它升序（FIFO）
+  PRIMARY KEY (model, content_digest)
+);
+CREATE INDEX idx_embedding_cache_created ON embedding_cache(created_at);
+
 -- 用户与组目录（0008）。`acl_entry` / `node_permission` 存的是
 -- `user:{uid}` / `group:{gid}` 字符串；这三张表是组员关系与
 -- `GET /admin/*` 的数据来源。
@@ -830,6 +843,24 @@ CREATE TABLE group_member (
 | 0008 | `0008_identity.sql` | `app_user` / `app_group` / `group_member` |
 | 0009 | `0009_access_tracking.sql` | `node.access_count` / `node.last_accessed_at`（热度衰减的输入） |
 | 0010 | `0010_ttl.sql` | `node.expires_at` + 部分索引 `idx_node_expires`（记忆 TTL，§11.7） |
+| 0011 | `0011_ingest.sql` | 本机 Agent 对话导入的游标 |
+| 0012 | `0012_prompt.sql` | `prompt_override`（§18.1） |
+| 0013 | `0013_auth.sql` | 用户名密码与 API Key |
+| 0014 | `0014_group_owner.sql` | `app_group.owner_user_id`（§12.6） |
+| 0015 | `0015_embedding_cache.sql` | `embedding_cache`（嵌入结果缓存） |
+
+**`node_embedding` 与 `embedding_cache` 的职责边界。** 两张表都不是真相（文件是真相，§7），但它们回答的问题不同：
+
+| 表 | 主键 | 回答的问题 | 谁读 | 删掉会怎样 |
+|---|---|---|---|---|
+| `node_embedding` | `uri` | 这个**节点**的向量是不是最新的 | 检索（`find` / `search` 的向量召回） | 语义检索返回空，直到回填 |
+| `embedding_cache` | `(model, content_digest)` | 这份**正文**嵌过没有 | 嵌入服务（写路径、检索查询、回填） | 下一次嵌入重新打供应商，结果逐位相同 |
+
+`node_embedding` 的按 URI 去重只能回答「这个地址写过没有」。同一段正文出现在两个 URI 下（复制一份记忆、把同一份规则挂到两个项目）、同一条查询被重复执行、`pnpm eval` 重跑同一批语料——这三种场景在 URI 维度上都未命中，却是同一份正文。`embedding_cache` 补的就是这一段。
+
+**缓存不跨模型，也不跨维度。** `model` 进主键：不同模型的向量空间不可比，换模型时旧行自然全部未命中，不需要任何清理动作（与 `node_embedding` 的 `model = ?` 过滤同一个语义）。`dimension` 单独一列：模型名没变而维度改了（配置写错、换了量化版本）时主键仍然命中，读路径比对维度后当未命中并记 `warn`——直接把长度不对的向量返回，`assertValidVector` 会在写 `node_embedding` 时抛错，而写入路径不该因为缓存坏掉而失败。
+
+**容量与淘汰。** 默认上限 20,000 条（`providers.embedding.cache.maxEntries`），超了按 **FIFO**（`created_at` 升序）淘汰。选 FIFO 而不是 LRU 的理由是**不在命中路径上写库**：LRU 要在每次命中时更新「最近使用时间」，而命中是写路径上最热的操作，为了一次淘汰把它变成写事务不划算。失效场景要说清楚：一份很早插入、之后被反复命中的正文，会先于一份只嵌过一次的近期正文被淘汰——错判只影响命中率，下一次重新打一次供应商即可，不影响数据。20,000 的来源：1024 维每行约 4 KiB（共约 80 MiB），1536 维约 120 MiB，是「磁盘不是无限的」这一条下的保守取值；它覆盖 100 倍于 `pnpm eval` 的语料量（52 篇 + 105 条查询），再大的库靠供应商调用补。
 
 **中文必须单字切分，否则检索整段失效。** 实测（SQLite 3.54.1，Node 26 的 `node:sqlite`）：
 
@@ -2365,6 +2396,10 @@ Prometheus 文本              分析型 JSON
 
 **为什么必须单独测进程启动**：hook 起一个新 Node 进程就是 30–50ms 纯开销。把它藏在「检索 20ms」后面会误导人，让人以为 CoMem 只花 20ms。
 
+**异步阶段里嵌入是最贵的一段，所以它必须批量、必须缓存。** 归档、抽取、合并、摘要、嵌入都在 `IndexObserver` 的排期里跑（内容落盘之后），不计入上面那 60–180ms。嵌入的单价随条数摊薄：远程供应商单条 1140ms，本地 GPU 单条 410ms 而 32 条只要 400ms（12.5ms/条）——差异几乎全在「每条一次 HTTP 往返」上。所以写路径把一次合并窗口里排队的记录按 `providers.embedding.maxBatchSize` 切片：N 条记录产生 `ceil(N / maxBatchSize)` 次请求；`(model, 正文摘要)` 命中 `embedding_cache`（§8.1）时一次都不产生。两件事都不改变 `drain()` 的契约——它返回时每个排队项要么已写入 `node_embedding`，要么已降级并记了日志。
+
+**一批失败只影响这一批。** 供应商整体不可用时这一批记录跳过（记 `warn`），其它批照常；单条坏输入（超长、非法字符，供应商回 400）则**二分重试**，把失败收敛到它自己，剩下的记录照常写入。二分不会放大请求数：供应商挂掉时熔断在 5 次连续失败后打开，`EmbeddingService.available` 转 `false`，后续子树直接跳过、不打网络。
+
 **指标**：
 
 ```
@@ -2659,6 +2694,8 @@ task:
 **控制台跟随这个值，不重复配置。** `GET /health` 返回 `subject` 与 `scopes`（§17.9），控制台启动时拉一次，用 `subject` 拼请求头。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改 `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
 
 **`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
+
+**`providers.embedding.cache` 默认开。** 缓存的是 `(model, 正文摘要) → 向量`，命中就不打供应商。读失败 / 写失败都降级成「没命中」，生产写入路径不受影响（§7 的同一原则）。`enabled: false` 只对「每次都要拿新向量」的调试有意义；`maxEntries` 默认 20,000，淘汰策略与失效场景见 §8.1。
 
 **`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。同理，`retrieval.rerank.enabled` 为 `true` 而 `providers.rerank.type` 仍是 `disabled` 时也抛错，不静默降级成「不重排」。
 

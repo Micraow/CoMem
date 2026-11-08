@@ -93,8 +93,12 @@ export function toVectorBlob(vector: readonly number[]): Uint8Array {
  *
  * 空数组是兜底：列可空，正常路径不会读到 `null`；真读到时空向量会让调用方的
  * 维度校验先报错，比在映射函数里抛一个没有上下文的异常更容易定位。
+ *
+ * 导出给 `embedding-cache.ts`：缓存表存的是同一种 `Float32Array` 原始字节，
+ * 两份实现必须逐位一致，否则「命中」与「重新嵌入」写进 `node_embedding` 的
+ * 向量不同。
  */
-function fromBlob(value: unknown): number[] {
+export function fromVectorBlob(value: unknown): number[] {
   if (!(value instanceof Uint8Array)) {
     return [];
   }
@@ -111,7 +115,7 @@ function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {
     uri: text(row['uri']),
     model: text(row['model']),
     contentDigest: text(row['content_digest']),
-    vector: fromBlob(row['embedding']),
+    vector: fromVectorBlob(row['embedding']),
   };
 }
 

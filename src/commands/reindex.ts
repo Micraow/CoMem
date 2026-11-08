@@ -36,6 +36,7 @@ import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
+import { EmbeddingCacheRepository } from '../adapters/sqlite/embedding-cache.js';
 import {
   EmbeddingRepository,
   createEmbeddingTable,
@@ -404,6 +405,11 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     const nodeRepository = new NodeRepository({ db, logger });
     const embeddings = new EmbeddingRepository({ db, logger });
     const embedding = new EmbeddingService({
+      // 回填同样走缓存：同一份正文在「回填」与「写路径」之间的结果必须一致，
+      // 否则第二次重建会重复打供应商。
+      cache: embeddingConfig.cache.enabled
+        ? new EmbeddingCacheRepository({ db, logger, maxEntries: embeddingConfig.cache.maxEntries })
+        : null,
       provider:
         embeddingConfig.type === 'disabled'
           ? null

@@ -31,6 +31,13 @@ providers:
     dimension: 1024
     maxBatchSize: 64           # 供应商常见上限 100–2048，取保守值
     timeoutSeconds: 30
+    # 嵌入结果缓存（架构文档 §8.1 的 embedding_cache 表）。按
+    # (model, 正文摘要) 去重：同一段正文出现两次、同一条查询跑两遍都不再打供应商。
+    # 派生数据，读 / 写失败都降级成「没命中」，不影响写入。
+    cache:
+      enabled: true
+      # 超过上限按插入顺序淘汰最旧的行。1024 维每行约 4 KiB（20,000 行约 80 MiB）。
+      maxEntries: 20000
 
   # 重排（Cohere / Jina 兼容的 POST /rerank）。
   #
