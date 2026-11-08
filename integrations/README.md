@@ -278,6 +278,40 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 文件名、再用 `.catch(() => null)` 吞掉 400——`<comem-preferences>` 从上线起就没注入
 过，而文件一直在盘上。读取失败（不是 403 / 404）现在记一条 stderr 的 `warn`。
 
+### 注入预算契约
+
+`SessionStart` 的三个块（`<comem-profile>` / `<comem-preferences>` / `<available-skills>`）
+都有硬上限。超过宿主上限不是「多一点上下文」，而是**整段被转存成文件、模型只看到
+预览**——注入静默失效。
+
+| 约束 | 值 | 超了怎么办 |
+|---|---|---|
+| 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 保留前 8 行 / 句 + 尾部，中间插 `[… 已省略中间 N 行；完整内容用 read 取回 <URI> …]` |
+| 偏好 token 预算 | 画像预算的 1/4，默认 500 | 同上（偏好通常只有几行，按句截断） |
+| 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
+| 宿主字节上限 | Claude Code 9,500 / DSH 20,000 | 按「画像 > 技能目录 > 偏好」丢块，stderr 记一条 `warn` |
+
+**只注入正文。** `profile.md` 的 YAML frontmatter 是噪声：`memory_type` /
+`created_at` / `uri` 模型用不上，`summary` 是正文前 256 字的副本。服务端
+`content/read` 已经剥过一次（`ContentStore.readText` 返回 `document.body`）；Hook
+再剥一次是因为它是独立部署的交付物，对端不一定是同一个版本，而半截 YAML 混进
+上下文比多一段噪声更难发现。
+
+**token 估算按文本自身的 CJK 密度**：`ceil(CJK 码点数 × 1 + 其余码点数 × 0.25)`。
+常用的 `chars / 4` 对中文**低估 6 倍**（1000 个汉字约 1000–1500 token，不是 250），
+用它判预算会让中文画像超上限 4–6 倍。公式与 `src/domain/session.ts` 的
+`estimateTokens` 是同一份（Hook 不依赖 `src/`，所以有一份副本；**改一处要改两处**）。
+
+**为什么偏好排在技能目录之后丢。** 偏好是目录的 L1 概览，模型能用 `find` /
+`content/overview` 按需取回；技能目录是模型发现「存在哪些能力」的唯一入口，丢了
+没有恢复路径。画像是唯一不可恢复的（「这个用户是谁」），只受 token 预算约束，
+不参与丢块。
+
+**宿主字节上限的来源是宿主的实现细节，不是公开规范。** Claude Code / Codex 在 hook
+输出超过约 10,000 字符时转存文件、只放预览，这里取 9,500 留余量；DSH 没有公开上限，
+取 20,000 的保守值。两个数在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**
+——真实上限更低时调小，不要指望宿主报错，它只会静默降级成预览。
+
 ### 为什么不用 `mcp-remote` 这类现成代理
 
 生态里已经有一个成熟的 stdio → 远程 MCP 代理（`npx mcp-remote <url>`，支持
@@ -342,6 +376,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
 | `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 相对阈值：只保留分数不低于本次最高分 × 该值的命中（§15.9 的「三条前提」之二） |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入 token 预算。超了保留前 8 行 / 句 + 尾部，中间插带 URI 的省略标记（见「注入预算契约」） |
 | `queryFilters` | `COMEM_QUERY_FILTERS`（换行分隔） | §8.8 的五条 | sed 风格正则 |
 
 ```yaml

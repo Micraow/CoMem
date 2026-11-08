@@ -50,6 +50,21 @@ export const DEFAULT_QUERY_FILTERS = Object.freeze([
  */
 export const DEFAULT_SKILL_BUDGET_TOKENS = 400;
 
+/**
+ * 用户画像的注入 token 预算（`<comem-profile>`）。
+ *
+ * 2000 的来源是**宿主字节上限的倒推**，不是拍的：最严的宿主对 hook 输出只给
+ * 9,500 字节（见 `hosts/claude-code.mjs` 的 `MAX_CONTEXT_BYTES`），按最坏情况
+ * 4 字节/token（英文：1 字符 1 字节、4 字符/token）是 2,375 token；再留 400 token
+ * 给技能目录、留出块标签与空行的余量，取 2,000。中文 2,000 字约 6 KB（3 字节/字、
+ * 1 token/字），与同一个上限相容。
+ *
+ * 量级上：画像正文按 157 字/归档的实测速度增长（4 个会话 8 次归档 1,259 字），
+ * 2,000 token 约等于 12 次归档；超过之后按「前 8 行 + 尾部 + 省略标记」截断。
+ * 写盘侧把画像压短是另一件事（抽取提示词的职责），这个值只管注入。
+ */
+export const DEFAULT_PROFILE_BUDGET_TOKENS = 2000;
+
 /** 默认配置（与 §18 的默认值一致）。 */
 export const DEFAULT_CONFIG = Object.freeze({
   baseUrl: 'http://127.0.0.1:1933',
@@ -79,6 +94,7 @@ export const DEFAULT_CONFIG = Object.freeze({
    */
   recallScoreThreshold: 0.5,
   skillBudgetTokens: DEFAULT_SKILL_BUDGET_TOKENS,
+  profileBudgetTokens: DEFAULT_PROFILE_BUDGET_TOKENS,
   queryFilters: DEFAULT_QUERY_FILTERS,
 });
 
@@ -93,6 +109,7 @@ const ENV_OVERRIDES = Object.freeze({
   COMEM_RECALL_LIMIT: 'recallLimit',
   COMEM_RECALL_SCORE_THRESHOLD: 'recallScoreThreshold',
   COMEM_SKILL_BUDGET_TOKENS: 'skillBudgetTokens',
+  COMEM_PROFILE_BUDGET_TOKENS: 'profileBudgetTokens',
   COMEM_QUERY_FILTERS: 'queryFilters',
 });
 
@@ -103,6 +120,7 @@ const NUMERIC_KEYS = new Set([
   'recallLimit',
   'recallScoreThreshold',
   'skillBudgetTokens',
+  'profileBudgetTokens',
 ]);
 
 function invalidConfig(message) {
@@ -244,7 +262,7 @@ function coerce(key, value) {
  *   baseUrl: string, userId: string, token: string, timeoutMs: number,
  *   commitTimeoutMs: number, mcpTimeoutMs: number, recallLimit: number,
  *   recallScoreThreshold: number,
- *   skillBudgetTokens: number, queryFilters: readonly string[],
+ *   skillBudgetTokens: number, profileBudgetTokens: number, queryFilters: readonly string[],
  *   configFile: string, tmpDir: string,
  * }>}
  */

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { ComemHookError } from '../lib/http.mjs';
+import { fitContext, stripFrontmatter } from '../lib/injection.mjs';
 import { estimateTokens, handleSessionStart, renderSkillCatalog } from '../servers/session-start.mjs';
 
 const SKILLS = [
@@ -229,4 +230,154 @@ test('按路径 glob 关掉（§8.9 的 COMEM_BYPASS_SESSION_PATTERNS）', async
   );
   assert.equal(result, undefined);
   assert.equal(http.calls.length, 0);
+});
+
+
+/**
+ * 注入预算（§15.2）：画像只注入正文、超预算按 head/tail 截断、宿主字节上限
+ * 决定丢块顺序。
+ *
+ * 三条独立机制，任何一条被删掉都要有对应用例变红：
+ * - 去掉 `stripFrontmatter` → 「注入不含 YAML frontmatter」红；
+ * - 去掉 `elideToBudget` → 「超预算时截断」红；
+ * - 把 CJK 换算改回 `chars / 4` → 「中文不低估」红。
+ */
+test('画像超预算时保留前 8 行 + 尾部，中间插带 URI 的省略标记', async () => {
+  const line = (index) => `第 ${index} 行：用户在做网络仿真相关工作，主要使用 NS-3 模拟器。`;
+  const lines = Array.from({ length: 200 }, (_, index) => line(index + 1));
+  const http = fakeHttp({
+    '/api/v1/content/read?comem://user/alice/memories/profile.md': { text: lines.join('\n') },
+  });
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, profileBudgetTokens: 300, tmpDir: '/tmp' },
+      http,
+      env: {},
+    },
+  );
+
+  const injected = result.context;
+  assert.ok(injected.split('\n').length < 200, '行数必须少于原始 200 行');
+  assert.match(injected, /已省略中间 \d+ 行/);
+  assert.match(injected, /完整内容用 read 取回 comem:\/\/user\/alice\/memories\/profile\.md/);
+  for (const kept of lines.slice(0, 8)) {
+    assert.ok(injected.includes(kept), `前 8 行必须保留：${kept}`);
+  }
+  assert.ok(injected.includes(lines.at(-1)), '尾部最后一行必须保留');
+  assert.ok(!injected.includes(line(100)), '中间的行必须被省略');
+});
+
+test('注入不含 YAML frontmatter（只注入正文）', async () => {
+  const raw = [
+    '---',
+    'memory_type: profile',
+    'status: active',
+    'created_at: "2026-11-08T12:05:17.406Z"',
+    'updated_at: "2026-11-08T12:13:20.760Z"',
+    'uri: comem://user/alice/memories/profile.md',
+    'summary: 用户在做网络仿真',
+    'name: 用户',
+    '---',
+    '',
+    '## content',
+    '',
+    '用户在做网络仿真相关工作。',
+  ].join('\n');
+  const http = fakeHttp({
+    '/api/v1/content/read?comem://user/alice/memories/profile.md': { text: raw },
+  });
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, profileBudgetTokens: 2000, tmpDir: '/tmp' },
+      http,
+      env: {},
+    },
+  );
+
+  assert.doesNotMatch(result.context, /memory_type:/);
+  assert.doesNotMatch(result.context, /created_at:/);
+  assert.doesNotMatch(result.context, /^---$/m);
+  assert.match(result.context, /^## content$/m);
+  assert.match(result.context, /用户在做网络仿真相关工作。/);
+});
+
+test('中文按 CJK 密度估算 token，不低估', () => {
+  // 1000 个汉字在 BPE 分词器里约 1000–1500 token；`chars / 4` 只有 250。
+  assert.ok(estimateTokens('汉'.repeat(1000)) > 900);
+  // 英文对照：4 字符/token。
+  assert.equal(estimateTokens('a'.repeat(1000)), 250);
+});
+
+test('未超预算时原样注入（没有省略标记）', async () => {
+  const body = '## content\n\n用户在做网络仿真相关工作。';
+  const http = fakeHttp({
+    '/api/v1/content/read?comem://user/alice/memories/profile.md': { text: body },
+  });
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, profileBudgetTokens: 2000, tmpDir: '/tmp' },
+      http,
+      env: {},
+    },
+  );
+
+  assert.match(result.context, /<comem-profile>\n## content\n\n用户在做网络仿真相关工作。\n<\/comem-profile>/);
+  assert.doesNotMatch(result.context, /已省略/);
+});
+
+test('stripFrontmatter 只认第一行的 ---，正文里的水平线不动', () => {
+  assert.equal(stripFrontmatter('---\na: 1\n---\n\n正文'), '正文');
+  assert.equal(stripFrontmatter('正文\n---\n更多'), '正文\n---\n更多');
+  // 没有闭合分隔符：半截 frontmatter 没有可解释的语义，整段当正文。
+  assert.equal(stripFrontmatter('---\na: 1'), '---\na: 1');
+});
+
+test('超过宿主字节上限时先丢偏好、再丢技能目录，画像保留', async () => {
+  const warnings = [];
+  const http = fakeHttp({
+    '/api/v1/content/read?comem://user/alice/memories/profile.md': { text: 'a'.repeat(4000) },
+    '/api/v1/content/overview?comem://user/alice/memories/preferences': {
+      overview: 'b'.repeat(4000),
+    },
+    '/api/v1/skills': { skills: SKILLS },
+  });
+
+  const result = await handleSessionStart(
+    { sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
+    {
+      config: { userId: 'alice', skillBudgetTokens: 1000, profileBudgetTokens: 2000, tmpDir: '/tmp' },
+      http,
+      env: {},
+      maxContextBytes: 1000,
+      warn: (message, data) => warnings.push({ message, data }),
+    },
+  );
+
+  assert.ok(Buffer.byteLength(result.context, 'utf8') <= 1000, '整段上下文必须放得下');
+  assert.match(result.context, /<comem-profile>/);
+  assert.match(result.context, /已(?:省略中间|截断)/);
+  assert.doesNotMatch(result.context, /comem-preferences/);
+  assert.doesNotMatch(result.context, /available-skills/);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(warnings[0].data.dropped, ['preferences', 'skills']);
+});
+
+test('fitContext 的丢块顺序：偏好 → 技能，画像永不丢', () => {
+  const blocks = [
+    { id: 'profile', text: 'p'.repeat(100) },
+    { id: 'preferences', text: 'r'.repeat(100) },
+    { id: 'skills', text: 's'.repeat(100) },
+  ];
+
+  assert.deepEqual(fitContext(blocks, 1000).dropped, []);
+  assert.deepEqual(fitContext(blocks, 250).dropped, ['preferences']);
+  const both = fitContext(blocks, 100);
+  assert.deepEqual(both.dropped, ['preferences', 'skills']);
+  assert.equal(both.context, 'p'.repeat(100));
 });

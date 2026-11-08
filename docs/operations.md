@@ -112,6 +112,28 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `ingest.extractionTimeoutMs` | `1800000` | 每批阶段二的最长等待（30 分钟）。`0` = 不等。超时按批算，不是按总量 |
 | `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
 
+### Hook 的注入预算
+
+`SessionStart` 往对话里注入三个块（`<comem-profile>` / `<comem-preferences>` /
+`<available-skills>`），各有 token 预算。这几项是 **Hook 插件**的配置（读
+`~/.config/comem/config.yaml` 的**顶层**键，不是服务端配置的嵌套段；见
+`integrations/README.md` 的「配置」），环境变量优先：
+
+| 键 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入预算。超了保留前 8 行 / 句 + 尾部，中间插带 URI 的省略标记 |
+| `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的预算。三档降级：全放 → 只名字 → 一行计数 |
+
+**画像只注入正文。** `profile.md` 的 YAML frontmatter（`memory_type` / `created_at` /
+`uri` / 256 字的 `summary`）在这条路径上被剥掉：前三个字段对模型是噪声，`summary`
+是正文首行的副本。
+
+**还有一层宿主字节上限。** Claude Code / Codex 在 hook 输出超过约 10,000 字符时
+把整段转存成文件、只把预览放进上下文（9,500 是留余量的取值）；DSH 没有公开上限，
+取 20,000。超限时 Hook 按「画像 > 技能目录 > 偏好」丢块，并在 stderr 记一条
+`注入上下文超过宿主字节上限` 的 `warn`——看到它说明这次注入少了块，不是正常状态。
+两个数字在 `integrations/hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**。
+
 ### 没有可用 LLM 时
 
 `providers.llm.default.type: disabled` 表示这次部署里没有模型。各功能的处理**不完全
