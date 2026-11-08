@@ -974,6 +974,15 @@ export interface RetrievalIndex {
 
 `search` 有一个 `mode="context"` 变体：返回的不是命中列表，而是一段**可直接塞进模型上下文**的文本。这是「检索结果 → 模型输入」的独立一层。
 
+`mode` 只有两个取值，**默认 `list`**：
+
+| 形态 | 返回 | 说明 |
+|---|---|---|
+| `list` | `{ hits, plan }` | 命中列表 + 查询计划。与接线前逐字一致，向后兼容 |
+| `context` | `{ items, rendered, dropped, usedTokens }` | 分层投放后的条目（带 `detail` / `tokens`）与渲染文本 |
+
+`POST /search/search` 与 MCP `search` 工具接受同一个字段。**这不是第 17 个 MCP 工具**——`context` 是 `search` 的出参形态，不是新能力（AGENTS.md §3 的「16 个，不多不少」）。
+
 四步：
 
 **1. token 预算。** 默认 1600 tokens（`assembly.maxTokens`），单条也有上限（`maxTokens / 条目数 × 2`，给单条留 2 倍余量）。
@@ -1021,6 +1030,14 @@ export interface RetrievalIndex {
 **为什么需要**：用户连续问三个相关问题，同一段记忆会被完整注入三次。上下文浪费 2/3，模型还可能因为重复而分心。
 
 **与去重的区别**：8.6 的去重是**同一次请求内**的重复（同一 URI 命中多条记录）；账本是**跨请求**的重复（上一轮给过，这一轮不再给）。两者都要做。
+
+**写侧调用点。** `SearchService.context` 在组装完成后调用 `RecallLedger.record(scopeKey, turn, items)`，只记 `detail !== null` 的条目（规则 1）。`turn` 取会话消息总数（`SessionService.load` 的 `messageCount`），`scopeKey` 取会话 URI 的作用域部分（`user_{uid}`）。
+
+**没有 `sessionId` 时不做跨轮去重，也不写账本。** 没有会话就没有东西能推进 `turn`；用一个常量会让账本在 500 条之后永久排除所有候选——静默失效比不去重更糟。`excludeDelivered` 是给离线脚本与测试的显式时钟（`scopeKey` + `turn`），传了它就不再读会话。
+
+**账本写失败只记 `warn`，不影响检索。** 账本是去重辅助，不是真相来源；一次磁盘写失败不该让已经组装好的上下文丢掉。
+
+**接线前的失败模式。** `context` 与 `RecallLedger.record` 都实现并测过，但 HTTP 路由与 MCP 工具没有 `mode` 参数——生产路径一次都没执行过。测试全绿只说明它自洽。现在的回归测试走 `POST /search/search` 与 MCP `search` 工具，连续两次 `mode="context"` 必须证明第二次不重复投放第一次给过的条目。
 
 ### 8.8 输入过滤
 
@@ -2018,6 +2035,13 @@ providers:
       pricing:                  # 用于成本换算，按 1M token 计
         inputPerMillion: 0.15
         outputPerMillion: 0.60
+  rerank:
+    type: disabled            # http | disabled；http 走 Cohere / Jina 兼容的 POST /rerank
+    baseUrl: ""               # 如 https://api.jina.ai/v1
+    model: BAAI/bge-reranker-v2-m3
+    apiKey: ""
+    timeoutSeconds: 10        # 检索路径上串行执行，超时直接加在用户等待时间上
+    topN: 50                  # 送去重排的候选条数上限
 
 summary:
   generator: llm          # llm | rule
@@ -2040,13 +2064,9 @@ retrieval:
     maxTokens: 1600       # 注入模型的 token 预算
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
-  recall:
-    mode: balanced        # fast(0 次 LLM) | balanced(1) | deep(2)
-    expandOnlyWithContext: true   # 首轮自动 fast
-    escalateBelowScore: 0.5       # 快速检索 top1 低于此分则升级
-    expansionTimeoutMs: 5000
-    rewriteTimeoutMs: 30000
-    budgetMs: 500         # 超了就用已拿到的结果
+  rerank:
+    enabled: false        # 默认关；关掉时 find 路径与接线前逐字一致
+    keepTopN: 0           # 重排后保留前 N 条；0 = 只重排不截断
 
 session:
   autoCommit:
@@ -2065,7 +2085,6 @@ memory:
     enabled: false        # 开它会多一次 LLM 调用
 
 acl:
-  enabled: true
   groupDefaultLevel: write   # write | read
 
 server:
@@ -2100,7 +2119,22 @@ task:
 
 **`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
 
-**`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。
+**`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。同理，`retrieval.rerank.enabled` 为 `true` 而 `providers.rerank.type` 仍是 `disabled` 时也抛错，不静默降级成「不重排」。
+
+**重排的实际语义。** `retrieval.rerank.enabled` 打开后，`find` / `search` / `context` 在融合（或单引擎排序）之后、热度加权之前调用重排模型：
+
+- **候选文本是摘要（`abstract`），不是正文。** 重排模型吃不下长文本，而摘要在索引里就有。
+- **`providers.rerank.topN` 是送去重排的条数上限。** 开启重排时候选集放宽到 `max(limit, topN)`，否则「融合排第 20 但最相关」的候选永远上不来；关闭时 `candidateLimit === limit`，与接线前逐字一致。
+- **`retrieval.rerank.keepTopN` 在重排之后截断**（`0` = 只重排不截断）。
+- **分数未归一化、可以是负数。** `jina/jina-reranker-v3` 的 `relevance_score` 没有约定值域，不要 clamp 到 `[0, 1]`，直接按原值降序。
+- **顺序是「先重排、再按热度乘性加权」。** 重排是相关性判断，热度是相关性同档内的微调；反过来会让「最近访问过」压过「更相关」。
+- **失败全部兜底。** 模型调用抛错时整批退化成融合分，只记 `warn`——重排是质量增强，不能让检索失败。
+
+**`telemetry.metrics.enabled` 与 `includeAccountLabel` 真的生效。** 前者为 `false` 时 `GET /metrics` 返回 404 并说明「指标已关闭」；后者为 `true` 时 `comem_http_request_duration_seconds` 的样本带 `account` 标签（关闭时是全局汇总，两种形态不能混着输出）。
+
+**`telemetry.requestLog.retainDays` / `retainRows` 在启动时执行一次。** 不做定时任务：单机部署的启动清理已经能挡住无限增长，常驻定时器要多一个生命周期与并发问题。
+
+**`acl.enabled` 与 `retrieval.recall.*` 已删除。** 前者没有实现（关掉仍然走 ACL），后者没有调用点（自适应升级从未执行）。`context` 模式取代 `recall.*` 的职责；等真正需要自适应升级时再加配置。
 
 **并发控制。** SQLite 开 `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=5000`，允许并发读、单写者。写事务统一走一个 `withWriteTransaction()` 包装，超过 `busy_timeout` 抛 `CONFLICT` 由任务层重试。这是 SQLite 的标准用法，不需要额外的写队列。
 

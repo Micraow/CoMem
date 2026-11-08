@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { FastifyInstance, InjectOptions } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDownloadUrl } from '../../../src/api/mcp/tools/download.js';
 import { createHttpServer, PROMETHEUS_CONTENT_TYPE } from '../../../src/api/http/server.js';
@@ -386,6 +386,145 @@ describe('检索', () => {
   });
 });
 
+describe('检索 mode = context', () => {
+  const FILE = `${ROOT}/memories/context-note.md`;
+
+  /** 摘要进索引后，`context` 才有 L0 可投（§8.6 的起始层级）。 */
+  async function seedMemory(): Promise<void> {
+    await container.services.filesystem.write(
+      Uri.parse(FILE),
+      '# 标题\n\n上下文记忆数据库。',
+      { frontmatter: { summary: '一句话摘要' } },
+    );
+    await container.services.indexObserver.drain();
+  }
+
+  async function createSession(): Promise<string> {
+    const created = resultOf(
+      await inject({ method: 'POST', url: '/api/v1/sessions', payload: {} }),
+    );
+    const uri = String(created['uri']);
+    return uri.slice(uri.lastIndexOf('/') + 1);
+  }
+
+  async function appendMessage(sessionId: string): Promise<void> {
+    await inject({
+      method: 'POST',
+      url: `/api/v1/sessions/${sessionId}/messages`,
+      payload: { messages: [{ role: 'user', parts: [{ kind: 'text', text: '继续' }] }] },
+    });
+  }
+
+  function contextBody(sessionId?: string): Record<string, unknown> {
+    return { query: '记忆', mode: 'context', ...(sessionId === undefined ? {} : { sessionId }) };
+  }
+
+  it('mode 缺省时响应形状与改动前一致（快照）', async () => {
+    await seedMemory();
+
+    const result = resultOf(
+      await inject({ method: 'POST', url: '/api/v1/search/search', payload: { query: '记忆' } }),
+    );
+
+    // `elapsedMs` 是墙钟；`reason` 取决于本机能否连上模型（降级与否都合法），
+    // 两者归一化。其余字段（含分数）必须逐字相同。
+    const plan = result['plan'] as Record<string, unknown>;
+    expect({
+      ...result,
+      plan: {
+        ...plan,
+        elapsedMs: 0,
+        reason: plan['reason'] === null ? null : '<degraded>',
+      },
+    }).toMatchSnapshot();
+  });
+
+  it('mode=context 返回分层条目与可直接注入的文本', async () => {
+    await seedMemory();
+
+    const result = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/search/search',
+        payload: contextBody(),
+      }),
+    );
+
+    expect(Object.keys(result).sort()).toEqual(['dropped', 'items', 'rendered', 'usedTokens']);
+    const items = result['items'] as Record<string, unknown>[];
+    expect(items.map((item) => item['uri'])).toContain(FILE);
+    // 预算允许时会从 abstract 升到 full（§8.6 的三轮升级）；关键是拿到了正文。
+    expect(items[0]?.['detail']).not.toBeNull();
+    expect(String(items[0]?.['text'] ?? '').length).toBeGreaterThan(0);
+    expect(String(result['rendered'])).toContain('<memory');
+    expect(Number(result['usedTokens'])).toBeGreaterThan(0);
+  });
+
+  it('连续两次 mode=context：第二次不重复投放第一次给过的条目', async () => {
+    await seedMemory();
+    const sessionId = await createSession();
+
+    const first = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/search/search',
+        payload: contextBody(sessionId),
+      }),
+    );
+    expect((first['items'] as unknown[]).length).toBeGreaterThan(0);
+
+    // 推进一轮：轮次时钟取消息总数（§8.7）。
+    await appendMessage(sessionId);
+
+    const second = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/search/search',
+        payload: contextBody(sessionId),
+      }),
+    );
+    expect(second['items']).toEqual([]);
+    expect(second['rendered']).toBe('');
+  });
+
+  it('MCP search 工具支持 mode=context', async () => {
+    await seedMemory();
+
+    const response = await inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      payload: {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'search', arguments: { query: '记忆', mode: 'context' } },
+      },
+    });
+
+    const body = json(response);
+    const content = (body['result'] as Record<string, unknown>)['content'] as {
+      readonly text: string;
+    }[];
+    expect(content[0]?.text).toContain('token(s)');
+    expect(content[0]?.text).toContain('<memory');
+  });
+
+  it('非法 mode 抛 INVALID_ARGUMENT', async () => {
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/search/search',
+      payload: { query: '记忆', mode: 'deep' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
+  });
+});
+
 describe('会话与任务', () => {
   it('create 之后 GET /sessions 立刻能列出它（不靠后续写入补权限）', async () => {
     const created = resultOf(
@@ -648,5 +787,133 @@ describe('管理与遥测', () => {
     });
     expect(response.statusCode).toBe(400);
     expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
+  });
+});
+
+describe('指标开关', () => {
+  /** 用独立的临时容器验证配置真的生效（不改外层 beforeEach 的默认装配）。 */
+  async function withApp(
+    env: Record<string, string>,
+    run: (app: FastifyInstance, created: Container) => Promise<void>,
+  ): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-http-metrics-'));
+    const created = await createContainer({
+      configPath: join(dir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: dir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_LOGGING_LEVEL: 'error',
+        ...env,
+      },
+    });
+    const createdApp = await createHttpServer({
+      config: created.config,
+      logger: created.logger,
+      observability: created.observability,
+      routes: created.routes,
+      mcp: created.mcp,
+      resolveIdentity: created.resolveIdentity,
+    });
+    try {
+      await run(createdApp, created);
+    } finally {
+      await created.services.indexObserver.drain();
+      await createdApp.close();
+      await created.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('metrics.enabled=false 时 /metrics 返回 404 并说明原因', async () => {
+    await withApp({ COMEM_TELEMETRY_METRICS_ENABLED: 'false' }, async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/metrics' });
+      expect(response.statusCode).toBe(404);
+      expect(errorOf(response)['message']).toContain('指标已关闭');
+    });
+  });
+
+  it('includeAccountLabel 打开后请求耗时按账号拆标签', async () => {
+    await withApp({ COMEM_TELEMETRY_METRICS_INCLUDE_ACCOUNT_LABEL: 'true' }, async (app, created) => {
+      // 直接喂一条请求记录：`onResponse` 是异步的，注入端点读不到确定的写入时刻。
+      await created.observability.recordRequest({
+        requestId: 'req-metrics',
+        method: 'GET',
+        path: '/health',
+        statusCode: 200,
+        durationMs: 12,
+        errorCode: null,
+        subject: 'user:local',
+      });
+
+      const metrics = await app.inject({ method: 'GET', url: '/metrics' });
+      expect(metrics.body).toContain(
+        'comem_http_request_duration_seconds_count{account="user:local"} 1',
+      );
+      // 同一指标族不能混着有无标签的样本，否则 Prometheus 抓取整段失败。
+      expect(metrics.body).not.toContain('comem_http_request_duration_seconds_count 1');
+    });
+  });
+});
+
+describe('重排接线', () => {
+  it('retrieval.rerank.enabled 打开后 find 真的调用重排供应商', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-http-rerank-'));
+    let capturedUrl = '';
+    let capturedBody: unknown = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedBody = init?.body === undefined ? null : JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ results: [{ index: 0, relevance_score: 0.99 }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const created = await createContainer({
+      configPath: join(dir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: dir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_LOGGING_LEVEL: 'error',
+        COMEM_RETRIEVAL_RERANK_ENABLED: 'true',
+        COMEM_PROVIDERS_RERANK_TYPE: 'http',
+        COMEM_PROVIDERS_RERANK_BASE_URL: 'https://rerank.example.test/v1',
+        COMEM_PROVIDERS_RERANK_MODEL: 'test-reranker',
+        COMEM_PROVIDERS_RERANK_API_KEY: 'test-key',
+      },
+    });
+
+    try {
+      const file = `${ROOT}/memories/rerank.md`;
+      await created.services.filesystem.write(Uri.parse(file), '上下文记忆数据库。', {
+        frontmatter: { summary: '一句话摘要' },
+      });
+      await created.services.indexObserver.drain();
+
+      const hits = await created.services.search.find('记忆', {
+        scopes: [ROOT],
+        subject: SUBJECT,
+        principals: [SUBJECT, 'user:*'],
+      });
+
+      expect(hits).toHaveLength(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(capturedUrl).toBe('https://rerank.example.test/v1/rerank');
+      // 候选文本是摘要，不是正文——重排模型吃不下长文本。
+      expect(capturedBody).toMatchObject({
+        model: 'test-reranker',
+        documents: ['一句话摘要'],
+      });
+      // 模型的分数直接成为最终分数（不 clamp、不与融合分混合）。
+      expect(hits[0]?.score).toBe(0.99);
+    } finally {
+      vi.unstubAllGlobals();
+      await created.services.indexObserver.drain();
+      await created.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

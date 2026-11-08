@@ -60,6 +60,7 @@ import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
+import { HttpRerankProvider } from '../adapters/llm/rerank-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
@@ -486,6 +487,16 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   });
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
+  // 请求记录的保留策略在启动时执行一次（§17.6 的 7 天 / 10 万条）。
+  //
+  // **不做定时任务**：单机部署的「启动清理」已经能挡住无限增长，常驻定时器要多
+  // 一个生命周期与并发问题，收益抵不过成本。`prune` 自己在删到行时记 info 日志
+  // （含 `deleted`），启动日志因此能回答「这次清掉了多少」。
+  requestLog.prune({
+    retainDays: config.telemetry.requestLog.retainDays,
+    retainRows: config.telemetry.requestLog.retainRows,
+    now: new Date(),
+  });
   const embeddings = new EmbeddingRepository({ db, logger });
   const vectors = new SqliteVectorIndex({ db, logger });
 
@@ -547,6 +558,32 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
       engine: config.retrieval.engine,
       model: embedding.model,
       dimension: embeddingConfig.dimension,
+    });
+  }
+
+  // ── 重排 ──
+  //
+  // `retrieval.rerank.enabled` 为 false（默认）时不构造 provider，`SearchService`
+  // 拿到 `undefined`，整条重排路径不执行——默认路径与接线前逐字一致。
+  //
+  // 交叉校验（`config/schema.ts`）保证 enabled 为 true 时 `providers.rerank.type`
+  // 不是 `disabled`；这里只按 `http` 构造，不静默降级成「不重排」。
+  const rerankConfig = config.providers.rerank;
+  const rerankProvider =
+    config.retrieval.rerank.enabled && rerankConfig.type === 'http'
+      ? new HttpRerankProvider({
+          baseUrl: rerankConfig.baseUrl,
+          model: rerankConfig.model,
+          apiKey: rerankConfig.apiKey,
+          timeoutSeconds: rerankConfig.timeoutSeconds,
+          logger,
+        })
+      : undefined;
+  if (rerankProvider !== undefined) {
+    logger.info('重排已启用', {
+      model: rerankProvider.model,
+      topN: rerankConfig.topN,
+      keepTopN: config.retrieval.rerank.keepTopN,
     });
   }
 
@@ -705,6 +742,17 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     vectors,
     nodes,
     engine: config.retrieval.engine,
+    // 重排默认关；只有 `retrieval.rerank.enabled` 打开时才注入，未注入时
+    // `SearchService` 的整条重排路径不执行（与接线前逐字一致）。
+    ...(rerankProvider === undefined
+      ? {}
+      : {
+          rerank: {
+            provider: rerankProvider,
+            topN: rerankConfig.topN,
+            keepTopN: config.retrieval.rerank.keepTopN,
+          },
+        }),
     // `telemetry.hotness.*` 是四个可选依赖：不传不会报错，只会让配置项静默失效
     // （`weight` 恒为 0、`hotness` 恒为 `null`）。服务层单测全绿也发现不了这种
     // 缺口，只有真实装配能证明配置生效。
@@ -836,6 +884,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     llm,
     logger,
     hookOverheadEnabled: config.telemetry.hookOverhead.enabled,
+    includeAccountLabel: config.telemetry.metrics.includeAccountLabel,
     requestLogPolicy: {
       enabled: config.telemetry.requestLog.enabled,
       sampleRate: config.telemetry.requestLog.sampleRate,

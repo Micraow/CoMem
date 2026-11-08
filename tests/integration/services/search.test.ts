@@ -15,7 +15,8 @@ import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
-import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import type { IndexRecord, RetrievalIndex, SearchHit } from '../../../src/domain/retrieval.js';
+import type { RerankProvider } from '../../../src/domain/rerank.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
   AllowAllAuthorizer,
@@ -25,6 +26,7 @@ import {
 } from '../../../src/services/authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
+import type { DeliveredItem, RecallLedger } from '../../../src/services/recall-ledger.js';
 import {
   SearchService,
   type ContextOptions,
@@ -132,7 +134,13 @@ async function writeBody(uri: string, text: string): Promise<void> {
 async function createService(options: {
   readonly authorizer?: Authorizer;
   readonly maxTokens?: number;
-  readonly ledger?: { recentlyDelivered: () => Promise<ReadonlySet<string>> };
+  readonly index?: RetrievalIndex;
+  readonly ledger?: Pick<RecallLedger, 'recentlyDelivered' | 'record'>;
+  readonly rerank?: {
+    readonly provider: RerankProvider;
+    readonly topN: number;
+    readonly keepTopN: number;
+  };
 } = {}): Promise<SearchService> {
   const activeAuthorizer = options.authorizer ?? authorizer;
   const assembler = new ContextAssembler({
@@ -150,7 +158,7 @@ async function createService(options: {
   });
 
   return new SearchService({
-    index,
+    index: options.index ?? index,
     filesystem,
     authorizer: activeAuthorizer,
     assembler,
@@ -159,8 +167,35 @@ async function createService(options: {
       options.maxTokens === undefined
         ? CONFIG
         : { ...CONFIG, assembly: { ...CONFIG.assembly, maxTokens: options.maxTokens } },
-    ledger: options.ledger,
+    ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
   });
+}
+
+/** 假索引的一行：分数写死，用于断言重排前后顺序。 */
+interface FakeHit {
+  readonly uri: string;
+  readonly score: number;
+  readonly abstract?: string | null;
+}
+
+/** 假索引：分数写死，`#rank` 只做层级加权（L2 权重 1.0，分数原样保留）。 */
+function fakeIndex(entries: readonly FakeHit[]): RetrievalIndex {
+  const hits: SearchHit[] = entries.map((entry) => ({
+    uri: entry.uri,
+    level: 'L2',
+    abstract: entry.abstract ?? null,
+    score: entry.score,
+    contextType: 'memory',
+    memoryType: null,
+  }));
+  return {
+    upsert: async () => {},
+    deleteByUri: async () => {},
+    search: async () => hits.map((hit) => ({ ...hit })),
+    glob: async () => hits.map((hit) => hit.uri),
+    stat: async () => null,
+  };
 }
 
 function findOptions(overrides: Partial<FindOptions> = {}): FindOptions {
@@ -447,58 +482,75 @@ describe('glob', () => {
   });
 });
 
-describe('context', () => {
+/**
+ * `context` 的账本写回（§8.7）。
+ *
+ * 组装本身（预算、分层、去重、配额）由 `tests/unit/domain/assembly.test.ts` 穷举；
+ * 这里只钉住「生产路径上账本真的被读、被写」这一条——它正是接线前断掉的地方。
+ * 路由与 MCP 的出参形态在 `tests/integration/api/http.test.ts` 覆盖。
+ */
+describe('context 账本', () => {
   const DOC = 'comem://user/alice/mem/m1.md';
 
-  it('返回可直接注入模型的文本', async () => {
+  it('投放的条目写回账本，下一轮按账本去重', async () => {
     await writeBody(DOC, '# 标题\n\n正文。');
     await seed(DOC, '记忆', { abstract: '一句话摘要' });
 
-    const service = await createService();
-    const result = await service.context('记忆', contextOptions());
-
-    expect(result.items).toHaveLength(1);
-    expect(result.rendered).toContain('<memory');
-    expect(result.tokensUsed).toBeGreaterThan(0);
-  });
-
-  it('预算不足时降级而不是超预算', async () => {
-    await writeBody(DOC, '正'.repeat(1000));
-    await seed(DOC, '记忆', { abstract: '一句话摘要' });
-
-    const service = await createService({ maxTokens: 200 });
-    const result = await service.context('记忆', contextOptions());
-
-    expect(result.tokensUsed).toBeLessThanOrEqual(200);
-    expect(result.items[0]?.detail).not.toBe('full');
-  });
-
-  it('渲染后正文相同的条目只投一次', async () => {
-    const other = 'comem://user/alice/mem/m2.md';
-    await seed(DOC, '记忆', { abstract: '同一句话' });
-    await seed(other, '记忆', { abstract: '同一句话' });
-
-    const service = await createService();
-    const result = await service.context('记忆', contextOptions());
-
-    expect(result.items).toHaveLength(1);
-  });
-
-  it('excludeDelivered 按召回账本去重', async () => {
-    await seed(DOC, '记忆', { abstract: '一句话摘要' });
-    const ledger = { recentlyDelivered: vi.fn(async () => new Set([DOC])) };
+    const delivered = new Set<string>();
+    const ledger = {
+      recentlyDelivered: vi.fn(async () => new Set(delivered)),
+      record: vi.fn(
+        async (_scopeKey: string, _turn: number, items: readonly DeliveredItem[]) => {
+          for (const item of items) {
+            // §8.7 规则 1：只给了 URI 的条目不记——模型没看到正文。
+            if (item.detail !== null) {
+              delivered.add(item.uri);
+            }
+          }
+        },
+      ),
+    };
 
     const service = await createService({ ledger });
-    const result = await service.context(
+    const first = await service.context(
       '记忆',
       contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 4 } }),
     );
 
-    expect(result.items).toEqual([]);
-    expect(ledger.recentlyDelivered).toHaveBeenCalledWith('user_alice', 4, {
+    expect(first.items.map((item) => item.uri)).toEqual([DOC]);
+    expect(ledger.record).toHaveBeenCalledWith('user_alice', 4, first.items, {
       dedupTurns: CONFIG.assembly.dedupTurns,
       maxEntries: 500,
     });
+
+    const second = await service.context(
+      '记忆',
+      contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 4 } }),
+    );
+    expect(second.items).toEqual([]);
+    expect(second.rendered).toBe('');
+  });
+
+  it('账本写入失败只记 warn，检索仍返回结果', async () => {
+    await seed(DOC, '记忆', { abstract: '一句话摘要' });
+    const ledger = {
+      recentlyDelivered: vi.fn(async () => new Set<string>()),
+      record: vi.fn(async () => {
+        throw new ComemError('INTERNAL', '磁盘满了');
+      }),
+    };
+
+    const service = await createService({ ledger });
+    const result = await service.context(
+      '记忆',
+      contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 1 } }),
+    );
+
+    expect(result.items).toHaveLength(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      '召回账本写入失败',
+      expect.objectContaining({ scopeKey: 'user_alice', turn: 1, code: 'INTERNAL' }),
+    );
   });
 
   it('没有注入账本时 excludeDelivered 抛 INVALID_ARGUMENT', async () => {
@@ -512,14 +564,111 @@ describe('context', () => {
       ),
     ).rejects.toBeInstanceOf(ComemError);
   });
+});
 
-  it('quotaPreset 覆盖配置默认值', async () => {
-    await seed(DOC, '记忆', { contextType: 'skill' });
-    const service = await createService();
+describe('rerank', () => {
+  const A = 'comem://user/alice/mem/a.md';
+  const B = 'comem://user/alice/mem/b.md';
+  const C = 'comem://user/alice/mem/c.md';
 
-    const result = await service.context('记忆', contextOptions({ quotaPreset: 'chat' }));
+  function threeHits(): RetrievalIndex {
+    return fakeIndex([
+      { uri: A, score: 9, abstract: '摘要A' },
+      { uri: B, score: 5, abstract: '摘要B' },
+      { uri: C, score: 1, abstract: '摘要C' },
+    ]);
+  }
 
-    expect(result.items).toHaveLength(1);
+  function provider(
+    score: RerankProvider['score'],
+    model = 'test-reranker',
+  ): RerankProvider {
+    return { model, score };
+  }
+
+  it('未注入时不调模型，顺序与融合分一致', async () => {
+    const service = await createService({ index: threeHits() });
+
+    const hits = await service.find('记忆', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([A, B, C]);
+    expect(hits.map((hit) => hit.score)).toEqual([9, 5, 1]);
+  });
+
+  it('按模型分数降序，候选文本用摘要，未给分时用融合分', async () => {
+    const score = vi.fn(async () => [0.1, 0.9, null] as (number | null)[]);
+    const service = await createService({
+      index: threeHits(),
+      rerank: { provider: provider(score), topN: 50, keepTopN: 0 },
+    });
+
+    const hits = await service.find('记忆', findOptions());
+
+    // 候选文本是摘要，不是正文。
+    expect(score).toHaveBeenCalledWith('记忆', ['摘要A', '摘要B', '摘要C']);
+    // C 没给分：用融合分 1；分数未归一化，直接按原值降序。
+    expect(hits.map((hit) => hit.uri)).toEqual([C, B, A]);
+    expect(hits.map((hit) => hit.score)).toEqual([1, 0.9, 0.1]);
+  });
+
+  it('负数分数不 clamp 到 [0, 1]', async () => {
+    const service = await createService({
+      index: threeHits(),
+      rerank: { provider: provider(async () => [-5, 0.9, 2]), topN: 50, keepTopN: 0 },
+    });
+
+    const hits = await service.find('记忆', findOptions());
+
+    expect(hits.map((hit) => hit.score)).toEqual([2, 0.9, -5]);
+  });
+
+  it('topN 是送去重排的条数上限', async () => {
+    const score = vi.fn(async (_query: string, documents: readonly string[]) =>
+      documents.map(() => 0),
+    );
+    const service = await createService({
+      index: threeHits(),
+      rerank: { provider: provider(score), topN: 2, keepTopN: 0 },
+    });
+
+    const hits = await service.find('记忆', findOptions());
+
+    expect(score).toHaveBeenCalledTimes(1);
+    expect(score.mock.calls[0]?.[1]).toEqual(['摘要A', '摘要B']);
+    // 没送去重排的 C 保留融合分。
+    expect(hits.find((hit) => hit.uri === C)?.score).toBe(1);
+  });
+
+  it('keepTopN 在重排之后截断', async () => {
+    const service = await createService({
+      index: threeHits(),
+      rerank: { provider: provider(async () => [0.1, 0.9, 0.5]), topN: 50, keepTopN: 2 },
+    });
+
+    const hits = await service.find('记忆', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([B, C]);
+  });
+
+  it('重排失败时退化为融合分，并记 warn', async () => {
+    const service = await createService({
+      index: threeHits(),
+      rerank: {
+        provider: provider(async () => {
+          throw new ComemError('PROVIDER_UNAVAILABLE', '供应商挂了');
+        }),
+        topN: 50,
+        keepTopN: 0,
+      },
+    });
+
+    const hits = await service.find('记忆', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([A, B, C]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      '重排失败，使用融合分',
+      expect.objectContaining({ model: 'test-reranker', candidates: 3 }),
+    );
   });
 });
 

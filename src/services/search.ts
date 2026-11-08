@@ -31,6 +31,7 @@ import type { NodeAccessStats, NodeRepository } from '../adapters/sqlite/node-re
 import type { SqliteVectorIndex, VectorHit } from '../adapters/sqlite/vector-index.js';
 import { parsePrincipal } from '../domain/acl.js';
 import {
+  type AssembledItem,
   type AssemblyCandidate,
   type AssemblyOptions,
   type AssemblyResult,
@@ -43,6 +44,7 @@ import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType } from '../domain/node.js';
 import { rankCandidates, type LevelWeights, type RankedCandidate } from '../domain/ranking.js';
+import { applyRerank, type RerankCandidate, type RerankProvider } from '../domain/rerank.js';
 import {
   applyQueryFilters,
   compileQueryFilters,
@@ -74,7 +76,7 @@ import {
   REWRITE_SYSTEM_PROMPT,
   type RewriteMessage,
 } from './prompts/rewrite.js';
-import { DEFAULT_RECALL_LEDGER_OPTIONS, type RecallLedger } from './recall-ledger.js';
+import { DEFAULT_RECALL_LEDGER_OPTIONS, scopeKeyOf, type RecallLedger } from './recall-ledger.js';
 import type { SessionService } from './session.js';
 
 /**
@@ -106,10 +108,21 @@ export interface SearchServiceDeps {
   readonly logger: Logger;
   readonly config: RetrievalSettings;
   /**
-   * 召回账本（§8.7）。只有 `context` 的 `excludeDelivered` 用到；不传时传了
-   * `excludeDelivered` 会抛 `INVALID_ARGUMENT`——静默不去重比报错更难查。
+   * 召回账本（§8.7）。`context` 的跨轮去重读它，组装完成后把真正投出去的条目
+   * 写回它。不注入时不做跨轮去重——账本是去重辅助，不是检索的真相来源。
    */
-  readonly ledger?: Pick<RecallLedger, 'recentlyDelivered'>;
+  readonly ledger?: Pick<RecallLedger, 'recentlyDelivered' | 'record'>;
+  /**
+   * 重排（`retrieval.rerank.*` / `providers.rerank.*`）。
+   *
+   * 不注入时整条重排路径不执行，行为与接线前逐字一致（默认关）。`topN` 是送去
+   * 重排的条数上限；`keepTopN` 是重排后保留的条数（0 = 不截断）。
+   */
+  readonly rerank?: {
+    readonly provider: RerankProvider;
+    readonly topN: number;
+    readonly keepTopN: number;
+  };
   /**
    * 意图分析（§8.4）。只有 `search` 用到。
    *
@@ -186,8 +199,30 @@ export interface SearchOptions extends FindOptions {
 
 export interface ContextOptions extends FindOptions {
   readonly quotaPreset?: QuotaPreset;
-  /** 跨轮去重：上一轮已经投过的 URI 不再投（§8.7） */
+  /**
+   * 会话 ID。跨轮去重的轮次时钟（§8.7）取它读到的消息总数。
+   *
+   * 不传时不做跨轮去重：没有会话就没有东西能推进 `turn`，用常量会让账本在
+   * 500 条之后永久排除所有候选——那是静默失效，比不去重更糟。组装本身照常工作。
+   */
+  readonly sessionId?: string;
+  /**
+   * 显式指定去重时钟（`scopeKey` + `turn`）。
+   *
+   * 传了它就用它，不再从 `sessionId` 推导；离线脚本与测试用它钉住确定的值。
+   * 不注入账本时传它会抛 `INVALID_ARGUMENT`——静默不去重比报错更难查。
+   */
   readonly excludeDelivered?: { readonly scopeKey: string; readonly turn: number };
+}
+
+/**
+ * 跨轮去重的时钟。`scopeKey` 决定账本文件，`turn` 决定去重窗口（§8.7）。
+ *
+ * `turn` 取会话消息总数，与 `SessionService.load` 的 `messageCount` 同一口径。
+ */
+interface DeliveryClock {
+  readonly scopeKey: string;
+  readonly turn: number;
 }
 
 /** `find` / `glob` 的命中。`level` 是命中记录的层级，`score` 已做层级加权。 */
@@ -384,7 +419,8 @@ export class SearchService {
   readonly #assembler: ContextAssembler;
   readonly #logger: Logger;
   readonly #config: RetrievalSettings;
-  readonly #ledger: Pick<RecallLedger, 'recentlyDelivered'> | undefined;
+  readonly #ledger: Pick<RecallLedger, 'recentlyDelivered' | 'record'> | undefined;
+  readonly #rerank: SearchServiceDeps['rerank'];
   readonly #llm: Pick<LlmService, 'generateJson'> | undefined;
   readonly #sessions: Pick<SessionService, 'load'> | undefined;
   readonly #queryFilters: readonly QueryFilter[];
@@ -410,6 +446,7 @@ export class SearchService {
     this.#logger = deps.logger;
     this.#config = deps.config;
     this.#ledger = deps.ledger;
+    this.#rerank = deps.rerank;
     this.#llm = deps.llm;
     this.#sessions = deps.sessions;
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
@@ -531,8 +568,15 @@ export class SearchService {
     return outcome;
   }
 
-  /** 按配置的引擎分派。`fts5` 分支与接入向量前的实现逐字一致（回归基线）。 */
+  /**
+   * 按配置的引擎分派。`fts5` 分支与接入向量前的实现逐字一致（回归基线）。
+   *
+   * **重排开启时候选集放宽到 `topN`。** 重排的意义是把「融合排第 20、但其实最
+   * 相关」的候选提上来；只拿 `limit` 条去重排，`topN > limit` 的配置就永远用不满。
+   * 关闭重排时 `candidateLimit === limit`，与接线前逐字一致。
+   */
   async #retrieve(text: string, options: FindOptions, limit: number): Promise<RetrieveOutcome> {
+    const candidateLimit = Math.max(limit, this.#rerank?.topN ?? 0);
     if (this.#engine === 'fts5') {
       const hits = await this.#index.search({
         text,
@@ -540,15 +584,14 @@ export class SearchService {
         principals: options.principals,
         contextTypes: options.contextTypes,
         levels: options.levels,
-        limit,
+        limit: candidateLimit,
       });
+      const ranked = this.#rank(hits, candidateLimit, options.scoreThreshold).map((hit) => ({
+        ...hit,
+        ranks: null,
+      }));
       return {
-        hits: this.#applyHotness(
-          this.#rank(hits, limit, options.scoreThreshold).map((hit) => ({
-            ...hit,
-            ranks: null,
-          })),
-        ),
+        hits: this.#applyHotness((await this.#applyRerank(text, ranked)).slice(0, limit)),
         degradation: null,
       };
     }
@@ -561,8 +604,8 @@ export class SearchService {
       });
     }
     return this.#engine === 'vector'
-      ? this.#retrieveVector(vector, text, options, limit)
-      : this.#retrieveHybrid(vector, text, options, limit);
+      ? this.#retrieveVector(vector, text, options, limit, candidateLimit)
+      : this.#retrieveHybrid(vector, text, options, limit, candidateLimit);
   }
 
   /**
@@ -576,6 +619,7 @@ export class SearchService {
     text: string,
     options: FindOptions,
     limit: number,
+    candidateLimit: number,
   ): Promise<RetrieveOutcome> {
     const embedded = await vector.embedding.embed([text]);
     const queryVector = embedded.vectors[0];
@@ -592,16 +636,21 @@ export class SearchService {
     }
 
     const uris = await this.#readableUris(options);
-    const raw = await vector.vectors.search({ vector: queryVector, model, uris, limit });
+    const raw = await vector.vectors.search({
+      vector: queryVector,
+      model,
+      uris,
+      limit: candidateLimit,
+    });
     const enriched = this.#enrich(raw, options, vector.nodes);
-    const ranked = this.#rank(enriched, limit, options.scoreThreshold);
+    const ranked = this.#rank(enriched, candidateLimit, options.scoreThreshold).map(
+      (hit, index) => ({
+        ...hit,
+        ranks: { fts5: null, vector: index + 1, hybrid: null },
+      }),
+    );
     return {
-      hits: this.#applyHotness(
-        ranked.map((hit, index) => ({
-          ...hit,
-          ranks: { fts5: null, vector: index + 1, hybrid: null },
-        })),
-      ),
+      hits: this.#applyHotness((await this.#applyRerank(text, ranked)).slice(0, limit)),
       degradation: null,
     };
   }
@@ -619,6 +668,7 @@ export class SearchService {
     text: string,
     options: FindOptions,
     limit: number,
+    candidateLimit: number,
   ): Promise<RetrieveOutcome> {
     // 两路并行：串行会让一次 hybrid 查询把两倍的索引延迟叠在用户身上。
     const [ftsHits, embedded] = await Promise.all([
@@ -628,7 +678,7 @@ export class SearchService {
         principals: options.principals,
         contextTypes: options.contextTypes,
         levels: options.levels,
-        limit,
+        limit: candidateLimit,
       }),
       vector.embedding.embed([text]),
     ]);
@@ -644,7 +694,12 @@ export class SearchService {
       degradation = '没有配置嵌入模型，无法按模型过滤向量。';
     } else {
       const uris = await this.#readableUris(options);
-      const raw = await vector.vectors.search({ vector: queryVector, model, uris, limit });
+      const raw = await vector.vectors.search({
+        vector: queryVector,
+        model,
+        uris,
+        limit: candidateLimit,
+      });
       vectorHits = this.#enrich(raw, options, vector.nodes);
     }
 
@@ -653,27 +708,27 @@ export class SearchService {
         { engine: 'fts5', hits: ftsHits },
         { engine: 'vector', hits: vectorHits },
       ],
-      { limit },
+      { limit: candidateLimit },
     );
 
+    // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
+    const scored = fused
+      .filter(
+        (hit: FusedHit) =>
+          options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
+      )
+      .map((hit: FusedHit) => ({
+        uri: hit.uri,
+        contextType: hit.contextType,
+        memoryType: hit.memoryType,
+        level: hit.level,
+        abstract: hit.abstract,
+        score: hit.score,
+        ranks: hit.ranks,
+      }));
+
     return {
-      // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
-      hits: this.#applyHotness(
-        fused
-          .filter(
-            (hit: FusedHit) =>
-              options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
-          )
-          .map((hit: FusedHit) => ({
-            uri: hit.uri,
-            contextType: hit.contextType,
-            memoryType: hit.memoryType,
-            level: hit.level,
-            abstract: hit.abstract,
-            score: hit.score,
-            ranks: hit.ranks,
-          })),
-      ),
+      hits: this.#applyHotness((await this.#applyRerank(text, scored)).slice(0, limit)),
       degradation,
     };
   }
@@ -1112,10 +1167,13 @@ export class SearchService {
   /**
    * §8.6 的 `context` 变体：返回可直接注入模型的文本。
    *
-   * `find` → `AssemblyCandidate[]` →（可选）账本去重 → 组装。
+   * `find` → `AssemblyCandidate[]` →（可选）账本去重 → 组装 → 账本写回。
    *
    * `memoryType` 从索引透传：§8.6 的起始层级按记忆类型区分（`events` 从 L1 概览起，
    * 其余从 L0 摘要起）。少了这一列，事件类记忆会一律退化成一句话摘要。
+   *
+   * 账本写回放在组装之后：只记**真的给了正文**的条目（§8.7 规则 1），只给 URI 的
+   * 条目由 `RecallLedger.record` 自己跳过。
    */
   async context(query: string, options: ContextOptions): Promise<ContextAssembly> {
     const startedAt = process.hrtime.bigint();
@@ -1129,12 +1187,14 @@ export class SearchService {
       abstract: hit.abstract,
     }));
 
+    const clock = await this.#deliveryClock(options);
     const assembly: AssemblyOptions = {
       maxTokens: this.#config.assembly.maxTokens,
       quotaPreset: options.quotaPreset ?? this.#config.assembly.quotaPreset,
-      excludedUris: await this.#excludedUris(options.excludeDelivered),
+      excludedUris: await this.#excludedUris(clock),
     };
     const result = await this.#assembler.assemble(candidates, assembly);
+    await this.#recordDelivered(clock, result.items);
 
     this.#logger.info('上下文组装完成', {
       subject: options.subject,
@@ -1145,6 +1205,142 @@ export class SearchService {
       durationMs: elapsedMs(startedAt),
     });
     return result;
+  }
+
+  /**
+   * 跨轮去重的时钟（§8.7）。
+   *
+   * `turn` 取会话消息总数，与 `SessionService.load` 的 `messageCount` 同一口径。
+   * **没有 `sessionId` 时不返回时钟**：没有东西能推进 `turn`，用一个常量会让账本
+   * 在 500 条之后永久排除所有候选——静默失效，比不做跨轮去重更糟。
+   *
+   * 显式传了 `excludeDelivered` 就原样用它，不再读会话：离线脚本与测试要能钉住
+   * 确定的 `turn`。
+   */
+  async #deliveryClock(options: ContextOptions): Promise<DeliveryClock | undefined> {
+    if (options.excludeDelivered !== undefined) {
+      return options.excludeDelivered;
+    }
+    if (options.sessionId === undefined || this.#sessions === undefined) {
+      return undefined;
+    }
+
+    let sessionUri: Uri;
+    try {
+      sessionUri = sessionUriOf(options.subject, options.sessionId);
+    } catch (error) {
+      this.#logger.warn('会话 ID 无法归属到调用方，本次不做跨轮去重', {
+        sessionId: options.sessionId,
+        code: ComemError.from(error).code,
+      });
+      return undefined;
+    }
+
+    try {
+      const session = await this.#sessions.load(sessionUri);
+      return { scopeKey: scopeKeyOf(sessionUri), turn: session.messageCount };
+    } catch (error) {
+      // 会话不可读（已归档、ID 写错）只影响去重，不该让整次检索失败。
+      this.#logger.warn('会话不可读，本次不做跨轮去重', {
+        sessionId: options.sessionId,
+        code: ComemError.from(error).code,
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * 把本次真正投给模型的条目写回账本（§8.7 规则 1）。
+   *
+   * **写失败只记 warn**：账本是去重辅助，不是真相来源。一次磁盘写失败不该让已经
+   * 组装好的上下文丢掉——那等于用「去重账本坏了」惩罚当前这一轮。
+   */
+  async #recordDelivered(
+    clock: DeliveryClock | undefined,
+    items: readonly AssembledItem[],
+  ): Promise<void> {
+    const ledger = this.#ledger;
+    if (clock === undefined || ledger === undefined) {
+      return;
+    }
+    try {
+      await ledger.record(clock.scopeKey, clock.turn, items, {
+        dedupTurns: this.#config.assembly.dedupTurns,
+        maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
+      });
+    } catch (error) {
+      const failure = ComemError.from(error);
+      this.#logger.warn('召回账本写入失败', {
+        scopeKey: clock.scopeKey,
+        turn: clock.turn,
+        items: items.length,
+        code: failure.code,
+        message: failure.message,
+      });
+    }
+  }
+
+  /**
+   * 重排（`retrieval.rerank.*` / `providers.rerank.*`）。
+   *
+   * 位置：融合 / 层级加权之后、热度加权之前。**先重排，再按热度乘性加权**——重排
+   * 是相关性判断，热度是相关性同档内的微调；反过来会让「最近访问过」压过「更相关」。
+   *
+   * 候选文本用**摘要**（`abstract`），不是正文：重排模型吃不下长文本，而摘要在
+   * 索引里就有，取值不花钱。`topN` 之外的候选不送模型，保留融合分。
+   *
+   * **不要 clamp 分数**：`jina/jina-reranker-v3` 的 `relevance_score` 未归一化，
+   * 可以是负数；按原值降序才是模型给出的顺序。等同分时按 URI 码点序，与
+   * `rankCandidates` 同一套口径。
+   *
+   * 失败全部兜底：`applyRerank` 逐条兜底，`score` 抛错时整批退化成融合分，只记
+   * warn——重排是质量增强，不能让检索失败。
+   */
+  async #applyRerank(query: string, hits: readonly PreHotnessHit[]): Promise<PreHotnessHit[]> {
+    const rerank = this.#rerank;
+    if (rerank === undefined || hits.length === 0) {
+      return [...hits];
+    }
+
+    const limited = hits.slice(0, rerank.topN);
+    const candidates: RerankCandidate[] = limited.map((hit) => ({
+      uri: hit.uri,
+      text: hit.abstract ?? '',
+      fallbackScore: hit.score,
+    }));
+
+    let modelScores: readonly (number | null)[] | null = null;
+    try {
+      modelScores = await rerank.provider.score(
+        query,
+        candidates.map((candidate) => candidate.text),
+      );
+    } catch (error) {
+      const failure = ComemError.from(error);
+      this.#logger.warn('重排失败，使用融合分', {
+        model: rerank.provider.model,
+        candidates: candidates.length,
+        code: failure.code,
+        message: failure.message,
+      });
+    }
+
+    const result = applyRerank(candidates, modelScores);
+    const reranked = limited.map((hit, index) => ({
+      ...hit,
+      score: result.scores[index] ?? hit.score,
+    }));
+    const merged = [...reranked, ...hits.slice(rerank.topN)];
+    merged.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      if (left.uri === right.uri) {
+        return 0;
+      }
+      return left.uri < right.uri ? -1 : 1;
+    });
+    return rerank.keepTopN > 0 ? merged.slice(0, rerank.keepTopN) : merged;
   }
 
   /**
@@ -1265,19 +1461,19 @@ export class SearchService {
 
   /** 跨轮去重：账本里 `dedupTurns` 轮内投过的 URI（§8.7）。 */
   async #excludedUris(
-    delivered: ContextOptions['excludeDelivered'],
+    clock: DeliveryClock | undefined,
   ): Promise<ReadonlySet<string> | undefined> {
-    if (delivered === undefined) {
+    if (clock === undefined) {
       return undefined;
     }
     if (this.#ledger === undefined) {
       throw new ComemError(
         'INVALID_ARGUMENT',
         'excludeDelivered 需要注入召回账本（SearchServiceDeps.ledger）。',
-        { scopeKey: delivered.scopeKey, turn: delivered.turn },
+        { scopeKey: clock.scopeKey, turn: clock.turn },
       );
     }
-    return this.#ledger.recentlyDelivered(delivered.scopeKey, delivered.turn, {
+    return this.#ledger.recentlyDelivered(clock.scopeKey, clock.turn, {
       dedupTurns: this.#config.assembly.dedupTurns,
       maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
     });

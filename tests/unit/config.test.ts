@@ -83,14 +83,6 @@ function expectedDefaults(dataDir: string): unknown {
       levelWeights: { l0: 1.15, l1: 1.05, l2: 1 },
       queryFilters: [],
       assembly: { maxTokens: 1600, dedupTurns: 3, quotaPreset: 'coding' },
-      recall: {
-        mode: 'balanced',
-        expandOnlyWithContext: true,
-        escalateBelowScore: 0.5,
-        expansionTimeoutMs: 5000,
-        rewriteTimeoutMs: 30000,
-        budgetMs: 500,
-      },
       rerank: { enabled: false, keepTopN: 0 },
     },
     session: {
@@ -104,7 +96,7 @@ function expectedDefaults(dataDir: string): unknown {
       },
     },
     memory: { reviewRequired: ['experiences', 'rules'], workingMemory: { enabled: false } },
-    acl: { enabled: true, groupDefaultLevel: 'write' },
+    acl: { groupDefaultLevel: 'write' },
     server: { host: '127.0.0.1', port: 1933 },
     logging: { level: 'info', file: '' },
     telemetry: {
@@ -208,7 +200,7 @@ describe('loadConfig', () => {
           COMEM_SERVER_PORT: '8080',
           COMEM_RETRIEVAL_ASSEMBLY_MAX_TOKENS: '800',
           COMEM_RETRIEVAL_LEVEL_WEIGHTS_L0: '2',
-          COMEM_ACL_ENABLED: 'false',
+          COMEM_ACL_GROUP_DEFAULT_LEVEL: 'read',
           COMEM_LOGGING_FILE: '/var/log/comem/error.log',
           COMEM_RETRIEVAL_QUERY_FILTERS: '["^recall"]',
           COMEM_MEMORY_REVIEW_REQUIRED: '["rules"]',
@@ -218,7 +210,7 @@ describe('loadConfig', () => {
       expect(config.server.port).toBe(8080);
       expect(config.retrieval.assembly.maxTokens).toBe(800);
       expect(config.retrieval.levelWeights.l0).toBe(2);
-      expect(config.acl.enabled).toBe(false);
+      expect(config.acl.groupDefaultLevel).toBe('read');
       expect(config.logging.file).toBe('/var/log/comem/error.log');
       expect(config.retrieval.queryFilters).toEqual(['^recall']);
       expect(config.memory.reviewRequired).toEqual(['rules']);
@@ -262,11 +254,11 @@ describe('loadConfig', () => {
     it('布尔值无法识别时抛 INVALID_ARGUMENT', () => {
       const error = loadError({
         path: join(tempDir, 'missing.yaml'),
-        env: testEnv({ COMEM_ACL_ENABLED: 'yes' }),
+        env: testEnv({ COMEM_TELEMETRY_HOOK_OVERHEAD_ENABLED: 'yes' }),
       });
 
       expect(error.code).toBe('INVALID_ARGUMENT');
-      expect(error.details).toEqual({ field: 'COMEM_ACL_ENABLED' });
+      expect(error.details).toEqual({ field: 'COMEM_TELEMETRY_HOOK_OVERHEAD_ENABLED' });
     });
 
     it('数组不是合法 JSON 时抛 INVALID_ARGUMENT', () => {

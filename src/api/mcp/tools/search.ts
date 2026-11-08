@@ -9,7 +9,9 @@
  * 范围由 `targetUri` 与调用方身份决定。
  */
 
+import { ComemError } from '../../../domain/errors.js';
 import type { SearchPlan } from '../../../domain/retrieval.js';
+import type { ContextAssembly } from '../../../services/search.js';
 import {
   asRecord,
   formatScoredHits,
@@ -25,6 +27,36 @@ import {
 
 /** §13.2 的默认值：`limit=10`。 */
 const DEFAULT_LIMIT = 10;
+
+/** `search` 的出参形态（§8.6）：`list` 是默认，`context` 返回可直接注入模型的文本。 */
+type SearchMode = 'list' | 'context';
+
+const SEARCH_MODES: readonly SearchMode[] = ['list', 'context'];
+
+function parseMode(value: string | undefined): SearchMode {
+  if (value === undefined) {
+    return 'list';
+  }
+  const match = SEARCH_MODES.find((candidate) => candidate === value);
+  if (match === undefined) {
+    throw new ComemError('INVALID_ARGUMENT', `search 的 mode 只能是 list / context。`, {
+      tool: 'search',
+      mode: value,
+    });
+  }
+  return match;
+}
+
+/**
+ * `context` 模式的文本：先一行统计，再是渲染好的条目。
+ *
+ * 统计行让人一眼看出「这次投了几条、花了多少预算、丢了几条」；正文是模型直接
+ * 读的部分，与 §8.6 的渲染格式一致。
+ */
+function formatContext(result: ContextAssembly): string {
+  const header = `Context: ${result.items.length} item(s), ${result.tokensUsed} token(s), ${result.dropped} dropped.`;
+  return result.rendered === '' ? header : `${header}\n\n${result.rendered}`;
+}
 
 interface PlanEnvelope {
   readonly scopes: readonly string[];
@@ -75,6 +107,13 @@ export const searchTool: McpToolDefinition = {
       level: { type: 'string', enum: ['L0', 'L1', 'L2'] },
       contextType: { type: 'string', enum: ['memory', 'resource', 'skill', 'session'] },
       sessionId: { type: 'string', description: '可选：提供最近消息用于解析指代' },
+      mode: {
+        type: 'string',
+        enum: ['list', 'context'],
+        default: 'list',
+        description:
+          'list（默认）返回命中列表；context 返回按 token 预算分层投放、可直接注入模型的文本',
+      },
     },
     required: ['query'],
   },
@@ -86,7 +125,32 @@ export const searchTool: McpToolDefinition = {
     const level = optionalLevel(args, 'level', 'search');
     const contextType = optionalContextType(args, 'contextType', 'search');
     const sessionId = optionalString(args, 'sessionId', 'search');
+    const mode = parseMode(optionalString(args, 'mode', 'search'));
     const scopes = await readScopes(context, targetUri);
+
+    if (mode === 'context') {
+      // 跨轮去重：传了 sessionId 才有轮次时钟（见 `ContextOptions.sessionId`）。
+      const assembled = await context.search.context(query, {
+        scopes,
+        subject: context.subject,
+        principals: context.principals,
+        limit,
+        sessionId,
+        levels: level === undefined ? undefined : [level],
+        contextTypes: contextType === undefined ? undefined : [contextType],
+      });
+
+      context.logger.debug('MCP search（context）完成', {
+        requestId: context.requestId,
+        sessionId: sessionId ?? null,
+        scopes,
+        items: assembled.items.length,
+        tokensUsed: assembled.tokensUsed,
+        dropped: assembled.dropped,
+      });
+
+      return textResult(formatContext(assembled));
+    }
 
     const result = await context.search.search(query, {
       scopes,

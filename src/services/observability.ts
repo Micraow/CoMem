@@ -115,6 +115,14 @@ const HOOK_EVENTS: readonly string[] = [
 /** 未知事件归到这里（§17.1 的低基数要求）。 */
 const OTHER_EVENT = 'other';
 
+/**
+ * 没有身份的请求在 `account` 标签里的取值。
+ *
+ * 不省略标签：同一个指标族的样本标签集必须一致，漏掉 account 会让 Prometheus
+ * 抓取整段失败。
+ */
+const ANONYMOUS_ACCOUNT = 'anonymous';
+
 /** §17.2 的报告：hook 在退出前 `POST /api/v1/telemetry/hook` 带上它。 */
 export interface HookOverheadReport {
   readonly event: string;
@@ -209,6 +217,13 @@ export interface ObservabilityServiceDeps {
   readonly now?: () => Date;
   /** §17.6 的采样；默认全量 */
   readonly requestLogPolicy?: RequestLogPolicy;
+  /**
+   * 是否在 `/metrics` 里按账号拆分请求耗时（`telemetry.metrics.includeAccountLabel`）。
+   *
+   * 默认 `false`：单账号部署没必要，开了会放大标签基数。打开后
+   * `comem_http_request_duration_seconds` 的样本带 `account` 标签。
+   */
+  readonly includeAccountLabel?: boolean;
 }
 
 function normalizeEvent(event: string): string {
@@ -227,6 +242,11 @@ function sumOf(phases: Readonly<Record<string, number>>, names: readonly string[
 /** Prometheus 文本里的数值。非有限值（NaN / ±Infinity）写 0，否则抓取会整段失败。 */
 function metricValue(value: number): string {
   return Number.isFinite(value) ? String(value) : '0';
+}
+
+/** 标签值转义（Prometheus 文本格式）：反斜杠、换行、双引号。 */
+function escapeLabel(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('\n', '\\n').replaceAll('"', '\\"');
 }
 
 function errorMessage(error: unknown): string {
@@ -281,6 +301,10 @@ export class ObservabilityService {
   /** §17.3 的 `comem_http_request_duration_seconds` 的 summary 累加器。 */
   #requestDurationSumSeconds = 0;
   #requestDurationCount = 0;
+  /** `telemetry.metrics.includeAccountLabel` 打开时按账号分组的请求耗时。 */
+  readonly #accountDurations = new Map<string, { sumSeconds: number; count: number }>();
+  /** `telemetry.metrics.includeAccountLabel`。关掉时只输出全局汇总。 */
+  readonly #includeAccountLabel: boolean;
   /** `telemetry.hookOverhead.enabled`。关掉时 `recordHookOverhead` 直接丢弃。 */
   readonly #hookOverheadEnabled: boolean;
 
@@ -292,6 +316,7 @@ export class ObservabilityService {
     this.#logger = deps.logger;
     this.#now = deps.now ?? (() => new Date());
     this.#policy = deps.requestLogPolicy ?? DEFAULT_REQUEST_LOG_POLICY;
+    this.#includeAccountLabel = deps.includeAccountLabel ?? false;
     this.#hookOverheadEnabled = deps.hookOverheadEnabled ?? true;
   }
 
@@ -360,8 +385,16 @@ export class ObservabilityService {
   /** 记录一次请求：写 `request_log`（§17.6）+ 结构化日志（§17.8）。 */
   async recordRequest(entry: RequestLogEntry): Promise<void> {
     // 指标先记：采样只影响请求记录表，不影响「系统刚才多慢」。
-    this.#requestDurationSumSeconds += entry.durationMs / MILLISECONDS_PER_SECOND;
+    const durationSeconds = entry.durationMs / MILLISECONDS_PER_SECOND;
+    this.#requestDurationSumSeconds += durationSeconds;
     this.#requestDurationCount += 1;
+    if (this.#includeAccountLabel) {
+      const account = entry.subject ?? ANONYMOUS_ACCOUNT;
+      const current = this.#accountDurations.get(account) ?? { sumSeconds: 0, count: 0 };
+      current.sumSeconds += durationSeconds;
+      current.count += 1;
+      this.#accountDurations.set(account, current);
+    }
 
     // 作用域随请求结束一起被丢弃，不需要（也不能）在这里清空——清空会抹掉同进程
     // 里另一个正在跑的请求的阶段。
@@ -465,6 +498,32 @@ export class ObservabilityService {
   }
 
   /**
+   * `comem_http_request_duration_seconds` 的样本。
+   *
+   * `includeAccountLabel` 为 `true` 时按账号分组；关闭时输出全局汇总（与接线前
+   * 逐字一致）。**两种形态不能混着输出**：同一个指标族的标签集必须一致，否则
+   * Prometheus 抓取整段失败。
+   */
+  #requestDurationLines(): string[] {
+    if (!this.#includeAccountLabel) {
+      return [
+        `comem_http_request_duration_seconds_sum ${metricValue(this.#requestDurationSumSeconds)}`,
+        `comem_http_request_duration_seconds_count ${metricValue(this.#requestDurationCount)}`,
+      ];
+    }
+
+    const lines: string[] = [];
+    for (const [account, duration] of this.#accountDurations) {
+      const label = `account="${escapeLabel(account)}"`;
+      lines.push(
+        `comem_http_request_duration_seconds_sum{${label}} ${metricValue(duration.sumSeconds)}`,
+        `comem_http_request_duration_seconds_count{${label}} ${metricValue(duration.count)}`,
+      );
+    }
+    return lines;
+  }
+
+  /**
    * Prometheus 文本（§17.1 的低基数端点）。
    *
    * v1 的 `comem_http_request_duration_seconds` 用 summary 形态（只报 `_sum` /
@@ -477,8 +536,7 @@ export class ObservabilityService {
     const lines: string[] = [
       '# HELP comem_http_request_duration_seconds HTTP 请求完整耗时',
       '# TYPE comem_http_request_duration_seconds summary',
-      `comem_http_request_duration_seconds_sum ${metricValue(this.#requestDurationSumSeconds)}`,
-      `comem_http_request_duration_seconds_count ${metricValue(this.#requestDurationCount)}`,
+      ...this.#requestDurationLines(),
     ];
 
     lines.push(

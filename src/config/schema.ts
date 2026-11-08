@@ -147,20 +147,6 @@ const retrievalSchema = z.object({
       quotaPreset: z.enum(['chat', 'coding']).default('coding'),
     })
     .prefault({}),
-  recall: z
-    .object({
-      /** fast(0 次 LLM) | balanced(1) | deep(2) */
-      mode: z.enum(['fast', 'balanced', 'deep']).default('balanced'),
-      /** 首轮自动 fast */
-      expandOnlyWithContext: z.boolean().default(true),
-      /** 快速检索 top1 低于此分则升级 */
-      escalateBelowScore: z.number().min(0).max(1).default(0.5),
-      expansionTimeoutMs: z.number().int().positive().default(5000),
-      rewriteTimeoutMs: z.number().int().positive().default(30000),
-      /** 超了就用已拿到的结果 */
-      budgetMs: z.number().int().positive().default(500),
-    })
-    .prefault({}),
   /**
    * 重排（§8.5 的「后续的 rerank」）。
    *
@@ -233,8 +219,12 @@ const configObjectSchema = z.object({
 
   acl: z
     .object({
-      enabled: z.boolean().default(true),
-      /** write | read */
+      /**
+       * 组空间根的预置级别（`write` | `read`）。
+       *
+       * 没有 `enabled`：ACL 是硬约束（§12），关掉它不会让请求跳过鉴权，
+       * 保留一个「看起来能关」的开关比没有更糟。
+       */
       groupDefaultLevel: z.enum(['write', 'read']).default('write'),
     })
     .prefault({}),

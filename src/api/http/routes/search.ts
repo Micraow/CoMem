@@ -23,6 +23,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { parsePrincipal } from '../../../domain/acl.js';
+import type { AssembledItem } from '../../../domain/assembly.js';
 import { ComemError } from '../../../domain/errors.js';
 import type { Level } from '../../../domain/level.js';
 import type { ContextType } from '../../../domain/node.js';
@@ -47,6 +48,16 @@ const READ = 1;
 
 const CONTEXT_TYPES: readonly ContextType[] = ['memory', 'resource', 'skill', 'session'];
 const LEVELS: readonly Level[] = ['L0', 'L1', 'L2'];
+
+/**
+ * `search` 的出参形态（§8.6）。
+ *
+ * `list` 是默认值，保持向后兼容；`context` 返回可直接注入模型的文本与分层明细。
+ * 这是同一个 `search` 能力的出参变体，不是第 17 个 MCP 工具。
+ */
+type SearchMode = 'list' | 'context';
+
+const SEARCH_MODES: readonly SearchMode[] = ['list', 'context'];
 
 /** §8.4 的默认条数。与 `SearchService` 的默认值一致。 */
 const DEFAULT_LIMIT = 20;
@@ -79,6 +90,19 @@ function parseLevels(value: readonly string[] | undefined): readonly Level[] | u
     }
     return match;
   });
+}
+
+function parseMode(value: string | undefined): SearchMode {
+  if (value === undefined) {
+    return 'list';
+  }
+  const match = SEARCH_MODES.find((candidate) => candidate === value);
+  if (match === undefined) {
+    throw new ComemError('INVALID_ARGUMENT', `mode 只能是 ${SEARCH_MODES.join(' / ')}。`, {
+      mode: value,
+    });
+  }
+  return match;
 }
 
 /** `user:alice` → `comem://user/alice`（不带末尾斜杠）。 */
@@ -137,6 +161,24 @@ function serializePlan(plan: SearchPlan): Record<string, unknown> {
   };
 }
 
+/**
+ * `context` 模式的条目：投放层级与渲染后的文本都要回传。
+ *
+ * `detail === null` 表示只给了 URI（模型没看到正文）；`tokens` 是这一条的 token
+ * 成本，`tokensUsed` 是合计——调用方要能解释「预算花在哪」。
+ */
+function serializeAssembledItem(item: AssembledItem): Record<string, unknown> {
+  return {
+    uri: item.uri,
+    contextType: item.contextType,
+    level: item.level,
+    score: item.score,
+    detail: item.detail,
+    text: item.text,
+    tokens: item.tokens,
+  };
+}
+
 export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { search, authorizer } = services;
 
@@ -170,6 +212,27 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const levels = parseLevels(optionalStringArray(body, 'levels'));
         // 会话只用于解析指代（§8.4）；不传也能检索，只是历史为空。
         const sessionId = optionalString(body, 'sessionId');
+        const mode = parseMode(optionalString(body, 'mode'));
+
+        if (mode === 'context') {
+          // `context` 是同一个 `search` 出参形态的变体（§8.6），不是第 17 个工具。
+          // 跨轮去重的时钟由 `sessionId` 推导；不传就不去重（见 `ContextOptions`）。
+          const result = await search.context(query, {
+            scopes: scope,
+            subject: context.subject,
+            principals: context.principals,
+            contextTypes,
+            levels,
+            limit,
+            sessionId,
+          });
+          return ok({
+            items: result.items.map(serializeAssembledItem),
+            rendered: result.rendered,
+            dropped: result.dropped,
+            usedTokens: result.tokensUsed,
+          });
+        }
 
         const result = await search.search(query, {
           scopes: scope,

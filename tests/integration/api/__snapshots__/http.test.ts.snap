@@ -1,0 +1,31 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`检索 mode = context > mode 缺省时响应形状与改动前一致（快照） 1`] = `
+{
+  "hits": [
+    {
+      "abstract": "一句话摘要",
+      "contextType": "memory",
+      "level": "L2",
+      "matchedQuery": "记忆",
+      "memoryType": null,
+      "score": 0.4573671282555964,
+      "uri": "comem://user/local/memories/context-note.md",
+    },
+  ],
+  "plan": {
+    "analyzed": false,
+    "elapsedMs": 0,
+    "original": "记忆",
+    "queries": [
+      {
+        "confidence": 1,
+        "derivedFrom": null,
+        "intent": "other",
+        "text": "记忆",
+      },
+    ],
+    "reason": "<degraded>",
+  },
+}
+`;

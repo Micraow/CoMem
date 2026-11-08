@@ -17,6 +17,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
+import { ComemError } from '../../../domain/errors.js';
 import { ok } from '../envelope.js';
 import { PROMETHEUS_CONTENT_TYPE, SERVICE_VERSION, type HttpRouteGroup } from '../server.js';
 
@@ -63,6 +64,14 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
       });
 
       app.get('/metrics', async (_request, reply) => {
+        // 关闭时明确 404，而不是输出空文本：空文本会被抓取端当成「指标全为 0」，
+        // 运维看不到「这个开关被关掉了」（AGENTS.md §1 的「假配置」）。
+        if (!config.telemetry.metrics.enabled) {
+          throw new ComemError(
+            'NOT_FOUND',
+            '指标已关闭（telemetry.metrics.enabled = false）。',
+          );
+        }
         return reply
           .header('content-type', PROMETHEUS_CONTENT_TYPE)
           .send(observability.renderMetrics());

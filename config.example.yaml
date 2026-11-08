@@ -32,6 +32,19 @@ providers:
     maxBatchSize: 64           # 供应商常见上限 100–2048，取保守值
     timeoutSeconds: 30
 
+  # 重排（Cohere / Jina 兼容的 POST /rerank）。
+  #
+  # 重排模型看 (query, 摘要) 对，分数直接决定排序；relevance_score 未归一化，
+  # 可以是负数，不要 clamp 到 [0, 1]。打开 retrieval.rerank.enabled 时这里必须
+  # 配成 http，否则 loadConfig 抛 INVALID_ARGUMENT。
+  rerank:
+    type: disabled             # http | disabled
+    baseUrl: ""                # 如 https://api.jina.ai/v1
+    model: BAAI/bge-reranker-v2-m3
+    apiKey: ""
+    timeoutSeconds: 10
+    topN: 50                   # 送去重排的候选条数上限
+
 summary:
   generator: llm          # llm | rule
   abstractMaxChars: 256
@@ -53,13 +66,10 @@ retrieval:
     maxTokens: 1600       # 注入模型的 token 预算
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
-  recall:
-    mode: balanced        # fast(0 次 LLM) | balanced(1) | deep(2)
-    expandOnlyWithContext: true   # 首轮自动 fast
-    escalateBelowScore: 0.5       # 快速检索 top1 低于此分则升级
-    expansionTimeoutMs: 5000
-    rewriteTimeoutMs: 30000
-    budgetMs: 500         # 超了就用已拿到的结果
+  # 重排：默认关。打开后融合结果先过重排模型，再按 keepTopN 截断。
+  rerank:
+    enabled: false
+    keepTopN: 0           # 重排后保留前 N 条；0 = 只重排不截断
 
 session:
   autoCommit:
@@ -78,7 +88,6 @@ memory:
     enabled: false        # 开它会多一次 LLM 调用
 
 acl:
-  enabled: true
   groupDefaultLevel: write   # write | read
 
 server:
