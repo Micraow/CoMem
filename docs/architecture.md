@@ -1094,6 +1094,68 @@ COMEM_BYPASS_SESSION_PATTERNS="*/scratch/*,*/tmp/*"
 
 **生效位置在 Hook 层**：注入和采集都跳过。服务端不知道有这回事——它只是没收到请求，不需要额外逻辑。
 
+### 8.10 检索质量评估
+
+§8.1–§8.9 的每个参数都有来源注释，但**来源是「文献」或「经验假设」不等于「在本项目的
+数据上验证过」**：RRF 的 `k = 60` 是原论文值，层级权重 `1.15 / 1.05 / 1.00` 是拍的，
+`candidateMultiplier = 4` 与 `scoreThreshold` 没有测量依据。没有评估集时，改一个参数
+只能得到「感觉应该更好」，而不是「变好了多少」。
+
+`pnpm eval`（`src/eval/`、`src/commands/eval.ts`）用一份带标注的数据集测量三个指标：
+
+| 指标 | 公式 | 来源 |
+|---|---|---|
+| Recall@k | `\|top-k ∩ relevant\| / \|relevant\|` | 标准 IR 定义 |
+| MRR | `1 / rank_of_first_relevant`（rank 从 1 起） | 标准 IR 定义 |
+| nDCG@k | `DCG@k / IDCG@k`，`DCG = Σ (2^rel_i - 1) / log2(i + 1)` | Järvelin & Kekäläinen (2002) |
+
+三个指标一起看才有意义：Recall 高、MRR 低是「找到了但埋得很深」；只有 Recall 是
+「该找的有没有被找出来」，对顺序不敏感。
+
+**两个明确的取舍**：`relevant` 为空时 Recall 返回 1（没有该找的东西，检索没有做错
+任何事）；`graded` 为空时 nDCG 返回 0（分子分母同时为 0，没有可归一化的基准）。
+
+**数据集即被测语料。** `eval/datasets/*.yaml` 同时给出 `corpus`（URI → 正文）与
+`cases`（query + 二值 `relevant` + 分级 `graded`）。语料必须全部属于同一个 `user`
+根，执行器把它绑成服务图身份；标注里引用的 URI 必须在语料里，`graded` 值域是
+`0–3` 整数——任何一条不成立都在解析时抛 `INVALID_ARGUMENT`，不静默跳过。数据集格式
+与标注规则见 `eval/README.md`。
+
+**执行方式**（`src/eval/runner.ts`）：
+
+- **每个变体一个临时数据根**。变体之间的索引、向量、权限表完全隔离；否则「hybrid 比
+  fts5 好」可能只是「hybrid 跑在 fts5 建好的索引上」。
+- **延迟只测 `find()` 调用本身**。建容器（迁移、建表、根预置）与播种语料（写文件 +
+  嵌入）在计时窗口之外。
+- **每个查询跑 3 次取中位数**。第一次带冷缓存成本（SQLite 页缓存、`sqlite-vec`、
+  FTS5 段缓存）；3 是「能算中位数」的最小奇数。命中取最后一次（热缓存稳定态）。
+- **变体切换重建容器**。重排 / 热度 / 层级权重 / 引擎都是容器级配置，没有热改入口；
+  重建成本已经被「延迟窗口之外」隔离掉。
+- **评估固定覆盖三项配置**：`summary.generator=rule`（摘要生成会调模型，与检索
+  无关）、`session.autoCommit.enabled=false` 与 `session.expiry.idleTimeoutSeconds=0`
+  （不启动后台调度器）、`logging.level=fatal`（容器日志走 stdout，会割裂表格 / JSON；
+  变体零命中时执行器自己补一条告警）。
+
+**基线**（2026-11-08，本机，34 条查询，k=10，远程 bge-m3 嵌入）：
+
+| 变体 | Recall@10 | MRR | NDCG@10 | p50 | p95 |
+|---|---:|---:|---:|---:|---:|
+| fts5 | 0.387 | 0.355 | 0.355 | 0.8ms | 2.4ms |
+| vector | 0.963 | 0.907 | 0.907 | 411.9ms | 705.8ms |
+| hybrid | 0.963 | 0.909 | 0.911 | 451.2ms | 634.2ms |
+| hybrid+rerank | 0.963 | 0.909 | 0.911 | 800.7ms | 1543.6ms |
+
+混合检索不是「永远更好」：FTS5 在自然语言改写上召回接近 0，在专有名词 / 标识符上
+召回 1.0；向量反过来。**`hybrid+rerank` 与 `hybrid` 的指标完全相同**，因为重排的
+候选文本取自 `SearchHit.abstract`，而普通文档的 `abstract` 是 `null`——空文本候选被
+`applyRerank` 跳过，重排退化成「按融合分原样返回」，只多了一次模型调用的延迟。这是
+真实缺陷（重排只对上传时带 `summary` 的资源生效），不是「重排没用」。
+
+**评估能证明什么、不能证明什么。** 34 条查询上的点估计没有置信区间，0.02 的差距
+可能是噪声；向量变体的延迟包含查询嵌入的网络往返，不能当作索引本身的延迟；热度
+变体需要访问历史，临时数据根里 `access_count` 全是 0。这些限制写在 `eval/README.md`
+的「已知限制」里。
+
 ## 9. 摘要与失效
 
 ### 9.1 三层
@@ -1579,6 +1641,114 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 `POST /api/v1/memories/consolidate`，body `{ "scope": "...", "dryRun": true }`，
 需要 `manage`。**`dryRun` 默认 `true`**：合并会 `delete`，不传就等于预览，误点的代价
 不可逆。**不进 MCP**（§3：16 个工具，不多不少）。
+
+### 11.9 本机 Agent 对话导入
+
+用户的机器上散落着历史对话（Claude Code / Codex / DeepSeek / Qwen）。这些对话里的
+偏好、约定与踩过的坑是 CoMem 要存的东西，但用户不会一条条搬。`pnpm ingest` 把它们
+导进会话目录，再走 §10.1 的提交管线。
+
+**范围只到「落成会话 + 建归档任务」**。记忆抽取在阶段二（§10.1），与 `remember`
+工具同一条路径；导入命令不自己写记忆。
+
+#### 数据流
+
+```
+LogSource.discoverSessions()  →  SessionRef（harness, nativeSessionId, locator, …）
+        ↓
+LogSource.readMessages(ref, cursor, limit)  →  NormalizedMessage[] + 新游标
+        ↓
+IngestService：SessionService.create / addMessage / commitPhase1
+        ↓
+ingest_cursor：原生会话 → 我们的 session URI + 读到的位置
+```
+
+`NormalizedMessage` 是宿主无关的对话轮（`role` / `text` / `createdAt` / `model` /
+`cwd`）。适配器只负责把各自的日志格式翻译成它，编排层不认识任何宿主的字段。
+
+#### 游标：为什么必须有
+
+源日志是**追加式**的。今天导了一半，明天又多了 500 条；没有游标就只能全量重导，
+而重导会产生重复会话。`ingest_cursor`（`0011_ingest.sql`）的主键是
+`(harness, native_session_id)`，同一个原生 ID 在不同宿主里是不同会话。
+
+两种游标：
+
+| 类型 | 用于 | 值 |
+|---|---|---|
+| `byte_offset` | 追加式 JSONL（Claude Code、Codex） | 最后消费完的那一行**结束之后**的字节位置 |
+| `tree_node` | 树形导出（DeepSeek、Qwen） | 最后消费完的节点 ID；空串 = 还没读过 |
+
+**游标只在消息落盘之后前进。** 反过来（先写游标再写消息）时，一次磁盘满或进程被杀
+就会永久丢掉那一段——日志还在，但游标越过去了。
+
+**解析失败的行跳过并计数，不中断导入。** 一行坏 JSON 不该让 908 个会话都导不进
+来。会话层面的失败才进报告，且每个会话独立 `try/catch`。
+
+#### 幂等与续跑
+
+同一个 `(harness, nativeSessionId)` 跑第二次：游标已经在末尾，`readMessages` 不
+前进，报告里 `skipped + 1`，不建会话、不写消息、不提交。首次导入在游标行里记下
+`session_uri`，续跑靠它找回同一个会话。
+
+**已知的重复窗口**：一批 100 条消息写完之后、游标写回之前崩溃，重跑会把这一批再
+追加一次。批量大小是 100（`ingest.batchSize`），所以最坏情况是 100 条重复，而不是
+整段对话。要彻底消除需要逐条去重（消息 ID 来自源系统），不在 v1。
+
+#### 各宿主的过滤规则
+
+| 宿主 | 路径 | 保留什么 | 丢弃什么 |
+|---|---|---|---|
+| Claude Code | `~/.claude/projects/<slug>/<uuid>.jsonl` | `type` 为 user / assistant；`content` 里的 text block | `isSidechain`（子 agent）、`isMeta`（合成记录）、`tool_use` / `tool_result` / `thinking`、取完为空（纯工具轮） |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | `type = response_item` 且 `payload.type = message`；`input_text` / `output_text` | `reasoning`、`function_call*`、`custom_tool_call*`、`event_msg`、`developer` 角色 |
+| DeepSeek | `~/Downloads/**/conversations.json` | `message.fragments` 里的 `REQUEST`（user）/ `RESPONSE`（assistant） | `THINK`、`TOOL_*`、`FILE`、`SEARCH` |
+| Qwen | `~/Downloads/**/Qwen-chat-export-*.json` | `history.messages` 的 user / assistant；正文优先 `content`，为空时取 `content_list` 里 `phase = answer` | `thinking_summary` / `web_search` / `think` 等 phase |
+
+`~/.claude/history.jsonl` 是命令历史，不是对话（没有 `type` 字段，发现阶段跳过）。
+DeepSeek / Qwen 的树按 `children[0]` 取**第一条子分支**：分叉是编辑 / 重新生成的
+产物，它们共享同一段前缀，把每个叶子都导一遍会让同一句话出现 N 次。
+
+Qwen 的导出格式与 DeepSeek 不同（`chat.history.messages`，正文在 `content_list`
+的 answer 段），实测文件里还存在未转义的引号导致整份 JSON 不可解析。**这种情况明确
+抛 `INVALID_ARGUMENT` 并带 `locator`**——静默返回 0 个会话会让「导入完了但什么都
+没发生」看起来像正常状态（AGENTS.md §1）。
+
+#### dry-run
+
+`--dry-run` 不建会话、不写消息、不写游标、不提交。它仍然读游标与源日志，所以
+「会新建多少 / 会跳过多少」是真实判断。CLI 在 dry-run 下只打开**只读**数据库连接
+（库文件不存在就当作没有游标），文件系统层面也不创建 `_meta`。
+
+#### 溯源的边界
+
+`SessionMeta` 是冻结契约，没有 `source` 字段，`metadata-file.ts` 读回时也会丢弃未
+知字段。所以「这条会话从哪来」记在 `ingest_cursor` 行的
+`(harness, nativeSessionId, locator → session_uri)` 上，而不是伪造一个读不回来的
+`.meta.json` 字段。要在会话元数据里直接看到来源，需要先扩 `SessionMeta`——那是另一个
+改动。
+
+#### 配置
+
+```yaml
+ingest:
+  enabled: false       # 默认关：导入会写大量数据，必须显式开启
+  batchSize: 100       # 每个会话一次读多少条
+  paths:               # 留空用各宿主默认路径
+    claude-code: []
+    codex: []
+    deepseek: []
+    qwen: []
+```
+
+#### 已知限制
+
+- **会话消息不进检索索引。** `messages.jsonl` 由 `SessionService` 直接写
+  `ContentStore`，不经过 `IndexObserver`（§7 的取舍：`GET /sessions` 从磁盘列目录）。
+  `find` 要搜到导入的内容，得等阶段二把它抽取成记忆。
+- **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
+  且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。
+- **Qwen 的损坏导出不可用。** 见上；适配器保留，遇到损坏文件明确报错。
+- **`.meta.json` 里没有 `source`。** 见「溯源的边界」。
 
 ## 12. 权限模型
 

@@ -1,7 +1,9 @@
 /**
  * `health`：服务状态（架构文档 §17.9、§13.2）。
  *
- * 与 `GET /health` 返回同样的字段。降级必须可见——静默降级等于骗人（§17.9）。
+ * 与 `GET /health` 返回同样的字段，外加**当前绑定主体与可寻址的根**：MCP 工具之间
+ * 没有状态，Agent 拿不到「我是谁」就拼不出绝对 URI；`~` 别名（§6.1）的展开目标
+ * 也来自这里。没有 `subject` / `scopes` 时，空库上的 Agent 只能猜一个默认根。
  *
  * 索引条数按「当前身份可见的根」统计：`RetrievalIndex` 没有全库计数方法，而 MCP
  * 工具不应该绕过权限去数别人的节点。
@@ -24,7 +26,7 @@ export const healthTool: McpToolDefinition = {
   name: 'health',
   kind: 'read',
   description:
-    '怀疑检索结果不对、或想知道后台任务是否堆积时先调这个，它不读内容也不改状态。它统计的是当前身份可见的索引条数，不是全库总量。summary.degraded 为 true 表示摘要走的是规则降级，此时摘要质量会下降。',
+    '怀疑检索结果不对、或想知道后台任务是否堆积时先调这个，它不读内容也不改状态。返回里的 subject 是当前身份（拼绝对 URI 用），scopes 是它能看到的根（`~` 展开的目标）。它统计的是当前身份可见的索引条数，不是全库总量。summary.degraded 为 true 表示摘要走的是规则降级，此时摘要质量会下降。',
   inputSchema: {
     type: 'object',
     properties: {},
@@ -58,6 +60,8 @@ export const healthTool: McpToolDefinition = {
     return textResult(
       [
         `status: ${status}`,
+        `subject: ${context.subject}`,
+        `scopes: ${scopes.join(', ')}`,
         `index.nodes: ${nodes}`,
         `queue: pending=${pending} running=${running}`,
         `summary.degraded: ${String(degraded)}`,

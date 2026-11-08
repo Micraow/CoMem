@@ -112,6 +112,11 @@ function expectedDefaults(dataDir: string): unknown {
       hotness: { halfLifeHours: 168, weight: 0 },
     },
     task: { leaseSeconds: 60, maxAttempts: 3, concurrency: 4 },
+    ingest: {
+      enabled: false,
+      batchSize: 100,
+      paths: { 'claude-code': [], codex: [], deepseek: [], qwen: [] },
+    },
   };
 }
 
@@ -198,6 +203,27 @@ describe('loadConfig', () => {
     });
   });
 
+  it('ingest 默认关闭；paths 可以按宿主覆盖', () => {
+    const config = loadConfig({
+      path: writeConfig(
+        [
+          'ingest:',
+          '  enabled: true',
+          '  batchSize: 20',
+          '  paths:',
+          '    codex:',
+          '      - /tmp/rollouts',
+        ].join('\n'),
+      ),
+      env: testEnv(),
+    });
+
+    expect(config.ingest.enabled).toBe(true);
+    expect(config.ingest.batchSize).toBe(20);
+    expect(config.ingest.paths.codex).toEqual(['/tmp/rollouts']);
+    expect(config.ingest.paths['claude-code']).toEqual([]);
+  });
+
   describe('环境变量覆盖', () => {
     it('COMEM_<SECTION>_<KEY> 按目标类型强制转换', () => {
       const config = loadConfig({
@@ -211,10 +237,14 @@ describe('loadConfig', () => {
           COMEM_RETRIEVAL_QUERY_FILTERS: '["^recall"]',
           COMEM_MEMORY_REVIEW_REQUIRED: '["rules"]',
           COMEM_MEMORY_CONSOLIDATION_MAX_ITERATIONS: '5',
+          COMEM_INGEST_ENABLED: 'true',
+          COMEM_INGEST_BATCH_SIZE: '25',
         }),
       });
 
       expect(config.server.port).toBe(8080);
+      expect(config.ingest.enabled).toBe(true);
+      expect(config.ingest.batchSize).toBe(25);
       expect(config.retrieval.assembly.maxTokens).toBe(800);
       expect(config.retrieval.levelWeights.l0).toBe(2);
       expect(config.acl.groupDefaultLevel).toBe('read');

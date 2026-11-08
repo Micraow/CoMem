@@ -95,6 +95,9 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `task.leaseSeconds` | `60` | 任务租约。到期未续租会被启动扫描回收（§10.4） |
 | `task.maxAttempts` | `3` | 单个任务最多执行 3 次，超限置 `failed` |
 | `task.concurrency` | `4` | 阶段二执行器同时跑几个任务。每个任务会调模型，调太高会把供应商的速率限制打满 |
+| `ingest.enabled` | `false` | 本机对话导入的总开关。关着时 `pnpm ingest` 拒绝真正写入，只允许 `--dry-run` |
+| `ingest.batchSize` | `100` | 每个会话一次读多少条。100 与 MCP 单次批量写入的量级一致（§10.6 的验收场景） |
+| `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
 
 ## 启动
 
@@ -396,6 +399,96 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 
 `/health` 与 `/metrics` 同时挂在根路径与 `/api/v1` 下，两处都能抓（§17.1）。
 
+## 检索质量评估
+
+`pnpm eval` 在临时数据根里跑一份带标注的数据集，给出各引擎的 Recall / MRR / NDCG
+与延迟。它不碰 `dataDir` 里的真实数据，跑完自动清理。
+
+```bash
+pnpm eval                                   # eval/datasets/basic.yaml，三个引擎
+pnpm eval --k 5                             # 只算前 5 名
+pnpm eval --engines fts5,vector             # 只跑指定引擎
+pnpm eval --json                            # 机器可读输出
+pnpm eval --config local/eval-config.yaml --rerank   # 追加 hybrid+rerank 对照
+```
+
+输出是一张可以直接贴进文档的表格。**看三件事**：
+
+1. **Recall 与 MRR 的差**。Recall 高、MRR 低说明「找到了但埋得很深」，通常是
+   排序规则的问题；两者都低才是召回的问题。
+2. **哪个引擎赢在哪类查询上**。FTS5 在专有名词 / 标识符（`URI_CHUNK_SIZE`、
+   `pnpm verify`）上召回 1.0，在自然语言改写上接近 0；向量反过来。混合检索不是
+   永远更好，它把两边的错误率平均掉。
+3. **延迟的量级**。向量 / 混合变体的 `find` 里有一次查询嵌入的网络往返，p50 在
+   几百毫秒是正常的。要比「索引本身多快」，看 `fts5` 变体。
+
+### 数据集放在哪
+
+`eval/datasets/*.yaml`。格式、标注规则与指标定义见 [`eval/README.md`](../eval/README.md)。
+改检索参数（`retrieval.levelWeights`、`retrieval.rerank.*`、`retrieval.engine`）
+之前先跑一遍留下基线，改完再跑一遍对比——没有基线的调参只是换了一个数字。
+
+### 评估固定覆盖的配置
+
+`summary.generator` 固定为 `rule`（摘要生成会调模型，与检索无关），
+`session.autoCommit` / `session.expiry` 关闭（不启动后台调度器），
+`logging.level` 固定为 `fatal`（容器日志走 stdout，会割裂表格 / JSON）。
+这几项写在 `src/eval/runner.ts` 的 `FIXED_OVERRIDES` 里，评估不读用户配置。
+
+### 已知限制
+
+- **热度变体需要访问历史**。临时数据根里 `access_count` 全是 0，`--hotness-weight`
+  对排序没有影响。要测它得先造访问记录，数据集格式目前没有这一列。
+- **向量变体的延迟包含网络往返**，不能当作索引本身的延迟。
+- **`group` 作用域不支持**：评估容器只绑定一个 `user` 身份。
+- **没有统计显著性**：34 条查询上的小差距可能是噪声，报告给的是点估计。
+
+## 导入本机 Agent 对话
+
+`pnpm ingest` 把机器上的历史对话导进会话目录，并逐条会话走阶段一提交。阶段二（记忆
+抽取）由 `CommitRunner` 在后台执行，与 `remember` 工具同一条路径。
+
+```bash
+pnpm ingest --source claude-code          # 只导一个
+pnpm ingest --source all                  # 全部
+pnpm ingest --source all --dry-run        # 只报告不写
+pnpm ingest --source codex --since 2026-08-01
+pnpm ingest --source all --json           # 机器可读
+```
+
+`--source` 接受 `all` 或逗号分隔的宿主名（`claude-code` / `codex` / `deepseek` /
+`qwen`）。`ingest.enabled` 默认 `false`，真正写入之前必须显式打开（配置文件或
+`COMEM_INGEST_ENABLED=true`）；`--dry-run` 不受这个开关限制，且只开只读数据库连接，
+不创建 `_meta` 目录。
+
+**幂等。** 同一个来源跑第二次，已导入的会话全部计入「跳过」，不会产生重复会话。
+「读到哪」记在 `_meta/comem.sqlite` 的 `ingest_cursor` 表里；想重导某个会话，删掉
+对应行即可（`DELETE FROM ingest_cursor WHERE native_session_id = '...'`）。
+
+**导入之后 `find` 搜不到原始对话正文是正常的。** 会话消息按设计不进检索索引；
+`find` 能搜到的是阶段二从归档里抽取出来的记忆。如果任务一直 `pending`，见「已知
+限制」第 1 条（只有 `main.ts` 起的进程会跑阶段二）。
+
+### 输出怎么读
+
+```text
+来源 claude-code：发现 42 个会话
+  ✅ 新建 38 个会话，共 1,204 条消息
+  ➕ 追加 12 条消息到已有会话
+  ⏭️  跳过 3 个（游标已到末尾）
+  ❌ 失败 1 个
+    - /path/to/session.jsonl：<原因>
+```
+
+失败会带 `locator`（源文件路径），单条会话的失败不影响其它会话。命令在有失败时以
+退出码 1 结束，`--json` 的报告里 `harnesses[].errors` 是完整清单。
+
+### 源路径
+
+默认路径见配置表。真实语料常常是导出的副本（例如 `~/Downloads/AI对话/`），这时用
+`ingest.paths` 显式指定，不要改默认值——默认值服务的是「本机正在用的 Claude Code /
+Codex」，导出目录是一次性的。
+
 ## 故障排查
 
 ### 摘要一直是「待刷新」
@@ -594,3 +687,19 @@ COMEM_SERVER_PORT=8080 pnpm dev
     空等于语义检索偶尔查不出东西。当前做法是先用全表主键扫描求交（1 万行 5.8ms）。
     **不要换成按候选集点查**：`vec0` 主键点查约 7µs/条，1 万条 70ms，比全表扫贵一个
     数量级。上游修复后可以简化。
+
+17. **导入的会话把来源记在游标表，不是 `.meta.json`。** `SessionMeta` 没有 `source`
+    字段，`metadata-file.ts` 读回时也会丢弃未知字段。`ingest_cursor` 的
+    `(harness, native_session_id, session_uri)` 是唯一可追溯来源的地方。要在
+    `.meta.json` 里直接看到来源，需要先扩 `SessionMeta`。
+
+18. **导入的重复窗口是「一批 100 条」。** 一批消息写完之后、游标写回之前崩溃，重跑
+    会把这一批再追加一次。最坏情况 100 条重复，不是整段对话。彻底消除要按源消息 ID
+    逐条去重，v1 不做。
+
+19. **Qwen 的导出文件可能整份不可解析。** 本机实测的 35MB 导出在字符串里有未转义的
+    引号（`JSON.parse` 报 `Expecting ',' delimiter`）。导入命令会明确报
+    `INVALID_ARGUMENT` 并带 `locator`，不会静默返回 0 个会话。这份数据要重新导出。
+
+20. **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
+    且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。

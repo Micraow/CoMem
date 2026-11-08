@@ -342,6 +342,42 @@ const configObjectSchema = z.object({
       concurrency: z.number().int().positive().default(4),
     })
     .prefault({}),
+
+  /**
+   * 本机 Agent 对话导入（架构文档 §11.9）。
+   *
+   * **默认关闭**：导入会往数据根写大量会话与消息，必须是显式选择。关着时
+   * `pnpm ingest` 拒绝真正写入，只允许 `--dry-run` 报告。
+   */
+  ingest: z
+    .object({
+      enabled: z.boolean().default(false),
+      /**
+       * 每个会话一次读多少条。
+       *
+       * 100 的来源是 W24 任务约定：与 MCP 单次批量写入的量级一致（架构文档
+       * §10.6 的验收场景就是 100 个文件）。100 条消息的内存占用可忽略，又足够
+       * 摊薄「每批一次游标写」的代价。
+       */
+      batchSize: z.number().int().positive().default(100),
+      /**
+       * 源路径覆盖。空数组表示用各宿主的默认路径：
+       *
+       * - `claude-code`：`~/.claude/projects`（目录，递归）
+       * - `codex`：`~/.codex/sessions`（目录，递归找 `rollout-*.jsonl`）
+       * - `deepseek`：`~/Downloads/<任意子目录>/conversations.json`（文件）
+       * - `qwen`：`~/Downloads/<任意子目录>/Qwen-chat-export-*.json`（文件）
+       */
+      paths: z
+        .object({
+          'claude-code': z.array(z.string()).default([]),
+          codex: z.array(z.string()).default([]),
+          deepseek: z.array(z.string()).default([]),
+          qwen: z.array(z.string()).default([]),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
 });
 
 /**

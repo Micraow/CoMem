@@ -93,12 +93,96 @@ function invalidRegistry(message: string, details: Record<string, unknown>): Com
   return new ComemError('INTERNAL', `MCP 工具注册失败：${message}`, details);
 }
 
+/**
+ * 输入里可以带 `~` 别名的字段（§13.2 的 URI 参数）。
+ *
+ * 只认 URI 字段，不扫全部字符串：`content` 里的 `~/notes` 是正文，重写成 URI 会
+ * 静默改坏文件内容。
+ */
+const URI_INPUT_FIELDS: readonly string[] = ['uri', 'uris', 'parentUri', 'targetUri'];
+
+const PATH_SEPARATOR = '/';
+
+/**
+ * `~` 别名展开（§6.1）。
+ *
+ * `Uri.parse` 的 `currentUserId` 只表达用户根，表达不了组主体；工具调用之间也没有
+ * 状态，Agent 只能靠 `health.subject` 拼绝对 URI。所以在注册表这一层展开：
+ * `~` / `~/x` 展开成绑定主体的根（`comem://user/{uid}` 或 `comem://group/{gid}`）。
+ *
+ * 没有主体时抛 `INVALID_URI`，**不兜底到 `user:local`**——那是猜，空库上猜错的
+ * 根会让所有写入落进别人的空间。
+ */
+export function expandUriAlias(raw: string, subject: string): string {
+  if (raw !== '~' && !raw.startsWith(`~${PATH_SEPARATOR}`)) {
+    return raw;
+  }
+  let principal;
+  try {
+    principal = parsePrincipal(subject);
+  } catch {
+    throw new ComemError('INVALID_URI', `~ 需要当前请求身份才能展开：${raw}`, {
+      input: raw,
+      subject,
+    });
+  }
+  return `comem://${principal.kind}/${principal.id}${raw.slice(1)}`;
+}
+
+/** 复制输入并展开 URI 字段里的 `~`；没有命中时原样返回同一个对象。 */
+function expandInputAliases(input: unknown, subject: string): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return input;
+  }
+  const record = input as Record<string, unknown>;
+  let expanded: Record<string, unknown> | null = null;
+
+  for (const field of URI_INPUT_FIELDS) {
+    const value = record[field];
+    if (typeof value === 'string') {
+      const next = expandUriAlias(value, subject);
+      if (next !== value) {
+        expanded = { ...(expanded ?? record), [field]: next };
+      }
+      continue;
+    }
+    if (!Array.isArray(value)) {
+      continue;
+    }
+    let changed = false;
+    const items = value.map((item) => {
+      if (typeof item !== 'string') {
+        return item;
+      }
+      const next = expandUriAlias(item, subject);
+      if (next !== item) {
+        changed = true;
+      }
+      return next;
+    });
+    if (changed) {
+      expanded = { ...(expanded ?? record), [field]: items };
+    }
+  }
+  return expanded ?? input;
+}
+
+function bindSubjectAliases(tool: McpToolDefinition): McpToolDefinition {
+  return {
+    ...tool,
+    execute: (input, context) => tool.execute(expandInputAliases(input, context.subject), context),
+  };
+}
+
 export class ToolRegistry {
   readonly #tools: readonly McpToolDefinition[];
   readonly #byName: ReadonlyMap<string, McpToolDefinition>;
 
   constructor(tools: readonly McpToolDefinition[]) {
-    this.#tools = [...tools];
+    // `~` 展开需要请求身份，而身份只在 `execute` 的 `context` 里（§6.1、§13.2）。
+    // 在这里统一包装，16 个工具不必各写一遍——漏一个就是「有的工具能用别名、
+    // 有的不能」。
+    this.#tools = tools.map(bindSubjectAliases);
     this.#byName = new Map(this.#tools.map((tool) => [tool.name, tool]));
   }
 

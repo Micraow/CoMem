@@ -19,7 +19,9 @@
     "start": "tsx src/bootstrap/main.ts",
     "dev:web": "cd web && pnpm dev",
     "reindex": "tsx src/commands/reindex.ts",
-    "test:e2e": "bash scripts/demo.sh"
+    "eval": "tsx src/commands/eval.ts",
+    "test:e2e": "bash scripts/demo.sh",
+    "ingest": "tsx src/commands/ingest.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.97",

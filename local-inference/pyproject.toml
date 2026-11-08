@@ -1,0 +1,45 @@
+# CoMem 本地推理服务（embedding + rerank）
+#
+# 这是可选的本地部署组件，不参与根仓库的 pnpm 构建。CoMem 通过
+# `providers.embedding.baseUrl` / `providers.rerank.baseUrl` 指向它。
+#
+# 安装：uv sync --python 3.12
+# llama-cpp-python 必须带 Vulkan 源码编译（预编译 wheel 只有 CPU 后端），
+# 完整命令见 README 的「安装」一节。
+
+[project]
+name = "comem-local-inference"
+version = "1.0.0"
+description = "CoMem 的本地 embedding / rerank 推理服务（OpenAI 与 Cohere 兼容）"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "AGPL-3.0-only" }
+
+dependencies = [
+    # HTTP 层。FastAPI 的请求校验直接产出 OpenAI 形状的 422，省掉手写参数检查。
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.9",
+    # llama.cpp 的 Python 绑定。CPU 与 Vulkan 在同一个构建里（GGML_VULKAN=ON），
+    # 运行期用 --device 选择，见 backends/llama_cpp.py。
+    #
+    # 它没有带 Vulkan 后端的预编译 wheel，必须源码编译；编译命令见 README「安装」。
+    "llama-cpp-python>=0.3.16",
+]
+
+[dependency-groups]
+# bench.py 只用标准库（statistics / json / subprocess），不需要额外的压测框架。
+dev = []
+
+[tool.uv]
+# 不是可安装的包：没有 build backend，`uv sync` 只装依赖。
+package = false
+
+# llama-cpp-python 没有带 Vulkan 后端的预编译 wheel，必须源码编译。
+# 这些值只在构建 llama-cpp-python 时生效；其它包仍然走 wheel。
+[tool.uv.extra-build-variables]
+llama-cpp-python = { CMAKE_ARGS = "-DGGML_VULKAN=ON -DGGML_NATIVE=ON", CMAKE_BUILD_PARALLEL_LEVEL = "6" }
+
+[tool.uv.sources]
+# 空：全部走 PyPI。镜像用环境变量 UV_DEFAULT_INDEX 覆盖，不要写死在文件里
+# （写死之后换镜像要改版本控制里的文件）。

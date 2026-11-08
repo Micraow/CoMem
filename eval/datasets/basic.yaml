@@ -1,0 +1,486 @@
+# CoMem 检索质量基线数据集。
+#
+# 语料全部取自这个项目的真实文档与真实使用场景（架构文档、运维手册、决策记录里
+# 讨论过的问题），不是 foo / bar / lorem。每篇文档只描述一个主题，正文可独立阅读。
+#
+# ## 标注约定
+#
+# - `relevant`：二值相关性，用于 recall 与 MRR。
+# - `graded`：0–3 的分级相关度，用于 nDCG。0 表示「字面相似但语义无关」的难负例，
+#   它不进入 `relevant`，但会进入 nDCG 的理想排序候选（增益为 0，所以只惩罚
+#   「把它排在相关文档前面」）。
+# - 每条查询上面的注释写清「为什么这几条相关、为什么相关程度不同」。没有注释的
+#   标注无法复核，等于没有标注。
+#
+# ## 查询分布
+#
+# 1. 中文双字词（记忆 / 偏好 / 严格 / 物化 / 降级 / 缓存 / 提交 / 部署 / 权限）：
+#    `unicode61` 的分词盲区，CoMem 用 CJK 单字切分 + 短语匹配覆盖。
+# 2. 同义改写：query 用 A 说法，语料用 B 说法，只有语义检索能命中。
+# 3. 专有名词 / 标识符（sqlite-vec / pnpm verify / URI_CHUNK_SIZE /
+#    node_permission / bge-m3）：只有关键词检索能精确命中。
+# 4. 分级相关性：一条查询对应多篇文档，相关程度不同。
+# 5. 难负例：`记忆化缓存` 与 `记忆` / `缓存` 字面重叠但语义不同。
+#
+# ## 语料根
+#
+# 全部在 `comem://user/lin` 下。评估执行器按语料的根绑定服务图身份（`user:lin`），
+# 换一个根只需要改这里的 URI。
+
+name: basic
+description: >-
+  CoMem 检索质量基线：34 条查询，覆盖中文双字词、同义改写、标识符、分级相关性与
+  难负例。语料取自项目自身文档中的真实主题。
+
+corpus:
+  # ── 记忆：偏好 ──────────────────────────────────────────────────────────
+
+  "comem://user/lin/memories/preferences/code-style.md": |
+    代码风格偏好
+
+    仓库统一使用 TypeScript 严格模式，tsconfig 里 strict 与 noUncheckedIndexedAccess 都打开。
+    缩进两个空格，行宽 100 列。优先写纯函数，副作用集中在一处。
+    不要为了少写一行而用 any 绕过类型检查；类型断言要能解释运行时值为什么一定成立。
+
+  "comem://user/lin/memories/preferences/commit-message.md": |
+    提交信息约定
+
+    提交信息用中文，动词开头，一行不超过 72 个字符。正文说明动机与影响，不复述 diff。
+    一个提交只做一件事；格式化与重构不要混在功能提交里。
+
+  "comem://user/lin/memories/preferences/review-process.md": |
+    代码评审流程
+
+    小步提交，每次评审不超过 400 行。评审前在本地跑一遍 pnpm verify，确认类型检查、lint 与测试全绿。
+    评审意见只针对改动，不针对人。争议超过两轮就开个短会，不要在同一条评论里来回拉锯。
+
+  "comem://user/lin/memories/preferences/observability.md": |
+    可观测性偏好
+
+    日志每行一个 JSON，requestId 贯穿一次请求到后台任务与模型调用。
+    延迟按阶段归因，不要只报一个总数。错误日志里带稳定错误码，方便按码聚合。
+
+  # ── 记忆：实体 ──────────────────────────────────────────────────────────
+
+  "comem://user/lin/memories/entities/comem-project.md": |
+    CoMem 项目
+
+    CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地址 comem://，让它在不同会话、
+    不同机器、不同队友之间共享已经知道的东西。技术栈是 TypeScript、Fastify 与 SQLite
+    （FTS5 与 sqlite-vec）。
+
+  "comem://user/lin/memories/entities/sqlite-vec.md": |
+    sqlite-vec 向量扩展
+
+    sqlite-vec 提供 vec0 虚拟表，做的是暴力 KNN 检索，没有 ANN 索引。
+    一万条 1024 维向量大约 8 到 10 毫秒；候选集超过一万条时会先撞上全量 URI 过滤的成本。
+
+  "comem://user/lin/memories/entities/bge-m3.md": |
+    bge-m3 嵌入模型
+
+    bge-m3 输出 1024 维向量，支持中英文。换模型时 node_embedding 的维度必须跟着改，
+    否则启动就报维度不一致。维度写错不会静默降级，第一次写入就会失败。
+
+  "comem://user/lin/memories/entities/rerank-model.md": |
+    重排模型
+
+    重排用 bge-reranker-v2-m3，一次最多送 50 条候选，超时 10 秒。
+    重排是检索路径上的额外模型调用，默认关闭。开启后按重排分数保留前 keepTopN 条。
+
+  # ── 记忆：经历 ──────────────────────────────────────────────────────────
+
+  "comem://user/lin/memories/experiences/monorepo-migration.md": |
+    多仓库迁移到 monorepo 的教训
+
+    一开始把所有包都塞进一个 workspace，构建时间从两分钟涨到十五分钟。
+    后来按发布节奏拆成三个 workspace，每个包只依赖自己需要的构建产物。
+    迁移脚本要能重复执行，中途失败时知道停在哪一步，不要留下半套目录。
+
+  "comem://user/lin/memories/experiences/cache-invalidation.md": |
+    缓存失效的教训
+
+    缓存键里一定要带数据版本。曾经用文件名当键，文件内容改了但键没变，读出来的是旧数据。
+    失效用删除而不是覆盖：覆盖会留下一个永远不会被读到的旧值。
+
+  "comem://user/lin/memories/experiences/lock-contention.md": |
+    路径锁竞争
+
+    两把锁按 URI 字符串排序后获取，避免两个相反方向的移动互相等待。
+    互为祖先的路径直接拒绝：移动 a 到 a/b 会在拿第二把锁时等自己，最后报一个误导性的超时。
+
+  # ── 记忆：规则 ──────────────────────────────────────────────────────────
+
+  "comem://user/lin/memories/rules/license-review.md": |
+    依赖许可证检查
+
+    引入新依赖前检查许可证。AGPL-3.0 与项目兼容，但 GPL 系要单独确认。
+    不确定时先读 LICENSE 全文，不要只看 package.json 里的字段。
+
+  "comem://user/lin/memories/rules/no-silent-degradation.md": |
+    降级必须可见
+
+    任何降级都要写日志，并把原因带回给调用方。静默降级会让真实缺陷看起来像正常状态。
+    模型超时、嵌入失败、重排不可用都走这条规则：返回结果，同时带 reason。
+
+  # ── 资料 ────────────────────────────────────────────────────────────────
+
+  "comem://user/lin/resources/fts5-segmentation.md": |
+    中文检索的分词问题
+
+    unicode61 按 Unicode 类别切词，连续的汉字会被当成一个巨型 token，只有整段原样查询才命中。
+    trigram 支持子串，但要求至少三个字符，中文双字词（记忆、偏好）全部落空。
+    做法是索引与查询两侧都做 CJK 单字切分，再按短语匹配。
+
+  "comem://user/lin/resources/rrf-fusion.md": |
+    倒数排名融合
+
+    RRF 用名次而不是分数做融合：score = 1 / (k + rank)，k 取 60。
+    BM25 的分数无界，向量余弦在 -1 到 1 之间，直接相加前要归一化，而归一化依赖当次候选集。
+    只用名次就没有这个问题。k 越大，前几名之间的差距越小。
+
+  "comem://user/lin/resources/level-weighting.md": |
+    层级加权
+
+    L0 摘要权重 1.15，L1 概览 1.05，L2 原文 1.00。
+    加权只用来在 BM25 分数接近时打破平局，不应该压过词频。这几个数字是经验假设，没有实测数据。
+
+  "comem://user/lin/resources/sqlite-binding-limit.md": |
+    SQLite 绑定变量上限
+
+    SQLite 单条语句的绑定变量有上限，候选集大时要分批查询。URI_CHUNK_SIZE 取 500，是留了余量的保守值。
+    批次之间要合并成全局前 k 名，不能每批各取 k 条再拼接。
+
+  "comem://user/lin/resources/context-window-budget.md": |
+    上下文预算
+
+    注入模型的上下文默认 1600 tokens。单条候选最多占平均值的两倍，超出就降级到下一层。
+    放不下的条目先降级再丢弃，丢弃的数量要计数，不能静默少给。
+
+  "comem://user/lin/resources/acl-materialization.md": |
+    权限物化
+
+    这个节点对谁能做什么，在写 ACL 时算好，存进 node_permission 表。检索时就是一个普通的 EXISTS 子查询。
+    写时算、读时查：读是高频操作，改 ACL 是低频操作。
+    路径范围用 GLOB 而不是 LIKE，因为 LIKE 对 ASCII 大小写不敏感，会把 Alice 的子树算进 alice。
+
+  "comem://user/lin/resources/ttl-sweep.md": |
+    记忆过期清扫
+
+    TTL 只做软过期：把 status 改成 archived，不物理删除文件。
+    过期时间存绝对时刻，不存 N 天后。清扫按批处理，每批最多 100 条，避免一次锁住数据库。
+
+  "comem://user/lin/resources/memoization.md": |
+    记忆化（memoization）
+
+    记忆化是把函数的计算结果缓存起来，下次用同样的参数调用时直接返回。
+    它和上下文记忆是两回事：前者是进程内的性能优化，后者是跨会话的知识存储。
+
+  # ── 技能 ────────────────────────────────────────────────────────────────
+
+  "comem://user/lin/skills/deploy-checklist.md": |
+    部署检查清单
+
+    上线前跑 pnpm verify，确认类型检查、lint、单元测试与集成测试全绿。
+    然后检查健康检查端点、数据库迁移版本、备份目录可写。最后确认回滚步骤。
+
+  "comem://user/lin/skills/release-steps.md": |
+    发布步骤
+
+    先打 tag，再用 tag 生成变更日志，最后构建镜像并推送到镜像仓库。
+    发布后观察十分钟的错误率与延迟，异常就回滚到上一个 tag。
+
+cases:
+  # ── 中文双字词 ──────────────────────────────────────────────────────────
+
+  # 「记忆」出现在项目介绍与记忆化文档里。前者是主题，后者只是字面重叠（memoization
+  # 是进程内缓存，不是跨会话记忆），标 0 作为难负例。
+  - query: 记忆
+    relevant:
+      - comem://user/lin/memories/entities/comem-project.md
+    graded:
+      comem://user/lin/memories/entities/comem-project.md: 3
+      comem://user/lin/resources/memoization.md: 0
+
+  # 「偏好」在代码风格、提交信息、可观测性三篇里都是主题，相关程度按「多具体地
+  # 谈偏好」区分。分词文档只是举例提到这个词，标 0。
+  - query: 偏好
+    relevant:
+      - comem://user/lin/memories/preferences/code-style.md
+      - comem://user/lin/memories/preferences/commit-message.md
+      - comem://user/lin/memories/preferences/observability.md
+    graded:
+      comem://user/lin/memories/preferences/code-style.md: 3
+      comem://user/lin/memories/preferences/commit-message.md: 2
+      comem://user/lin/memories/preferences/observability.md: 2
+      comem://user/lin/resources/fts5-segmentation.md: 0
+
+  # 只有代码风格文档真的在讲「严格模式」。
+  - query: 严格
+    relevant:
+      - comem://user/lin/memories/preferences/code-style.md
+    graded:
+      comem://user/lin/memories/preferences/code-style.md: 3
+
+  # 权限物化是唯一讲「物化」的文档。
+  - query: 物化
+    relevant:
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/resources/acl-materialization.md: 3
+
+  # 降级规则文档是主题；上下文预算文档讲的是同一套「降级到下一层」的机制，
+  # 相关但更具体。
+  - query: 降级
+    relevant:
+      - comem://user/lin/memories/rules/no-silent-degradation.md
+      - comem://user/lin/resources/context-window-budget.md
+    graded:
+      comem://user/lin/memories/rules/no-silent-degradation.md: 3
+      comem://user/lin/resources/context-window-budget.md: 2
+
+  # 「缓存」在缓存失效经历与记忆化文档里都是主题：前者讲失效策略，后者讲 memoization
+  # 本身，相关程度低一档。
+  - query: 缓存
+    relevant:
+      - comem://user/lin/memories/experiences/cache-invalidation.md
+      - comem://user/lin/resources/memoization.md
+    graded:
+      comem://user/lin/memories/experiences/cache-invalidation.md: 3
+      comem://user/lin/resources/memoization.md: 2
+
+  # 提交信息约定是主题；代码评审流程讲提交粒度，相关但更边缘。
+  - query: 提交
+    relevant:
+      - comem://user/lin/memories/preferences/commit-message.md
+      - comem://user/lin/memories/preferences/review-process.md
+    graded:
+      comem://user/lin/memories/preferences/commit-message.md: 3
+      comem://user/lin/memories/preferences/review-process.md: 2
+
+  # 部署清单是主题；发布步骤是同一件事的另一半（发布与回滚）。
+  - query: 部署
+    relevant:
+      - comem://user/lin/skills/deploy-checklist.md
+      - comem://user/lin/skills/release-steps.md
+    graded:
+      comem://user/lin/skills/deploy-checklist.md: 3
+      comem://user/lin/skills/release-steps.md: 2
+
+  # 「权限」在权限物化文档里是主题；许可证检查讲的是另一种「许可」，不是权限。
+  - query: 权限
+    relevant:
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/resources/acl-materialization.md: 3
+      comem://user/lin/memories/rules/license-review.md: 0
+
+  # ── 同义改写（只有语义检索能命中）──────────────────────────────────────
+
+  # 问的是「怎么保证团队产出风格一致」，语料里那篇讲的是代码风格偏好与严格模式。
+  # 没有共享的连续字符，关键词检索的短语匹配不可能命中。
+  - query: 怎样让不同人写出来的东西看起来一样
+    relevant:
+      - comem://user/lin/memories/preferences/code-style.md
+    graded:
+      comem://user/lin/memories/preferences/code-style.md: 3
+
+  # 问的是并发写同一个文件会不会丢改动，语料里是路径锁顺序与死锁。
+  - query: 多个人同时改同一个文件会不会丢改动
+    relevant:
+      - comem://user/lin/memories/experiences/lock-contention.md
+    graded:
+      comem://user/lin/memories/experiences/lock-contention.md: 3
+
+  # 问的是依赖能不能用，语料里是许可证检查。
+  - query: 怎么判断一份依赖能不能用
+    relevant:
+      - comem://user/lin/memories/rules/license-review.md
+    graded:
+      comem://user/lin/memories/rules/license-review.md: 3
+
+  # 问的是模型服务故障时的表现，语料里是「降级必须可见」。
+  - query: 模型服务挂掉的时候系统怎么表现
+    relevant:
+      - comem://user/lin/memories/rules/no-silent-degradation.md
+    graded:
+      comem://user/lin/memories/rules/no-silent-degradation.md: 3
+
+  # 问的是上线前的检查项，语料里是部署检查清单。
+  - query: 上线之前要检查哪些东西
+    relevant:
+      - comem://user/lin/skills/deploy-checklist.md
+    graded:
+      comem://user/lin/skills/deploy-checklist.md: 3
+
+  # 问的是中文切词，语料里是 unicode61 / trigram / 单字切分那篇。
+  - query: 中文检索怎么切词
+    relevant:
+      - comem://user/lin/resources/fts5-segmentation.md
+    graded:
+      comem://user/lin/resources/fts5-segmentation.md: 3
+
+  # 问的是两路检索结果怎么合并，语料里是 RRF；绑定变量文档提到「合并成全局前 k 名」，
+  # 是同一件事的下游细节。
+  - query: 两个检索结果怎么合并
+    relevant:
+      - comem://user/lin/resources/rrf-fusion.md
+      - comem://user/lin/resources/sqlite-binding-limit.md
+    graded:
+      comem://user/lin/resources/rrf-fusion.md: 3
+      comem://user/lin/resources/sqlite-binding-limit.md: 1
+
+  # 问的是摘要占多少上下文，语料里是上下文预算；层级加权文档讲 L0 摘要的权重，
+  # 相关但更偏排序。
+  - query: 摘要应该占多少上下文
+    relevant:
+      - comem://user/lin/resources/context-window-budget.md
+      - comem://user/lin/resources/level-weighting.md
+    graded:
+      comem://user/lin/resources/context-window-budget.md: 3
+      comem://user/lin/resources/level-weighting.md: 2
+
+  # 问的是过期记忆怎么清理，语料里是 TTL 软过期。
+  - query: 过期的记忆怎么清理
+    relevant:
+      - comem://user/lin/resources/ttl-sweep.md
+    graded:
+      comem://user/lin/resources/ttl-sweep.md: 3
+
+  # 问的是数据库迁移踩过的坑，语料里是 monorepo 迁移的经历。
+  - query: 数据库迁移踩过什么坑
+    relevant:
+      - comem://user/lin/memories/experiences/monorepo-migration.md
+    graded:
+      comem://user/lin/memories/experiences/monorepo-migration.md: 3
+
+  # 问的是发布流程，语料里是发布步骤；部署清单是同一流程的前置检查。
+  - query: 发布流程是什么
+    relevant:
+      - comem://user/lin/skills/release-steps.md
+      - comem://user/lin/skills/deploy-checklist.md
+    graded:
+      comem://user/lin/skills/release-steps.md: 3
+      comem://user/lin/skills/deploy-checklist.md: 2
+
+  # 问的是怎么在一次请求里定位问题，语料里是可观测性偏好。
+  - query: 日志里怎么定位一次请求
+    relevant:
+      - comem://user/lin/memories/preferences/observability.md
+    graded:
+      comem://user/lin/memories/preferences/observability.md: 3
+
+  # 问的是许可证兼容性，语料里是依赖许可证检查。
+  - query: 许可证能不能用 AGPL
+    relevant:
+      - comem://user/lin/memories/rules/license-review.md
+    graded:
+      comem://user/lin/memories/rules/license-review.md: 3
+
+  # 问的是死锁怎么避免，语料里是路径锁按 URI 排序。
+  - query: 锁竞争怎么避免死锁
+    relevant:
+      - comem://user/lin/memories/experiences/lock-contention.md
+    graded:
+      comem://user/lin/memories/experiences/lock-contention.md: 3
+
+  # 问的是重排模型怎么配，语料里是 bge-reranker-v2-m3 那篇。
+  - query: 重排模型怎么配置
+    relevant:
+      - comem://user/lin/memories/entities/rerank-model.md
+    graded:
+      comem://user/lin/memories/entities/rerank-model.md: 3
+
+  # 问的是向量维度，语料里 bge-m3 文档给了 1024 维；sqlite-vec 文档提到 1024 维
+  # 向量的性能数据，相关但更偏性能。
+  - query: 向量维度是多少
+    relevant:
+      - comem://user/lin/memories/entities/bge-m3.md
+      - comem://user/lin/memories/entities/sqlite-vec.md
+    graded:
+      comem://user/lin/memories/entities/bge-m3.md: 3
+      comem://user/lin/memories/entities/sqlite-vec.md: 2
+
+  # 问的是路径锁的顺序，语料里是「两把锁按 URI 排序后获取」。
+  - query: 路径锁的顺序为什么重要
+    relevant:
+      - comem://user/lin/memories/experiences/lock-contention.md
+    graded:
+      comem://user/lin/memories/experiences/lock-contention.md: 3
+
+  # 问的是上下文预算超了怎么办，语料里是降级到下一层再丢弃。
+  - query: 上下文预算超了怎么办
+    relevant:
+      - comem://user/lin/resources/context-window-budget.md
+    graded:
+      comem://user/lin/resources/context-window-budget.md: 3
+
+  # ── 专有名词 / 标识符（只有关键词检索能精确命中）────────────────────────
+
+  # 标识符同时出现在项目介绍（一句带过）与 sqlite-vec 专篇（主题）里。
+  - query: sqlite-vec
+    relevant:
+      - comem://user/lin/memories/entities/sqlite-vec.md
+      - comem://user/lin/memories/entities/comem-project.md
+    graded:
+      comem://user/lin/memories/entities/sqlite-vec.md: 3
+      comem://user/lin/memories/entities/comem-project.md: 1
+
+  # 命令同时出现在部署清单与评审流程里，两处都是「跑它作为门禁」。
+  - query: pnpm verify
+    relevant:
+      - comem://user/lin/skills/deploy-checklist.md
+      - comem://user/lin/memories/preferences/review-process.md
+    graded:
+      comem://user/lin/skills/deploy-checklist.md: 3
+      comem://user/lin/memories/preferences/review-process.md: 3
+
+  # 常量名只出现在绑定变量上限那篇。
+  - query: URI_CHUNK_SIZE
+    relevant:
+      - comem://user/lin/resources/sqlite-binding-limit.md
+    graded:
+      comem://user/lin/resources/sqlite-binding-limit.md: 3
+
+  # 表名只出现在权限物化那篇。
+  - query: node_permission
+    relevant:
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/resources/acl-materialization.md: 3
+
+  # 模型名在 bge-m3 专篇里是主题；sqlite-vec 文档只提到 1024 维向量，标 0。
+  - query: bge-m3
+    relevant:
+      - comem://user/lin/memories/entities/bge-m3.md
+    graded:
+      comem://user/lin/memories/entities/bge-m3.md: 3
+      comem://user/lin/memories/entities/sqlite-vec.md: 0
+
+  # ── 分级相关性（一条查询多篇相关，程度不同）────────────────────────────
+
+  # 「向量检索」是 sqlite-vec 专篇的主题；RRF 与 bge-m3 是它的上下游；项目介绍
+  # 只提了一句。
+  - query: 向量检索
+    relevant:
+      - comem://user/lin/memories/entities/sqlite-vec.md
+      - comem://user/lin/resources/rrf-fusion.md
+      - comem://user/lin/memories/entities/bge-m3.md
+      - comem://user/lin/memories/entities/comem-project.md
+    graded:
+      comem://user/lin/memories/entities/sqlite-vec.md: 3
+      comem://user/lin/resources/rrf-fusion.md: 2
+      comem://user/lin/memories/entities/bge-m3.md: 2
+      comem://user/lin/memories/entities/comem-project.md: 1
+
+  # ── 难负例（字面相似但语义无关）────────────────────────────────────────
+
+  # 「记忆化缓存」是 memoization 的完整说法；缓存失效经历讲的是同一类问题的另一面
+  # （键没带版本），相关但更偏运维。项目介绍里的「记忆」是字面重叠，标 0。
+  - query: 记忆化缓存
+    relevant:
+      - comem://user/lin/resources/memoization.md
+      - comem://user/lin/memories/experiences/cache-invalidation.md
+    graded:
+      comem://user/lin/resources/memoization.md: 3
+      comem://user/lin/memories/experiences/cache-invalidation.md: 2
+      comem://user/lin/memories/entities/comem-project.md: 0

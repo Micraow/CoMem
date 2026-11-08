@@ -237,6 +237,27 @@ export class FileSystemService {
   }
 
   /**
+   * 写整份文档（frontmatter + 正文），**不做 frontmatter 合并**。
+   *
+   * `write` 的 `options.frontmatter` 只覆盖 `DocumentFrontmatter` 建模的摘要三列，
+   * 其余键（`memory_type`、`status`、未来的字段）会原样保留在文件头上。MCP 的
+   * `write` 工具需要「调用方给什么就写什么」的整体替换语义（§13.2），用 `write`
+   * 会在文件头留下**旧** frontmatter，写进去的新值只能靠 `readText` 的二次解析才
+   * 看得见——所以这里直接写字节，交给调用方序列化。
+   *
+   * 锁与观察者与 `write` 相同：整份文档是一个原子写，索引仍然需要在落盘后物化。
+   */
+  async writeDocument(uri: Uri, text: string): Promise<WriteResult> {
+    await this.#authorizer.assert(uri, WRITE);
+    return this.#locks.withLock(uri, 'exact', async () => {
+      const created = !(await this.#store.exists(uri));
+      const stat = await this.#store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8')));
+      await this.#notifyWritten(uri, 'file');
+      return { uri, stat, created };
+    });
+  }
+
+  /**
    * 应用 SEARCH/REPLACE 补丁（§11.2、§11.5）。
    *
    * 失败时抛 `INVALID_ARGUMENT`，**不写文件**：块命中零处或多处时，任何部分应用

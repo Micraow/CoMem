@@ -15,7 +15,12 @@ import { PermissionRepository } from '../../../src/adapters/sqlite/permission-re
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import type { McpToolContext } from '../../../src/api/mcp/context.js';
-import type { McpToolName, McpToolResult } from '../../../src/api/mcp/registry.js';
+import {
+  ToolRegistry,
+  type McpToolDefinition,
+  type McpToolName,
+  type McpToolResult,
+} from '../../../src/api/mcp/registry.js';
 import { MCP_TOOLS } from '../../../src/api/mcp/tools/index.js';
 import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { configSchema } from '../../../src/config/index.js';
@@ -289,8 +294,14 @@ afterEach(async () => {
   await harness.close();
 });
 
-function tool(name: McpToolName) {
-  const found = MCP_TOOLS.find((candidate) => candidate.name === name);
+/**
+ * 生产路径走 `ToolRegistry`（`~` 别名在注册表的包装层展开）。直接调 `MCP_TOOLS`
+ * 会绕过展开，测不到「工具接受 `~`」这条契约。
+ */
+const registry = new ToolRegistry(MCP_TOOLS);
+
+function tool(name: McpToolName): McpToolDefinition {
+  const found = registry.get(name);
   if (found === undefined) {
     throw new Error(`工具不存在：${name}`);
   }

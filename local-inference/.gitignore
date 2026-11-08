@@ -1,0 +1,17 @@
+# 本地推理服务：虚拟环境与模型权重都不进版本控制。
+#
+# 模型是本目录下最大的一块（Qwen3-Embedding-0.8B 的 GGUF Q8_0 约 850MB，
+# OpenVINO FP16 IR 约 1.6GB），占用见 `local/env-log.md`。
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 模型权重。`models/.gitkeep` 保留目录结构。
+models/*
+!models/.gitkeep
+
+# bench 输出
+bench-results.json
