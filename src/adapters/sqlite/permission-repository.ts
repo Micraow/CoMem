@@ -217,6 +217,26 @@ export class PermissionRepository {
   }
 
   /**
+   * 删除子树内全部原始授权行，返回删除的行数。
+   *
+   * 与 `deleteSubtree` 的区别：那个方法同时删 `node_permission`，服务的是「节点
+   * 不存在了」。这里只清 `acl_entry`——`node_permission` 要按清空后的文件重算，
+   * 因为子树里的节点可能从**子树之外**的祖先继承权限（删组时，`comem://group/`
+   * 上的条目仍然生效）。只删物化行会让求权结果比文件更严，两边不一致。
+   */
+  deleteEntriesSubtree(uri: string): number {
+    const deleted = Number(
+      withWriteTransaction(this.#db, () =>
+        this.#db
+          .prepare(`DELETE FROM acl_entry WHERE uri = ? OR uri GLOB ?`)
+          .run(uri, globPrefixPattern(uri)).changes,
+      ),
+    );
+    this.#logger.debug('子树授权条目已删除', { uri, deleted });
+    return deleted;
+  }
+
+  /**
    * 写入物化行，调用方负责删除范围与事务边界。
    *
    * 用 `ON CONFLICT DO UPDATE` 而不是普通 `INSERT`：入参里同一

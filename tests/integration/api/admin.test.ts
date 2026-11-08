@@ -984,6 +984,52 @@ describe('账号复用不会继承组管理权', () => {
   });
 });
 
+/**
+ * 回归：删组只清 `group:{gid}` 主体，组子树里 `user:bob = write` 这样的**直接
+ * 授权**不会被动（架构文档 §12.2）。组被删、数据留在磁盘上，同 ID 重建后旧授权
+ * 立刻生效——删组没有撤销共享范围。同 ID 复用是常规操作（测试环境重置、离职回归）。
+ */
+describe('删组清空子树里的直接授权', () => {
+  it('删组重建同 ID 后，旧的 user 直接授权不再生效', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    await createGroup('eng');
+
+    const sub = Uri.parse('comem://group/eng/sub');
+    // 先物化：`setAcl` 的前置检查按 `node_permission` 求 manage，而 `sub` 还没有
+    // 自己的行（继承来的权限要物化之后才查得到）。
+    await container.services.acl.materializeNode(sub);
+    await container.services.acl.setAcl(
+      sub,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 3, effect: 'allow' }],
+      },
+      'user:local',
+      ['user:local', 'user:*'],
+    );
+    expect(await container.services.acl.check(sub, 3, ['user:bob', 'user:*'])).toBe(true);
+
+    const deleted = resultOf(
+      await inject({ method: 'DELETE', url: '/api/v1/admin/groups/eng' }),
+    );
+    expect(deleted['clearedAclFiles']).toBeGreaterThanOrEqual(1);
+
+    // 同 ID 重建：组根预置会写回来，但子树里的旧授权不能跟着回来。
+    await createGroup('eng');
+
+    expect(await container.services.acl.check(sub, 1, ['user:bob', 'user:*'])).toBe(false);
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+    ).toBe(0);
+
+    const onDisk = JSON.parse(
+      await readFile(join(dataDir, 'group', 'eng', 'sub', '.acl.json'), 'utf8'),
+    ) as { readonly entries: readonly { readonly principal: string }[] };
+    expect(onDisk.entries).toEqual([]);
+  });
+});
+
 describe('授权', () => {
   it('没有 manage 权限时 403', async () => {
     // 路由的授权在 owner 恒 manage 的规则下对「自身根」总是成立，所以这里用
@@ -1026,6 +1072,7 @@ describe('授权', () => {
       ensureRootPreset: async () => ({ entries: [], ownerMissing: false }),
       setGroupOwner: async () => {},
       purgePrincipal: async () => 0,
+      purgeSubtree: async () => 0,
     };
 
     const denyingApp = Fastify({ logger: false });

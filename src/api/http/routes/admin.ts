@@ -26,6 +26,12 @@
  * **不递归删节点。** 用户写过的记忆仍然属于那个根，所有权转移或显式删除是另一个
  * 动作。把「删账号」实现成「删数据」会让一次误操作不可恢复。
  *
+ * **删组要清空组子树的直接授权。** `purgePrincipal('group:{gid}')` 只按主体清，
+ * 子树里 `user:bob = write` 这样的直接授权不会被动。组不存在了，这些条目挂在谁也
+ * 不认识的路径上；同 ID 重建的组会立刻继承它们——删组没有撤销共享范围。所以删组
+ * 走两步：先 `purgePrincipal` 移除组主体，再 `purgeSubtree` 清空子树内的全部条目
+ * （保留数据与 `mode`，见 `AclService.purgeSubtree`）。
+ *
  * ## 不能删掉当前绑定主体
  *
  * 删掉 `user:local` 之后服务仍在跑，但它绑定的 `app_user` 行没了，控制台每个
@@ -123,7 +129,7 @@ export interface AdminAccess {
  */
 export type AdminAcl = Pick<
   HttpRouteServices['acl'],
-  'ensureRootPreset' | 'setGroupOwner' | 'purgePrincipal'
+  'ensureRootPreset' | 'setGroupOwner' | 'purgePrincipal' | 'purgeSubtree'
 >;
 
 export type AdminRouteServices = Pick<
@@ -473,8 +479,13 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
 
         const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
         await acl.purgePrincipal(principal);
+        // 组主体之外，组子树里还可能有 `user:bob = write` 这样的直接授权。
+        // `purgePrincipal` 只按主体清，这些条目会留下：组不存在了，授权挂在一条
+        // 谁都不认识的路径上，同 ID 重建后立刻生效——删组没有撤销共享范围。
+        // 删组保留数据，但清空该子树内的全部 ACL 条目（§12.2、operations.md）。
+        const clearedAclFiles = await acl.purgeSubtree(Uri.parse(`comem://group/${id}`));
         identity.deleteGroup(id);
-        return ok({ id, deleted: true, revokedPermissions });
+        return ok({ id, deleted: true, revokedPermissions, clearedAclFiles });
       });
 
       // ── 组成员 ──

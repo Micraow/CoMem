@@ -599,6 +599,84 @@ export class AclService implements Authorizer {
   }
 
   /**
+   * 清空某个 URI 子树内的全部直接授权条目（删组用）。
+   *
+   * **为什么需要它。** `purgePrincipal` 只按主体清：删组时它移除 `group:{gid}`
+   * 这个 principal 的条目，组子树里 `user:bob = write` 这样的**直接授权**不会被动。
+   * 组被删、数据留在磁盘上，同 ID 重建后旧授权立刻生效——删组没有撤销共享范围。
+   * 同 ID 复用是常规操作（测试环境重置、离职回归）。
+   *
+   * **语义：保留数据与 `mode`，清空条目。** 删组不是删数据（`DELETE
+   * /admin/groups/{id}` 不删 `comem://group/{gid}/` 下的文件）。清空条目而不是
+   * 重置 `mode`：`restricted` 是旧组管理员的决定，清空后它仍然收得最紧（没人可读）；
+   * 重置成 `inherit` 反而可能让祖先的 `user:*` 放开数据。要连数据一起删，用文件
+   * 系统显式删除目录，不在 HTTP 管理面。
+   *
+   * **物化表要重算，不能只删行。** 子树里的节点可能从**子树之外**的祖先继承权限
+   * （`comem://group/` 上的条目），所以 `node_permission` 按清空后的文件重算整棵
+   * 子树；`acl_entry` 的子树行直接删除（文件里已经没有条目）。
+   *
+   * 扫描上限沿用 `MAX_PURGE_SCAN_DIRECTORIES`，达到上限时记 warn 并继续——与
+   * `purgePrincipal` 同一个判据：撤权失败会让组删不掉，失败方向更差。返回被改写的
+   * `.acl.json` 文件数。空操作返回 0。
+   */
+  async purgeSubtree(root: Uri): Promise<number> {
+    const prefix = root.toString();
+
+    const scan = await this.#aclFile.scanDirectories({
+      maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
+    });
+    if (scan.truncated) {
+      this.#logger.warn('清空子树授权达到目录上限，上限之外的 .acl.json 未检查', {
+        uri: prefix,
+        limit: MAX_PURGE_SCAN_DIRECTORIES,
+        scannedDirectories: scan.directoriesScanned,
+        aclFiles: scan.uris.length,
+      });
+    }
+
+    const rewrites: PurgeRewrite[] = [];
+    for (const uri of scan.uris) {
+      const value = uri.toString();
+      if (value !== prefix && !value.startsWith(`${prefix}/`)) {
+        continue;
+      }
+      const previous = await this.#aclFile.read(uri);
+      if (previous === null || previous.entries.length === 0) {
+        continue;
+      }
+      rewrites.push({ uri, previous, next: { mode: previous.mode, entries: [] } });
+    }
+
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const rewrite of rewrites) {
+        await this.#aclFile.write(rewrite.uri, rewrite.next);
+      }
+      const permissions = await this.#materializeSubtree(root);
+      this.#runInTransaction(() => {
+        this.#permissions.replaceSubtree(prefix, permissions);
+        this.#permissions.deleteEntriesSubtree(prefix);
+      });
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      await this.#restoreAclFiles(rewrites);
+      throw error;
+    }
+
+    this.#logger.info('子树授权已清空', {
+      uri: prefix,
+      files: rewrites.length,
+      entries: rewrites.reduce((total, rewrite) => total + rewrite.previous.entries.length, 0),
+      scannedDirectories: scan.directoriesScanned,
+      aclFiles: scan.uris.length,
+      truncated: scan.truncated,
+    });
+    return rewrites.length;
+  }
+
+  /**
    * 从所有 `.acl.json` 里移除某个主体。
    *
    * **必须真改文件**，不能只删 `acl_entry` / `node_permission` 的行——那两张表是
@@ -838,7 +916,7 @@ export class AclService implements Authorizer {
   }
 
   /**
-   * 重算 `uri` 整棵子树的物化权限。
+   * 重算 `uri` 整棵子树的物化权限（`setAcl` 用）。
    *
    * 子树来自 `nodes.descendants`（SQL 前缀匹配），**不递归 open 目录**：§8.2 的
    * 硬伤就是「一条候选 open 5 层目录」。这里的文件读取只发生在链上，且按目录
@@ -847,11 +925,28 @@ export class AclService implements Authorizer {
    * 文档（`kind === 'document'`）不读自己的 `.acl.json`：文件没有 ACL 文件，
    * 它的有效权限就是所在目录的。owner 按 URI 根推导，文档与目录同属一个根，
    * 所以省略文档节点不改变结果。
+   *
+   * `file` 是**还没写盘**的新内容，预置进缓存：求值必须用新 ACL，而文件写失败时
+   * 事务根本不会开始。
    */
   async #materialize(uri: Uri, file: AclFile): Promise<readonly PermissionRow[]> {
-    const cache = new Map<string, AclFile | null>();
-    cache.set(uri.toString(), file);
+    return this.#materializeChain(uri, new Map<string, AclFile | null>([[uri.toString(), file]]));
+  }
 
+  /**
+   * 按磁盘上的 `.acl.json` 重算整棵子树的物化权限（`purgeSubtree` 用）。
+   *
+   * 与 `#materialize` 的唯一区别是不预置目标节点的文件：调用方已经写盘，按文件
+   * 读到的就是新内容。
+   */
+  async #materializeSubtree(uri: Uri): Promise<readonly PermissionRow[]> {
+    return this.#materializeChain(uri, new Map<string, AclFile | null>());
+  }
+
+  async #materializeChain(
+    uri: Uri,
+    cache: Map<string, AclFile | null>,
+  ): Promise<readonly PermissionRow[]> {
     const target = this.#nodes.get(uri.toString());
     const nodes: readonly { readonly uri: Uri; readonly kind: NodeKind }[] = [
       { uri, kind: target?.kind ?? 'directory' },
