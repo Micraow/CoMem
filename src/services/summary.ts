@@ -81,6 +81,7 @@ import {
 } from '../domain/summary.js';
 import type { Uri } from '../domain/uri.js';
 
+import type { AclService } from './acl.js';
 import type { LlmService } from './llm.js';
 import { buildSummaryPrompt } from './prompts/summarize.js';
 
@@ -123,6 +124,15 @@ export interface SummaryServiceDeps {
   readonly generator: SummaryGenerator;
   readonly logger: Logger;
   readonly config: SummaryServiceConfig;
+  /**
+   * 写摘要之后的权限物化（§12.4 的「写时算」）。
+   *
+   * 归档子树（`history/`、`archive_NNN/`）是 `SessionService` 直接写 `ContentStore`
+   * 建出来的，观察者收不到通知；摘要生成是这条链上唯一的写后钩子。只取
+   * `materializeNode` 一个方法，与 `ArchiveSummaryStep` 取 `Pick<SummaryService, ...>`
+   * 同一取舍：不需要整个 `AclService` 的测试不该造一个。
+   */
+  readonly acl: Pick<AclService, 'materializeNode'>;
   /** 每个目录一把 EXACT 锁；省略时不加锁（见文件头「并发」）。 */
   readonly locks?: PathLockManager;
 }
@@ -274,6 +284,7 @@ export class SummaryService {
   readonly #logger: Logger;
   readonly #config: SummaryServiceConfig;
   readonly #thresholds: FreshnessThresholds;
+  readonly #acl: Pick<AclService, 'materializeNode'>;
   readonly #locks: PathLockManager | undefined;
 
   constructor(deps: SummaryServiceDeps) {
@@ -286,6 +297,7 @@ export class SummaryService {
     this.#logger = deps.logger;
     this.#config = deps.config;
     this.#thresholds = deps.config.freshness ?? DEFAULT_FRESHNESS_THRESHOLDS;
+    this.#acl = deps.acl;
     this.#locks = deps.locks;
   }
 
@@ -497,6 +509,19 @@ export class SummaryService {
       this.#consume(directoryUri.toString(), baseline, snapshot, children.length);
     });
 
+    // §12.4 的「写时算」：归档子树是 `SessionService` 直接写 `ContentStore` 建出来的，
+    // 观察者收不到通知，所以 `node_permission` 里没有 `history/` 与 `archive_NNN/`
+    // 的行。而 `list` / `tree` / `glob` 的权限过滤是**纯 SQL 查询**——归档写成功了，
+    // 控制台的文件树里一条都没有，`stat` 一次又全部恢复（读路径的
+    // `InheritingAuthorizer` 会补）。摘要生成是这条链上唯一的写后钩子。
+    //
+    // 物化在 `index.upsert` 之后：`materializeNode` 从 `node` 表读 kind 决定链的起点
+    // （与 `IndexObserver.#indexNode` 同一顺序）。
+    //
+    // 失败不吞：本服务在后台任务里跑，静默跳过只会让「归档写成功、树里看不到」
+    // 变成一条没有上下文的空目录；抛出去由提交步骤重试。
+    await this.#materialize(directoryUri);
+
     this.#logger.debug('目录摘要已生成', {
       uri: directoryUri.toString(),
       children: children.length,
@@ -608,6 +633,26 @@ export class SummaryService {
   }
 
   // ── 基础设施 ──
+
+  /**
+   * 物化 `uri` 及其全部祖先的权限（§12.4 的「写时算」）。
+   *
+   * 只物化 `uri` 自己不够：`ContentStore.writeText` 写
+   * `.../history/archive_001/messages.jsonl` 时顺手 `mkdir -p` 出 `history/` 与
+   * `archive_001/`，两个目录都没有行，而 `filterReadable` 是纯 SQL 查询——它们在
+   * `list` / `tree` / `glob` 里**整个消失**，用户看到的会话目录树是断的。
+   *
+   * 逐级 `materializeNode` 是幂等的（行已存在就是覆盖成同样的值），depth 通常
+   * 3–6，换「归档目录树不断」是划算的。与 `IndexObserver.#materializeAncestors`
+   * 同一做法。
+   */
+  async #materialize(uri: Uri): Promise<void> {
+    let current: Uri | null = uri;
+    while (current !== null) {
+      await this.#acl.materializeNode(current);
+      current = current.parent();
+    }
+  }
 
   async #withDirectoryLock<T>(uri: Uri, fn: () => Promise<T>): Promise<T> {
     if (this.#locks === undefined) {

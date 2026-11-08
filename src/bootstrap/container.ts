@@ -797,6 +797,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     metadata,
     store,
     db,
+    acl,
     generator:
       config.summary.generator === 'llm'
         ? new LlmSummarizer(llm, {

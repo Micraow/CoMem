@@ -951,7 +951,7 @@ LIMIT ?;
 
 **`acl_entry` 是反查索引，不是求权来源。** 求权只读 `node_permission`；`acl_entry` 回答「哪些目录直接写了这个主体」。两者由同一个 `#writeAcl` 一起替换。节点被移动时 `acl_entry` 必须按新 URI 从 `.acl.json` 重建（否则删账号的反查会漏），这条重建在 `IndexObserver.onNodeMoved` 里逐目录执行；没有 `.acl.json` 的节点直接跳过。
 
-**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
+**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。`SummaryService` 是归档子树（`sessions/{id}/history/archive_NNN/`）唯一的写后钩子：阶段一的落盘由 `SessionService` 直接写 `ContentStore`，观察者收不到通知，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 
 ### 8.3 检索接口
 

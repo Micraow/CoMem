@@ -50,6 +50,9 @@ beforeEach(async () => {
       COMEM_DATA_DIR: dataDir,
       // 写路径会投递摘要失效；用规则摘要，测试不碰模型。
       COMEM_SUMMARY_GENERATOR: 'rule',
+      // 归档提交的 `memory_extract` 步骤会调模型。禁掉供应商，这一步按
+      // `skippedSteps` 跳过——本文件断言的是权限物化，不是抽取质量。
+      COMEM_PROVIDERS_LLM_DEFAULT_TYPE: 'disabled',
       COMEM_LOGGING_LEVEL: 'error',
     },
   });
@@ -125,6 +128,59 @@ describe('createContainer', () => {
   it('close() 幂等', async () => {
     await container.close();
     await expect(container.close()).resolves.toBeUndefined();
+  });
+
+  /**
+   * 回归（P1）：归档提交后**立刻**能在 `tree` / `list` / `glob` 里看到。
+   *
+   * 归档子树（`history/`、`archive_NNN/`）是 `SessionService` 直接写 `ContentStore`
+   * 建出来的，观察者收不到通知。`SummaryService` 只写了索引行、没物化权限，而
+   * `list` / `tree` / `glob` 的权限过滤是**纯 SQL 查询**——归档写成功了，控制台的
+   * 文件树里一条都没有；`stat` 一次（读路径的 `InheritingAuthorizer`）又全部恢复。
+   *
+   * **用例里不能先 `stat` / 先 `assert` 归档节点**：那正是掩盖缺陷的补偿路径。
+   */
+  it('归档提交后立刻能在 tree / list / glob 里看到', async () => {
+    const { filesystem, search, session, acl } = container.services;
+    const { commitRunner } = container;
+    const root = Uri.parse(ROOT);
+    await acl.ensureRootPreset(root);
+
+    const sessionUri = await session.create(root, PRINCIPALS, { sessionId: 'archive-probe' });
+    for (let index = 0; index < 3; index += 1) {
+      await session.addMessage(sessionUri, {
+        id: `msg_${index}`,
+        role: 'user',
+        parts: [{ kind: 'text', text: `第 ${index} 条消息` }],
+        createdAt: '2026-11-08T00:00:00.000Z',
+      });
+    }
+
+    const phase1 = await session.commitPhase1(sessionUri);
+    await commitRunner.tick();
+
+    const historyUri = sessionUri.child('history');
+    const archiveUri = phase1.archiveUri.toString();
+
+    const tree = await filesystem.tree(sessionUri, PRINCIPALS, { depth: 4 });
+    expect(tree.entries.map((entry) => entry.uri.toString())).toEqual([
+      historyUri.toString(),
+      archiveUri,
+    ]);
+    expect(tree.truncated).toBe(false);
+
+    const sessions = await filesystem.list(sessionUri, PRINCIPALS);
+    expect(sessions.map((entry) => entry.uri.name)).toContain('history');
+
+    const archives = await filesystem.list(historyUri, PRINCIPALS);
+    expect(archives.map((entry) => entry.uri.toString())).toEqual([archiveUri]);
+
+    const globbed = await search.glob('**', {
+      scopes: [sessionUri.toString()],
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    });
+    expect(globbed).toContain(archiveUri);
   });
 
   it('写文件 → 索引能查到 → 权限行存在（端到端）', async () => {

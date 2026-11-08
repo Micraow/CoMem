@@ -5,12 +5,14 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType, NodeKind } from '../../../src/domain/node.js';
@@ -23,6 +25,7 @@ import {
   type SummaryInput,
 } from '../../../src/domain/summary.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
 import { LlmService } from '../../../src/services/llm.js';
 import {
   LlmSummarizer,
@@ -50,6 +53,7 @@ let metadata: MetadataFileStore;
 let nodes: NodeRepository;
 let index: SqliteFtsIndex;
 let locks: PathLockManager;
+let acl: AclService;
 let logger: Logger;
 
 beforeEach(async () => {
@@ -62,6 +66,15 @@ beforeEach(async () => {
   nodes = new NodeRepository({ db, logger });
   index = new SqliteFtsIndex({ db, logger });
   locks = createPathLockManager({ dataDir, logger });
+  // 真实 `AclService`：`#summarize` 写索引之后要物化权限，桩会让这条链路在测试里断掉。
+  acl = new AclService({
+    dataDir,
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions: new PermissionRepository({ db, logger }),
+    nodes,
+    logger,
+  });
 });
 
 afterEach(async () => {
@@ -94,6 +107,7 @@ function createService(options: ServiceOptions = {}): SummaryService {
     metadata,
     store,
     db,
+    acl,
     logger,
     locks,
     generator: options.generator ?? new RuleSummarizer(),

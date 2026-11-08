@@ -105,6 +105,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     metadata,
     store,
     db,
+    acl,
     generator: new RuleSummarizer(),
     logger,
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },

@@ -20,11 +20,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { createArchiveArtifacts, createArchivePorts } from '../../../src/bootstrap/archive-ports.js';
@@ -45,6 +47,7 @@ import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-s
 import { MemoryExtractStep } from '../../../src/services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../../../src/services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summary-invalidate.js';
+import { AclService } from '../../../src/services/acl.js';
 import { LlmService } from '../../../src/services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../../../src/services/memory.js';
 import { SessionService } from '../../../src/services/session.js';
@@ -190,12 +193,22 @@ beforeEach(async () => {
   };
   memory = new MemoryService({ filesystem, search: { find: async () => [] }, logger });
 
+  // 真实 `AclService`：归档步骤写摘要后要物化权限，桩会让这条链路在测试里断掉。
+  const acl = new AclService({
+    dataDir,
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions: new PermissionRepository({ db, logger }),
+    nodes,
+    logger,
+  });
   summary = new SummaryService({
     nodes,
     index,
     metadata,
     store,
     db,
+    acl,
     generator: new RuleSummarizer(),
     logger,
     config: { abstractMaxChars: ABSTRACT_MAX_CHARS, overviewMaxChars: OVERVIEW_MAX_CHARS },

@@ -83,17 +83,6 @@ beforeEach(async () => {
   store = new ContentStore({ dataDir, logger });
   locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 5, defaultTimeoutMs: 2000 });
   index = new SqliteFtsIndex({ db, logger });
-  summary = new SummaryService({
-    nodes: new NodeRepository({ db, logger }),
-    index,
-    metadata: new MetadataFileStore({ dataDir, logger }),
-    store,
-    db,
-    generator: new RuleSummarizer(),
-    logger,
-    locks,
-    config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
-  });
   permissions = new PermissionRepository({ db, logger });
   // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
   const acl = new AclService({
@@ -103,6 +92,18 @@ beforeEach(async () => {
     permissions,
     nodes: new NodeRepository({ db, logger }),
     logger,
+  });
+  summary = new SummaryService({
+    nodes: new NodeRepository({ db, logger }),
+    index,
+    metadata: new MetadataFileStore({ dataDir, logger }),
+    store,
+    db,
+    acl,
+    generator: new RuleSummarizer(),
+    logger,
+    locks,
+    config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
   });
   await acl.ensureRootPreset(Uri.parse(SCOPE));
   const authorizer = new InheritingAuthorizer(acl, store);
