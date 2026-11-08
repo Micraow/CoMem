@@ -369,6 +369,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
             const principal = groupPrincipal(group.id);
             return {
               ...group,
+              ownerMissing: group.ownerUserId === null,
               memberCount: memberCounts.get(group.id) ?? 0,
               permissionCount: permissionCounts.get(principal) ?? 0,
             };
@@ -442,6 +443,10 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         }
 
         const groupRoot = Uri.parse(`comem://group/${id}`);
+        // `ownerUserId` 是元数据，不是授权（§12.2）：它只回答「谁是当前 owner」。
+        // 为 `NULL` 时没有任何人是当前 owner，必须按组根 `manage` 求权——删账号会
+        // 把这一列清空，组里如果没有第二个 manage 持有者，本端点就再也进不来，
+        // 恢复只能走 `pnpm group:owner`（§12.6）。
         if (group.ownerUserId !== callerUserIdOf(request)) {
           // 不是当前 owner 时按组根的 manage 求权（Service 层会再求一次纵深防御
           // 之外的那部分由 `setGroupOwner` 跳过，原因见它的注释）。

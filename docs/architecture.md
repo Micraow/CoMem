@@ -1951,7 +1951,18 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 2. **同节点 deny 优先**：同一主体在同一节点既有 allow 又有 deny 时，deny 赢。
 3. **只有 manage 能改 ACL**：`setAcl` 前置检查 `check(N, manage)`。ACL 工具不进 MCP——一个能给自己授权的 agent 就是提权漏洞。
 
-`owner(N)` 只对 `user/` 根成立；组空间没有隐式 owner。组的 owner 是组根 `.acl.json` 里的 `user:{owner} = manage` 条目（§12.6），可以被组根的 manage 持有者替换——它不是不变量 1 里的 `owner(N)`。
+**ACL 条目是授权的唯一来源。** `app_group.owner_user_id` 是元数据，只回答「这个组归谁管」，
+决定谁能调 `POST /admin/groups/{id}/owner`；它本身不产生任何权限，也不能作为求权的输入。
+owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` 条目。
+
+这条边界在删账号时最容易被破坏：残留的 `owner_user_id` 在账号重建后与新的主体同 ID，
+让路由把「当前 owner」判成成立、跳过组根求权。所以 `IdentityService.deleteUser` 必须把
+该组的 `owner_user_id` 清成 `NULL`——删除与重建同 ID 是常规操作，残留的元数据不能在重建
+后变成权限。置 `NULL` 的组没有 manage 持有者，只能通过 `pnpm group:owner` 恢复（§12.6）。
+
+服务层也要自己校验 owner 主体：`AclService.ensureRootPreset` / `setGroupOwner` 拒绝通配
+主体 `*` 与非 `user` 格式（`assertOwnerUserId`）。HTTP 路径的 `assertValidUserId` 不能
+替服务方法兜底——绕过路由直接调用的代码不会补这一遍。
 
 ### 12.3 继承不存快照
 
@@ -1999,6 +2010,14 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 两个预置都是普通 ACL 条目，可以改（owner 那一条除外）。写死会让组空间无法降级成只读。组的默认级别来自 `acl.groupDefaultLevel`（`write` / `read`），只作用于 `group:{gid}` 那一条，不把 owner 的 `manage` 一起降级。
 
 **组必须有 owner。** 组根只有 `group:{gid} = write`（级别 3）时，没有任何主体能求 `manage`（级别 7）——`levelSatisfies(3, 7)` 为 false，`setAcl` / `getAcl` 永远 403，组内成员既不能给同组另一人开只读，也不能设 `restricted` 或建子目录授权。owner 记在 `app_group.owner_user_id`，是「这个组归谁管」的权威来源；owner 的 `manage` 仍然要作为条目真的写进 `.acl.json`，因为求权只查物化表。owner 为 `NULL` 的组保持只有 `group:{gid} = write`，`ensureRootPreset` 的返回值用 `ownerMissing` 报告这个状态。
+
+**删账号会清掉 owner。** `IdentityService.deleteUser` 把该用户名下的 `owner_user_id` 置 `NULL`（§12.2）：残留的 ID 在同 ID 重建后会被当成当前 owner。组里如果没有第二个 manage 持有者，`POST /groups/{id}/owner` 在求权阶段就 403，这个组从此不能改 ACL、不能加成员。恢复走命令行：
+
+```bash
+pnpm group:owner <groupId> <userId>
+```
+
+它直接打开数据库写行，再调 `AclService.setGroupOwner` 补组根条目，绕开「管理端点自己也要认证」的循环——与 `pnpm password` 解决的是同一类问题（§12.7 的引导循环）。命令用 `setGroupOwner` 而不是 `ensureRootPreset`：后者的幂等判断是「文件里有没有 `group:{gid}` 这一条」，正常组一定已经有，早退之后 owner 的 `manage` 永远补不上。`GET /admin/groups` 的行带 `ownerMissing: true`（`ownerUserId` 为 `null`），控制台据此显示「无所有者」。
 
 改 owner 走 `POST /api/v1/admin/groups/{id}/owner`（body `{userId}`），只有当前 owner 或组根的 `manage` 持有者能改。改 owner 会同步替换组根 `.acl.json` 里的 `user:{owner} = manage` 条目，保留其它条目与 `mode`。**当前 owner 单独成立**：迁移回填的存量组有 `owner_user_id` 但没有 manage 条目（SQL 迁移写不了文件），owner 调一次这个端点即可补齐预置；否则这条修复路径会被自己的求权挡住。
 

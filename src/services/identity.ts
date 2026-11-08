@@ -172,23 +172,30 @@ export class IdentityService {
   }
 
   /**
-   * 删除用户，同时清掉它的组成员关系。不存在抛 `NOT_FOUND`。
+   * 删除用户，同时清掉它的组成员关系与它持有的组 owner。不存在抛 `NOT_FOUND`。
    *
    * 先删成员关系再删用户：反过来的话，删用户成功后成员关系写入失败就留下孤儿行，
    * 而那条行连「属于谁」都查不到。
+   *
+   * **组 owner 必须一起清。** `app_group.owner_user_id` 是元数据不是授权（§12.2），
+   * 但 `POST /admin/groups/{id}/owner` 把它当成「当前 owner 可以改」的依据。残留的
+   * ID 在同 ID 重建账号后会让路由跳过组根求权——重建的账号拿到组的管理权，尽管它
+   * 从未被授予任何东西。置 `NULL` 的组没有 manage 持有者，恢复走 `pnpm group:owner`
+   * （§12.6），日志里的 `ownedGroups` 指出哪些组需要人工接管。
    *
    * 这里**不**撤 ACL。撤权是 `AclService.purgePrincipal`（异步写 `.acl.json`），
    * 由 `DELETE /admin/users/{id}` 在调用本方法之前完成——只删物化行不改文件的话，
    * 下次物化会把授权算回来。见文件头。
    */
-  deleteUser(id: string): void {
+  deleteUser(id: string, now: Date = new Date()): void {
     if (this.#users.get(id) === null) {
       throw userNotFound(id);
     }
     const memberships = this.#groups.removeMembershipsOfUser(id);
+    const ownedGroups = this.#groups.clearOwnerOfUser(id, now);
     const apiKeys = this.#apiKeys.removeByUser(id);
     this.#users.delete(id);
-    this.#logger.info('用户已删除', { userId: id, memberships, apiKeys });
+    this.#logger.info('用户已删除', { userId: id, memberships, ownedGroups, apiKeys });
   }
 
   // ── 组 ──

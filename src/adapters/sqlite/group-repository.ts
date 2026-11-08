@@ -224,6 +224,29 @@ export class GroupRepository {
   }
 
   /**
+   * 清掉某个用户名下的组 owner，返回受影响的组数（`IdentityService.deleteUser` 用）。
+   *
+   * `owner_user_id` 是元数据，不是授权（§12.2）：它只决定「谁能改 owner」。不清掉的
+   * 话，同 ID 重建的账号会被 `POST /admin/groups/{id}/owner` 当成当前 owner，跳过
+   * 组根求权，等于拿到组的管理权。
+   *
+   * 置 `NULL` 的组只有 `group:{gid} = write`，没有主体能求 manage，**只能通过
+   * `pnpm group:owner` 恢复**（§12.6）——所以要返回受影响的组数，让删除用户的那条
+   * 日志能指出哪些组需要人工接管。
+   */
+  clearOwnerOfUser(userId: string, now: Date): number {
+    const cleared = Number(
+      withWriteTransaction(this.#db, () =>
+        this.#db
+          .prepare('UPDATE app_group SET owner_user_id = NULL, updated_at = ? WHERE owner_user_id = ?')
+          .run(now.toISOString(), userId).changes,
+      ),
+    );
+    this.#logger.debug('组 owner 已清空', { userId, groups: cleared });
+    return cleared;
+  }
+
+  /**
    * 硬删组，返回被删的行数（0 = 不存在）。
    *
    * 不碰 `group_member`：成员关系由 `IdentityService.deleteGroup` 显式清理

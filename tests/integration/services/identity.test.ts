@@ -174,6 +174,26 @@ describe('用户管理', () => {
     expect(service.getUser('alice')).toBeNull();
     expect(service.listMembers('eng').map((member) => member.userId)).toEqual(['bob']);
   });
+
+  /**
+   * 回归：`app_group.owner_user_id` 是元数据，不是授权（架构文档 §12.2）。
+   *
+   * 残留的 owner ID 在账号重建后会让 `POST /groups/{id}/owner` 把它当成「当前
+   * owner」，跳过组根求权——重建的账号拿到组的管理权，尽管它从未被授予任何东西。
+   */
+  it('deleteUser 清掉它持有的组 owner，重建同 ID 不会变成当前 owner', () => {
+    createUser('alice');
+    service.createGroup({ id: 'eng', displayName: 'eng', ownerUserId: 'alice' }, NOW);
+    expect(service.getGroup('eng')?.ownerUserId).toBe('alice');
+
+    service.deleteUser('alice');
+
+    expect(service.getGroup('eng')?.ownerUserId).toBeNull();
+
+    // 同 ID 重建：目录行是新的，owner 元数据不能跟着回来。
+    createUser('alice');
+    expect(service.getGroup('eng')?.ownerUserId).toBeNull();
+  });
 });
 
 describe('组管理', () => {

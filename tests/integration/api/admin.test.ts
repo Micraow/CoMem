@@ -103,6 +103,43 @@ function createGroup(id: string): Promise<unknown> {
   });
 }
 
+/**
+ * 以指定身份建一个只挂管理面的服务实例。
+ *
+ * v1 的 `container.resolveIdentity` 只接受绑定主体（`server.subject`），测「另一个
+ * 用户发请求」需要自己给一份身份。真实的服务与 ACL 实例共用同一份数据根，只有身份
+ * 解析是替身——攻击链依赖的是「请求身份是谁」，不是「身份怎么来的」。
+ */
+async function createAdminAppAs(subject: string): Promise<FastifyInstance> {
+  const instance = Fastify({ logger: false });
+  instance.addHook('onRequest', createRequestIdMiddleware());
+  instance.addHook(
+    'onRequest',
+    createIdentityMiddleware(async () => ({ subject, principals: [subject, 'user:*'] })),
+  );
+  instance.setErrorHandler((error, _request, reply) => {
+    const mapped = toErrorEnvelope(error);
+    reply.code(mapped.statusCode).send(mapped.body);
+  });
+  const adminAccess: AdminAccess = {
+    permissionCounts: () => new Map(),
+    memberCounts: () => new Map(),
+    userCount: () => 0,
+    groupCount: () => 0,
+  };
+  instance.register(
+    createAdminRoutes({
+      identity: container.services.identity,
+      authorizer: container.services.acl,
+      adminAccess,
+      acl: container.services.acl,
+    }).register,
+    { prefix: '/admin' },
+  );
+  await instance.ready();
+  return instance;
+}
+
 describe('用户管理', () => {
   it('创建 → 列表 → 更新 → 删除', async () => {
     const created = resultOf(
@@ -867,6 +904,83 @@ describe('组 owner', () => {
     });
     expect(response.statusCode).toBe(404);
     expect(errorOf(response)['code']).toBe('NOT_FOUND');
+  });
+});
+
+/**
+ * 回归：删账号之后，`app_group.owner_user_id` 残留会在同 ID 重建后变成权限
+ * （架构文档 §12.2、§12.6）。
+ *
+ * 攻击链：建组（owner = alice）→ 删 alice（ACL 条目被 `purgePrincipal` 撤掉）→
+ * 重建同 ID → 以 alice 调 `POST /groups/eng/owner`。修复前 `owner.ownerUserId`
+ * 仍是 `'alice'`，路由把「元数据」当成「当前 owner」，跳过组根求权，
+ * `setGroupOwner` 直接把 `user:alice = manage` 写进组根。
+ */
+describe('账号复用不会继承组管理权', () => {
+  const GROUP_ROOT = Uri.parse('comem://group/eng');
+  const ALICE_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
+
+  it('删 owner 后重建同 ID：改 owner 的端点返回 403', async () => {
+    await createUser('alice');
+    container.services.identity.createGroup({
+      id: 'eng',
+      displayName: 'eng',
+      ownerUserId: 'alice',
+    });
+    await container.services.acl.ensureRootPreset(GROUP_ROOT, 'alice');
+    expect(await container.services.acl.check(GROUP_ROOT, 7, ALICE_PRINCIPALS)).toBe(true);
+
+    // 1. 删账号：撤权 + 清 owner 元数据。
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/alice' }));
+    expect(container.services.identity.getGroup('eng')?.ownerUserId).toBeNull();
+
+    const aclPath = join(dataDir, 'group', 'eng', '.acl.json');
+    const afterDelete = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string }[];
+    };
+    expect(afterDelete.entries.some((entry) => entry.principal === 'user:alice')).toBe(false);
+
+    // 2. 同 ID 重建。
+    await createUser('alice');
+
+    // 3. 以 alice 身份改 owner：她不是当前 owner（NULL），组根也没有 manage。
+    const aliceApp = await createAdminAppAs('user:alice');
+    try {
+      const denied = await aliceApp.inject({
+        method: 'POST',
+        url: '/admin/groups/eng/owner',
+        payload: { userId: 'alice' },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(errorOf(denied)['code']).toBe('PERMISSION_DENIED');
+    } finally {
+      await aliceApp.close();
+    }
+
+    // 授权没有落盘：重建的 alice 从未被授予任何东西。
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string }[];
+    };
+    expect(onDisk.entries.some((entry) => entry.principal === 'user:alice')).toBe(false);
+    expect(await container.services.acl.check(GROUP_ROOT, 7, ALICE_PRINCIPALS)).toBe(false);
+  });
+
+  it('没有 owner 的组在列表里被标出来', async () => {
+    await createUser('alice');
+    container.services.identity.createGroup({
+      id: 'eng',
+      displayName: 'eng',
+      ownerUserId: 'alice',
+    });
+    await container.services.acl.ensureRootPreset(GROUP_ROOT, 'alice');
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/alice' }));
+
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/groups' }));
+    const eng = (listed['groups'] as Record<string, unknown>[]).find(
+      (row) => row['id'] === 'eng',
+    );
+    expect(eng?.['ownerUserId']).toBeNull();
+    expect(eng?.['ownerMissing']).toBe(true);
   });
 });
 
