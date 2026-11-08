@@ -23,9 +23,10 @@ import { pathToFileURL } from 'node:url';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { UserRepository } from '../adapters/sqlite/user-repository.js';
-import { loadConfig } from '../config/index.js';
 import { ComemError } from '../domain/errors.js';
 import { hashSecret } from '../services/password.js';
+
+import { loadCommandConfig } from './config.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
@@ -44,16 +45,20 @@ async function readStdin(): Promise<string> {
 export async function setPassword(
   username: string,
   password: string,
-  options: { readonly path?: string; readonly env?: NodeJS.ProcessEnv } = {},
+  options: {
+    readonly path?: string;
+    readonly env?: NodeJS.ProcessEnv;
+    /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` / `--data-dir` 靠它生效 */
+    readonly argv?: readonly string[];
+  } = {},
 ): Promise<string> {
   if (password === '') {
     throw new ComemError('INVALID_ARGUMENT', '密码不能为空。');
   }
 
-  const config = await loadConfig({
-    ...(options.path === undefined ? {} : { path: options.path }),
-    ...(options.env === undefined ? {} : { env: options.env }),
-  });
+  // 走统一入口：漏传 `argv` 会让 `--config` / `--data-dir` 静默失效，密码就写到
+  // 错误的数据根上（见 `commands/config.ts`）。
+  const config = loadCommandConfig(options);
   const logger = new ConsoleLogger({ level: 'warn' });
   const db = openDatabase(join(config.dataDir, META_DIRECTORY, DATABASE_FILE));
   try {
@@ -77,7 +82,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   } else {
     try {
       const password = (await readStdin()).trimEnd();
-      await setPassword(username, password);
+      await setPassword(username, password, { argv: process.argv.slice(2) });
       process.stdout.write(`已设置 ${username} 的密码。\n`);
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

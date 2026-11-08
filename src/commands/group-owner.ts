@@ -35,11 +35,12 @@ import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { UserRepository } from '../adapters/sqlite/user-repository.js';
-import { loadConfig } from '../config/index.js';
 import { ComemError } from '../domain/errors.js';
 import { assertValidGroupId, assertValidUserId } from '../domain/identity.js';
 import { Uri } from '../domain/uri.js';
 import { AclService } from '../services/acl.js';
+
+import { loadCommandConfig } from './config.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
@@ -48,6 +49,8 @@ const DATABASE_FILE = 'comem.sqlite';
 export interface SetGroupOwnerOptions {
   readonly path?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` / `--data-dir` 靠它生效 */
+  readonly argv?: readonly string[];
 }
 
 export interface SetGroupOwnerResult {
@@ -64,10 +67,9 @@ export async function setGroupOwner(
   const id = assertValidGroupId(groupId);
   const ownerUserId = assertValidUserId(userId);
 
-  const config = await loadConfig({
-    ...(options.path === undefined ? {} : { path: options.path }),
-    ...(options.env === undefined ? {} : { env: options.env }),
-  });
+  // 走统一入口：漏传 `argv` 会让 `--config` / `--data-dir` 静默失效，owner 就写到
+  // 错误的数据根上（见 `commands/config.ts`）。
+  const config = loadCommandConfig(options);
   const dataDir = config.dataDir;
   const logger = new ConsoleLogger({ level: 'warn' });
   const db = openDatabase(join(dataDir, META_DIRECTORY, DATABASE_FILE));
@@ -110,7 +112,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     process.exitCode = 2;
   } else {
     try {
-      const result = await setGroupOwner(groupId, userId);
+      const result = await setGroupOwner(groupId, userId, { argv: process.argv.slice(2) });
       process.stdout.write(`已把组 ${result.groupId} 的 owner 设为 ${result.userId}。\n`);
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

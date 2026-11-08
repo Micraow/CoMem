@@ -279,3 +279,38 @@ describe('embeddings 重建', () => {
     });
   });
 });
+
+/**
+ * 回归：`--config` / `--data-dir` 曾经只合成 `--data-dir`，真实 `process.argv`
+ * 被丢掉——`--config` 静默失效，遍历的是默认数据根。
+ */
+describe('--config / --data-dir', () => {
+  const FILE = `${ROOT}/memories/note.md`;
+
+  it('--config 坏 YAML 必须报错，不能静默用默认值', async () => {
+    const bad = join(dataDir, 'bad.yaml');
+    await writeFile(bad, 'not: [valid', 'utf8');
+
+    await expect(
+      runReindex({
+        argv: ['--config', bad],
+        env: { ...process.env, COMEM_DATA_DIR: join(dataDir, 'from-env') },
+        only: 'index',
+      }),
+    ).rejects.toThrow(/YAML/);
+  });
+
+  it('--data-dir 覆盖 COMEM_DATA_DIR：扫描的是 --data-dir 指向的数据根', async () => {
+    await writeConfig(false);
+    await writeBody(FILE, '上下文记忆数据库的设计。');
+
+    const result = await runReindex({
+      configPath,
+      argv: ['--data-dir', dataDir],
+      env: { ...process.env, COMEM_DATA_DIR: join(dataDir, 'from-env') },
+      only: 'index',
+    });
+
+    expect(result.scanned).toBeGreaterThanOrEqual(1);
+  });
+});

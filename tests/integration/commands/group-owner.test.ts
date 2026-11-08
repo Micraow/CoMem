@@ -151,3 +151,38 @@ describe('pnpm group:owner', () => {
     } satisfies Partial<ComemError>);
   });
 });
+
+/**
+ * 回归：`--config` / `--data-dir` 曾经被静默忽略。
+ *
+ * 命令自己拼 `loadConfig({...})` 时漏了 `argv`，两个 flag 都回落到「当前目录的
+ * `config.yaml` + 环境变量推导的数据根」——给错误的数据根改 owner，不报错。
+ */
+describe('pnpm group:owner 的配置入口', () => {
+  it('--config 坏 YAML 必须报错，不能静默用默认值', async () => {
+    seed();
+    const bad = join(dataDir, 'bad.yaml');
+    await writeFile(bad, 'not: [valid', 'utf8');
+
+    await expect(
+      setGroupOwner('eng', 'alice', {
+        argv: ['--config', bad],
+        env: { ...process.env, COMEM_DATA_DIR: dataDir },
+      }),
+    ).rejects.toThrow(/YAML/);
+    // 报错发生在写库之前。
+    expect(ownerOf('eng')).toBeNull();
+  });
+
+  it('--data-dir 覆盖 COMEM_DATA_DIR：owner 写到 --data-dir 指向的数据根', async () => {
+    seed();
+    const fromEnv = join(dataDir, 'from-env');
+
+    await setGroupOwner('eng', 'alice', {
+      argv: ['--data-dir', dataDir],
+      env: { ...process.env, COMEM_DATA_DIR: fromEnv },
+    });
+
+    expect(ownerOf('eng')).toBe('alice');
+  });
+});

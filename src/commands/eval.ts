@@ -39,12 +39,16 @@ import {
   type EvalVariant,
 } from '../eval/runner.js';
 
+import { loadCommandConfig } from './config.js';
+
 export interface EvalCliOptions {
   readonly datasetPath: string;
   readonly k: number;
   /** 默认变体的引擎集合；`--rerank` 等追加变体不受它影响 */
   readonly engines: readonly RetrievalEngine[];
   readonly configPath?: string;
+  /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` 靠它生效 */
+  readonly argv?: readonly string[];
   readonly rerank: boolean;
   readonly hotnessWeight?: number;
   readonly levelWeights?: { readonly l0: number; readonly l1: number; readonly l2: number };
@@ -217,6 +221,20 @@ function buildVariants(options: EvalCliOptions): readonly EvalVariant[] {
  * 可以注入任意容器工厂，不需要碰配置文件。
  */
 export async function runEval(options: EvalCliOptions): Promise<EvalReport> {
+  // 统一入口先加载一次配置：`--config` 写坏时在读完数据集、建任何容器之前报错，
+  // 而不是每个变体各报一次。
+  loadCommandConfig({
+    ...(options.configPath === undefined ? {} : { path: options.configPath }),
+    ...(options.argv === undefined ? {} : { argv: options.argv }),
+  });
+  // `--data-dir` 对 eval 没有意义：每个变体都跑在 `mkdtemp` 的临时数据根里。
+  // 明确拒绝而不是静默忽略——静默忽略会让人以为评估写进了自己的数据根。
+  if (readFlag(options.argv ?? process.argv.slice(2), 'data-dir') !== undefined) {
+    throw new ComemError('INVALID_ARGUMENT', 'eval 总是使用临时数据根，--data-dir 不生效。', {
+      flag: '--data-dir',
+    });
+  }
+
   const raw: unknown = parseYaml(await readFile(options.datasetPath, 'utf8'));
   const dataset = parseDataset(raw);
 
@@ -347,8 +365,9 @@ const entry = process.argv[1];
 const isMain = entry !== undefined && import.meta.url === pathToFileURL(entry).href;
 
 if (isMain) {
-  const json = process.argv.includes('--json');
-  runEval(parseArgs(process.argv.slice(2))).then(
+  const argv = process.argv.slice(2);
+  const json = argv.includes('--json');
+  runEval({ ...parseArgs(argv), argv }).then(
     (report) => {
       process.stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatReport(report));
     },

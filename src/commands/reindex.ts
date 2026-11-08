@@ -44,7 +44,6 @@ import {
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { NodeRow } from '../adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
-import { loadConfig } from '../config/index.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType, NodeStatus } from '../domain/node.js';
@@ -53,9 +52,17 @@ import type { IndexRecord } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { EmbeddingService } from '../services/embedding.js';
 
+import { loadCommandConfig } from './config.js';
+
 export interface ReindexOptions {
+  /** 数据根（测试注入用）；命令行传 `--data-dir` */
   readonly dataDir?: string;
+  /** 配置文件路径（测试注入用）；命令行传 `--config` */
   readonly configPath?: string;
+  /** 环境变量（测试注入用）；缺省 `process.env` */
+  readonly env?: NodeJS.ProcessEnv;
+  /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` / `--data-dir` 靠它生效 */
+  readonly argv?: readonly string[];
   /** `--only=embeddings|index|all`，默认 all */
   readonly only?: 'embeddings' | 'index' | 'all';
   readonly dryRun?: boolean;
@@ -357,9 +364,16 @@ function restoreEmbeddings(db: DatabaseSync, backup: EmbeddingBackup, logger: Lo
  * `scanned`，其余计数保持 0——它们描述的是「实际写入了什么」。
  */
 export async function runReindex(options: ReindexOptions = {}): Promise<ReindexResult> {
-  const config = loadConfig({
+  // 统一入口：`configPath` / `dataDir` 是测试注入用的显式覆盖，真实 `--config` /
+  // `--data-dir` 从 `options.argv` 解析（缺省 `process.argv.slice(2)`）。只合成
+  // `--data-dir` 会把真实 `--config` 丢掉，那正是这个入口要消灭的静默失败。
+  const config = loadCommandConfig({
     ...(options.configPath === undefined ? {} : { path: options.configPath }),
-    argv: options.dataDir === undefined ? [] : ['--data-dir', options.dataDir],
+    ...(options.env === undefined ? {} : { env: options.env }),
+    argv: [
+      ...(options.dataDir === undefined ? [] : ['--data-dir', options.dataDir]),
+      ...(options.argv ?? process.argv.slice(2)),
+    ],
   });
   const only = options.only ?? 'all';
   const dryRun = options.dryRun ?? false;
@@ -564,13 +578,13 @@ function readFlag(argv: readonly string[], name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * 只解析命令自己的参数。`--config` / `--data-dir` 归 `loadCommandConfig` 解析：
+ * 在这里再读一遍就会多一份「哪个 flag 算配置」的实现，漏一个就静默失效。
+ */
 function parseArgs(argv: readonly string[]): ReindexOptions {
-  const dataDir = readFlag(argv, 'data-dir');
-  const configPath = readFlag(argv, 'config');
   const only = readFlag(argv, 'only');
   return {
-    ...(dataDir === undefined ? {} : { dataDir }),
-    ...(configPath === undefined ? {} : { configPath }),
     ...(only === undefined ? {} : { only: parseOnly(only) }),
     ...(argv.includes('--dry-run') ? { dryRun: true } : {}),
   };
@@ -578,7 +592,8 @@ function parseArgs(argv: readonly string[]): ReindexOptions {
 
 /** 只有直接执行（`tsx src/commands/reindex.ts`）时才跑 CLI 入口，测试 import 不触发。 */
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runReindex(parseArgs(process.argv.slice(2))).then(
+  const argv = process.argv.slice(2);
+  runReindex({ ...parseArgs(argv), argv }).then(
     (result) => {
       process.stdout.write(
         `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，跳过 ${result.skipped}，失败 ${result.failed}。\n`,

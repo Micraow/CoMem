@@ -45,7 +45,7 @@ import { IngestCursorRepository } from '../adapters/sqlite/ingest-cursor-reposit
 import type { TaskRow } from '../adapters/sqlite/task-repository.js';
 import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
-import { loadConfig, type ComemConfig } from '../config/index.js';
+import type { ComemConfig } from '../config/index.js';
 import { ComemError } from '../domain/errors.js';
 import type { IngestHarness } from '../domain/ingest.js';
 import type { Logger } from '../domain/log.js';
@@ -59,6 +59,8 @@ import {
   type IngestServiceOptions,
 } from '../services/ingest.js';
 import type { TaskService } from '../services/task.js';
+
+import { loadCommandConfig } from './config.js';
 
 const META_DIRECTORY = '_meta';
 const DATABASE_FILE = 'comem.sqlite';
@@ -85,8 +87,12 @@ const REPAIR_SCRIPT_PATH = fileURLToPath(
 );
 
 export interface IngestCommandOptions {
+  /** 配置文件路径（测试注入用）；命令行传 `--config` */
   readonly configPath?: string;
+  /** 数据根（测试注入用）；命令行传 `--data-dir` */
   readonly dataDir?: string;
+  /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` / `--data-dir` 靠它生效 */
+  readonly argv?: readonly string[];
   /** `all` 或逗号分隔的宿主名 */
   readonly source?: string;
   readonly dryRun?: boolean;
@@ -155,16 +161,16 @@ function parseNonNegativeInteger(raw: string, flag: string): number {
   return value;
 }
 
+/**
+ * 只解析命令自己的参数。`--config` / `--data-dir` 归 `loadCommandConfig` 解析：
+ * 在这里再读一遍就会多一份「哪个 flag 算配置」的实现，漏一个就静默失效。
+ */
 function parseArgs(argv: readonly string[]): IngestCommandOptions {
   const source = readFlag(argv, 'source');
-  const configPath = readFlag(argv, 'config');
-  const dataDir = readFlag(argv, 'data-dir');
   const since = readFlag(argv, 'since');
   const limit = readFlag(argv, 'limit-per-session');
   const timeout = readFlag(argv, 'timeout');
   return {
-    ...(configPath === undefined ? {} : { configPath }),
-    ...(dataDir === undefined ? {} : { dataDir }),
     ...(source === undefined ? {} : { source }),
     ...(since === undefined ? {} : { since }),
     ...(limit === undefined
@@ -517,9 +523,13 @@ function renderReport(report: IngestReport, dryRun: boolean): string {
  * 而不是静默写下去。
  */
 export async function runIngest(options: IngestCommandOptions = {}): Promise<IngestReport> {
+  // 统一入口：`configPath` / `dataDir` 是测试注入用的显式覆盖，真实 `--config` /
+  // `--data-dir` 从 `options.argv` 解析（缺省 `process.argv.slice(2)`）。显式覆盖
+  // 排在前面，与 `loadConfig` 的 `options.path 优先于 --config` 一致。
   const argv = [
     ...(options.configPath === undefined ? [] : ['--config', options.configPath]),
     ...(options.dataDir === undefined ? [] : ['--data-dir', options.dataDir]),
+    ...(options.argv ?? process.argv.slice(2)),
   ];
   const dryRun = options.dryRun ?? false;
   const harnesses = selectHarnesses(options.source);
@@ -527,10 +537,7 @@ export async function runIngest(options: IngestCommandOptions = {}): Promise<Ing
   if (!dryRun) {
     // `createContainer` 自己加载配置；这里先读一遍是为了在写任何东西之前拒绝
     // 「默认关闭」的导入。容器启动会建库、建根目录，不校验就会先写后报错。
-    const config = loadConfig({
-      ...(options.configPath === undefined ? {} : { path: options.configPath }),
-      argv,
-    });
+    const config = loadCommandConfig({ argv });
     if (!config.ingest.enabled) {
       throw new ComemError(
         'INVALID_ARGUMENT',
@@ -546,10 +553,7 @@ export async function runIngest(options: IngestCommandOptions = {}): Promise<Ing
   });
 
   if (dryRun) {
-    const config = loadConfig({
-      ...(options.configPath === undefined ? {} : { path: options.configPath }),
-      argv,
-    });
+    const config = loadCommandConfig({ argv });
     return runWithConfig(config, logger, harnesses, options, dryRun);
   }
 
@@ -633,7 +637,7 @@ async function runWithConfig(
 /** 只有直接执行（`tsx src/commands/ingest.ts`）时才跑 CLI 入口，测试 import 不触发。 */
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const argv = process.argv.slice(2);
-  const options = parseArgs(argv);
+  const options = { ...parseArgs(argv), argv };
   runIngest(options).then(
     (report) => {
       if (options.json === true) {
