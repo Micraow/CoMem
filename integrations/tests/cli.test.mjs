@@ -247,3 +247,45 @@ test('doctor 报游标文件损坏', async () => {
   });
   await server.close();
 });
+
+test('install --host codex 写 hooks.json，PreToolUse matcher 覆盖 apply_patch', async () => {
+  await withTempDir(async (dir) => {
+    const settingsPath = join(dir, 'hooks.json');
+    const result = await install({ host: 'codex', settingsPath, root: ROOT });
+
+    assert.equal(result.settingsPath, settingsPath);
+    assert.deepEqual(result.events, Object.keys(HOOK_EVENTS));
+
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'));
+    // Codex 的 hooks.json 顶层是 { hooks: { Event: [ {matcher, hooks:[...]} ] } }。
+    assert.equal(settings.hooks.SessionStart[0].hooks[0].command.endsWith('--host codex'), true);
+    assert.match(settings.hooks.PreToolUse[0].matcher, /apply_patch/);
+    assert.match(settings.hooks.PreToolUse[0].matcher, /Edit/);
+    assert.match(settings.hooks.PreToolUse[0].matcher, /Write/);
+  });
+});
+
+test('uninstall --host codex 只删 CoMem 条目，保留别人的 hook', async () => {
+  await withTempDir(async (dir) => {
+    const settingsPath = join(dir, 'hooks.json');
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ hooks: { PostToolUse: [FOREIGN_HOOK] } }, null, 2),
+      'utf8',
+    );
+    await install({ host: 'codex', settingsPath, root: ROOT });
+    const result = await uninstall({ host: 'codex', settingsPath });
+    assert.equal(result.removed, Object.keys(HOOK_EVENTS).length);
+
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'));
+    // 别人的 PostToolUse 组还在。
+    const commands = JSON.stringify(settings);
+    assert.match(commands, /other-tool/);
+    assert.doesNotMatch(commands, /integrations\/servers/);
+  });
+});
+
+test('未知宿主报错并列出可用宿主', async () => {
+  // 不传 settingsPath，让 settingsPathFor 走默认表并因未知宿主抛错。
+  await assert.rejects(() => install({ host: 'cursor' }), /未知宿主/);
+});

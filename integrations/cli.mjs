@@ -50,10 +50,33 @@ export const HOOK_EVENTS = Object.freeze({
 /** 需要按工具名预过滤的事件（少起进程）。 */
 const MATCHERS = Object.freeze({ PreToolUse: 'Read|Write|Edit' });
 
-/** 各宿主的默认 settings 路径。 */
+/**
+ * 各宿主的默认 settings 路径。
+ *
+ * - `claude-code`：`~/.claude/settings.json`，`hooks` 是 matcher 组数组。
+ * - `dsh`：`~/.dsh/settings.json`（DSH 插件所依赖的 settings 形状）。
+ * - `codex`：`~/.codex/hooks.json`。Codex 从 `~/.codex/hooks.json` 或
+ *   `~/.codex/config.toml` 的内联 `[hooks]` 表加载生命周期 Hook，官方文档
+ *   <https://developers.openai.com/codex/hooks>。`hooks.json` 的顶层是
+ *   `{ "hooks": { Event: [ {matcher, hooks:[{type,command}]} ] } }`，与本节
+ *   `install` 写入的形状一致，所以直接写 `hooks.json` 即可；它受
+ *   `~/.codex/config.toml` 的 `[features].hooks`（默认开启）控制。
+ *   **项目级**也可以是 `<repo>/.codex/hooks.json`，用 `--settings` 指定。
+ */
 const DEFAULT_SETTINGS = Object.freeze({
   'claude-code': join(homedir(), '.claude', 'settings.json'),
   dsh: join(homedir(), '.dsh', 'settings.json'),
+  codex: join(homedir(), '.codex', 'hooks.json'),
+});
+
+/**
+ * 宿主专属的 PreToolUse matcher 覆盖。
+ *
+ * Codex 没有 `Read` 工具：文件编辑走 `apply_patch`（别名 `Edit` / `Write`），命令走
+ * `Bash`。matcher 按工具名过滤，多列几个别名只是少起进程，不影响正确性。
+ */
+const HOST_MATCHERS = Object.freeze({
+  codex: Object.freeze({ PreToolUse: 'apply_patch|Edit|Write|Read' }),
 });
 
 /**
@@ -93,7 +116,7 @@ export function hookCommand(event, host, options = {}) {
 
 /** 生成一个 matcher group。 */
 export function hookGroup(event, host, options = {}) {
-  const matcher = MATCHERS[event];
+  const matcher = HOST_MATCHERS[host]?.[event] ?? MATCHERS[event];
   return {
     ...(matcher === undefined ? {} : { matcher }),
     hooks: [{ type: 'command', command: hookCommand(event, host, options) }],
@@ -337,9 +360,9 @@ function flag(argv, name) {
 }
 
 const USAGE = `用法：
-  co-mem install --host claude-code [--settings <path>]
+  co-mem install --host <claude-code|dsh|codex> [--settings <path>]
   co-mem doctor
-  co-mem uninstall --host claude-code [--settings <path>]`;
+  co-mem uninstall --host <claude-code|dsh|codex> [--settings <path>]`;
 
 async function main(argv) {
   const command = argv[0];

@@ -2567,7 +2567,7 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 ### 15.5 会话 ID
 
-宿主没有统一的会话 ID 格式，插件按宿主加前缀：`cc-`（Claude Code）、`dsh-`（DSH）。
+宿主没有统一的会话 ID 格式，插件按宿主加前缀：`cc-`（Claude Code）、`dsh-`（DSH）、`cx-`（Codex）。
 
 ### 15.6 MCP 接入
 
@@ -2598,9 +2598,25 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 ### 15.7 支持哪些宿主
 
-v1 做两个：**Claude Code**（hooks + MCP，最常用）和 **DSH**（plugin + MCP）。
+v1 做三个：**Claude Code**（hooks + MCP，最常用）、**DSH**（plugin + MCP）和 **Codex**（hooks + MCP）。
 
-不做 Cursor、Codex、TRAE。它们的 hook 事件名和 payload 各不相同，每个都要单独适配并对着真实宿主验证。适配器接口留好即可。
+三个宿主的 Hook 事件名与载荷都覆盖 §15.2 的六个生命周期点：
+
+| 宿主 | Hook 形态 | 事件名 | 配置文件 |
+|---|---|---|---|
+| Claude Code | settings 里的 hooks | `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `PreCompact`（`SessionEnd` 归一成 `PreCompact`） | `~/.claude/settings.json` |
+| DSH | 插件 hooks | 同上（插件定义的形状） | `~/.dsh/settings.json` |
+| Codex | `hooks.json` 或 `config.toml` 内联 `[hooks]` | 同上（官方文档 <https://developers.openai.com/codex/hooks>；另有 `SessionEnd` / `SubagentStart` / `SubagentStop` / `PermissionRequest` / `PostCompact` / `Interrupt`，CoMem 只用其中六个） | `~/.codex/hooks.json` 或 `<repo>/.codex/hooks.json` |
+
+Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` / `cwd` /
+`hook_event_name`，信封是 `hookSpecificOutput.additionalContext` 与
+`permissionDecision: 'deny'`），所以适配器只在文件工具名上不同：Codex 没有 `Read`，
+文件编辑走 `apply_patch`（别名 `Edit` / `Write`），路径在补丁命令里提取。Codex
+的非托管 Hook 运行前需要用户在 `/hooks` 里审查并信任。
+
+**不做 Cursor、TRAE、OpenCode 等的 Hook。** 它们的 hook 事件名和 payload 各不相同，
+每个都要单独适配并对着真实宿主验证。适配器接口留好即可——加一个宿主仍然只加一个
+`hosts/<name>.mjs` 文件，再加一条 `cli.mjs` 的 `DEFAULT_SETTINGS` 条目。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
 
@@ -2621,6 +2637,7 @@ integrations/
 │   └── mcp-proxy.mjs          # stdio → POST /mcp（§15.6）
 ├── hosts/                     # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
+│   ├── codex.mjs
 │   └── dsh.mjs
 ├── lib/                       # 与宿主无关的共享模块
 │   ├── config.mjs             # 配置 + 宿主解析 + bypass

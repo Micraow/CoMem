@@ -30,6 +30,7 @@ integrations/
 │   └── mcp-proxy.mjs     # stdio → POST /mcp 的 MCP 代理
 ├── hosts/                # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
+│   ├── codex.mjs
 │   └── dsh.mjs
 ├── skills/               # 提示词（装进宿主的技能目录）
 │   ├── comem-memory/SKILL.md
@@ -50,6 +51,39 @@ co-mem uninstall --host claude-code
 `install` 把六条 hook 写进宿主的 settings（默认 `~/.claude/settings.json`，可用
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径
 匹配到的、我们自己加的条目，别人的 hook 一个不动。
+
+三个宿主都能用同一套命令，`--host` 取 `claude-code` / `dsh` / `codex`：
+
+```bash
+co-mem install --host codex      # 写进 ~/.codex/hooks.json
+co-mem uninstall --host codex
+```
+
+| 宿主 | 默认配置文件 | 备注 |
+|---|---|---|
+| `claude-code` | `~/.claude/settings.json` | `hooks` 是 matcher 组数组 |
+| `dsh` | `~/.dsh/settings.json` | DSH 插件所依赖的 settings 形状 |
+| `codex` | `~/.codex/hooks.json` | 见下节；**首次使用需在 Codex 里信任 Hook** |
+
+### Codex
+
+Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），
+事件名与 CoMem 的六个一一对应，载荷字段与 Claude Code 同形（`session_id` /
+`transcript_path` / `cwd` / `hook_event_name`）。官方文档：
+<https://developers.openai.com/codex/hooks>。
+
+Codex 从 `~/.codex/hooks.json`（用户级）或 `<repo>/.codex/hooks.json`（项目级）读取
+Hook，也接受 `~/.codex/config.toml` 的内联 `[hooks]` 表。`co-mem install --host codex`
+写的是 `~/.codex/hooks.json`；装到项目级时用 `--settings <repo>/.codex/hooks.json`。
+
+**安装不等于信任。** Codex 要求每个非托管 Hook 在运行前经过审查和信任：首次启动时
+会弹确认，或打开 `/hooks` 逐条信任 `integrations/servers/*.mjs`。不信任就不运行
+（Hook 与 MCP 分离：不信任 Hook 时 MCP 工具仍可用，但自动召回与采集不生效）。
+若要关闭这些 Hook，在 `~/.codex/config.toml` 设 `[features].hooks = false`。
+
+Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（matcher 别名
+`Edit` / `Write`），命令走 `Bash`；`co-mem install` 为 Codex 写的 matcher 是
+`apply_patch|Edit|Write|Read`，`apply_patch` 的 `comem://` 路径从补丁命令里提取。
 
 `doctor` 检查四项，每项输出「通过 / 失败 + 一句怎么修」：
 
@@ -289,7 +323,7 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 | 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 保留前 8 行 / 句 + 尾部，中间插 `[… 已省略中间 N 行；完整内容用 read 取回 <URI> …]` |
 | 偏好 token 预算 | 画像预算的 1/4，默认 500 | 同上（偏好通常只有几行，按句截断） |
 | 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
-| 宿主字节上限 | Claude Code 9,500 / DSH 20,000 | 按「画像 > 技能目录 > 偏好」丢块，stderr 记一条 `warn` |
+| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 20,000 | 按「画像 > 技能目录 > 偏好」丢块，stderr 记一条 `warn` |
 
 **只注入正文。** `profile.md` 的 YAML frontmatter 是噪声：`memory_type` /
 `created_at` / `uri` 模型用不上，`summary` 是正文前 256 字的副本。服务端
