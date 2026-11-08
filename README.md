@@ -14,6 +14,9 @@
   <img alt="Fastify" src="https://img.shields.io/badge/Fastify-5-000000?style=flat-square&logo=fastify&logoColor=white">
   <img alt="Nuxt" src="https://img.shields.io/badge/Nuxt-3-00DC82?style=flat-square&logo=nuxt.js&logoColor=white">
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-FTS5-003B57?style=flat-square&logo=sqlite&logoColor=white">
+  <img alt="sqlite-vec" src="https://img.shields.io/badge/sqlite--vec-vector-4B8BBE?style=flat-square">
+  <img alt="Embedding" src="https://img.shields.io/badge/Embedding-1024d-FF6F00?style=flat-square">
+  <img alt="Hybrid Search" src="https://img.shields.io/badge/Recall%4010-0.904-2EA043?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square">
 </p>
 
@@ -21,9 +24,9 @@
 
 ---
 
-你在 Claude Code 里跟它说「这个项目不用 `any`，收窄时用 `unknown`」，它照做了一次。第二天换台机器、换个会话，它又给你写出 `any`——因为它只记得上下文窗口里的东西，而上下文窗口是**会话级**的。
+昨天你让 agent 排查一个问题，它翻了三层目录、读了五个文件、最后定位到一个 `Settings::nextHop` 是三级映射的坑。今天开个新会话问它同样的事，它从零开始再翻一遍——因为它只记得上下文窗口里的东西，而上下文窗口是**会话级**的，关掉就没了。
 
-CoMem 给 agent 一个稳定地址（`comem://`），让它跨会话、跨机器、跨队友共享「它知道的东西」。记忆是**你磁盘上的 Markdown 文件**——看得见、改得动、可以 `git diff`。没有黑箱，没有「存进去就查不出来」的失望。
+CoMem 给 agent 一个稳定地址（`comem://`），让它在不同会话、不同机器、不同队友之间共享「它知道的东西」。记忆是**你磁盘上的 Markdown 文件**——看得见、改得动、可以 `git diff`。没有黑箱，没有「存进去就查不出来」的失望。
 
 ### 它记的不是「你说过什么偏好」，而是「你干活时暴露过什么」
 
