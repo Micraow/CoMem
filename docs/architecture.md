@@ -84,7 +84,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 **为什么 `domain` 和 `services` 分开。** `domain` 是规则，`services` 是流程。ACL 求值是规则（给定树和身份，算出一个布尔值，纯函数）；提交管线是流程（有 IO、有重试、有后台恢复）。混在一起，ACL 就只能在跑通整条管线之后才能测。
 
-**为什么检索与合并的规则收进 `domain`，不留独立目录。** 它们拆错了：`patch.ts`（SEARCH/REPLACE 块的匹配与应用）是纯字符串函数，`ranking.ts`（打分与截断）是纯数值函数，两者跟存储和协议都无关，属于领域规则。只有「调模型做意图分析」属于应用编排。按「规则进 `domain`、编排进 `services`」拆，首层就不会出现两个语义模糊的目录。
+**为什么检索与合并的规则收进 `domain`，不留独立目录。** `patch.ts`（SEARCH/REPLACE 块的匹配与应用）是纯字符串函数，`ranking.ts`（打分与截断）是纯数值函数，两者跟存储和协议都无关，属于领域规则。只有「调模型做意图分析」属于应用编排。按「规则进 `domain`、编排进 `services`」拆，首层就不会出现两个语义模糊的目录。
 
 ### 4.4 接口清单
 
@@ -784,8 +784,8 @@ CREATE TABLE embedding_model (
 );
 
 -- 用户与组目录（0008）。`acl_entry` / `node_permission` 存的是
--- `user:{uid}` / `group:{gid}` 字符串，组员关系此前不落库，所以
--- `GET /admin/*` 只能返回 501。这三张表是那组端点的数据来源。
+-- `user:{uid}` / `group:{gid}` 字符串；这三张表是组员关系与
+-- `GET /admin/*` 的数据来源。
 --
 -- 表名加 `app_` 前缀：`user` 是 SQLite 关键字，`group` 是 `GROUP BY` 的关键字。
 -- 加引号能用，但漏一次就是语法错误。
@@ -862,7 +862,7 @@ function toMatchExpression(query: string): string {
 
 ### 8.2 权限为什么要物化进索引
 
-**上一版这里我写错了**，原方案是「先取候选，再逐条 open 祖先 `.acl.json` 求权」。这有两个硬伤：
+**「先取候选，再逐条 open 祖先 `.acl.json` 求权」有两个硬伤：**
 
 - 一条候选要 open 5 层目录的 `.acl.json`。`tree` 一个 1000 节点的目录就是 5000 次文件读。
 - 如果取回的前 40 条候选全都没权限，最终返回不足 10 条，用户看到「没有结果」，而实际上有。
@@ -905,7 +905,7 @@ LIMIT ?;
 
 **`level` 存 `'L0'|'L1'|'L2'` 而不是整数。** 领域类型、检索返回值、索引记录三处都是字面量联合，存整数要在每个读写点做一次有损映射。SQLite 的 TEXT 存储开销相对索引体积可以忽略，换来的是「磁盘上看一眼就知道是什么」。
 
-**代价转移动了。** 改一个节点的 ACL，要重算它所有后代的 `node_permission`。ACL 改动是低频操作（一个项目整个周期可能就改几次），读是高频操作。物化方向必须是「写时算，读时查」。
+**代价在写入侧。** 改一个节点的 ACL，要重算它所有后代的 `node_permission`。ACL 改动是低频操作（一个项目整个周期可能就改几次），读是高频操作。物化方向必须是「写时算，读时查」。
 
 **重算用事务包住**：`BEGIN; DELETE FROM node_permission WHERE node_uri LIKE ? || '%'; INSERT ...; UPDATE acl_entry ...; COMMIT;`。中途失败整批回滚，`node_permission` 和 `.acl.json` 不会不一致。
 
@@ -985,7 +985,7 @@ export interface RetrievalIndex {
 score(d) = Σ_retriever levelWeight(level_d) / (k + rank_retriever(d))
 ```
 
-RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF，与接线前逐位相同（`1.0 * x === x`）。
+RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF（`1.0 * x === x`）。
 
 单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎就是 `hybrid`**，只给单引擎加权的实现等于「配置项在默认部署下不生效」。
 
@@ -1001,7 +1001,7 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 | 形态 | 返回 | 说明 |
 |---|---|---|
-| `list` | `{ hits, plan }` | 命中列表 + 查询计划。与接线前逐字一致，向后兼容 |
+| `list` | `{ hits, plan }` | 命中列表 + 查询计划。默认形态，向后兼容 |
 | `context` | `{ items, rendered, dropped, usedTokens }` | 分层投放后的条目（带 `detail` / `tokens`）与渲染文本 |
 
 `POST /search/search` 与 MCP `search` 工具接受同一个字段。**这不是第 17 个 MCP 工具**——`context` 是 `search` 的出参形态，不是新能力（AGENTS.md §3 的「16 个，不多不少」）。
@@ -1060,7 +1060,7 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 **账本写失败只记 `warn`，不影响检索。** 账本是去重辅助，不是真相来源；一次磁盘写失败不该让已经组装好的上下文丢掉。
 
-**接线前的失败模式。** `context` 与 `RecallLedger.record` 都实现并测过，但 HTTP 路由与 MCP 工具没有 `mode` 参数——生产路径一次都没执行过。测试全绿只说明它自洽。现在的回归测试走 `POST /search/search` 与 MCP `search` 工具，连续两次 `mode="context"` 必须证明第二次不重复投放第一次给过的条目。
+**`mode` 必须从 HTTP 路由与 MCP 工具一路贯穿到 `context`。** 只实现 `context` 与 `RecallLedger.record`、不给入口加 `mode` 参数时，生产路径一次都不会执行，测试全绿只说明它自洽。回归测试走 `POST /search/search` 与 MCP `search` 工具，连续两次 `mode="context"` 必须证明第二次不重复投放第一次给过的条目。
 
 ### 8.8 输入过滤
 
@@ -1165,11 +1165,11 @@ COMEM_BYPASS_SESSION_PATTERNS="*/scratch/*,*/tmp/*"
 混合检索不是「永远更好」：FTS5 在自然语言改写上召回接近 0，在专有名词 / 标识符上
 召回 1.0；向量反过来。
 
-**重排空转已经修复（2026-11-08）。** 之前 `hybrid+rerank` 与 `hybrid` 的三项指标
-逐位相同：候选文本取自 `SearchHit.abstract`，而普通文档的 `abstract` 是 `null`，
-空文本候选被 `applyRerank` 跳过，重排退化成「按融合分原样返回」，只多了一次模型
-调用的延迟。现在摘要优先、正文兜底（512 字符），`hybrid+rerank` 的三项指标都高于
-`hybrid`，代价是 p50 从 381.2ms 涨到 1880.2ms（正文读取 + 模型调用）。
+**`hybrid+rerank` 与 `hybrid` 的差距来自候选文本。** 候选文本摘要优先、正文兜底
+（512 字符）：普通文档的 `abstract` 是 `null`，不兜底时空文本候选被 `applyRerank`
+跳过，重排退化成「按融合分原样返回」，只多了一次模型调用的延迟。正文兜底后
+`hybrid+rerank` 的三项指标都高于 `hybrid`，代价是 p50 从 381.2ms 涨到 1880.2ms
+（正文读取 + 模型调用）。
 
 **`hybrid+levels` 与 `hybrid` 逐位相同不是缺陷。** 当前数据集的标注全是文件（L2
 记录）；目录的 L0 摘要虽然进了索引、也出现在 top-10 里，但没有被标成相关文档。
@@ -1297,7 +1297,7 @@ commit(sessionId, options)
 
 **为什么 `idleTimeout` 默认关**：它是「长会话」场景的旋钮，不是默认路径的一部分。打开它需要服务端常驻扫描器（§10.7 的调度器），单机部署多一个每 30 秒空转的定时器。
 
-**空闲提交与其它触发走同一条阶段一，`keepRecentCount` 一视同仁。** 早期草图写的是「空闲提交忽略 `keepRecentCount`，全部归档」，没有实现：那需要在阶段一加一个「这一次不看保留条数」的参数，而「保留最近几条」在用户回来接着聊时恰好是有用的上下文。`keepRecentCount = 0`（默认）时两种语义是同一个结果。
+**空闲提交与其它触发走同一条阶段一，`keepRecentCount` 一视同仁。** 让空闲提交忽略 `keepRecentCount` 需要在阶段一加一个「这一次不看保留条数」的参数，而「保留最近几条」在用户回来接着聊时恰好是有用的上下文。`keepRecentCount = 0`（默认）时两种语义是同一个结果。
 
 **提交是幂等的**：自动提交和手动提交走同一条管线，重复触发不会产生重复归档（Phase 1 的路径锁 + 归档序号单调保证）。
 
@@ -1834,8 +1834,8 @@ Qwen 的导出格式与 DeepSeek 不同（`chat.history.messages`，正文在 `c
 `SessionMeta` 是冻结契约，没有 `source` 字段，`metadata-file.ts` 读回时也会丢弃未
 知字段。所以「这条会话从哪来」记在 `ingest_cursor` 行的
 `(harness, nativeSessionId, locator → session_uri)` 上，而不是伪造一个读不回来的
-`.meta.json` 字段。要在会话元数据里直接看到来源，需要先扩 `SessionMeta`——那是另一个
-改动。
+`.meta.json` 字段。要在会话元数据里直接看到来源，需要先扩 `SessionMeta` 这个冻结
+契约。
 
 #### 配置
 
@@ -2521,7 +2521,7 @@ retrieval:
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
   rerank:
-    enabled: false        # 默认关；关掉时 find 路径与接线前逐字一致
+    enabled: false        # 默认关；关掉时 find 路径不调用重排模型
     keepTopN: 0           # 重排后保留前 N 条；0 = 只重排不截断
 
 session:
@@ -2597,7 +2597,7 @@ task:
 - **记忆写入时把 L0 摘要写进 frontmatter 的 `summary`**，`IndexObserver` 把它当 `abstract` 索引。新记忆因此零 I/O 就能重排；存量记忆走正文兜底，不需要 reindex 回填。
 - **层级先验在重排后保留。** 重排把相关性分换成模型分，但层级是**文档先验**（摘要经过压缩，模型从文本本身看不出出处）。先验按符号保序地乘回模型分：非负分乘权重、负分除以权重（模型分未归一化时直接乘会把负分惩罚得更狠，把先验反过来）。`weight = 1` 时是恒等变换。
 - **全部候选都没有可用文本时不发请求。** 模型对空串打不出有意义的分数，一次没有输入的调用只花延迟预算。
-- **`providers.rerank.topN` 是送去重排的条数上限。** 开启重排时候选集放宽到 `max(limit, topN)`，否则「融合排第 20 但最相关」的候选永远上不来；关闭时 `candidateLimit === limit`，与接线前逐字一致。
+- **`providers.rerank.topN` 是送去重排的条数上限。** 开启重排时候选集放宽到 `max(limit, topN)`，否则「融合排第 20 但最相关」的候选永远上不来；关闭时 `candidateLimit === limit`。
 - **`retrieval.rerank.keepTopN` 在重排之后截断**（`0` = 只重排不截断）。
 - **分数未归一化、可以是负数。** `jina/jina-reranker-v3` 的 `relevance_score` 没有约定值域，不要 clamp 到 `[0, 1]`，直接按原值降序。
 - **顺序是「先重排、再按热度乘性加权」。** 重排是相关性判断，热度是相关性同档内的微调；反过来会让「最近访问过」压过「更相关」。
@@ -2609,7 +2609,8 @@ task:
 
 **`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**三个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0`。`memory.ttl.defaultDays` 在 `node` 行的写入点算成绝对时刻，只对 `context_type = 'memory'` 生效——`resources` / `skills` 不会被套上记忆的存活时间。
 
-**`acl.enabled` 与 `retrieval.recall.*` 已删除。** 前者没有实现（关掉仍然走 ACL），后者没有调用点（自适应升级从未执行）。`context` 模式取代 `recall.*` 的职责；等真正需要自适应升级时再加配置。
+**检索参数只留 `retrieval.engine` 与 `retrieval.rerank`。** 自适应升级由
+`search` 的 `mode: 'context'` 承担；需要更细的召回控制时再加配置。
 
 **并发控制。** SQLite 开 `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=5000`，允许并发读、单写者。写事务统一走一个 `withWriteTransaction()` 包装，超过 `busy_timeout` 抛 `CONFLICT` 由任务层重试。这是 SQLite 的标准用法，不需要额外的写队列。
 
@@ -2671,7 +2672,7 @@ task:
 | P11 | Hook 插件（Claude Code + DSH） | 真实会话自动入库 |
 | P12 | 文档与答辩材料 | 文档定稿 |
 
-**顺序调整的说明**：路径锁和元数据写保护从「以后再说」提到 P2——它们是**正确性**问题，晚补等于在错误的地基上盖楼。Context Assembly 和 Recall Ledger 放在 P3，因为它们跟检索是同一层，拆开做要改两遍。
+**路径锁与元数据写保护排在 P2，Context Assembly 与 Recall Ledger 排在 P3。** 前两者是**正确性**问题，晚补等于在错误的地基上盖楼；后两者跟检索是同一层，拆开做要改两遍。
 
 **v1 之后（backlog）**：
 
