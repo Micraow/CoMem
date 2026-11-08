@@ -8,7 +8,7 @@ import type { Mock } from 'vitest';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
-import type { ArchiveMeta, MemoryDiff } from '../../../src/domain/archive.js';
+import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmOptions, LlmPrompt, LlmResult } from '../../../src/domain/llm.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -25,6 +25,7 @@ import {
   EXTRACT_RESULT_KEY,
   isMemoryExtractResult,
   MemoryExtractStep,
+  type MemoryExtractStepDeps,
   type MemoryExtractResult,
 } from '../../../src/services/commit/steps/memory-extract.js';
 import {
@@ -135,19 +136,42 @@ class FakeMemoryPort {
   }
 }
 
+/** 归档产物替身：内存里存最近一次写入，`rehydrate` 从它读回。 */
+function createArtifacts(): {
+  readonly archive: MemoryExtractStepDeps['archive'];
+  readonly written: MemoryOperationsFile[];
+} {
+  const written: MemoryOperationsFile[] = [];
+  return {
+    archive: {
+      writeMemoryOperations: async (_archiveUri, operations) => {
+        written.push(operations);
+      },
+      readMemoryOperations: async () => written.at(-1) ?? null,
+    },
+    written,
+  };
+}
+
 function createExtractStep(
   provider: FakeLlmProvider,
   options: { readonly prefetchTopN?: number } = {},
-): { readonly step: MemoryExtractStep; readonly fakeMemory: FakeMemoryPort } {
+): {
+  readonly step: MemoryExtractStep;
+  readonly fakeMemory: FakeMemoryPort;
+  readonly written: MemoryOperationsFile[];
+} {
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
   const fakeMemory = new FakeMemoryPort();
+  const artifacts = createArtifacts();
   const step = new MemoryExtractStep({
     memory: fakeMemory,
     llm,
+    archive: artifacts.archive,
     logger,
     ...(options.prefetchTopN === undefined ? {} : { prefetchTopN: options.prefetchTopN }),
   });
-  return { step, fakeMemory };
+  return { step, fakeMemory, written: artifacts.written };
 }
 
 function extracted(context: StepContext): MemoryExtractResult {
@@ -323,6 +347,60 @@ describe('MemoryExtractStep', () => {
     ]);
     expect(result.skipped).toEqual([]);
     expect(result.memoryTypes.get(CODE_STYLE)).toBe('preferences');
+  });
+
+  it('抽取结果落盘，重放时 rehydrate 能读回（§10.4）', async () => {
+    const provider = new FakeLlmProvider([
+      {
+        json: {
+          operations: [
+            {
+              kind: 'upsert',
+              pageId: 100,
+              type: 'preferences',
+              identity: { topic: 'code-style' },
+              operations: [{ kind: 'replace', field: 'content', value: '新内容' }],
+            },
+          ],
+        },
+      },
+    ]);
+    const { step, written } = createExtractStep(provider);
+
+    const context = createContext();
+    await step.run(context);
+
+    // 产物必须落盘：`stepsDone` 声称这一步跑完了，重放会跳过它。
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ archiveUri: ARCHIVE });
+    // 新建项会先补一条 identity 的 `replace`，再是模型给的字段操作（§11.4）。
+    expect(written[0]?.operations.map((operation) => operation.uri)).toEqual([
+      CODE_STYLE,
+      CODE_STYLE,
+    ]);
+    // `memoryTypes` 落盘是二元组数组（JSON 没有 Map），不是 `{}`。
+    expect(written[0]?.memoryTypes).toEqual([[CODE_STYLE, 'preferences']]);
+    // 落盘形状必须能原样序列化：`JSON.stringify(new Map())` 会得到 `{}`，那正是
+    // 「产物只存在内存里」的形态。
+    expect(JSON.parse(JSON.stringify(written[0]))).toEqual(written[0]);
+
+    // 新的 run()：`state` 是空的，rehydrate 从盘上恢复。
+    const replay = createContext();
+    await step.rehydrate(replay);
+    const restored = extracted(replay);
+    expect(restored.operations).toEqual(extracted(context).operations);
+    expect(restored.memoryTypes.get(CODE_STYLE)).toBe('preferences');
+    expect(restored.memoryTypes).toBeInstanceOf(Map);
+  });
+
+  it('盘上没有 memory_operations.json 时 rehydrate 抛 INVALID_ARGUMENT', async () => {
+    // `stepsDone` 声称跑过、盘上却没有产物：真正的装配 / 数据错误，重试没用。
+    const { step } = createExtractStep(new FakeLlmProvider([]));
+
+    await expect(step.rehydrate(createContext())).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringContaining('memory_operations.json'),
+    });
   });
 
   it('新建项 pageId >= 100 时按 identity 生成新 URI', async () => {
@@ -544,7 +622,10 @@ function createMergeStep(
       remove: (uri) => memory.remove(uri),
       ...memoryOverride,
     },
-    archive: { writeMemoryDiff },
+    archive: {
+      writeMemoryDiff,
+      readMemoryDiff: async () => diffs.at(-1) ?? null,
+    },
     logger,
   });
   return { step, writeMemoryDiff, diffs };
@@ -758,6 +839,58 @@ describe('MemoryMergeStep', () => {
 
     expect(diffs[0]?.skippedOperations).toHaveLength(1);
     expect(diffs[0]?.summary).toMatchObject({ totalSkipped: 1 });
+  });
+
+  it('rehydrate 从 memory_diff.json 恢复写入集合（重放时摘要失效仍能拿到）', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: 'old',
+    });
+    const gone = `${SCOPE}/memories/preferences/gone.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'gone',
+      content: 'x',
+    });
+
+    const { step } = createMergeStep();
+    await step.run(
+      mergeContext(
+        [
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: {
+              kind: 'patch',
+              field: 'content',
+              blocks: [{ search: 'old', replace: 'new' }],
+            },
+          },
+          { kind: 'delete', uri: gone },
+        ],
+        [
+          [CODE_STYLE, 'preferences'],
+          [gone, 'preferences'],
+        ],
+      ),
+    );
+
+    // 重放：`state` 是新的，`written` / `deleted` 只能从 `memory_diff.json` 推出。
+    const replay = createContext();
+    await step.rehydrate(replay);
+
+    expect(replay.state.get(MERGE_RESULT_KEY)).toMatchObject({
+      written: [Uri.parse(CODE_STYLE)],
+      deleted: [Uri.parse(gone)],
+    });
+  });
+
+  it('盘上没有 memory_diff.json 时 rehydrate 抛 INVALID_ARGUMENT', async () => {
+    const { step } = createMergeStep();
+
+    await expect(step.rehydrate(createContext())).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringContaining('memory_diff.json'),
+    });
   });
 
   it('把写入结果放进 state 供摘要失效步骤消费', async () => {

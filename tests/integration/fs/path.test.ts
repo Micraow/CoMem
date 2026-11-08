@@ -53,6 +53,7 @@ const EXPECTED_RESERVED_NAMES = [
   '.meta.json',
   '.done',
   'memory_diff.json',
+  'memory_operations.json',
 ];
 
 describe('RESERVED_NAMES', () => {

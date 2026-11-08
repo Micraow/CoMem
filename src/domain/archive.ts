@@ -6,6 +6,7 @@
  */
 
 import type { ComemErrorCode } from './errors.js';
+import type { BatchOperation } from './merge-op.js';
 
 /**
  * 归档的完成状态（§10.1 的 `phase1.status`）。
@@ -124,6 +125,95 @@ export interface MemoryDiff {
     readonly totalDeletes: number;
     readonly totalSkipped: number;
   };
+}
+
+/**
+ * `archive_NNN/memory_operations.json` 的形状（§6.6、§10.4）。
+ *
+ * `memory_extract` 的产物。抽取结果原先只存在 `StepContext.state` 里，而
+ * `stepsDone` 已经声称这一步跑完了——`memory_merge` 之后任何一次瞬态失败（供应商
+ * 503、租约过期、进程重启）都会让重放跳过抽取步骤、从空 `state` 里读不到产物，
+ * 把一份本来能完成的归档永久标成 `failed`。**`stepsDone` 的契约是「可恢复」，
+ * 它必须同时意味着「产物还在」。**
+ *
+ * `memoryTypes` 落盘用二元组数组：JSON 没有 `Map`，用对象则是拿 URI 当键，会撞上
+ * `__proto__` 这类原型链属性。
+ */
+export interface MemoryOperationsFile {
+  readonly archiveUri: string;
+  /** ISO 8601 */
+  readonly extractedAt: string;
+  readonly operations: readonly BatchOperation[];
+  readonly skipped: readonly SkippedMemoryOperation[];
+  /** `[uri, memoryType]`，还原成 `Map` 是消费方的事 */
+  readonly memoryTypes: readonly (readonly [string, string])[];
+}
+
+/**
+ * 盘上的 `memory_operations.json` 是否可消费。
+ *
+ * 只校验**下游真正读取的字段**：`operations` / `skipped` / `memoryTypes` 的形状。
+ * 深校验 `BatchOperation` 等于把 `memory-extract.ts` 的 zod schema 抄一遍，而写入
+ * 侧已经用那份 schema 校验过；这里防的是磁盘被手改、版本升级留下旧结构。
+ */
+export function isMemoryOperationsFile(value: unknown): value is MemoryOperationsFile {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record['archiveUri'] !== 'string' || typeof record['extractedAt'] !== 'string') {
+    return false;
+  }
+  if (!Array.isArray(record['operations']) || !Array.isArray(record['skipped'])) {
+    return false;
+  }
+  const memoryTypes = record['memoryTypes'];
+  if (!Array.isArray(memoryTypes)) {
+    return false;
+  }
+  return memoryTypes.every(
+    (entry) =>
+      Array.isArray(entry) &&
+      entry.length === 2 &&
+      typeof entry[0] === 'string' &&
+      typeof entry[1] === 'string',
+  );
+}
+
+/**
+ * 盘上的 `memory_diff.json` 是否可消费。
+ *
+ * 重放用它推出「真正写过 / 删过哪些文件」（`MemoryMergeStep.rehydrate`）。只校验
+ * 消费方读取的字段（`operations.{adds,updates}[].uri` 与 `operations.deletes[]`），
+ * 其余字段原样保留。
+ */
+export function isMemoryDiff(value: unknown): value is MemoryDiff {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const operations = (value as Record<string, unknown>)['operations'];
+  if (typeof operations !== 'object' || operations === null || Array.isArray(operations)) {
+    return false;
+  }
+  const record = operations as Record<string, unknown>;
+  return (
+    isDiffEntryList(record['adds']) &&
+    isDiffEntryList(record['updates']) &&
+    Array.isArray(record['deletes']) &&
+    record['deletes'].every((uri) => typeof uri === 'string')
+  );
+}
+
+function isDiffEntryList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        typeof (entry as Record<string, unknown>)['uri'] === 'string',
+    )
+  );
 }
 
 /** 统计一段记忆差异。空差异返回全 0，不返回 `undefined`。 */

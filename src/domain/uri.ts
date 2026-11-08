@@ -36,6 +36,7 @@ const RESERVED_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   '.meta.json',
   '.done',
   'memory_diff.json',
+  'memory_operations.json',
 ]);
 
 /** 单段 UTF-8 字节数上限（架构文档 §6.2 规则 5）。 */

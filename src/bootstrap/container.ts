@@ -141,7 +141,7 @@ import {
 import { TaskService } from '../services/task.js';
 import { TtlService } from '../services/ttl.js';
 
-import { createArchivePorts, createArchiveWriter } from './archive-ports.js';
+import { createArchivePorts, createArchiveArtifacts } from './archive-ports.js';
 import { CommitRunner } from './commit-runner.js';
 import { DEFAULT_INTERVAL_MS, Scheduler } from './scheduler.js';
 
@@ -1034,7 +1034,12 @@ async function ensureUserNamespace(userId: string): Promise<void> {
         dataDir,
         onStepsChanged,
       });
-      const archiveWriter = createArchiveWriter(archiveUri, { store, metadata, logger, dataDir });
+      const archiveArtifacts = createArchiveArtifacts(archiveUri, {
+        store,
+        metadata,
+        logger,
+        dataDir,
+      });
       return new CommitPipeline({
         steps: [
           new ArchiveSummaryStep({
@@ -1044,8 +1049,8 @@ async function ensureUserNamespace(userId: string): Promise<void> {
             workingMemory: { enabled: config.memory.workingMemory.enabled },
             logger,
           }),
-          new MemoryExtractStep({ memory, llm, logger }),
-          new MemoryMergeStep({ memory, archive: archiveWriter, logger }),
+          new MemoryExtractStep({ memory, llm, archive: archiveArtifacts, logger }),
+          new MemoryMergeStep({ memory, archive: archiveArtifacts, logger }),
           new SummaryInvalidateStep({ summary, logger }),
         ],
         ports,

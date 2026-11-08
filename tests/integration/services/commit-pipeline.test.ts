@@ -27,14 +27,17 @@ const ALL_STEPS: readonly CommitStepName[] = [
 class FakeStep extends CommitStep {
   readonly name: CommitStepName;
   readonly run: Mock<(context: StepContext) => Promise<void>>;
+  override readonly rehydrate: Mock<(context: StepContext) => Promise<void>>;
 
   constructor(
     name: CommitStepName,
     impl: (context: StepContext) => Promise<void> = async () => undefined,
+    rehydrateImpl: (context: StepContext) => Promise<void> = async () => undefined,
   ) {
     super();
     this.name = name;
     this.run = vi.fn(impl);
+    this.rehydrate = vi.fn(rehydrateImpl);
   }
 }
 
@@ -53,6 +56,8 @@ function createLogger(): Logger {
 interface HarnessOptions {
   readonly steps: readonly CommitStep[];
   readonly stepsDone?: readonly CommitStepName[];
+  /** 被跳过的步骤（`skippedSteps`，从未执行过，没有产物可恢复）。 */
+  readonly skippedSteps?: readonly CommitStepName[];
   readonly stepAttempts?: number;
   readonly messages?: readonly SessionMessage[];
   readonly latestArchiveOverview?: string | null;
@@ -78,7 +83,10 @@ function createHarness(options: HarnessOptions): Harness {
       retainedMessageIds: [],
     },
     stepsDone: options.stepsDone ?? [],
-    skippedSteps: [],
+    skippedSteps: (options.skippedSteps ?? []).map((step) => ({
+      step,
+      reason: 'llm_disabled' as const,
+    })),
     taskId: 'task_1',
   };
 
@@ -142,6 +150,79 @@ describe('CommitPipeline 骨架（§10.3）', () => {
     // 跳过的步骤不会被重复记录。
     expect(harness.currentMeta().stepsDone).toEqual([...ALL_STEPS]);
     expect(harness.metaWrites.map((meta) => meta.stepsDone.length)).toEqual([3, 4]);
+  });
+
+  it('跳过已完成步骤时先 rehydrate，产物回到 state 供下游消费', async () => {
+    // `stepsDone` 只记「跑过」，不记「跑出了什么」。重放时 `state` 是新的，
+    // 跳过的步骤必须从归档目录把产物读回来（§10.4 的不变量）。
+    const recovered: string[] = [];
+    const producer = new FakeStep(
+      'archive_summary',
+      undefined,
+      async (context: StepContext) => {
+        recovered.push('restored');
+        context.state.set('payload', { operations: 3 });
+      },
+    );
+    const consumer = new FakeStep('memory_extract', async (context) => {
+      recovered.push(JSON.stringify(context.state.get('payload')));
+    });
+    const harness = createHarness({ steps: [producer, consumer], stepsDone: ['archive_summary'] });
+
+    await harness.pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE));
+
+    expect(producer.run).not.toHaveBeenCalled();
+    expect(producer.rehydrate).toHaveBeenCalledTimes(1);
+    expect(consumer.run).toHaveBeenCalledTimes(1);
+    expect(recovered).toEqual(['restored', '{"operations":3}']);
+  });
+
+  it('被跳过的步骤不 rehydrate：从未执行过，没有产物可恢复', async () => {
+    // `providers.llm.default.type: disabled` 的部署里 `memory_extract` 被跳过，
+    // 归档里没有 `memory_operations.json`。任务重放时对跳过步骤调用 rehydrate
+    // 会误报「步骤声称跑过但产物不存在」，把一次正常的跳过变成失败。
+    const steps = ALL_STEPS.map((name) => new FakeStep(name));
+    const harness = createHarness({
+      steps,
+      stepsDone: [...ALL_STEPS],
+      skippedSteps: ['memory_extract', 'memory_merge'],
+    });
+
+    await harness.pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE));
+
+    // 被跳过的两步从未执行过：没有产物可恢复。
+    expect(steps[1]?.rehydrate).not.toHaveBeenCalled();
+    expect(steps[2]?.rehydrate).not.toHaveBeenCalled();
+    // 执行过的两步（产物在盘上）照常 rehydrate，它们自己不做任何事。
+    expect(steps[0]?.rehydrate).toHaveBeenCalledTimes(1);
+    expect(steps[3]?.rehydrate).toHaveBeenCalledTimes(1);
+    for (const step of steps) {
+      expect(step.run, step.name).not.toHaveBeenCalled();
+    }
+    expect(harness.writeDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('rehydrate 失败不重试，管线中止且不写 .done', async () => {
+    // 归档自相矛盾（声称跑过、盘上没有产物）是确定性的，重试只会拖长失败。
+    const failing = new FakeStep('memory_extract', undefined, async () => {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        '归档元数据声称 memory_extract 已完成，但 memory_operations.json 不存在。',
+      );
+    });
+    const harness = createHarness({
+      steps: [failing],
+      stepsDone: ['memory_extract'],
+      stepAttempts: 1,
+    });
+
+    await expect(
+      harness.pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE)),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    expect(failing.rehydrate).toHaveBeenCalledTimes(1);
+    expect(failing.run).not.toHaveBeenCalled();
+    expect(harness.writeDone).not.toHaveBeenCalled();
   });
 
   it('每步完成立刻落盘：第 2 步失败时第 1 步的 stepsDone 已写', async () => {

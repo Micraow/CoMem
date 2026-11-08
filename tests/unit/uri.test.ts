@@ -118,6 +118,7 @@ describe('Uri.parse', () => {
         '.meta.json',
         '.done',
         'memory_diff.json',
+        'memory_operations.json',
       ]) {
         expectInvalidUri(`comem://user/alice/${reserved}`);
         expectInvalidUri(`comem://user/alice/memories/${reserved}`);

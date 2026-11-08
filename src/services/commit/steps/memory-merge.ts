@@ -78,9 +78,11 @@ export interface MemoryMergeStepDeps {
     ): Promise<MemoryWriteResult>;
     remove(uri: Uri): Promise<void>;
   };
-  /** 写 `archive_NNN/memory_diff.json`（保留名，必须按归档目录定位）。 */
+  /** 写/读 `archive_NNN/memory_diff.json`（保留名，必须按归档目录定位）。 */
   readonly archive: {
     writeMemoryDiff(archiveUri: Uri, diff: MemoryDiff): Promise<void>;
+    /** 不存在返回 `null`（正常状态：这一步还没跑过）。 */
+    readMemoryDiff(archiveUri: Uri): Promise<MemoryDiff | null>;
   };
   readonly logger: Logger;
 }
@@ -151,6 +153,22 @@ export function isMemoryMergeResult(value: unknown): value is MemoryMergeResult 
   return Array.isArray(value.written) && Array.isArray(value.deleted);
 }
 
+/**
+ * `memory_diff.json` → 合并结果（重放时 `summary_invalidate` 的输入）。
+ *
+ * `written` 是 adds + updates 的 URI——写 `memory_diff.json` 时用的就是
+ * `write.uri`，两者同一个值；`deleted` 就是 `deletes`。摘要失效按父目录去重，
+ * 集合顺序不影响结果。
+ */
+function mergeResultFromDiff(diff: MemoryDiff): MemoryMergeResult {
+  return {
+    written: [...diff.operations.adds, ...diff.operations.updates].map((entry) =>
+      Uri.parse(entry.uri),
+    ),
+    deleted: diff.operations.deletes.map((uri) => Uri.parse(uri)),
+  };
+}
+
 export class MemoryMergeStep extends CommitStep {
   readonly name = 'memory_merge' as const;
 
@@ -168,7 +186,10 @@ export class MemoryMergeStep extends CommitStep {
   async run(context: StepContext): Promise<void> {
     const extracted = context.state.get(EXTRACT_RESULT_KEY);
     if (!isMemoryExtractResult(extracted)) {
-      // 缺产物是装配错误（步骤顺序被改过），不是模型的问题，重试也没用。
+      // 正常恢复路径是 `MemoryExtractStep.rehydrate`：它把盘上的
+      // `memory_operations.json` 读回 `state`，所以能走到这里说明这一步排在
+      // `memory_extract` 之前（步骤顺序被改过），或者抽取步骤被登记成跳过却仍有
+      // 合并步骤要执行。两者都是装配错误，重试也没用。
       throw new ComemError('INVALID_ARGUMENT', '记忆合并步骤缺少抽取结果，提交管线顺序有误。', {
         archive: context.archiveUri.toString(),
       });
@@ -281,6 +302,31 @@ export class MemoryMergeStep extends CommitStep {
     this.#logger.info('记忆合并完成', {
       archive: context.archiveUri.toString(),
       ...diff.summary,
+    });
+  }
+
+  /**
+   * 重放：从 `memory_diff.json` 恢复「真正写过 / 删过哪些文件」。
+   *
+   * 这一步的产物（`written` / `deleted`）只存在 `state` 里。不恢复的话，重放时
+   * `summary_invalidate` 读到空集合，记一条 debug 日志就返回：目录摘要永远不重算，
+   * 而归档照样完成——**静默降级比失败更难发现**。
+   */
+  override async rehydrate(context: StepContext): Promise<void> {
+    const diff = await this.#archive.readMemoryDiff(context.archiveUri);
+    if (diff === null) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        `归档元数据声称 memory_merge 已完成，但 memory_diff.json 不存在：${context.archiveUri.toString()}`,
+        { archive: context.archiveUri.toString() },
+      );
+    }
+    const merged = mergeResultFromDiff(diff);
+    context.state.set(MERGE_RESULT_KEY, merged);
+    this.#logger.debug('已从归档目录恢复合并结果', {
+      archive: context.archiveUri.toString(),
+      written: merged.written.length,
+      deleted: merged.deleted.length,
     });
   }
 }

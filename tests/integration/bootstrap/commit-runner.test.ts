@@ -11,7 +11,7 @@
  * 抽取步骤要调模型，测试里不该起网络，也不该 mock 整个 AI SDK。
  */
 
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -27,7 +27,7 @@ import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/databa
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
-import { createArchivePorts, createArchiveWriter } from '../../../src/bootstrap/archive-ports.js';
+import { createArchiveArtifacts, createArchivePorts } from '../../../src/bootstrap/archive-ports.js';
 import { CommitRunner } from '../../../src/bootstrap/commit-runner.js';
 import type { ArchiveTaskPayload, MemoryDiff } from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
@@ -219,7 +219,7 @@ interface RunnerHarness {
 /** 与 `container.ts` 同构的装配：端口按归档现造，四个步骤顺序固定。 */
 function createRunner(
   responses: readonly FakeResponse[],
-  options: { readonly concurrency?: number } = {},
+  options: { readonly concurrency?: number; readonly stepAttempts?: number } = {},
 ): RunnerHarness {
   const provider = new FakeLlmProvider(responses);
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
@@ -230,22 +230,24 @@ function createRunner(
       onStepsChanged: (steps: readonly string[]) => void,
     ): CommitPipeline => {
       const deps = { store, metadata, logger, dataDir, onStepsChanged };
-    return new CommitPipeline({
-      steps: [
-        new ArchiveSummaryStep({
-          summary,
-          llm,
-          metadata,
-          workingMemory: { enabled: false },
-          logger,
-        }),
-        new MemoryExtractStep({ memory, llm, logger }),
-        new MemoryMergeStep({ memory, archive: createArchiveWriter(archiveUri, deps), logger }),
-        new SummaryInvalidateStep({ summary, logger }),
-      ],
-      ports: createArchivePorts(archiveUri, deps),
-      logger,
-    });
+      const archiveArtifacts = createArchiveArtifacts(archiveUri, deps);
+      return new CommitPipeline({
+        steps: [
+          new ArchiveSummaryStep({
+            summary,
+            llm,
+            metadata,
+            workingMemory: { enabled: false },
+            logger,
+          }),
+          new MemoryExtractStep({ memory, llm, archive: archiveArtifacts, logger }),
+          new MemoryMergeStep({ memory, archive: archiveArtifacts, logger }),
+          new SummaryInvalidateStep({ summary, logger }),
+        ],
+        ports: createArchivePorts(archiveUri, deps),
+        ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),
+        logger,
+      });
   });
 
   return {
@@ -395,6 +397,131 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     // 跳过的步骤不重写 `.meta.json`。
     expect(await metadata.readArchive(committed.archiveUri)).toEqual(metaBefore);
     await expect(stat(join(archiveDirectory(ARCHIVE), '.done'))).resolves.toBeDefined();
+
+    await runner.stop();
+  });
+
+  it('memory_extract 之后失败，重放能恢复（不重调模型）', async () => {
+    // 回归：`memory_extract` 的结果原先只存在 `StepContext.state` 里。`stepsDone`
+    // 声称它跑完了，重放会跳过它——`memory_merge` 拿到空 `state`，抛
+    // `INVALID_ARGUMENT`（终态），归档永久损坏，错误信息还说「步骤顺序被改过」。
+    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }], {
+      stepAttempts: 0,
+    });
+
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
+      sessionId: 'sess_1',
+    });
+    await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
+    const committed = await session.commitPhase1(sessionUri);
+
+    // 第 3 步撞瞬态失败（供应商 503 这一类）：不是终态，任务回队列。
+    vi.spyOn(memory, 'upsertMemory').mockRejectedValueOnce(
+      new ComemError('PROVIDER_UNAVAILABLE', '供应商暂时不可用。'),
+    );
+    await runner.tick();
+
+    expect(taskStore.get(committed.taskId)).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+    });
+    // 抽取产物必须已经在盘上，否则重放恢复不了。
+    const operationsPath = join(archiveDirectory(ARCHIVE), 'memory_operations.json');
+    await expect(stat(operationsPath)).resolves.toBeDefined();
+    // `memory_merge` 没写完 `memory_diff.json`：写盘失败时它不能存在。
+    await expect(stat(join(archiveDirectory(ARCHIVE), 'memory_diff.json'))).rejects.toMatchObject(
+      { code: 'ENOENT' },
+    );
+
+    // 第 2 轮：新的 `run()`、新的空 `state`。
+    await runner.tick();
+
+    expect(taskStore.get(committed.taskId)).toMatchObject({ status: 'done', error: null });
+    // 抽取没有重新调模型（FakeLlmProvider 只有一个响应，重跑会抛）。
+    expect(provider.calls).toHaveLength(1);
+
+    const diff = JSON.parse(
+      await readFile(join(archiveDirectory(ARCHIVE), 'memory_diff.json'), 'utf8'),
+    ) as MemoryDiff;
+    expect(diff.operations.adds.map((entry) => entry.uri)).toEqual([EXPERIENCE]);
+    expect(diff.operations.deletes).toEqual([]);
+    expect(diff.summary).toMatchObject({
+      totalAdds: 1,
+      totalUpdates: 0,
+      totalDeletes: 0,
+      totalSkipped: 0,
+    });
+
+    const meta = await metadata.readArchive(committed.archiveUri);
+    expect(meta?.stepsDone).toEqual([...ALL_STEPS]);
+
+    await runner.stop();
+  });
+
+  it('进程重启：新执行器按盘上的 stepsDone + memory_operations.json 恢复', async () => {
+    // 上一个用例只验证「同进程重试」。进程崩了再起时，管线实例、`state`、模型
+    // 供应商的响应全部消失——只剩磁盘。`recover()` 只重置租约过期的 `running`，
+    // 这里用「任务回队列 + 新建执行器」走同一条恢复路径。
+    const first = createRunner([{ json: EXTRACT_RESPONSE }], { stepAttempts: 0 });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
+      sessionId: 'sess_1',
+    });
+    await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
+    const committed = await session.commitPhase1(sessionUri);
+
+    vi.spyOn(memory, 'upsertMemory').mockRejectedValueOnce(
+      new ComemError('PROVIDER_UNAVAILABLE', '供应商暂时不可用。'),
+    );
+    await first.runner.tick();
+    await first.runner.stop();
+    expect(taskStore.get(committed.taskId)?.status).toBe('pending');
+    vi.restoreAllMocks();
+
+    // 全新的执行器：没有内存里的 `state`，也没有可用的模型响应。
+    const restarted = createRunner([], { stepAttempts: 0 });
+    await restarted.runner.tick();
+
+    expect(taskStore.get(committed.taskId)).toMatchObject({ status: 'done', error: null });
+    expect(restarted.provider.calls).toHaveLength(0);
+    expect(
+      JSON.parse(
+        await readFile(join(archiveDirectory(ARCHIVE), 'memory_diff.json'), 'utf8'),
+      ),
+    ).toMatchObject({ summary: { totalAdds: 1 } });
+
+    await restarted.runner.stop();
+  });
+
+  it('memory_merge 之后失败，重放仍会失效摘要（不静默降级）', async () => {
+    // 第四步的输入只存在 `state` 里。不恢复的话，重放时它读到空集合，记一条
+    // debug 日志就返回——目录摘要永远不重算，而归档照样完成。
+    const invalidate = vi
+      .spyOn(summary, 'invalidate')
+      .mockRejectedValueOnce(new ComemError('INTERNAL', '摘要服务暂时不可用。'));
+    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }], { stepAttempts: 0 });
+
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
+      sessionId: 'sess_1',
+    });
+    await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
+    const committed = await session.commitPhase1(sessionUri);
+
+    await runner.tick();
+    expect(taskStore.get(committed.taskId)).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+    });
+    // 合并已经完成：`memory_diff.json` 在盘上。
+    await expect(
+      stat(join(archiveDirectory(ARCHIVE), 'memory_diff.json')),
+    ).resolves.toBeDefined();
+
+    await runner.tick();
+
+    expect(taskStore.get(committed.taskId)).toMatchObject({ status: 'done', error: null });
+    // 第二次真的标记了摘要：不是「没有记忆写入，跳过」。
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate.mock.calls[1]?.[0].toString()).toBe(EXPERIENCE);
 
     await runner.stop();
   });
@@ -556,7 +683,7 @@ describe('createArchivePorts（§10.5、§6.2 规则 6）', () => {
     await ports.writeDone();
     expect(await readFile(join(archiveDirectory(ARCHIVE), '.done'), 'utf8')).toBe('');
 
-    const writer = createArchiveWriter(archiveUri, { store, metadata, logger, dataDir });
+    const writer = createArchiveArtifacts(archiveUri, { store, metadata, logger, dataDir });
     const diff = {
       archiveUri: ARCHIVE,
       extractedAt: '2026-11-08T00:00:00.000Z',
@@ -569,6 +696,31 @@ describe('createArchivePorts（§10.5、§6.2 规则 6）', () => {
     const raw = await readFile(join(archiveDirectory(ARCHIVE), 'memory_diff.json'), 'utf8');
     expect(raw.endsWith('\n')).toBe(true);
     expect(JSON.parse(raw)).toEqual(diff);
+  });
+
+  it('readMemoryOperations 把坏 JSON / 坏形状报成 INTERNAL，不伪装成「没有产物」', async () => {
+    // 坏文件不能返回 `null`：rehydrate 会把「文件坏了」报成「步骤声称跑过但产物
+    // 不存在」，指错方向。
+    const archiveUri = Uri.parse(ARCHIVE);
+    await store.mkdir(archiveUri, { recursive: true });
+    const artifacts = createArchiveArtifacts(archiveUri, { store, metadata, logger, dataDir });
+    const operationsPath = join(archiveDirectory(ARCHIVE), 'memory_operations.json');
+
+    await writeFile(operationsPath, '{不是 JSON', 'utf8');
+    await expect(artifacts.readMemoryOperations(archiveUri)).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: expect.stringContaining('memory_operations.json'),
+    });
+
+    await writeFile(operationsPath, JSON.stringify({ operations: [] }), 'utf8');
+    await expect(artifacts.readMemoryOperations(archiveUri)).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: expect.stringContaining('memory_operations.json'),
+    });
+
+    // 不存在才是 `null`。
+    await rm(operationsPath);
+    await expect(artifacts.readMemoryOperations(archiveUri)).resolves.toBeNull();
   });
 
   it('没有更早的归档时 latestArchiveOverview 是 null', async () => {

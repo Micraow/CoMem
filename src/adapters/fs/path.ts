@@ -44,6 +44,7 @@ export const RESERVED_NAMES: ReadonlySet<string> = new Set([
   '.meta.json',
   '.done',
   'memory_diff.json',
+  'memory_operations.json',
 ]);
 
 /** 临时文件名前缀：原子写用（`.comem-tmp-<random>`）。 */

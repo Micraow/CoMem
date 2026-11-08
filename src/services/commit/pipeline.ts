@@ -9,6 +9,12 @@
  * 1. **每步完成立刻落盘 `stepsDone`。** 记忆操作不幂等：重放一次 patch，SEARCH
  *    可能还能匹配，结果是同一段事实被写第二遍。崩在中间时只能靠 `stepsDone` 判断
  *    哪些步骤真的跑完了。
+ *
+ *    **「跑完」必须包含「产物还在」。** `stepsDone` 是重放判据，重放会跳过它记下
+ *    的步骤；如果某一步的产物只存在 `StepContext.state`（进程内存）里，跳过之后
+ *    它就不存在了，下游步骤拿到的是「步骤声称完成、产物却缺失」。所以每个步骤的
+ *    产物必须落在归档目录里，跳过时由 `CommitStep.rehydrate` 读回来。只记进度不记
+ *    产物的实现会让「`memory_extract` 之后的一次瞬态失败」变成永久损坏。
  * 2. **`.done` 最后写。** 它是唯一的完成信号（§10.1）。先写就等于宣称成功，而后面
  *    的步骤可能什么都没做。
  * 3. **单步失败重试 `stepAttempts` 次。** 这里的重试是「同一步再跑一遍」；模型调用
@@ -75,6 +81,22 @@ export interface StepContext {
 export abstract class CommitStep {
   abstract readonly name: CommitStepName;
   abstract run(context: StepContext): Promise<void>;
+
+  /**
+   * 从归档目录把「只存在内存里」的产物读回 `context.state`。
+   *
+   * 管线在**跳过**已完成的步骤时调用它。跳过意味着「不重算」，但下游步骤仍要看到
+   * 这一步的产物；产物一旦只存在 `StepContext.state` 里，重放时它就不存在了。
+   * 默认什么都不做：产物本来就在盘上的步骤（`archive_summary`）没有可恢复的东西，
+   * 而 `summary_invalidate` 的「产物」是摘要的脏计数，重跑反而会重复累加。
+   *
+   * 抛错表示归档自相矛盾（`stepsDone` 声称跑过，但盘上没有产物）。那是装配或数据
+   * 损坏，按终态错误处理，不要重试。
+   */
+  async rehydrate(context: StepContext): Promise<void> {
+    // 产物在盘上的步骤没有可恢复的东西。
+    void context;
+  }
 }
 
 export interface CommitPipelineOptions {
@@ -161,7 +183,23 @@ export class CommitPipeline {
     };
 
     for (const step of this.#steps) {
+      const context: StepContext = {
+        archiveUri,
+        scopeUri,
+        messages,
+        meta,
+        latestArchiveOverview,
+        state,
+        markStepDone,
+      };
+
       if (meta.stepsDone.includes(step.name)) {
+        // 跳过 = 不重算，但下游步骤仍要看到这一步的产物（文件头的第 1 条不变量）。
+        // 被跳过的步骤（`skippedSteps`）从未执行过，没有产物可恢复；对它们调用
+        // `rehydrate` 会让「没有可用模型」的部署在任务重放时误报「产物不存在」。
+        if (!meta.skippedSteps.some((skipped) => skipped.step === step.name)) {
+          await step.rehydrate(context);
+        }
         this.#logger.debug('提交步骤已完成，跳过', {
           archive: archiveUri.toString(),
           step: step.name,
@@ -181,15 +219,6 @@ export class CommitPipeline {
         continue;
       }
 
-      const context: StepContext = {
-        archiveUri,
-        scopeUri,
-        messages,
-        meta,
-        latestArchiveOverview,
-        state,
-        markStepDone,
-      };
       await this.#runWithRetry(step, context);
       await markStepDone(step.name);
     }

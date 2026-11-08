@@ -5,12 +5,12 @@
  * 读它自己的 `messages.jsonl`、写它自己的 `.meta.json`、找它上一个归档的概览。
  * 所以不能一次性构造，要按 `archiveUri` 现造——每个任务一份，不复用。
  *
- * ## 为什么有两个保留名不走 `ContentStore`
+ * ## 为什么有三个保留名不走 `ContentStore`
  *
- * `.done` 与 `memory_diff.json` 是归档产物，不是用户内容：`Uri` 拒绝它们作为普通
- * 路径段（§6.2 规则 6），`ContentStore.writeText` 也会以 `PERMISSION_DENIED` 拒绝。
- * 它们只能按「归档目录 + 文件名」落到磁盘路径，所以 `ArchivePortsDeps` 要带
- * `dataDir`。其余三个方法走正常的存储与元数据 API。
+ * `.done`、`memory_diff.json` 与 `memory_operations.json` 是归档产物，不是用户
+ * 内容：`Uri` 拒绝它们作为普通路径段（§6.2 规则 6），`ContentStore.writeText` 也会
+ * 以 `PERMISSION_DENIED` 拒绝。它们只能按「归档目录 + 文件名」落到磁盘路径，所以
+ * `ArchivePortsDeps` 要带 `dataDir`。其余三个方法走正常的存储与元数据 API。
  *
  * ## 坏行是跳过，不是抛错
  *
@@ -21,13 +21,14 @@
  * 坏数据要立刻暴露；这边是**事后**重放，能做的是尽量往前跑。
  */
 
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { toDiskPath } from '../adapters/fs/path.js';
-import type { ArchiveMeta, MemoryDiff } from '../domain/archive.js';
+import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../domain/archive.js';
+import { isMemoryDiff, isMemoryOperationsFile } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { ContentPart, SessionMessage } from '../domain/session.js';
@@ -44,6 +45,9 @@ const DONE_FILE_NAME = '.done';
 /** 一批记忆操作的差异（§6.6）。 */
 const MEMORY_DIFF_FILE_NAME = 'memory_diff.json';
 
+/** 抽取步骤的产物，供重放时恢复 `state`（§6.6、§10.4）。 */
+const MEMORY_OPERATIONS_FILE_NAME = 'memory_operations.json';
+
 /** 归档序号目录名：`archive_001`、`archive_002`……（§10.2）。 */
 const ARCHIVE_DIRECTORY_PATTERN = /^archive_(\d+)$/;
 
@@ -54,8 +58,8 @@ export interface ArchivePortsDeps {
   /**
    * 数据根。
    *
-   * 只用于两个保留名产物（`.done` / `memory_diff.json`）的磁盘定位——它们既不能
-   * 建成 `Uri` 路径段，也不能交给 `ContentStore`（见文件头）。
+   * 只用于三个保留名产物（`.done` / `memory_diff.json` / `memory_operations.json`）
+   * 的磁盘定位——它们既不能建成 `Uri` 路径段，也不能交给 `ContentStore`（见文件头）。
    */
   readonly dataDir: string;
   /**
@@ -69,9 +73,12 @@ export interface ArchivePortsDeps {
   readonly onStepsChanged?: (steps: readonly string[]) => void;
 }
 
-/** `MemoryMergeStepDeps.archive` 的形状（`memory_diff.json` 的写入）。 */
-export interface ArchiveWriter {
+/** `MemoryMergeStepDeps.archive` / `MemoryExtractStepDeps.archive` 的形状（归档产物）。 */
+export interface ArchiveArtifacts {
   writeMemoryDiff(archiveUri: Uri, diff: MemoryDiff): Promise<void>;
+  readMemoryDiff(archiveUri: Uri): Promise<MemoryDiff | null>;
+  writeMemoryOperations(archiveUri: Uri, operations: MemoryOperationsFile): Promise<void>;
+  readMemoryOperations(archiveUri: Uri): Promise<MemoryOperationsFile | null>;
 }
 
 /**
@@ -95,13 +102,19 @@ export function createArchivePorts(archiveUri: Uri, deps: ArchivePortsDeps): Ste
 }
 
 /**
- * `memory_diff.json` 的写入（`MemoryMergeStepDeps.archive`）。
+ * 归档产物的写入与读取（`memory_diff.json` / `memory_operations.json`）。
  *
- * 工厂的第一个参数是端口契约要求的「绑定归档」形状；写盘位置取调用时传进来的
+ * 工厂的第一个参数是端口契约要求的「绑定归档」形状；读写位置取调用时传进来的
  * 归档——`CommitPipeline.run` 的入参就是构造端口用的那个，两者必然相同。用入参是
  * 为了让「写哪个归档」在调用点可见，而不是藏在这个闭包里。
+ *
+ * **读回来的东西要能重建 `state`。** 两个文件都是 `stepsDone` 的产物：重放时步骤
+ * 被跳过，`memory_merge` / `summary_invalidate` 只能从盘上恢复输入（§10.4）。
  */
-export function createArchiveWriter(_archiveUri: Uri, deps: ArchivePortsDeps): ArchiveWriter {
+export function createArchiveArtifacts(
+  _archiveUri: Uri,
+  deps: ArchivePortsDeps,
+): ArchiveArtifacts {
   return {
     async writeMemoryDiff(archiveUri: Uri, diff: MemoryDiff): Promise<void> {
       const absolute = join(toDiskPath(deps.dataDir, archiveUri), MEMORY_DIFF_FILE_NAME);
@@ -114,7 +127,73 @@ export function createArchiveWriter(_archiveUri: Uri, deps: ArchivePortsDeps): A
         deletes: diff.summary.totalDeletes,
       });
     },
+
+    async readMemoryDiff(archiveUri: Uri): Promise<MemoryDiff | null> {
+      const value = await readArtifact(archiveUri, deps, MEMORY_DIFF_FILE_NAME);
+      if (value === null || isMemoryDiff(value)) {
+        return value;
+      }
+      throw new ComemError(
+        'INTERNAL',
+        `memory_diff.json 内容不合法：${archiveUri.toString()}`,
+        { uri: archiveUri.toString() },
+      );
+    },
+
+    async writeMemoryOperations(
+      archiveUri: Uri,
+      operations: MemoryOperationsFile,
+    ): Promise<void> {
+      const absolute = join(toDiskPath(deps.dataDir, archiveUri), MEMORY_OPERATIONS_FILE_NAME);
+      await writeFile(absolute, `${JSON.stringify(operations, null, 2)}\n`, 'utf8');
+      deps.logger.debug('记忆抽取结果已写入', {
+        archive: archiveUri.toString(),
+        operations: operations.operations.length,
+      });
+    },
+
+    async readMemoryOperations(archiveUri: Uri): Promise<MemoryOperationsFile | null> {
+      const value = await readArtifact(archiveUri, deps, MEMORY_OPERATIONS_FILE_NAME);
+      if (value === null || isMemoryOperationsFile(value)) {
+        return value;
+      }
+      throw new ComemError(
+        'INTERNAL',
+        `memory_operations.json 内容不合法：${archiveUri.toString()}`,
+        { uri: archiveUri.toString() },
+      );
+    },
   };
+}
+
+/**
+ * 读归档目录里的一个 JSON 产物；不存在返回 `null`。
+ *
+ * 解析失败抛 `INTERNAL` 而不是当成「没有产物」：后者会让 rehydrate 把「文件坏了」
+ * 报成「步骤声称跑过但产物不存在」，指错了方向。
+ */
+async function readArtifact(
+  archiveUri: Uri,
+  deps: ArchivePortsDeps,
+  fileName: string,
+): Promise<unknown | null> {
+  const absolute = join(toDiskPath(deps.dataDir, archiveUri), fileName);
+  let raw: string;
+  try {
+    raw = await readFile(absolute, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new ComemError('INTERNAL', `${fileName} 不是合法 JSON：${archiveUri.toString()}`, {
+      uri: archiveUri.toString(),
+    });
+  }
 }
 
 async function readMessages(

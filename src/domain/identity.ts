@@ -103,6 +103,7 @@ const URI_RESERVED_NAMES: ReadonlySet<string> = new Set([
   '.meta.json',
   '.done',
   'memory_diff.json',
+  'memory_operations.json',
 ]);
 
 /**

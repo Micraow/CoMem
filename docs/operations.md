@@ -1067,6 +1067,7 @@ $COMEM_DATA_DIR/
 │                   └── archive_NNN/
 │                       ├── messages.jsonl   # 归档消息
 │                       ├── .meta.json       # phase1 状态 + stepsDone + taskId
+│                       ├── memory_operations.json # 抽取步骤的产物（重放恢复用，§10.4）
 │                       ├── memory_diff.json # 这次归档抽出了哪些记忆操作
 │                       └── .done            # 完成信号，最后写（§10.1）
 └── group/
@@ -1074,7 +1075,7 @@ $COMEM_DATA_DIR/
 ```
 
 **规则**：普通 `ls` 看不到 `.acl.json` / `.abstract.md` / `.overview.md` / `.meta.json` /
-`.done` / `memory_diff.json`——它们是元数据，不是目录内容。想看内容用 `GET /content/*`，
+`.done` / `memory_diff.json` / `memory_operations.json`——它们是元数据，不是目录内容。想看内容用 `GET /content/*`，
 想看元数据用 `GET /fs/ls` 之外的接口（§6.7）。
 
 ## 备份与恢复

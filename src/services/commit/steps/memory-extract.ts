@@ -34,7 +34,8 @@
 import { z } from 'zod';
 import type { ZodType } from 'zod';
 
-import type { SkippedMemoryOperation } from '../../../domain/archive.js';
+import type { MemoryOperationsFile, SkippedMemoryOperation } from '../../../domain/archive.js';
+import { ComemError } from '../../../domain/errors.js';
 import type { LlmPrompt } from '../../../domain/llm.js';
 import type { Logger } from '../../../domain/log.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
@@ -74,6 +75,18 @@ export interface MemoryExtractStepDeps {
   };
   readonly llm: {
     generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
+  };
+  /**
+   * 写/读 `archive_NNN/memory_operations.json`（保留名，必须按归档目录定位）。
+   *
+   * 抽取结果**必须落盘**：`stepsDone` 已经声称这一步跑完了，重放会跳过它。产物
+   * 只存在 `StepContext.state` 里的话，任何在之后发生的瞬态失败（供应商 503、
+   * 租约过期、进程重启）都会让 `memory_merge` 拿到空 `state`。
+   */
+  readonly archive: {
+    writeMemoryOperations(archiveUri: Uri, operations: MemoryOperationsFile): Promise<void>;
+    /** 不存在返回 `null`（正常状态：这一步还没跑过）。 */
+    readMemoryOperations(archiveUri: Uri): Promise<MemoryOperationsFile | null>;
   };
   readonly logger: Logger;
   /**
@@ -338,11 +351,35 @@ export function isMemoryExtractResult(value: unknown): value is MemoryExtractRes
   );
 }
 
+/** 抽取结果 → 落盘形状（§6.6 的 `memory_operations.json`）。 */
+export function toMemoryOperationsFile(
+  archiveUri: Uri,
+  result: MemoryExtractResult,
+): MemoryOperationsFile {
+  return {
+    archiveUri: archiveUri.toString(),
+    extractedAt: new Date().toISOString(),
+    operations: [...result.operations],
+    skipped: [...result.skipped],
+    memoryTypes: [...result.memoryTypes],
+  };
+}
+
+/** 落盘形状 → 抽取结果（`memoryTypes` 还原成 `Map`）。 */
+export function fromMemoryOperationsFile(file: MemoryOperationsFile): MemoryExtractResult {
+  return {
+    operations: file.operations,
+    skipped: file.skipped,
+    memoryTypes: new Map(file.memoryTypes),
+  };
+}
+
 export class MemoryExtractStep extends CommitStep {
   readonly name = 'memory_extract' as const;
 
   readonly #memory: MemoryExtractStepDeps['memory'];
   readonly #llm: MemoryExtractStepDeps['llm'];
+  readonly #archive: MemoryExtractStepDeps['archive'];
   readonly #logger: Logger;
   readonly #prefetchTopN: number;
 
@@ -350,6 +387,7 @@ export class MemoryExtractStep extends CommitStep {
     super();
     this.#memory = deps.memory;
     this.#llm = deps.llm;
+    this.#archive = deps.archive;
     this.#logger = deps.logger;
     this.#prefetchTopN = deps.prefetchTopN ?? DEFAULT_PREFETCH_TOP_N;
   }
@@ -366,6 +404,13 @@ export class MemoryExtractStep extends CommitStep {
 
     const output = await this.#llm.generateJson(prompt, extractOutputSchema);
     const result = resolveOperations(output, context.scopeUri, pages);
+
+    // 先落盘再进 `state`：`state` 只是本次运行的缓存，重放时靠的是归档目录里的
+    // 产物。反过来的话，写盘失败会留下一个「步骤已完成、产物不存在」的归档。
+    await this.#archive.writeMemoryOperations(
+      context.archiveUri,
+      toMemoryOperationsFile(context.archiveUri, result),
+    );
     context.state.set(EXTRACT_RESULT_KEY, result);
 
     this.#logger.info('记忆抽取完成', {
@@ -373,6 +418,28 @@ export class MemoryExtractStep extends CommitStep {
       pages: pages.size,
       operations: result.operations.length,
       skipped: result.skipped.length,
+    });
+  }
+
+  /**
+   * 重放：这一步在 `stepsDone` 里，但 `state` 是新的。从归档目录读回抽取结果。
+   *
+   * 读不到是真正的装配 / 数据错误——`stepsDone` 声称跑过，产物却不在。用
+   * `INVALID_ARGUMENT`（终态）而不是可重试错误：重放一次还是同一个缺失。
+   */
+  override async rehydrate(context: StepContext): Promise<void> {
+    const file = await this.#archive.readMemoryOperations(context.archiveUri);
+    if (file === null) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        `归档元数据声称 memory_extract 已完成，但 memory_operations.json 不存在：${context.archiveUri.toString()}`,
+        { archive: context.archiveUri.toString() },
+      );
+    }
+    context.state.set(EXTRACT_RESULT_KEY, fromMemoryOperationsFile(file));
+    this.#logger.debug('已从归档目录恢复抽取结果', {
+      archive: context.archiveUri.toString(),
+      operations: file.operations.length,
     });
   }
 

@@ -45,6 +45,8 @@ export class SummaryInvalidateStep extends CommitStep {
     const merged = context.state.get(MERGE_RESULT_KEY);
     if (!isMemoryMergeResult(merged)) {
       // 没有写入就没有脏：上游步骤可以直接跳过（例如归档里没有值得保留的记忆）。
+      // 重放时 `memory_merge` 会先 `rehydrate` 把结果从 `memory_diff.json` 读回来
+      // （§10.4），所以走到这里意味着这次提交真的没有写任何记忆。
       this.#logger.debug('没有记忆写入，跳过摘要失效', {
         archive: context.archiveUri.toString(),
       });

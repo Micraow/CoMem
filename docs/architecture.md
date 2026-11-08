@@ -289,7 +289,7 @@ comem://{scope}/{path}
 3. 拒绝 `.` 与 `..` 段
 4. 拒绝控制字符（`\u0000`–`\u001f`）与 `\`
 5. 单段 UTF-8 字节数 ≤ 255
-6. 拒绝保留名：`.abstract.md`、`.overview.md`、`.acl.json`、`.meta.json`、`.done`、`memory_diff.json` 不能作为普通文件名写入
+6. 拒绝保留名：`.abstract.md`、`.overview.md`、`.acl.json`、`.meta.json`、`.done`、`memory_diff.json`、`memory_operations.json` 不能作为普通文件名写入
 
 **为什么规范化必须唯一。** 权限按路径记录。同一文件有两个路径，就有两套权限，其中一套一定是错的。大小写、软链接、`..` 全部在规范化层解决，鉴权层只看规范化后的结果。
 
@@ -442,6 +442,7 @@ docker run -d \
 │                   │   ├── .meta.json
 │                   │   ├── .abstract.md
 │                   │   ├── .overview.md
+│                   │   ├── memory_operations.json
 │                   │   ├── memory_diff.json
 │                   │   └── .done
 │                   └── archive_002/
@@ -635,8 +636,9 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
 | `.meta.json` | 会话与归档的元数据（进度、步骤、任务 ID） | `SessionService` |
 | `.done` | 归档完成的唯一信号（§10.1） | `CommitPipeline` |
 | `memory_diff.json` | 这次归档抽取出了哪些记忆操作 | `MemoryMergeStep` |
+| `memory_operations.json` | 抽取步骤的产物，重放时恢复 `state`（§10.4） | `MemoryExtractStep` |
 
-**六种元数据文件的读写全部在 `adapters/fs/metadata-file.ts` 与 `adapters/fs/acl-file.ts`。** `services/` 只声明它需要的方法，具体落盘由适配层做——这条不是为了好看：`services/` 一旦碰 `node:fs`，它下面对 `domain/` 的所有判断就没法用内存数据穷举测试了（§4.2）。
+**七种元数据文件的读写全部在 `adapters/fs/metadata-file.ts` 与 `adapters/fs/acl-file.ts`。** `services/` 只声明它需要的方法，具体落盘由适配层做——这条不是为了好看：`services/` 一旦碰 `node:fs`，它下面对 `domain/` 的所有判断就没法用内存数据穷举测试了（§4.2）。
 
 **`.meta.json` 有两种形状**：会话级（`sessionId` / `commitCount` / `pendingTokens`）与归档级（`archiveId` / `phase1` / `stepsDone` / `skippedSteps` / `taskId`），见 §6.6。同一个文件名承载两种结构，靠路径区分——归档在 `history/archive_NNN/` 下。
 
@@ -1305,11 +1307,10 @@ commit(sessionId, options)
 │
 └─ 阶段二（后台）
     1. 生成归档摘要（L0/L1）
-    2. 从归档消息抽取记忆操作
-    3. 应用补丁合并
+    2. 从归档消息抽取记忆操作，写 memory_operations.json
+    3. 应用补丁合并，写 memory_diff.json
     4. 标记祖先摘要失效并重算
-    5. 写 memory_diff.json
-    6. 写 .done（最后写）
+    5. 写 .done（最后写）
 ```
 
 **消息的 part 类型。** 一条消息由若干 part 组成，抽取时都参与：
@@ -1326,6 +1327,8 @@ commit(sessionId, options)
 **为什么 `.done` 最后写。** `.done` 是唯一的完成信号。先写它就等于宣称成功。崩溃后重放时，看到 `.done` 就跳过整个归档。
 
 **每步完成都写 `.meta.json` 的 `stepsDone`。** 这样重放能跳过已完成的步骤，不会重复应用记忆操作。记忆操作不幂等——重复应用会造出重复记忆。
+
+**「跑过」必须同时意味着「产物还在」。** `stepsDone` 只记进度不记产物的话，重放会跳过产物只存在内存里的步骤，下游拿到空输入。每个步骤的产物都必须落在归档目录里，跳过时由 `CommitStep.rehydrate` 读回 `state`——见 §10.4 的表格。
 
 **部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把这两步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
 
@@ -1363,6 +1366,8 @@ commit(sessionId, options)
 abstract class CommitStep {
   abstract readonly name: string;
   abstract run(ctx: StepContext): Promise<void>;
+  /** 跳过已完成的步骤时，把只存在内存里的产物从归档目录读回 `state`（§10.4） */
+  async rehydrate(ctx: StepContext): Promise<void> {}
 }
 
 class CommitPipeline {
@@ -1370,7 +1375,13 @@ class CommitPipeline {
 
   async run(ctx: StepContext): Promise<void> {
     for (const step of this.steps) {
-      if (ctx.meta.stepsDone.includes(step.name)) continue;
+      if (ctx.meta.stepsDone.includes(step.name)) {
+        // 被跳过的步骤从未执行过，没有产物可恢复。
+        if (!ctx.meta.skippedSteps.some((skipped) => skipped.step === step.name)) {
+          await step.rehydrate(ctx);
+        }
+        continue;
+      }
       const skipReason = this.skippedSteps.get(step.name);
       if (skipReason !== undefined) {
         await ctx.markStepSkipped(step.name, skipReason);
@@ -1389,8 +1400,23 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 - 认领：`UPDATE task SET status='running', lease_until=now+60s WHERE id=? AND (status='pending' OR (status='running' AND lease_until < now))`
 - 心跳：每 20 秒续租
-- 启动扫描：`status='running' AND lease_until < now` → 重置为 `pending`，`attempts += 1`
+- 启动扫描：`status='running'` 且租约过期 → 重置为 `pending`，`attempts += 1`
 - 重试上限 3 次。超限置 `failed`，错误写进 `error` 字段和 `error.log`
+
+**每个步骤的产物必须持久化。** 这是设计约束，不是实现细节。`stepsDone` 是重放判据：重放会跳过它记下的步骤。如果某一步的产物只存在 `StepContext.state`（进程内存）里，那么这一步之后的**任何**一次瞬态失败（供应商 503、SQLite 写冲突、租约过期、进程重启）都会让重放跳过它、下游拿到空输入。记忆操作不幂等，所以步骤不能被重跑；能做的只有让「跳过」不丢产物。
+
+| 步骤 | 产物 | 位置 | 可恢复性 |
+|---|---|---|---|
+| `archive_summary` | 归档目录的 `.abstract.md` / `.overview.md`（开启工作记忆时） | 盘 | 跳过即恢复：产物本来就在盘上 |
+| `memory_extract` | 抽取出的操作列表 | `archive_NNN/memory_operations.json` | `rehydrate` 读回 `state` |
+| `memory_merge` | 真正写过 / 删过的文件集合 | `archive_NNN/memory_diff.json` | `rehydrate` 从 diff 推出 `written` / `deleted` |
+| `summary_invalidate` | 无（副作用是摘要的 `pendingChanges`） | — | 跳过即正确；重跑会重复累加脏计数 |
+
+`CommitStep.rehydrate(context)` 是这条契约的落点：管线跳过已完成的步骤时先调用它，把产物从归档目录读回 `state`，再继续。此前 `memory_extract` 与 `memory_merge` 的产物都只存在 `state` 里，`memory_merge` 之后的一次 503 会让归档**永久**停在「`stepsDone` 声称抽取完成、产物却不存在」，而错误信息写着「步骤顺序被改过」——完全指错方向。
+
+**被跳过的步骤（`skippedSteps`）不 `rehydrate`。** 它们从未执行过，没有产物；对它们调用会把「`providers.llm.default.type: disabled` 的正常跳过」在任务重放时误报成「产物不存在」。
+
+**盘上没有产物 = 真正的装配或数据错误。** `rehydrate` 抛 `INVALID_ARGUMENT`（终态，不重试），错误信息写明「归档元数据声称某一步已完成，但对应文件不存在」。重试同一个缺失没有意义。
 
 ### 10.5 工作记忆（Working Memory）
 
