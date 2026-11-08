@@ -1042,7 +1042,19 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 ### 8.7 召回账本（Recall Ledger）
 
-每个会话维护一份 `.recall_log.json`，记录「第 N 轮给模型投喂了哪些 URI、投喂到什么粒度」。下一轮召回时，`dedup_turns` 轮内投过的**不重复投**。
+**文件按作用域分片，条目按会话过滤。** 账本文件是 `{dataDir}/_meta/recall/{scopeKey}.recall_log.json`（如 `user_alice.recall_log.json`），每条记录带 `sessionId`，写的是「哪个会话在第 N 轮给模型投喂了哪些 URI、投喂到什么粒度」。下一轮召回时，**同一个会话**在 `dedup_turns` 轮内投过的**不重复投**。
+
+**为什么这样切。** 去重窗口是「本会话最近几轮投过什么」，按会话隔离是正确性要求：同一用户的两个会话共用一个 `turn` 时钟会互相污染——会话 A 跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，新会话前几轮召回被静默压制。但文件不能按会话切：每个会话一个文件会产生大量小文件，而按作用域分片让并发写落在不同文件上。
+
+**窗口过滤是三个条件的合取**：
+
+```
+entry.sessionId === sessionId && entry.turn > turn - dedup_turns && entry.turn <= turn
+```
+
+第三个条件排除「未来轮次」：账本可能已经写入了比当前 `turn` 更大的记录（另一个更靠后的调用先写回），不过滤会把它们当成「刚投过」。
+
+**向后兼容。** 旧账本里的条目没有 `sessionId`。读取时把它当作「不匹配任何会话」忽略，不抛错——账本是缓存，丢一条只影响去重强度，不影响正确性。
 
 三条规则：
 
@@ -1054,9 +1066,9 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 **与去重的区别**：8.6 的去重是**同一次请求内**的重复（同一 URI 命中多条记录）；账本是**跨请求**的重复（上一轮给过，这一轮不再给）。两者都要做。
 
-**写侧调用点。** `SearchService.context` 在组装完成后调用 `RecallLedger.record(scopeKey, turn, items)`，只记 `detail !== null` 的条目（规则 1）。`turn` 取会话消息总数（`SessionService.load` 的 `messageCount`），`scopeKey` 取会话 URI 的作用域部分（`user_{uid}`）。
+**写侧调用点。** `SearchService.context` 在组装完成后调用 `RecallLedger.record(scopeKey, sessionId, turn, items)`，只记 `detail !== null` 的条目（规则 1）。`turn` 取会话消息总数（`SessionService.load` 的 `messageCount`），`sessionId` 取会话 ID，`scopeKey` 取会话 URI 的作用域部分（`user_{uid}`）。
 
-**没有 `sessionId` 时不做跨轮去重，也不写账本。** 没有会话就没有东西能推进 `turn`；用一个常量会让账本在 500 条之后永久排除所有候选——静默失效比不去重更糟。`excludeDelivered` 是给离线脚本与测试的显式时钟（`scopeKey` + `turn`），传了它就不再读会话。
+**没有 `sessionId` 时不做跨轮去重，也不写账本。** 没有会话就没有东西能推进 `turn`；用一个常量会让账本在 500 条之后永久排除所有候选——静默失效比不去重更糟。`excludeDelivered` 是给离线脚本与测试的显式时钟（`scopeKey` + `sessionId` + `turn`），传了它就不再读会话。
 
 **账本写失败只记 `warn`，不影响检索。** 账本是去重辅助，不是真相来源；一次磁盘写失败不该让已经组装好的上下文丢掉。
 

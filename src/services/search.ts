@@ -213,21 +213,25 @@ export interface ContextOptions extends FindOptions {
    */
   readonly sessionId?: string;
   /**
-   * 显式指定去重时钟（`scopeKey` + `turn`）。
+   * 显式指定去重时钟（`scopeKey` + `sessionId` + `turn`）。
    *
    * 传了它就用它，不再从 `sessionId` 推导；离线脚本与测试用它钉住确定的值。
    * 不注入账本时传它会抛 `INVALID_ARGUMENT`——静默不去重比报错更难查。
    */
-  readonly excludeDelivered?: { readonly scopeKey: string; readonly turn: number };
+  readonly excludeDelivered?: DeliveryClock;
 }
 
 /**
- * 跨轮去重的时钟。`scopeKey` 决定账本文件，`turn` 决定去重窗口（§8.7）。
+ * 跨轮去重的时钟（§8.7）。
+ *
+ * `scopeKey` 决定账本文件（按作用域分片），`sessionId` 决定文件里哪些条目参与
+ * 本次去重，`turn` 决定去重窗口。
  *
  * `turn` 取会话消息总数，与 `SessionService.load` 的 `messageCount` 同一口径。
  */
 interface DeliveryClock {
   readonly scopeKey: string;
+  readonly sessionId: string;
   readonly turn: number;
 }
 
@@ -1257,7 +1261,11 @@ export class SearchService {
 
     try {
       const session = await this.#sessions.load(sessionUri);
-      return { scopeKey: scopeKeyOf(sessionUri), turn: session.messageCount };
+      return {
+        scopeKey: scopeKeyOf(sessionUri),
+        sessionId: options.sessionId,
+        turn: session.messageCount,
+      };
     } catch (error) {
       // 会话不可读（已归档、ID 写错）只影响去重，不该让整次检索失败。
       this.#logger.warn('会话不可读，本次不做跨轮去重', {
@@ -1283,7 +1291,7 @@ export class SearchService {
       return;
     }
     try {
-      await ledger.record(clock.scopeKey, clock.turn, items, {
+      await ledger.record(clock.scopeKey, clock.sessionId, clock.turn, items, {
         dedupTurns: this.#config.assembly.dedupTurns,
         maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
       });
@@ -1291,6 +1299,7 @@ export class SearchService {
       const failure = ComemError.from(error);
       this.#logger.warn('召回账本写入失败', {
         scopeKey: clock.scopeKey,
+        sessionId: clock.sessionId,
         turn: clock.turn,
         items: items.length,
         code: failure.code,
@@ -1549,10 +1558,10 @@ export class SearchService {
       throw new ComemError(
         'INVALID_ARGUMENT',
         'excludeDelivered 需要注入召回账本（SearchServiceDeps.ledger）。',
-        { scopeKey: clock.scopeKey, turn: clock.turn },
+        { scopeKey: clock.scopeKey, sessionId: clock.sessionId, turn: clock.turn },
       );
     }
-    return this.#ledger.recentlyDelivered(clock.scopeKey, clock.turn, {
+    return this.#ledger.recentlyDelivered(clock.scopeKey, clock.sessionId, clock.turn, {
       dedupTurns: this.#config.assembly.dedupTurns,
       maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
     });

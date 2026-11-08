@@ -56,6 +56,7 @@ class RecordingLogger implements Logger {
 
 const DATA_DIR = '/var/lib/comem';
 const SCOPE = 'user_alice';
+const SESSION = 'sess_a';
 
 function createLedger(): {
   readonly ledger: RecallLedger;
@@ -121,7 +122,14 @@ describe('RecallLedger.save', () => {
     const { ledger, store } = createLedger();
     const data = {
       version: 1 as const,
-      entries: [{ uri: 'comem://user/alice/memories/m1', turn: 4, detail: 'abstract' as const }],
+      entries: [
+        {
+          uri: 'comem://user/alice/memories/m1',
+          sessionId: SESSION,
+          turn: 4,
+          detail: 'abstract' as const,
+        },
+      ],
     };
 
     await ledger.save(SCOPE, data);
@@ -145,6 +153,7 @@ describe('RecallLedger.record', () => {
 
     await ledger.record(
       SCOPE,
+      SESSION,
       3,
       [
         { uri: 'comem://user/alice/memories/m1', detail: 'abstract' },
@@ -156,16 +165,28 @@ describe('RecallLedger.record', () => {
 
     const data = await ledger.load(SCOPE);
     expect(data.entries).toEqual([
-      { uri: 'comem://user/alice/memories/m1', turn: 3, detail: 'abstract' },
-      { uri: 'comem://user/alice/memories/m3', turn: 3, detail: 'full' },
+      { uri: 'comem://user/alice/memories/m1', sessionId: SESSION, turn: 3, detail: 'abstract' },
+      { uri: 'comem://user/alice/memories/m3', sessionId: SESSION, turn: 3, detail: 'full' },
     ]);
   });
 
   it('按 turn - 4 × dedupTurns 裁剪，更早的记录被丢弃', async () => {
     const { ledger } = createLedger();
 
-    await ledger.record(SCOPE, 1, [{ uri: 'comem://user/alice/memories/old', detail: 'abstract' }], options());
-    await ledger.record(SCOPE, 20, [{ uri: 'comem://user/alice/memories/new', detail: 'abstract' }], options());
+    await ledger.record(
+      SCOPE,
+      SESSION,
+      1,
+      [{ uri: 'comem://user/alice/memories/old', detail: 'abstract' }],
+      options(),
+    );
+    await ledger.record(
+      SCOPE,
+      SESSION,
+      20,
+      [{ uri: 'comem://user/alice/memories/new', detail: 'abstract' }],
+      options(),
+    );
 
     const data = await ledger.load(SCOPE);
     expect(data.entries.map((entry) => entry.uri)).toEqual(['comem://user/alice/memories/new']);
@@ -177,6 +198,7 @@ describe('RecallLedger.record', () => {
     for (const turn of [1, 2, 3, 4, 5, 6]) {
       await ledger.record(
         SCOPE,
+        SESSION,
         turn,
         [{ uri: `comem://user/alice/memories/p${turn}`, detail: 'abstract' }],
         options({ maxEntries: 3 }),
@@ -190,18 +212,28 @@ describe('RecallLedger.record', () => {
   it('turn 不合法时抛 INVALID_ARGUMENT', async () => {
     const { ledger } = createLedger();
 
-    await expect(ledger.record(SCOPE, -1, [], options())).rejects.toBeInstanceOf(ComemError);
-    await expect(ledger.record(SCOPE, 1.5, [], options())).rejects.toBeInstanceOf(ComemError);
+    await expect(ledger.record(SCOPE, SESSION, -1, [], options())).rejects.toBeInstanceOf(
+      ComemError,
+    );
+    await expect(ledger.record(SCOPE, SESSION, 1.5, [], options())).rejects.toBeInstanceOf(
+      ComemError,
+    );
+  });
+
+  it('sessionId 为空时抛 INVALID_ARGUMENT', async () => {
+    const { ledger } = createLedger();
+
+    await expect(ledger.record(SCOPE, '', 1, [], options())).rejects.toBeInstanceOf(ComemError);
   });
 
   it('裁剪参数不合法时抛 INVALID_ARGUMENT', async () => {
     const { ledger } = createLedger();
 
     await expect(
-      ledger.record(SCOPE, 1, [], { dedupTurns: -1, maxEntries: 500 }),
+      ledger.record(SCOPE, SESSION, 1, [], { dedupTurns: -1, maxEntries: 500 }),
     ).rejects.toBeInstanceOf(ComemError);
     await expect(
-      ledger.record(SCOPE, 1, [], { dedupTurns: 3, maxEntries: 0 }),
+      ledger.record(SCOPE, SESSION, 1, [], { dedupTurns: 3, maxEntries: 0 }),
     ).rejects.toBeInstanceOf(ComemError);
   });
 });
@@ -211,6 +243,7 @@ describe('RecallLedger.recentlyDelivered', () => {
     for (const turn of [5, 6, 7, 8]) {
       await ledger.record(
         SCOPE,
+        SESSION,
         turn,
         [{ uri: `comem://user/alice/memories/p${turn}`, detail: 'abstract' }],
         options(),
@@ -222,7 +255,7 @@ describe('RecallLedger.recentlyDelivered', () => {
     const { ledger } = createLedger();
     await seed(ledger);
 
-    const delivered = await ledger.recentlyDelivered(SCOPE, 10, options());
+    const delivered = await ledger.recentlyDelivered(SCOPE, SESSION, 10, options());
 
     expect([...delivered]).toEqual(['comem://user/alice/memories/p8']);
   });
@@ -232,12 +265,12 @@ describe('RecallLedger.recentlyDelivered', () => {
     await seed(ledger);
 
     // turn = 9 时窗口是 (6, 9]，7 与 8 在窗口内，6 出窗。
-    expect([...(await ledger.recentlyDelivered(SCOPE, 9, options()))]).toEqual([
+    expect([...(await ledger.recentlyDelivered(SCOPE, SESSION, 9, options()))]).toEqual([
       'comem://user/alice/memories/p7',
       'comem://user/alice/memories/p8',
     ]);
     // turn = 8 时窗口是 (5, 8]，第 5 轮投过的应该还能再投。
-    expect([...(await ledger.recentlyDelivered(SCOPE, 8, options()))]).toEqual([
+    expect([...(await ledger.recentlyDelivered(SCOPE, SESSION, 8, options()))]).toEqual([
       'comem://user/alice/memories/p6',
       'comem://user/alice/memories/p7',
       'comem://user/alice/memories/p8',
@@ -248,13 +281,59 @@ describe('RecallLedger.recentlyDelivered', () => {
     const { ledger } = createLedger();
     await seed(ledger);
 
-    expect(await ledger.recentlyDelivered(SCOPE, 10, options({ dedupTurns: 0 }))).toEqual(new Set());
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options({ dedupTurns: 0 }))).toEqual(new Set());
   });
 
   it('空账本返回空集合', async () => {
     const { ledger } = createLedger();
 
-    expect(await ledger.recentlyDelivered(SCOPE, 10, options())).toEqual(new Set());
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
+  });
+
+  it('sessionId 为空时抛 INVALID_ARGUMENT', async () => {
+    const { ledger } = createLedger();
+
+    await expect(ledger.recentlyDelivered(SCOPE, '', 10, options())).rejects.toBeInstanceOf(
+      ComemError,
+    );
+  });
+
+  it('同一作用域下另一个会话投过的 URI 不参与本次去重', async () => {
+    const { ledger } = createLedger();
+    const uriA = 'comem://user/alice/memories/from-session-a';
+    const uriB = 'comem://user/alice/memories/from-session-b';
+
+    await ledger.record(SCOPE, 'sess_a', 5, [{ uri: uriA, detail: 'abstract' }], options());
+    await ledger.record(SCOPE, 'sess_b', 5, [{ uri: uriB, detail: 'abstract' }], options());
+
+    // 会话 A 跑到第 6 轮时只看得到自己投过的 a；账本文件是共用的，条目不是。
+    expect([...(await ledger.recentlyDelivered(SCOPE, 'sess_a', 6, options()))]).toEqual([uriA]);
+    expect([...(await ledger.recentlyDelivered(SCOPE, 'sess_b', 6, options()))]).toEqual([uriB]);
+  });
+
+  it('比当前轮次更晚的记录被排除（未来轮次不参与去重）', async () => {
+    const { ledger } = createLedger();
+    const future = 'comem://user/alice/memories/future';
+
+    await ledger.record(SCOPE, SESSION, 10, [{ uri: future, detail: 'abstract' }], options());
+
+    // turn = 9 的窗口是 (6, 9]，第 10 轮在窗口之后，不是「刚投过」。
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 9, options())).toEqual(new Set());
+    // 上界是闭区间：第 10 轮本身在窗口内。
+    expect([...(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options()))]).toEqual([future]);
+  });
+
+  it('没有 sessionId 的旧条目被忽略，不抛错', async () => {
+    const { ledger, store } = createLedger();
+    store.files.set(
+      ledgerPath(SCOPE),
+      JSON.stringify({
+        version: 1,
+        entries: [{ uri: 'comem://user/alice/memories/legacy', turn: 9, detail: 'abstract' }],
+      }),
+    );
+
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
   });
 });
 

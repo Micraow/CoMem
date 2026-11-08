@@ -64,7 +64,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `retrieval.levelWeights.l0` / `.l1` / `.l2` | `1.15` / `1.05` / `1.00` | 层级加权（§8.5）。只用来在 BM25 接近时打破平局 |
 | `retrieval.queryFilters` | `[]` | sed 风格正则数组，作用在 prompt 上，产物才是查询（§8.8）。Hook 侧也有默认五条 |
 | `retrieval.assembly.maxTokens` | `1600` | 注入模型的 token 预算（§8.6）。模型上下文窄时调小 |
-| `retrieval.assembly.dedupTurns` | `3` | 这么多轮内投过的 URI 不再投（召回账本，§8.7） |
+| `retrieval.assembly.dedupTurns` | `3` | 同一会话这么多轮内投过的 URI 不再投（召回账本，§8.7） |
 | `retrieval.assembly.quotaPreset` | `coding` | `chat`（记忆 5 / 资料 3 / 技能 2）或 `coding`（3 / 5 / 2） |
 | `session.autoCommit.enabled` | `true` | 自动提交开关。关掉就只能手动 `commit` |
 | `session.autoCommit.pendingTokenThreshold` | `150000` | 未提交 token **严格大于**该值才提交（§10.2.1） |
@@ -418,7 +418,7 @@ $COMEM_DATA_DIR/
 │   ├── reconcile.log             # 索引双写失败的对账日志（§10.6）
 │   ├── tmp/                      # temp-upload 暂存：<uploadId> 与 <uploadId>.meta.json
 │   └── recall/
-│       └── <scope>.recall_log.json   # 召回账本：第 N 轮投喂过哪些 URI（§8.7）
+│       └── <scope>.recall_log.json   # 召回账本：哪个会话在第 N 轮投喂过哪些 URI（§8.7）
 ├── user/
 │   └── <uid>/
 │       ├── .acl.json             # 个人根的权限

@@ -1,10 +1,16 @@
 /**
  * 召回账本（架构文档 §8.7）。
  *
- * 每个会话一份 `{dataDir}/_meta/recall/{scopeKey}.recall_log.json`，记录「第 N 轮
- * 给模型投喂了哪些 URI、投喂到什么粒度」。下一轮召回时，`dedupTurns` 轮内投过的
- * 不重复投——否则用户连续问三个相关问题，同一段记忆会被完整注入三次，上下文浪费
- * 2/3，模型还可能因为重复而分心。
+ * 账本是**每个作用域一份** `{dataDir}/_meta/recall/{scopeKey}.recall_log.json`，
+ * 条目带 `sessionId`，记录「第 N 轮给模型投喂了哪些 URI、投喂到什么粒度」。下一轮
+ * 召回时，同一个会话在 `dedupTurns` 轮内投过的不重复投——否则用户连续问三个相关
+ * 问题，同一段记忆会被完整注入三次，上下文浪费 2/3，模型还可能因为重复而分心。
+ *
+ * **文件按作用域分片，条目按会话过滤。** 去重窗口是「本会话最近几轮投过什么」，
+ * 按会话隔离是正确性要求：同一用户的两个会话共用一个 `turn` 时钟会互相污染（会话
+ * A 跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，
+ * 新会话前几轮召回被静默压制）。但文件不能按会话切：每个会话一个文件会产生大量
+ * 小文件，而按作用域分片让并发写落在不同文件上。
  *
  * 与 §8.6 第 3 步的去重不是一回事：那里的去重是**同一次请求内**同一 URI 命中多条
  * 记录；这里的账本是**跨请求**的重复。
@@ -35,6 +41,11 @@ import type { Uri } from '../domain/uri.js';
 
 export interface RecallEntry {
   readonly uri: string;
+  /**
+   * 投喂时所在的会话。`null` 表示旧账本里的条目（没有这一列）：它不匹配任何
+   * 会话，读取时被忽略——账本是缓存，丢一条只影响去重强度，不影响正确性。
+   */
+  readonly sessionId: string | null;
   readonly turn: number;
   readonly detail: ContextDetail;
 }
@@ -136,8 +147,9 @@ function assertScopeKey(scopeKey: string): string {
 /**
  * URI 的作用域部分：`user_alice` / `group_eng`。
  *
- * 账本是**每个作用域一份**，不是每个 URI 一份：去重的是「同一个作用域里投过哪些
- * 地址」，粒度到根标识（用户或组）就够，再细会让每个项目各存一份几乎相同的账本。
+ * 账本文件是**每个作用域一份**，不是每个 URI 一份，也不是每个会话一份：去重的是
+ * 「同一个作用域里投过哪些地址」，粒度到根标识（用户或组）就够，再细会让每个项目
+ * 各存一份几乎相同的账本。会话隔离靠条目里的 `sessionId`，不靠文件切分。
  */
 export function scopeKeyOf(uri: Uri): string {
   return assertScopeKey(`${uri.scope}_${uri.rootId}`);
@@ -155,9 +167,14 @@ function parseEntry(value: unknown): RecallEntry {
   if (!isRecord(value)) {
     throw new Error('条目不是对象');
   }
-  const { uri, turn, detail } = value;
+  const { uri, sessionId, turn, detail } = value;
   if (typeof uri !== 'string' || uri === '') {
     throw new Error('条目缺少 uri');
+  }
+  // `sessionId` 是后加的列：缺失的旧条目按「不匹配任何会话」处理（`null`），
+  // 不抛错——账本是缓存，丢一条只影响去重强度。
+  if (sessionId !== undefined && (typeof sessionId !== 'string' || sessionId === '')) {
+    throw new Error('条目的 sessionId 不合法');
   }
   if (typeof turn !== 'number' || !Number.isInteger(turn) || turn < 0) {
     throw new Error('条目的 turn 必须是非负整数');
@@ -165,7 +182,7 @@ function parseEntry(value: unknown): RecallEntry {
   if (!isContextDetail(detail)) {
     throw new Error('条目的 detail 不合法');
   }
-  return { uri, turn, detail };
+  return { uri, sessionId: sessionId === undefined ? null : sessionId, turn, detail };
 }
 
 /** 账本文件的结构校验。坏数据一律抛，由 `load` 决定怎么降级。 */
@@ -191,6 +208,18 @@ function resolveOptions(options: RecallLedgerOptions): RecallLedgerOptions {
 function assertTurn(turn: number): void {
   if (!Number.isInteger(turn) || turn < 0) {
     throw new ComemError('INVALID_ARGUMENT', 'turn 必须是非负整数。', { turn });
+  }
+}
+
+/**
+ * 会话标识校验。
+ *
+ * 空串会让「没有 `sessionId` 的旧条目」与「当前会话」在过滤时混淆，而混淆的表现
+ * 是「去重静默失效」——正是这一层要消灭的那类失效。所以在入口挡住。
+ */
+function assertSessionId(sessionId: string): void {
+  if (sessionId === '') {
+    throw new ComemError('INVALID_ARGUMENT', 'sessionId 不能为空。', { sessionId });
   }
 }
 
@@ -240,17 +269,19 @@ export class RecallLedger {
   /**
    * 追加本轮投放，并裁剪。
    *
-   * 只记 `detail !== null` 的条目（§8.7 规则 1）。裁剪顺序是「先轮次、再条数」：
-   * 先丢掉早于 `turn - 4 × dedupTurns` 的记录，再在剩下的里面保留最新的
-   * `maxEntries` 条。
+   * 只记 `detail !== null` 的条目（§8.7 规则 1），条目带上本次的 `sessionId`。
+   * 裁剪顺序是「先轮次、再条数」：先丢掉早于 `turn - 4 × dedupTurns` 的记录，
+   * 再在剩下的里面保留最新的 `maxEntries` 条。
    */
   async record(
     scopeKey: string,
+    sessionId: string,
     turn: number,
     items: readonly DeliveredItem[],
     options: RecallLedgerOptions,
   ): Promise<void> {
     const key = assertScopeKey(scopeKey);
+    assertSessionId(sessionId);
     assertTurn(turn);
     const { dedupTurns, maxEntries } = resolveOptions(options);
 
@@ -263,7 +294,7 @@ export class RecallLedger {
       if (item.detail === null) {
         continue;
       }
-      delivered.push({ uri: item.uri, turn, detail: item.detail });
+      delivered.push({ uri: item.uri, sessionId, turn, detail: item.detail });
     }
 
     // 按 turn 升序稳定排序后再截尾：turn 可能乱序到达（重放、补录），保留「最新的」
@@ -277,24 +308,45 @@ export class RecallLedger {
   /**
    * 上一轮投过的 URI 集合，供 `assembly` 的 `excludedUris` 使用。
    *
-   * 窗口是 `entry.turn > turn - dedupTurns`，**严格大于**：第 `turn - dedupTurns`
-   * 轮投过的应该还能再投。「`dedupTurns` 轮内」数的是间隔，投在 `turn - dedupTurns`
-   * 的那一条距当前正好 `dedupTurns` 轮，已经出了窗口。`dedupTurns = 0` 时窗口为空，
-   * 等价于关掉去重。
+   * 过滤是三个条件的合取：
+   *
+   * ```
+   * entry.sessionId === sessionId && entry.turn > turn - dedupTurns && entry.turn <= turn
+   * ```
+   *
+   * - **会话相等**：同一作用域下的另一个会话投过什么与本次无关。少了它，会话 A
+   *   跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，
+   *   新会话前几轮召回被静默压制。
+   * - **下界 `entry.turn > turn - dedupTurns`**（严格大于）：第 `turn - dedupTurns`
+   *   轮投过的应该还能再投。「`dedupTurns` 轮内」数的是间隔，投在 `turn - dedupTurns`
+   *   的那一条距当前正好 `dedupTurns` 轮，已经出了窗口。`dedupTurns = 0` 时窗口为空，
+   *   等价于关掉去重。
+   * - **上界 `entry.turn <= turn`**：比当前轮次更晚的记录不属于「刚投过」，不过滤
+   *   会把未来轮次的投放当成历史，同样静默压制。
+   *
+   * 旧账本里的条目没有 `sessionId`（解析成 `null`），`null === sessionId` 恒假，
+   * 自然被忽略。
    */
   async recentlyDelivered(
     scopeKey: string,
+    sessionId: string,
     turn: number,
     options: RecallLedgerOptions,
   ): Promise<ReadonlySet<string>> {
     const key = assertScopeKey(scopeKey);
+    assertSessionId(sessionId);
     assertTurn(turn);
     const { dedupTurns } = resolveOptions(options);
 
     const data = await this.load(key);
     const windowStart = turn - dedupTurns;
     return new Set(
-      data.entries.filter((entry) => entry.turn > windowStart).map((entry) => entry.uri),
+      data.entries
+        .filter(
+          (entry) =>
+            entry.sessionId === sessionId && entry.turn > windowStart && entry.turn <= turn,
+        )
+        .map((entry) => entry.uri),
     );
   }
 

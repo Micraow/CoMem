@@ -503,7 +503,12 @@ describe('context 账本', () => {
     const ledger = {
       recentlyDelivered: vi.fn(async () => new Set(delivered)),
       record: vi.fn(
-        async (_scopeKey: string, _turn: number, items: readonly DeliveredItem[]) => {
+        async (
+          _scopeKey: string,
+          _sessionId: string,
+          _turn: number,
+          items: readonly DeliveredItem[],
+        ) => {
           for (const item of items) {
             // §8.7 规则 1：只给了 URI 的条目不记——模型没看到正文。
             if (item.detail !== null) {
@@ -517,18 +522,22 @@ describe('context 账本', () => {
     const service = await createService({ ledger });
     const first = await service.context(
       '记忆',
-      contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 4 } }),
+      contextOptions({
+        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 4 },
+      }),
     );
 
     expect(first.items.map((item) => item.uri)).toEqual([DOC]);
-    expect(ledger.record).toHaveBeenCalledWith('user_alice', 4, first.items, {
+    expect(ledger.record).toHaveBeenCalledWith('user_alice', 'sess_1', 4, first.items, {
       dedupTurns: CONFIG.assembly.dedupTurns,
       maxEntries: 500,
     });
 
     const second = await service.context(
       '记忆',
-      contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 4 } }),
+      contextOptions({
+        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 4 },
+      }),
     );
     expect(second.items).toEqual([]);
     expect(second.rendered).toBe('');
@@ -546,13 +555,20 @@ describe('context 账本', () => {
     const service = await createService({ ledger });
     const result = await service.context(
       '记忆',
-      contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 1 } }),
+      contextOptions({
+        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 1 },
+      }),
     );
 
     expect(result.items).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledWith(
       '召回账本写入失败',
-      expect.objectContaining({ scopeKey: 'user_alice', turn: 1, code: 'INTERNAL' }),
+      expect.objectContaining({
+        scopeKey: 'user_alice',
+        sessionId: 'sess_1',
+        turn: 1,
+        code: 'INTERNAL',
+      }),
     );
   });
 
@@ -563,7 +579,9 @@ describe('context 账本', () => {
     await expect(
       service.context(
         '记忆',
-        contextOptions({ excludeDelivered: { scopeKey: 'user_alice', turn: 1 } }),
+        contextOptions({
+          excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 1 },
+        }),
       ),
     ).rejects.toBeInstanceOf(ComemError);
   });
