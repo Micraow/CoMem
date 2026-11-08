@@ -47,9 +47,37 @@
  * `import type` 引用适配层（§4.2）。这里用最小结构端口 `AclDatabase` 自己开
  * `BEGIN IMMEDIATE`，`PermissionRepository` 的两个写入方法检测到外层已有事务会
  * 直接复用，所以两步仍是一个事务。
+ *
+ * ## 并发：ACL 写入的锁契约（§10.6）
+ *
+ * 每个写方法都是「读整个 `.acl.json` → 改 → 写回」。读在锁外时两个并发写者各拿
+ * 一份旧条目，后写者整份覆盖，先写者的条目**静默消失**：丢 `allow` 是拒绝服务，
+ * 丢 `deny` 是越权。所以互斥必须覆盖读与写两步，不能只包写盘。
+ *
+ * | 方法 | 锁 | 为什么是这个粒度 |
+ * |---|---|---|
+ * | `setAcl` / `ensureRootPreset` / `setGroupOwner` | `exact(uri)` | 互斥资源是**单个** `.acl.json` 文件；同目录的其它写入与它无关 |
+ * | `purgeSubtree` | `tree(root)` | 清空是「扫子树 → 改每个文件」，只锁单文件会在扫描与写入之间漏掉新建目录（残留授权） |
+ * | `purgePrincipal` | 全部目标 `exact`，**按 URI 升序** | 撤权横跨整库，没有单一路径能覆盖；多锁必须定序（见下） |
+ *
+ * **锁序规则（多锁时）**：按 `Uri.toString()` 字典序升序获取，释放顺序相反。
+ * `FileSystemService.move` 用同一条规则（两个方向相反的 `move` 不会互等）。任何
+ * 新增的多锁路径都必须沿用这条全局顺序，否则两个持有者各拿一把等另一把。
+ *
+ * **不能嵌套**：`PathLockManager` 不可重入（`adapters/fs/lock.ts` 按锁路径排队，
+ * 持有者再拿同路径的锁会等自己，5 秒后 `CONFLICT`）。所以 `purgeSubtree` 持
+ * `tree(root)` 期间**直接写文件**，不调 `setAcl`——后者要 `exact(descendant)`，
+ * 与祖先的 `tree` 冲突，会等一个永远不会释放的锁。`#writeAcl` 因此要求调用方
+ * 已经持有 `exact(uri)`。
+ *
+ * **不加锁的两个方法**：`getAcl` 只读（`.acl.json` 是原子 `rename`，读到的要么是
+ * 旧的完整内容要么是新的）；`materializeNode` / `syncEntriesFromFile` 只写派生表，
+ * 而且由 `IndexObserver` 在 `FileSystemService` 已持有 `exact` / `tree` 的回调里
+ * 调用——这里再加锁就是上面那条「自己等自己」。
  */
 
 import type { AclFile, AclFileEntry, AclFileStore } from '../adapters/fs/acl-file.js';
+import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { NodeRepository, NodeRow } from '../adapters/sqlite/node-repository.js';
 import type {
   AclEntryRow,
@@ -134,6 +162,25 @@ export interface AclSnapshot {
   readonly effective: ReadonlyMap<string, ReadonlySet<AclLevel>>;
 }
 
+/** 一份 ACL 的领域形态（`setAcl` 的输入与转换函数的参数）。 */
+export interface AclState {
+  readonly mode: AclMode;
+  readonly entries: readonly AclEntry[];
+}
+
+/**
+ * `setAcl` 的输入：完整快照，或在锁内基于最新快照计算的转换函数。
+ *
+ * 两种形态对应两种语义，不能混为一谈：
+ *
+ * - **完整快照**是「整份替换」（`PUT /acl` 的编辑器语义）。两个并发调用是后写者
+ *   赢——但那是调用方选择要覆盖，不是丢更新。锁只能保证两次写入不交错。
+ * - **转换函数**是「在现有条目上加/减一条」（`/acl/grant`、`/acl/revoke`）。读发生
+ *   在 `exact(uri)` 锁内，两个并发 grant 各自看到对方写入的结果；锁外的
+ *   `getAcl` + `setAcl` 会让后写者拿一份旧快照整份覆盖，先写者的条目静默消失。
+ */
+export type AclInput = AclState | ((current: AclState) => AclState);
+
 export interface AclServiceOptions {
   readonly dataDir: string;
   readonly db: AclDatabase;
@@ -141,6 +188,8 @@ export interface AclServiceOptions {
   readonly permissions: PermissionRepository;
   readonly nodes: NodeRepository;
   readonly logger: Logger;
+  /** 路径锁（§10.6）。ACL 写入是读-改-写，锁必须覆盖读写两步，见文件头。 */
+  readonly locks: PathLockManager;
   /** §18 的 acl.groupDefaultLevel，默认 'write' */
   readonly groupDefaultLevel?: AclLevel;
 }
@@ -314,6 +363,7 @@ export class AclService implements Authorizer {
   readonly #permissions: PermissionRepository;
   readonly #nodes: NodeRepository;
   readonly #logger: Logger;
+  readonly #locks: PathLockManager;
   readonly #groupDefaultLevel: AclLevel;
 
   constructor(options: AclServiceOptions) {
@@ -330,6 +380,7 @@ export class AclService implements Authorizer {
     this.#permissions = options.permissions;
     this.#nodes = options.nodes;
     this.#logger = options.logger;
+    this.#locks = options.locks;
     this.#groupDefaultLevel = options.groupDefaultLevel ?? DEFAULT_GROUP_LEVEL;
   }
 
@@ -380,6 +431,9 @@ export class AclService implements Authorizer {
    * `subject` 只用于日志：授权判定用 `principals`。管理面可能以管理员身份操作
    * 别人的节点，所以这里不把 `subject` 拼进主体集合——那会让「管理员是谁」和
    * 「被操作的是谁的节点」混成一份身份。
+   *
+   * **不加锁**：只读。`.acl.json` 走临时文件 + `rename` 原子替换，读到的要么是
+   * 旧的完整内容，要么是新的完整内容（`adapters/fs/acl-file.ts` 「原子写」）。
    */
   async getAcl(
     uri: Uri,
@@ -419,22 +473,61 @@ export class AclService implements Authorizer {
    *
    * 顺序见文件头：先写 `.acl.json`（真相），再在一个事务里重算物化表与反查表。
    * 写文件失败时不会进入事务，`node_permission` 保持原样。
+   *
+   * `exact(uri)` 覆盖整个写入：本方法只改**一个**目录的 `.acl.json`，同目录的
+   * 并发 `setAcl` 必须排队，否则后写者整份覆盖，先写者的条目消失（§10.6 的锁
+   * 契约）。`createParentDirectory` 让新建目录的锁文件有地方放——否则
+   * `ensureLockDirectory` 返回「没有地方放锁」，两个写者会在新路径上同时进去。
    */
   async setAcl(
     uri: Uri,
-    acl: { readonly mode: AclMode; readonly entries: readonly AclEntry[] },
+    input: AclInput,
     subject: string,
     principals: readonly string[],
   ): Promise<void> {
     await this.#assertManage(uri, principals);
     this.#assertDirectory(uri);
 
-    if (acl.mode !== 'inherit' && acl.mode !== 'restricted') {
-      throw new ComemError('INVALID_ARGUMENT', `ACL 模式不合法：${String(acl.mode)}`, {
-        mode: acl.mode,
+    await this.#locks.withLock(
+      uri,
+      'exact',
+      async () => {
+        // 转换函数必须在锁内基于**最新**读到的快照求值：锁外的 `getAcl` + 整份
+        // `setAcl` 正是本次要修的丢更新——两个并发 grant 各拿一份旧条目，后写者
+        // 整份覆盖，先写者的条目静默消失。整份快照输入则直接沿用调用方给的值。
+        const acl = typeof input === 'function' ? input(await this.#readState(uri)) : input;
+        const file = this.#toFile(acl);
+        const permissions = await this.#writeAcl(uri, file);
+
+        this.#logger.info('ACL 已更新', {
+          uri: uri.toString(),
+          subject,
+          mode: file.mode,
+          entries: file.entries.length,
+          permissions,
+        });
+      },
+      { createParentDirectory: true },
+    );
+  }
+
+  /** 读出目录当前的领域形态（转换函数的输入）。 */
+  async #readState(uri: Uri): Promise<AclState> {
+    const file = await this.#aclFile.read(uri);
+    return {
+      mode: file?.mode ?? 'inherit',
+      entries: file?.entries.map(fromAclFileEntry) ?? [],
+    };
+  }
+
+  /** 领域形态 → 磁盘文件，逐项校验主体与效果。 */
+  #toFile(state: AclState): AclFile {
+    if (state.mode !== 'inherit' && state.mode !== 'restricted') {
+      throw new ComemError('INVALID_ARGUMENT', `ACL 模式不合法：${String(state.mode)}`, {
+        mode: state.mode,
       });
     }
-    const entries: AclFileEntry[] = acl.entries.map((entry) => {
+    const entries: AclFileEntry[] = state.entries.map((entry) => {
       // 安全边界：主体与效果都是调用方输入，进 `.acl.json` 之前逐项校验。
       // 一个 `user:*` 之外的畸形主体如果被静默写入，磁盘上就多一条谁也解释不了
       // 的授权；非法的 effect 会被下次读取拒绝，但那时写盘已经发生了。
@@ -446,17 +539,7 @@ export class AclService implements Authorizer {
       }
       return { principal: entry.principal, level: levelName(entry.level), effect: entry.effect };
     });
-    const file: AclFile = { mode: acl.mode, entries };
-
-    const permissions = await this.#writeAcl(uri, file);
-
-    this.#logger.info('ACL 已更新', {
-      uri: uri.toString(),
-      subject,
-      mode: file.mode,
-      entries: file.entries.length,
-      permissions,
-    });
+    return { mode: state.mode, entries };
   }
 
   /**
@@ -476,6 +559,11 @@ export class AclService implements Authorizer {
    *
    * 返回的 `ownerMissing` 告诉调用方「这个组还没有人管」——group 作用域没有 owner
    * 时只有 `group:{gid} = write`，没有主体能求 manage，组空间无法改 ACL。
+   *
+   * **幂等判断在 `exact(uri)` 锁内做。** 这是读-改-写：锁外的 `existing` 会让两个
+   * 并发创建（用户/组创建时自动跑，与管理员改 ACL 撞车）各自看到「没有预置」，
+   * 后写者整份覆盖。新组根目录可能还不存在，所以必须
+   * `createParentDirectory: true`，否则锁文件没有地方放、等于没锁。
    */
   async ensureRootPreset(uri: Uri, ownerUserId: string | null = null): Promise<RootPreset> {
     if (!uri.isRoot) {
@@ -503,12 +591,6 @@ export class AclService implements Authorizer {
       });
     }
 
-    const existing = await this.#aclFile.read(uri);
-    if (existing !== null && this.#hasRootPreset(uri, existing)) {
-      this.#logger.debug('根预置已存在，跳过', { uri: uri.toString() });
-      return preset;
-    }
-
     const file: AclFile = {
       mode: 'inherit',
       entries: preset.entries.map((entry) => ({
@@ -517,16 +599,30 @@ export class AclService implements Authorizer {
         effect: entry.effect,
       })),
     };
-    const permissions = await this.#writeAcl(uri, file);
 
-    this.#logger.info('根预置已写入', {
-      uri: uri.toString(),
-      scope: uri.scope,
-      ownerMissing: preset.ownerMissing,
-      entries: file.entries.length,
-      permissions,
-    });
-    return preset;
+    return this.#locks.withLock(
+      uri,
+      'exact',
+      async () => {
+        const existing = await this.#aclFile.read(uri);
+        if (existing !== null && this.#hasRootPreset(uri, existing)) {
+          this.#logger.debug('根预置已存在，跳过', { uri: uri.toString() });
+          return preset;
+        }
+
+        const permissions = await this.#writeAcl(uri, file);
+
+        this.#logger.info('根预置已写入', {
+          uri: uri.toString(),
+          scope: uri.scope,
+          ownerMissing: preset.ownerMissing,
+          entries: file.entries.length,
+          permissions,
+        });
+        return preset;
+      },
+      { createParentDirectory: true },
+    );
   }
 
   /** 根预置是否已经应用。见 `ensureRootPreset` 的注释。 */
@@ -549,6 +645,9 @@ export class AclService implements Authorizer {
    *
    * 保留其他条目与 `mode`：owner 变更不应该顺手把组根的 `restricted` 或别人
    * 的授权冲掉。组条目已存在时保留它的级别（管理员可能把它降成了 read）。
+   *
+   * 整个「读 `previous` → 拼条目 → 写」在 `exact(uri)` 锁内：锁外的 `previous`
+   * 会让并发的 `setAcl` / `ensureRootPreset` 条目被整份覆盖。
    */
   async setGroupOwner(
     uri: Uri,
@@ -564,7 +663,6 @@ export class AclService implements Authorizer {
     }
     assertOwnerUserId(nextOwnerId);
 
-    const previous = await this.#aclFile.read(uri);
     const preset = rootPreset(uri, {
       ownerUserId: nextOwnerId,
       groupLevel: this.#groupDefaultLevel,
@@ -573,29 +671,37 @@ export class AclService implements Authorizer {
       previousOwnerId === null ? null : userPrincipal(previousOwnerId);
     const nextOwnerPrincipal = userPrincipal(nextOwnerId);
 
-    const entries: AclFileEntry[] = (previous?.entries ?? []).filter(
-      (entry) =>
-        entry.principal !== previousOwnerPrincipal && entry.principal !== nextOwnerPrincipal,
-    );
-    for (const entry of preset.entries) {
-      // 已经有的条目保留原级别：管理员把组根降成 read 之后改 owner 不应该恢复成 write。
-      if (entries.some((candidate) => candidate.principal === entry.principal)) {
-        continue;
-      }
-      entries.push({
-        principal: entry.principal,
-        level: levelName(entry.level),
-        effect: entry.effect,
-      });
-    }
-    const file: AclFile = { mode: previous?.mode ?? 'inherit', entries };
+    await this.#locks.withLock(
+      uri,
+      'exact',
+      async () => {
+        const previous = await this.#aclFile.read(uri);
+        const entries: AclFileEntry[] = (previous?.entries ?? []).filter(
+          (entry) =>
+            entry.principal !== previousOwnerPrincipal && entry.principal !== nextOwnerPrincipal,
+        );
+        for (const entry of preset.entries) {
+          // 已经有的条目保留原级别：管理员把组根降成 read 之后改 owner 不应该恢复成 write。
+          if (entries.some((candidate) => candidate.principal === entry.principal)) {
+            continue;
+          }
+          entries.push({
+            principal: entry.principal,
+            level: levelName(entry.level),
+            effect: entry.effect,
+          });
+        }
+        const file: AclFile = { mode: previous?.mode ?? 'inherit', entries };
 
-    await this.#writeAcl(uri, file);
-    this.#logger.info('组 owner 预置已更新', {
-      uri: uri.toString(),
-      previousOwnerId,
-      nextOwnerId,
-    });
+        await this.#writeAcl(uri, file);
+        this.#logger.info('组 owner 预置已更新', {
+          uri: uri.toString(),
+          previousOwnerId,
+          nextOwnerId,
+        });
+      },
+      { createParentDirectory: true },
+    );
   }
 
   /**
@@ -619,61 +725,75 @@ export class AclService implements Authorizer {
    * 扫描上限沿用 `MAX_PURGE_SCAN_DIRECTORIES`，达到上限时记 warn 并继续——与
    * `purgePrincipal` 同一个判据：撤权失败会让组删不掉，失败方向更差。返回被改写的
    * `.acl.json` 文件数。空操作返回 0。
+   *
+   * **整棵子树一把 `tree(root)`。** 清空是「扫子树 → 改每个 `.acl.json`」：只锁单个
+   * 文件时，扫描之后新建的目录不在快照里，它的授权会残留——组删了、同 ID 重建后
+   * 旧授权立刻生效。`tree` 与子树里任何 `exact` 写入互斥（`domain/lock.ts` 的
+   * `conflicts`），窗口因此收口。
+   *
+   * **锁内不能回调 `setAcl`。** 后者要 `exact(descendant)`，与这里的 `tree(root)`
+   * 冲突，而 `PathLockManager` 不可重入——会等一个自己持有的锁直到 5 秒超时。所以
+   * 这里直接写文件（`#restoreAclFiles` 也一样，回滚时锁仍被持有）。
+   *
+   * **代价**：`scanDirectories` 扫的是整个数据根，锁持有时间包含这次扫描。撤权是
+   * 低频管理操作，用「整库扫描期间挡住该子树写入」换「不会残留授权」，值得。
    */
   async purgeSubtree(root: Uri): Promise<number> {
     const prefix = root.toString();
 
-    const scan = await this.#aclFile.scanDirectories({
-      maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
-    });
-    if (scan.truncated) {
-      this.#logger.warn('清空子树授权达到目录上限，上限之外的 .acl.json 未检查', {
+    return this.#locks.withLock(root, 'tree', async () => {
+      const scan = await this.#aclFile.scanDirectories({
+        maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
+      });
+      if (scan.truncated) {
+        this.#logger.warn('清空子树授权达到目录上限，上限之外的 .acl.json 未检查', {
+          uri: prefix,
+          limit: MAX_PURGE_SCAN_DIRECTORIES,
+          scannedDirectories: scan.directoriesScanned,
+          aclFiles: scan.uris.length,
+        });
+      }
+
+      const rewrites: PurgeRewrite[] = [];
+      for (const uri of scan.uris) {
+        const value = uri.toString();
+        if (value !== prefix && !value.startsWith(`${prefix}/`)) {
+          continue;
+        }
+        const previous = await this.#aclFile.read(uri);
+        if (previous === null || previous.entries.length === 0) {
+          continue;
+        }
+        rewrites.push({ uri, previous, next: { mode: previous.mode, entries: [] } });
+      }
+
+      this.#db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const rewrite of rewrites) {
+          await this.#aclFile.write(rewrite.uri, rewrite.next);
+        }
+        const permissions = await this.#materializeSubtree(root);
+        this.#runInTransaction(() => {
+          this.#permissions.replaceSubtree(prefix, permissions);
+          this.#permissions.deleteEntriesSubtree(prefix);
+        });
+        this.#db.exec('COMMIT');
+      } catch (error) {
+        this.#db.exec('ROLLBACK');
+        await this.#restoreAclFiles(rewrites);
+        throw error;
+      }
+
+      this.#logger.info('子树授权已清空', {
         uri: prefix,
-        limit: MAX_PURGE_SCAN_DIRECTORIES,
+        files: rewrites.length,
+        entries: rewrites.reduce((total, rewrite) => total + rewrite.previous.entries.length, 0),
         scannedDirectories: scan.directoriesScanned,
         aclFiles: scan.uris.length,
+        truncated: scan.truncated,
       });
-    }
-
-    const rewrites: PurgeRewrite[] = [];
-    for (const uri of scan.uris) {
-      const value = uri.toString();
-      if (value !== prefix && !value.startsWith(`${prefix}/`)) {
-        continue;
-      }
-      const previous = await this.#aclFile.read(uri);
-      if (previous === null || previous.entries.length === 0) {
-        continue;
-      }
-      rewrites.push({ uri, previous, next: { mode: previous.mode, entries: [] } });
-    }
-
-    this.#db.exec('BEGIN IMMEDIATE');
-    try {
-      for (const rewrite of rewrites) {
-        await this.#aclFile.write(rewrite.uri, rewrite.next);
-      }
-      const permissions = await this.#materializeSubtree(root);
-      this.#runInTransaction(() => {
-        this.#permissions.replaceSubtree(prefix, permissions);
-        this.#permissions.deleteEntriesSubtree(prefix);
-      });
-      this.#db.exec('COMMIT');
-    } catch (error) {
-      this.#db.exec('ROLLBACK');
-      await this.#restoreAclFiles(rewrites);
-      throw error;
-    }
-
-    this.#logger.info('子树授权已清空', {
-      uri: prefix,
-      files: rewrites.length,
-      entries: rewrites.reduce((total, rewrite) => total + rewrite.previous.entries.length, 0),
-      scannedDirectories: scan.directoriesScanned,
-      aclFiles: scan.uris.length,
-      truncated: scan.truncated,
+      return rewrites.length;
     });
-    return rewrites.length;
   }
 
   /**
@@ -731,41 +851,61 @@ export class AclService implements Authorizer {
       const rightUri = right.toString();
       return leftUri < rightUri ? -1 : leftUri > rightUri ? 1 : 0;
     });
-    const rewrites: PurgeRewrite[] = [];
-    for (const uri of ordered) {
-      const previous = await this.#aclFile.read(uri);
-      if (previous === null) {
-        // 节点被外部删除、或反查表比文件新：没有文件要改，行仍然要删。
-        continue;
-      }
-      const entries = previous.entries.filter((entry) => entry.principal !== principal);
-      if (entries.length === previous.entries.length) {
-        continue;
-      }
-      rewrites.push({ uri, previous, next: { mode: previous.mode, entries } });
-    }
 
-    this.#db.exec('BEGIN IMMEDIATE');
+    // 撤权横跨整库，没有单一路径能覆盖全部目标，所以逐目录 `exact`。**多锁必须
+    // 定序**（§10.6）：全部按 URI 升序获取、反序释放，两个并发撤权不会各持一把
+    // 等另一把。`FileSystemService.move` 用同一条全局顺序。
+    //
+    // 锁在扫描之后才拿：扫描本身是只读的目录遍历，把它放进锁里只会拉长持有时间，
+    // 挡不住「扫描之后新建的目录」——那是撤权的已知边界（`MAX_PURGE_SCAN_DIRECTORIES`
+    // 的截断同理），由 `purgeSubtree` 的 `tree` 锁在删组路径上兜底。
+    const releases: (() => void)[] = [];
     try {
-      for (const rewrite of rewrites) {
-        await this.#aclFile.write(rewrite.uri, rewrite.next);
+      for (const uri of ordered) {
+        releases.push(await this.#locks.acquire(uri, 'exact'));
       }
-      this.#deletePrincipalRows(principal);
-      this.#db.exec('COMMIT');
-    } catch (error) {
-      this.#db.exec('ROLLBACK');
-      await this.#restoreAclFiles(rewrites);
-      throw error;
-    }
 
-    this.#logger.info('主体授权已撤销', {
-      principal,
-      directories: rewrites.length,
-      scannedDirectories: scan.directoriesScanned,
-      aclFiles: scan.uris.length,
-      truncated: scan.truncated,
-    });
-    return rewrites.length;
+      const rewrites: PurgeRewrite[] = [];
+      for (const uri of ordered) {
+        const previous = await this.#aclFile.read(uri);
+        if (previous === null) {
+          // 节点被外部删除、或反查表比文件新：没有文件要改，行仍然要删。
+          continue;
+        }
+        const entries = previous.entries.filter((entry) => entry.principal !== principal);
+        if (entries.length === previous.entries.length) {
+          continue;
+        }
+        rewrites.push({ uri, previous, next: { mode: previous.mode, entries } });
+      }
+
+      this.#db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const rewrite of rewrites) {
+          await this.#aclFile.write(rewrite.uri, rewrite.next);
+        }
+        this.#deletePrincipalRows(principal);
+        this.#db.exec('COMMIT');
+      } catch (error) {
+        this.#db.exec('ROLLBACK');
+        // 回滚仍在锁内：锁外回滚会覆盖并发写者刚写进去的条目。
+        await this.#restoreAclFiles(rewrites);
+        throw error;
+      }
+
+      this.#logger.info('主体授权已撤销', {
+        principal,
+        directories: rewrites.length,
+        scannedDirectories: scan.directoriesScanned,
+        aclFiles: scan.uris.length,
+        truncated: scan.truncated,
+      });
+      return rewrites.length;
+    } finally {
+      for (const release of releases.reverse()) {
+        release();
+      }
+    }
   }
 
   /**
@@ -778,6 +918,12 @@ export class AclService implements Authorizer {
    *
    * 没有 `.acl.json` 时什么都不做：按文件为准，没有文件就没有直接授权（继承来的
    * 权限不是这个节点的直接条目）。返回是否写了行，供观察者日志与测试判断。
+   *
+   * **不加锁，而且不能加。** 调用方是 `IndexObserver.onNodeWritten` /
+   * `onNodeMoved`，它们在 `FileSystemService` 已经持有 `exact(uri)` / `tree(uri)`
+   * 的回调里执行；这里再拿同一路径的锁就是「自己等自己」，5 秒后 `CONFLICT`。
+   * 写入的是派生表（`acl_entry`），按文件重建是幂等的，交错的后果是反查表短暂
+   * 落后于文件——`purgePrincipal` 除了反查表还会扫文件系统，这条路径不会漏撤。
    */
   async syncEntriesFromFile(uri: Uri): Promise<boolean> {
     const file = await this.#aclFile.read(uri);
@@ -900,6 +1046,10 @@ export class AclService implements Authorizer {
    * `setAcl` / `ensureRootPreset` / `setGroupOwner` 共用这一条顺序：先求值、再写
    * 文件、最后在事务里替换两张派生表。文件写失败时事务根本不会开始，物化表保持
    * 旧值（见文件头「写文件的顺序」）。
+   *
+   * **调用方必须已经持有 `exact(uri)`。** 本方法不自己拿锁：三个入口的读都在锁
+   * 内，锁若加在这里就只覆盖了写。`purgeSubtree` / `purgePrincipal` 也不调它——
+   * 它们在 `tree(root)` / 逐个 `exact` 里直接写文件（文件头「并发」）。
    */
   async #writeAcl(uri: Uri, file: AclFile): Promise<number> {
     // 求值只读文件，先算完再落盘：这样文件写失败时没有任何物化副作用。
@@ -972,6 +1122,10 @@ export class AclService implements Authorizer {
    *
    * 与 `setAcl` 的整棵子树重算共用 `materializePermissions`，保证两条路径的
    * 谓词一致。
+   *
+   * **不加锁。** 只写派生表（`node_permission`），结果完全由 `.acl.json` 决定，
+   * 重算是幂等的；加锁反而会死锁——调用方 `IndexObserver` / `SummaryService` 在
+   * `FileSystemService` 已持有 `exact` / `tree` 的回调里调它（文件头「并发」）。
    */
   async materializeNode(uri: Uri): Promise<void> {
     const kind = this.#nodes.get(uri.toString())?.kind ?? 'directory';
@@ -1042,6 +1196,9 @@ export class AclService implements Authorizer {
    *
    * 尽力而为：恢复失败只记 `error`，原始错误继续抛。掩盖原始错误会让「为什么
    * 删账号失败」变成「为什么磁盘上有两份不同的授权」，后者更难定位。
+   *
+   * **调用方必须仍持有这些 URI 的锁。** 回滚是在并发写者可能刚写过的新内容上再
+   * 覆盖一次；锁外回滚会把对方的条目一起抹掉，那正是本次要修的缺陷。
    */
   async #restoreAclFiles(rewrites: readonly PurgeRewrite[]): Promise<void> {
     for (const rewrite of rewrites) {

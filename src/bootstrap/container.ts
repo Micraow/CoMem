@@ -762,6 +762,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     permissions,
     nodes,
     logger,
+    // ACL 写入是「读整个 .acl.json → 改 → 写」，锁必须覆盖读写两步（§10.6）。
+    locks,
     groupDefaultLevel: config.acl.groupDefaultLevel === 'write' ? 3 : 1,
   });
 

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
+import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
@@ -14,12 +15,12 @@ import {
   type PermissionRow,
 } from '../../../src/adapters/sqlite/permission-repository.js';
 import { levelSatisfies } from '../../../src/domain/acl.js';
-import type { AclEntry, AclLevel, AclMode, RootPreset } from '../../../src/domain/acl.js';
+import type { AclEntry, AclLevel, RootPreset } from '../../../src/domain/acl.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { NodeKind } from '../../../src/domain/node.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { AclService, type AclSnapshot } from '../../../src/services/acl.js';
+import { AclService, type AclInput, type AclSnapshot } from '../../../src/services/acl.js';
 
 const ROOT = 'comem://user/alice';
 const GROUP_ROOT = 'comem://group/eng';
@@ -30,6 +31,7 @@ let aclFile: AclFileStore;
 let permissions: PermissionRepository;
 let nodes: NodeRepository;
 let logger: Logger;
+let locks: PathLockManager;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-acl-'));
@@ -39,6 +41,8 @@ beforeEach(async () => {
   aclFile = new AclFileStore({ dataDir, logger });
   permissions = new PermissionRepository({ db, logger });
   nodes = new NodeRepository({ db, logger });
+  // 轮询间隔压到 1ms：并发用例靠锁排队，默认 25ms 会把等待放大到可测量。
+  locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 1 });
 });
 
 afterEach(async () => {
@@ -69,15 +73,12 @@ interface BoundAcl {
   check(uri: Uri, action: AclLevel): Promise<boolean>;
   filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>>;
   getAcl(uri: Uri, subject: string): Promise<AclSnapshot>;
-  setAcl(
-    uri: Uri,
-    acl: { readonly mode: AclMode; readonly entries: readonly AclEntry[] },
-    subject: string,
-  ): Promise<void>;
+  setAcl(uri: Uri, input: AclInput, subject: string): Promise<void>;
   ensureRootPreset(uri: Uri, ownerUserId?: string | null): Promise<RootPreset>;
   setGroupOwner(uri: Uri, previousOwnerId: string | null, nextOwnerId: string): Promise<void>;
   materializeNode(uri: Uri): Promise<void>;
   purgePrincipal(principal: string): Promise<number>;
+  purgeSubtree(root: Uri): Promise<number>;
   resolvePrincipals(subject: string, groups: readonly string[]): readonly string[];
 }
 
@@ -97,6 +98,7 @@ function createService(
     permissions,
     nodes,
     logger,
+    locks,
     groupDefaultLevel: options.groupDefaultLevel,
   });
   const principals = acl.resolvePrincipals(subject, groups);
@@ -110,6 +112,7 @@ function createService(
       acl.setGroupOwner(uri, previousOwnerId, nextOwnerId),
     materializeNode: (uri) => acl.materializeNode(uri),
     purgePrincipal: (principal) => acl.purgePrincipal(principal),
+    purgeSubtree: (root) => acl.purgeSubtree(root),
     resolvePrincipals: (requester, requesterGroups) =>
       acl.resolvePrincipals(requester, requesterGroups),
   };
@@ -800,4 +803,127 @@ describe('通配与 deny 物化', () => {
     );
     expect(await createService({ subject: 'user:bob' }).check(Uri.parse(child), 1)).toBe(false);
   });
+});
+
+/**
+ * 并发回归：读-改-写必须在同一把 `exact(uri)` 锁内完成。
+ *
+ * 三条用例都靠 `Promise.all` 制造交错，并用「显式延迟一个写者」把窗口拉宽到
+ * 稳定可测：延迟挂在 `aclFile.read` 上——修复后这个读在锁内，延迟只会让另一个
+ * 写者排队；去掉锁后这个读在锁外，延迟会让两个写者各拿一份旧条目，后写者整份
+ * 覆盖。变异验证：注释掉 `setAcl` / `ensureRootPreset` 的 `withLock`，三条全红。
+ */
+describe('并发写入不丢条目（§10.6 锁契约回归）', () => {
+  /** 给第一次 `aclFile.read` 加延迟：模拟一个慢写者在读到旧快照后才继续。 */
+  function slowFirstRead(ms: number): () => void {
+    const original = aclFile.read.bind(aclFile);
+    let fired = false;
+    const spy = vi.spyOn(aclFile, 'read').mockImplementation(async (uri) => {
+      const result = await original(uri);
+      if (!fired) {
+        fired = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      return result;
+    });
+    return () => spy.mockRestore();
+  }
+
+  it('两个并发 setAcl 到同一目录，两个条目都保留', async () => {
+    seed(ROOT);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+
+    // 两个 transform 各自只加自己那条（等价于 /acl/grant 的锁内读-改-写）。
+    const restore = slowFirstRead(50);
+    try {
+      await Promise.all([
+        service.setAcl(
+          Uri.parse(ROOT),
+          (current) => ({ mode: current.mode, entries: [...current.entries, allow('user:bob', 1)] }),
+          'user:alice',
+        ),
+        service.setAcl(
+          Uri.parse(ROOT),
+          (current) => ({ mode: current.mode, entries: [...current.entries, allow('user:carol', 1)] }),
+          'user:alice',
+        ),
+      ]);
+    } finally {
+      restore();
+    }
+
+    const file = await aclFile.read(Uri.parse(ROOT));
+    const principals = (file?.entries ?? []).map((entry) => entry.principal);
+    expect(principals).toContain('user:bob');
+    expect(principals).toContain('user:carol');
+    expect(principals).toContain('user:alice');
+  });
+
+  it('并发 ensureRootPreset 不会丢条目', async () => {
+    seed(GROUP_ROOT);
+    const service = createService({ subject: 'user:alice' });
+
+    // 先建立 manage（组根预置），再把文件改回「预置尚未应用」但 alice 仍有 manage 的
+    // 状态：这样 ensureRootPreset 会真的走写入分支，与并发 grant 撞车。
+    await service.ensureRootPreset(Uri.parse(GROUP_ROOT), 'alice');
+    await service.setAcl(
+      Uri.parse(GROUP_ROOT),
+      { mode: 'inherit', entries: [allow('user:alice', 7)] },
+      'user:alice',
+    );
+
+    // 并发 grant user:bob 与组根预置。锁外实现里 ensureRootPreset 读到「还没有
+    // group:eng 条目」，于是写一份只含预置的整份文件，把 bob 冲掉。
+    const restore = slowFirstRead(50);
+    try {
+      await Promise.all([
+        service.setAcl(
+          Uri.parse(GROUP_ROOT),
+          (current) => ({ mode: current.mode, entries: [...current.entries, allow('user:bob', 1)] }),
+          'user:alice',
+        ),
+        service.ensureRootPreset(Uri.parse(GROUP_ROOT), 'alice'),
+      ]);
+    } finally {
+      restore();
+    }
+
+    const file = await aclFile.read(Uri.parse(GROUP_ROOT));
+    const principals = (file?.entries ?? []).map((entry) => entry.principal);
+    expect(principals).toContain('group:eng');
+    expect(principals).toContain('user:alice');
+    expect(principals).toContain('user:bob');
+  });
+
+  it('purgeSubtree 与 setAcl 并发不死锁', async () => {
+    const subtree = [ROOT, `${ROOT}/a`, `${ROOT}/a/b`];
+    seed(...subtree);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(ROOT),
+      { mode: 'inherit', entries: [allow('user:bob', 1)] },
+      'user:alice',
+    );
+    await service.setAcl(
+      Uri.parse(`${ROOT}/a`),
+      { mode: 'inherit', entries: [allow('user:bob', 3)] },
+      'user:alice',
+    );
+
+    // purgeSubtree 持 tree(ROOT)，setAcl 到子目录要 exact(ROOT/a)：二者冲突但必须
+    // 在超时内完成（排队），不能等自己 5 秒后抛 CONFLICT。给足够大的超时保护，
+    // 断言 N 秒内 resolve。
+    const done = Promise.all([
+      service.purgeSubtree(Uri.parse(ROOT)),
+      service.setAcl(
+        Uri.parse(`${ROOT}/a/b`),
+        { mode: 'inherit', entries: [allow('user:dave', 1)] },
+        'user:alice',
+      ),
+    ]);
+
+    await expect(done).resolves.toBeDefined();
+  }, 8000);
 });

@@ -5,9 +5,11 @@
  * 漏洞。这里每个出口都要求 `manage`（§12.4 的出口清单），并且 `AclService` 自己
  * 会再求一次——路由层的 `assert` 是出口清单的执行点，服务层的是纵深防御。
  *
- * `grant` / `revoke` 是 `PUT /acl` 的语法糖：它们先读当前快照、改一条、再整体写回。
- * 写回走 `setAcl`，所以「写 `.acl.json` → 重算整棵子树的 `node_permission`」这条
- * 顺序只有一份实现。
+ * `grant` / `revoke` 是 `PUT /acl` 的语法糖：把一个「在现有条目上加/减一条」的
+ * **转换函数**交给 `setAcl`，由后在 `exact(uri)` 锁内对**最新**快照求值。过去的
+ * 「`getAcl`（锁外）+ 整份 `setAcl`」会让两个并发 grant 各拿一份旧条目、后写者
+ * 整份覆盖——先写者的条目静默消失（§10.6）。写盘仍只有一份实现：
+ * 「写 `.acl.json` → 重算整棵子树的 `node_permission`」。
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -140,13 +142,21 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         };
         await authorizer.assert(uri, MANAGE, context.principals);
 
-        const snapshot = await acl.getAcl(uri, context.subject, context.principals);
-        // 同一主体只能有一条（`acl_entry` 的主键是 `(uri, principal)`），后写的覆盖。
-        const entries = [
-          ...snapshot.entries.filter((candidate) => candidate.principal !== entry.principal),
-          entry,
-        ];
-        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject, context.principals);
+        // 转换函数在 `setAcl` 的 `exact(uri)` 锁内求值：两个并发 grant 各自看到
+        // 对方写入后的最新条目，后写者不会用旧快照整份覆盖（§10.6）。
+        await acl.setAcl(
+          uri,
+          (current) => ({
+            mode: current.mode,
+            // 同一主体只能有一条（`acl_entry` 的主键是 `(uri, principal)`），后写的覆盖。
+            entries: [
+              ...current.entries.filter((candidate) => candidate.principal !== entry.principal),
+              entry,
+            ],
+          }),
+          context.subject,
+          context.principals,
+        );
         return ok({ uri: uri.toString(), entry });
       });
 
@@ -157,15 +167,22 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const principal = requirePrincipal(body);
         await authorizer.assert(uri, MANAGE, context.principals);
 
-        const snapshot = await acl.getAcl(uri, context.subject, context.principals);
-        const entries = snapshot.entries.filter((candidate) => candidate.principal !== principal);
-        if (entries.length === snapshot.entries.length) {
-          throw new ComemError('NOT_FOUND', `该主体没有直接授权：${principal}`, {
-            uri: uri.toString(),
-            principal,
-          });
-        }
-        await acl.setAcl(uri, { mode: snapshot.mode, entries }, context.subject, context.principals);
+        // 同样是锁内转换：`NOT_FOUND` 基于最新快照判断「该主体是否还有直接授权」。
+        await acl.setAcl(
+          uri,
+          (current) => {
+            const entries = current.entries.filter((candidate) => candidate.principal !== principal);
+            if (entries.length === current.entries.length) {
+              throw new ComemError('NOT_FOUND', `该主体没有直接授权：${principal}`, {
+                uri: uri.toString(),
+                principal,
+              });
+            }
+            return { mode: current.mode, entries };
+          },
+          context.subject,
+          context.principals,
+        );
         return ok({ uri: uri.toString(), principal, revoked: true });
       });
     },
