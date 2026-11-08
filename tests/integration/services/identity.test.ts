@@ -229,6 +229,22 @@ describe('组管理', () => {
     expect(service.resolveSubject('user:alice')?.principals).toEqual(['group:eng', 'user:alice']);
     expectCode('NOT_FOUND', () => service.deleteGroup('ops'));
   });
+
+  /**
+   * 回归：服务层不能假设调用方已经校验过 owner 主体（架构文档 §12.2）。
+   *
+   * `user:*` 是合法主体，写成组 owner 等于给所有用户 manage；`group:eng` 不是用户
+   * ID，落进 `owner_user_id` 之后与主体同形。两者都必须在写库之前被拒绝。
+   */
+  it('setGroupOwner 拒绝通配主体与非用户格式', () => {
+    createUser('alice');
+    createGroup('eng');
+
+    expectCode('INVALID_ARGUMENT', () => service.setGroupOwner('eng', '*', NOW));
+    expectCode('INVALID_ARGUMENT', () => service.setGroupOwner('eng', 'group:eng', NOW));
+    expectCode('INVALID_ARGUMENT', () => service.setGroupOwner('eng', '', NOW));
+    expect(service.getGroup('eng')?.ownerUserId).toBeNull();
+  });
 });
 
 describe('成员管理', () => {

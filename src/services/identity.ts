@@ -254,26 +254,32 @@ export class IdentityService {
   }
 
   /**
-   * 改组 owner。组或用户不存在抛 `NOT_FOUND`。
+   * 改组 owner。组或用户不存在抛 `NOT_FOUND`，owner 不是合法用户 ID 抛
+   * `INVALID_ARGUMENT`。
    *
    * 只写 `app_group.owner_user_id`：组根的 `.acl.json` 由
    * `AclService.setGroupOwner` 同步（那是权限的真相）。两个写入不在一个事务里
    * ——文件系统与 SQLite 没有跨介质事务，顺序与 `setAcl` 相同：先写文件，再写
    * 目录行。
+   *
+   * `assertValidUserId` 是防御纵深（§12.2）：HTTP 路由已经校验过，但服务方法是
+   * 公开入口，直接传 `*` 会让 `owner_user_id` 与 `user:*` 主体同形——而通配主体
+   * 在组根上等于 manage。
    */
   setGroupOwner(id: string, userId: string, now: Date = new Date()): Group {
     if (this.#groups.get(id) === null) {
       throw groupNotFound(id);
     }
-    if (this.#users.get(userId) === null) {
-      throw userNotFound(userId);
+    const ownerUserId = assertValidUserId(userId);
+    if (this.#users.get(ownerUserId) === null) {
+      throw userNotFound(ownerUserId);
     }
-    const updated = this.#groups.setOwner(id, userId, now);
+    const updated = this.#groups.setOwner(id, ownerUserId, now);
     if (updated === null) {
       // 类型上不可达：上面已经确认组存在。走到这里说明数据库被改坏了。
       throw groupNotFound(id);
     }
-    this.#logger.info('组 owner 已更新', { groupId: id, ownerUserId: userId });
+    this.#logger.info('组 owner 已更新', { groupId: id, ownerUserId });
     return updated;
   }
 

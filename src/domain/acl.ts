@@ -60,6 +60,9 @@ const WRITE_LEVEL: AclLevel = 3;
 /** 架构文档 §12.1：唯一的通配主体。`group:*` 不支持。 */
 const USER_WILDCARD = 'user:*';
 
+/** 通配主体与普通主体共用的 id 段。`user:*` 是唯一合法的通配形态。 */
+const WILDCARD_ID = '*';
+
 /**
  * 解析主体字符串。
  *
@@ -87,7 +90,7 @@ export function parsePrincipal(raw: string): Principal {
   if (id.includes(':')) {
     throw new ComemError('INVALID_ARGUMENT', `主体不合法：${raw}。id 不能包含冒号。`, { raw });
   }
-  if (kind === 'group' && id === '*') {
+  if (kind === 'group' && id === WILDCARD_ID) {
     throw new ComemError(
       'INVALID_ARGUMENT',
       '主体不合法：group:* 不受支持（架构文档 §12.1）。',
@@ -116,6 +119,30 @@ export function groupPrincipal(groupId: string): string {
 /** `user:{uid}` 主体。 */
 export function userPrincipal(userId: string): string {
   return formatPrincipal({ kind: 'user', id: userId });
+}
+
+/**
+ * 校验「组的 owner」只能是具体用户主体。
+ *
+ * `ownerUserId` 是 `user:{uid}` 里的 uid，不是主体字符串。这里把它拼成主体再交给
+ * `parsePrincipal`：空串、含冒号的形态（`group:eng`）、`group:` 前缀都由解析层
+ * 拒绝，**通配主体 `*` 单独再拦一次**——`user:*` 是合法主体，但把它写成组根的
+ * owner 等于给所有用户 manage。
+ *
+ * 服务层必须自己校验，不能假设调用方已经过 `assertValidUserId`：HTTP 路径有这层
+ * 检查，但 `AclService` 是公开的服务方法，绕过路由直接调用的代码（命令、脚本、
+ * 迁移）不会替它补一遍。组 owner 的两条提权路径都出在「调用方已经校验过」这个
+ * 假设上。
+ */
+export function assertOwnerUserId(userId: string): void {
+  if (userId === WILDCARD_ID) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      '组 owner 不能是通配主体 user:*：它等于给所有用户 manage。',
+      { userId },
+    );
+  }
+  parsePrincipal(userPrincipal(userId));
 }
 
 /**

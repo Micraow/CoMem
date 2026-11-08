@@ -57,6 +57,7 @@ import type {
   PermissionRow,
 } from '../adapters/sqlite/permission-repository.js';
 import {
+  assertOwnerUserId,
   effectiveAcl,
   groupPrincipal,
   levelSatisfies,
@@ -484,6 +485,12 @@ export class AclService implements Authorizer {
         { uri: uri.toString() },
       );
     }
+    // owner 会变成组根的 `user:{owner} = manage` 条目。空串是「没有 owner」，与
+    // `null` 同义；其余形态（含通配 `*`）一律拒绝——这是 §12.2 的唯一授权来源
+    // 在服务层的落点，不能假设调用方已经过 `assertValidUserId`。
+    if (ownerUserId !== null && ownerUserId !== '') {
+      assertOwnerUserId(ownerUserId);
+    }
 
     const preset = rootPreset(uri, {
       ownerUserId,
@@ -555,7 +562,7 @@ export class AclService implements Authorizer {
         { uri: uri.toString() },
       );
     }
-    parsePrincipal(userPrincipal(nextOwnerId));
+    assertOwnerUserId(nextOwnerId);
 
     const previous = await this.#aclFile.read(uri);
     const preset = rootPreset(uri, {

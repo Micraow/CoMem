@@ -75,6 +75,7 @@ interface BoundAcl {
     subject: string,
   ): Promise<void>;
   ensureRootPreset(uri: Uri, ownerUserId?: string | null): Promise<RootPreset>;
+  setGroupOwner(uri: Uri, previousOwnerId: string | null, nextOwnerId: string): Promise<void>;
   materializeNode(uri: Uri): Promise<void>;
   purgePrincipal(principal: string): Promise<number>;
   resolvePrincipals(subject: string, groups: readonly string[]): readonly string[];
@@ -105,6 +106,8 @@ function createService(
     getAcl: (uri, requester) => acl.getAcl(uri, requester, principals),
     setAcl: (uri, input, requester) => acl.setAcl(uri, input, requester, principals),
     ensureRootPreset: (uri, ownerUserId) => acl.ensureRootPreset(uri, ownerUserId),
+    setGroupOwner: (uri, previousOwnerId, nextOwnerId) =>
+      acl.setGroupOwner(uri, previousOwnerId, nextOwnerId),
     materializeNode: (uri) => acl.materializeNode(uri),
     purgePrincipal: (principal) => acl.purgePrincipal(principal),
     resolvePrincipals: (requester, requesterGroups) =>
@@ -260,6 +263,70 @@ describe('根预置', () => {
       () => createService().ensureRootPreset(Uri.parse('comem://user/alice/memories')),
       'INVALID_ARGUMENT',
     );
+  });
+});
+
+/**
+ * 回归：服务层拒绝通配主体（架构文档 §12.2 的「ACL 条目是授权的唯一来源」）。
+ *
+ * HTTP 路径有 `assertValidUserId` 挡着，但 `AclService` 是公开入口。直接传 `*`
+ * 会写出 `user:* = manage`——通配主体拿到 manage 等于所有人都是组管理员。
+ */
+describe('组 owner 主体校验', () => {
+  it('ensureRootPreset 拒绝通配与非 user 格式，且不写盘', async () => {
+    const root = Uri.parse(GROUP_ROOT);
+
+    await expectComemError(() => createService().ensureRootPreset(root, '*'), 'INVALID_ARGUMENT');
+    await expectComemError(
+      () => createService().ensureRootPreset(root, 'group:eng'),
+      'INVALID_ARGUMENT',
+    );
+
+    // 拒绝发生在写盘之前：没有 `.acl.json`，也没有物化行。
+    expect(await aclFile.read(root)).toBeNull();
+    expect(permissionsOf(GROUP_ROOT)).toEqual([]);
+  });
+
+  it('setGroupOwner 拒绝通配与非 user 格式，且不改动已有预置', async () => {
+    const root = Uri.parse(GROUP_ROOT);
+    const service = createService();
+    await service.ensureRootPreset(root, 'alice');
+    const before = await aclFile.read(root);
+
+    await expectComemError(
+      () => service.setGroupOwner(root, 'alice', '*'),
+      'INVALID_ARGUMENT',
+    );
+    await expectComemError(
+      () => service.setGroupOwner(root, 'alice', 'group:eng'),
+      'INVALID_ARGUMENT',
+    );
+
+    expect(await aclFile.read(root)).toEqual(before);
+  });
+
+  it('替换 owner 条目，保留其它条目与 mode', async () => {
+    const root = Uri.parse(GROUP_ROOT);
+    const service = createService();
+    await service.ensureRootPreset(root, 'alice');
+    const initial = await aclFile.read(root);
+    await aclFile.write(root, {
+      mode: 'restricted',
+      entries: [...(initial?.entries ?? []), { principal: 'user:carol', level: 'read', effect: 'allow' }],
+    });
+
+    await service.setGroupOwner(root, 'alice', 'bob');
+
+    const file = await aclFile.read(root);
+    expect(file?.mode).toBe('restricted');
+    expect(file?.entries).toEqual(
+      expect.arrayContaining([
+        { principal: 'user:bob', level: 'manage', effect: 'allow' },
+        { principal: 'group:eng', level: 'write', effect: 'allow' },
+        { principal: 'user:carol', level: 'read', effect: 'allow' },
+      ]),
+    );
+    expect(file?.entries.some((entry) => entry.principal === 'user:alice')).toBe(false);
   });
 });
 
