@@ -13,7 +13,7 @@ import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/databa
 import { IngestCursorRepository } from '../../../src/adapters/sqlite/ingest-cursor-repository.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
-import { runIngest } from '../../../src/commands/ingest.js';
+import { runIngest, renderReport } from '../../../src/commands/ingest.js';
 import type { AutoCommitPolicy } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -24,6 +24,8 @@ import { QwenSource } from '../../../src/ingest/sources/qwen.js';
 import {
   IngestService,
   type ExtractionRunner,
+  type IngestExtractionReport,
+  type IngestReport,
   type IngestServiceOptions,
 } from '../../../src/services/ingest.js';
 import { SessionService } from '../../../src/services/session.js';
@@ -208,6 +210,20 @@ function createService(
     ...(dryRun ? {} : { cursors }),
     ...overrides,
   });
+}
+
+/**
+ * 报告里「阶段二真的跑了」的那一支。
+ *
+ * `extraction` 是联合类型：`null` = 没等，`{ skipped: true }` = 没有可用模型。
+ * 这些用例断言的是「跑了」；跳过时应当让测试直接失败，而不是读出一个 `undefined`。
+ */
+function runningExtraction(report: IngestReport): IngestExtractionReport {
+  const extraction = report.extraction;
+  if (extraction === null || extraction.skipped) {
+    throw new Error(`预期阶段二真的跑了，实际是 ${JSON.stringify(extraction)}`);
+  }
+  return extraction;
 }
 
 beforeEach(async () => {
@@ -436,12 +452,13 @@ describe('IngestService', () => {
 
     // 每个来源单独分批：claude 3 个会话 → [2, 1]，其余来源各 1 个。
     expect(timeouts).toEqual([12_345, 12_345, 12_345, 12_345, 12_345]);
-    expect(report.extraction?.tasksCompleted).toBe(5);
-    expect(report.extraction?.batches.map((batch) => batch.sessions)).toEqual([2, 1, 1, 1, 1]);
-    expect(report.extraction?.tasksFailed).toBe(0);
-    expect(report.extraction?.memoriesExtracted).toBe(10);
-    expect(report.extraction?.memoriesPendingReview).toBe(5);
-    expect(report.extraction?.batches.map((batch) => batch.index)).toEqual([1, 2, 3, 4, 5]);
+    const extractionReport = runningExtraction(report);
+    expect(extractionReport.tasksCompleted).toBe(5);
+    expect(extractionReport.batches.map((batch) => batch.sessions)).toEqual([2, 1, 1, 1, 1]);
+    expect(extractionReport.tasksFailed).toBe(0);
+    expect(extractionReport.memoriesExtracted).toBe(10);
+    expect(extractionReport.memoriesPendingReview).toBe(5);
+    expect(extractionReport.batches.map((batch) => batch.index)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it('waitForExtraction: false 时 extraction 为 null，执行器一次都不被调用', async () => {
@@ -480,6 +497,62 @@ describe('IngestService', () => {
     });
   });
 
+  /**
+   * 回归：`providers.llm.default.type: disabled` + `ingest.enabled: true`。
+   *
+   * 配置校验放行（`summary.generator: rule` 是合法组合），但阶段二每个任务都要
+   * 调模型。修复前每一个会话都调一次 `DisabledLlmProvider`、抛一次
+   * `INVALID_ARGUMENT`——1,076 个会话就是 1,076 条错误。要求的不是抛错（先导数据、
+   * 后配模型是合法部署），而是**降级成只归档并把跳过写进报告**。
+   */
+  it('没有可用 LLM 时降级成只归档：阶段一成功、阶段二跳过、执行器一次都不被调用', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(false, {
+      extraction: { run },
+      extractionSkip: 'llm_disabled',
+    }).run();
+
+    // 阶段一照常：会话归档、任务已建（任务停在 pending，等服务端执行器或下次导入）。
+    expect(report.harnesses.map((source) => source.imported)).toEqual([3, 1, 1, 1]);
+    expect(taskRepository.countByStatus('pending')).toBe(6);
+
+    // 阶段二没有发生，但报告不能是 null——`null` 已经表示「没等」（--no-wait）。
+    expect(report.extraction).toEqual({ skipped: true, reason: 'llm_disabled' });
+    expect(run).not.toHaveBeenCalled();
+
+    // 降级必须留痕：终端里看得见、日志里查得到。
+    expect(logger.warn).toHaveBeenCalledWith(
+      '阶段二被跳过：providers.llm.default.type 是 disabled',
+      { reason: 'llm_disabled' },
+    );
+  });
+
+  it('--no-wait 语义不变：有降级原因但没等时 extraction 仍是 null，不记跳过', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(false, {
+      extraction: { run },
+      extractionSkip: 'llm_disabled',
+    }).run({ waitForExtraction: false });
+
+    expect(report.extraction).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+    // 只断言「没有那条跳过日志」：坏日志行的 warn 是另一件事，与这里无关。
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      '阶段二被跳过：providers.llm.default.type 是 disabled',
+    );
+  });
+
+  it('dryRun 不报「跳过」：没有任务可跑，报告里 extraction 是 null', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(true, {
+      extraction: { run },
+      extractionSkip: 'llm_disabled',
+    }).run({ dryRun: true });
+
+    expect(report.extraction).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('执行器失败只记进报告，不影响已经导入的会话与其它批次', async () => {
     const extraction: ExtractionRunner = {
       async run() {
@@ -490,9 +563,10 @@ describe('IngestService', () => {
 
     // 导入本身完成，报告说明阶段二失败。
     expect(report.harnesses.map((source) => source.imported)).toEqual([3, 1, 1, 1]);
-    expect(report.extraction?.tasksCompleted).toBe(0);
-    expect(report.extraction?.batches.length).toBeGreaterThan(0);
-    expect(report.extraction?.batches[0]?.error).toContain('执行器炸了');
+    const extractionReport = runningExtraction(report);
+    expect(extractionReport.tasksCompleted).toBe(0);
+    expect(extractionReport.batches.length).toBeGreaterThan(0);
+    expect(extractionReport.batches[0]?.error).toContain('执行器炸了');
   });
 });
 
@@ -616,9 +690,10 @@ describe('导入后等阶段二（真实 createContainer）', () => {
     const report = await runIngest({ configPath, dataDir, source: 'claude-code' });
 
     expect(report.extraction).not.toBeNull();
-    expect(report.extraction?.tasksCompleted).toBeGreaterThan(0);
-    expect(report.extraction?.memoriesExtracted).toBeGreaterThan(0);
-    expect(report.extraction?.memoriesPendingReview).toBe(0);
+    const extractionReport = runningExtraction(report);
+    expect(extractionReport.tasksCompleted).toBeGreaterThan(0);
+    expect(extractionReport.memoriesExtracted).toBeGreaterThan(0);
+    expect(extractionReport.memoriesPendingReview).toBe(0);
 
     // 重新起一个容器读同一个数据根：模拟「导入进程退出后，服务端能搜到」。
     container = await createContainer({
@@ -632,5 +707,79 @@ describe('导入后等阶段二（真实 createContainer）', () => {
     });
 
     expect(hits.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * 回归（真实装配）：`providers.llm.default.type: disabled` + `ingest.enabled: true`
+ * + `waitForExtraction: true`。
+ *
+ * 走的是 `runIngest` 的完整接线：容器 → 来源 → 阶段一 → 阶段二。修复前阶段二每个
+ * 会话都调一次 `DisabledLlmProvider`，1,076 个会话就是 1,076 次 `INVALID_ARGUMENT`。
+ * 修复后一次模型调用都不该发生，报告与终端输出都要说明「记忆没被抽取」。
+ */
+describe('没有可用 LLM 时只归档（真实 createContainer）', () => {
+  let configPath: string;
+
+  beforeEach(async () => {
+    vi.spyOn(globalThis, 'fetch');
+    configPath = join(dataDir, 'ingest-disabled-config.yaml');
+    await writeFile(
+      configPath,
+      [
+        `dataDir: ${dataDir}`,
+        'providers:',
+        '  llm:',
+        '    default:',
+        '      type: disabled',
+        'summary:',
+        '  generator: rule',
+        'retrieval:',
+        '  engine: fts5',
+        'session:',
+        '  autoCommit:',
+        '    enabled: false',
+        'ingest:',
+        '  enabled: true',
+        '  paths:',
+        '    claude-code:',
+        `      - ${join(fixtures, 'claude', 'projects')}`,
+      ].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('阶段一成功、阶段二跳过、报告字段正确、fetch 一次都没被调用', async () => {
+    const report = await runIngest({ configPath, dataDir, source: 'claude-code' });
+
+    // 阶段一：3 个会话、4 条消息，全部归档。
+    expect(report.harnesses.map((source) => source.imported)).toEqual([3]);
+    expect(report.harnesses[0]?.messages).toBe(4);
+    expect(report.harnesses[0]?.failed).toBe(0);
+
+    // 阶段二没有发生，报告自己说明原因（不是 `null`——那是「没等」）。
+    expect(report.extraction).toEqual({ skipped: true, reason: 'llm_disabled' });
+
+    // 没有可用模型 ⇒ 一次模型调用都没有。任务停在 pending，等配好模型后重跑。
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    const db = openDatabase(join(dataDir, '_meta', 'comem.sqlite'), { readonly: true });
+    try {
+      const pending = db.prepare("SELECT COUNT(*) AS total FROM task WHERE status = 'pending'").get();
+      expect(Number(pending?.['total'] ?? 0)).toBe(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('终端输出里写明阶段二被跳过', async () => {
+    const report = await runIngest({ configPath, dataDir, source: 'claude-code' });
+    const output = renderReport(report, false);
+
+    expect(output).toContain('阶段二（记忆抽取）：跳过——providers.llm.default.type 是 disabled');
+    expect(output).toContain('记忆还没抽取');
   });
 });

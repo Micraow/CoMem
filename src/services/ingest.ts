@@ -27,6 +27,14 @@
  * 的任务结束。关掉它只在「先看报告、稍后跑服务」时有用，报告里的 `extraction` 为
  * `null`。
  *
+ * **没有可用 LLM 时降级成「只归档」。** 阶段一不依赖模型：把会话归档进库、建好
+ * 任务，本身就有价值（原始对话落盘、可按内容检索）。阶段二每个任务都要调模型，
+ * `providers.llm.default.type: disabled` 时注定失败。所以此时**不报错**——「先把
+ * 数据导进来、模型以后配」是合法的部署顺序——而是跳过阶段二，并在报告的
+ * `extraction` 里写明 `{ skipped: true, reason: 'llm_disabled' }`，同时记一条
+ * `warn` 日志。报告与日志必须说出来：跑完 1,076 个会话却不说「记忆没被抽取」，
+ * 用户会以为 `find` 能搜到。
+ *
  * **为什么要分批。** 908 个会话 × 每会话 1–2 次模型调用是 2–3 小时。等全部导完再
  * 等阶段二，用户几个小时看不到一行进度；而且一次超时就会把整批算失败。按
  * `extractionBatchSize`（默认 20）个会话一批，超时按批算，一批失败不阻塞后面。
@@ -184,7 +192,18 @@ export interface IngestExtractionBatchReport {
   readonly error: string | null;
 }
 
+/**
+ * 阶段二被跳过的原因。
+ *
+ * 目前只有一种：`providers.llm.default.type` 是 `disabled`。留着联合类型的形状，
+ * 是为了让报告自己说明「为什么没抽取」——`extraction: null` 已经表示「没等」
+ * （`--no-wait` / dry-run / 超时为 0），不能再多一个含义。
+ */
+export type IngestExtractionSkipReason = 'llm_disabled';
+
 export interface IngestExtractionReport {
+  /** 恒为 `false`。与 {@link IngestExtractionSkippedReport} 区分用。 */
+  readonly skipped: false;
   readonly tasksCompleted: number;
   readonly tasksFailed: number;
   /** 抽取并写入的记忆条数（按 URI 去重；同一份记忆更新两次只算一条）。 */
@@ -195,10 +214,22 @@ export interface IngestExtractionReport {
   readonly batches: readonly IngestExtractionBatchReport[];
 }
 
+/** 阶段二没有发生：会话已归档、任务已建，记忆没被抽取。 */
+export interface IngestExtractionSkippedReport {
+  readonly skipped: true;
+  readonly reason: IngestExtractionSkipReason;
+}
+
 export interface IngestReport {
   readonly harnesses: readonly IngestHarnessReport[];
-  /** 阶段二的结果。`waitForExtraction: false`、`dryRun` 或 `extractionTimeoutMs: 0` 时为 `null`。 */
-  readonly extraction: IngestExtractionReport | null;
+  /**
+   * 阶段二的结果。
+   *
+   * `null` 表示**没等**（`waitForExtraction: false`、`dryRun` 或
+   * `extractionTimeoutMs: 0`）；`{ skipped: true }` 表示**等了但没有可用模型**，
+   * 阶段二没有发生。
+   */
+  readonly extraction: IngestExtractionReport | IngestExtractionSkippedReport | null;
 }
 
 export interface IngestServiceOptions {
@@ -224,6 +255,13 @@ export interface IngestServiceOptions {
    * 否则导入会静默停在「任务已建、记忆没抽」的假完成状态。
    */
   readonly extraction?: ExtractionRunner;
+  /**
+   * 阶段二跑不了的原因；不传表示能跑。
+   *
+   * 装配方从 `providers.llm.default.type === 'disabled'` 推出。给了它却仍注入
+   * `extraction` 时以它为准——**执行器存在不等于模型存在**，容器总会建好执行器。
+   */
+  readonly extractionSkip?: IngestExtractionSkipReason;
   /**
    * 每批等多少个会话的阶段二。
    *
@@ -322,6 +360,7 @@ export class IngestService {
   readonly #sessions: IngestServiceOptions['sessions'];
   readonly #cursors: IngestServiceOptions['cursors'];
   readonly #extraction: IngestServiceOptions['extraction'];
+  readonly #extractionSkip: IngestExtractionSkipReason | undefined;
   readonly #extractionBatchSize: number;
   readonly #extractionTimeoutMs: number;
 
@@ -355,6 +394,7 @@ export class IngestService {
     this.#sessions = options.sessions;
     this.#cursors = options.cursors;
     this.#extraction = options.extraction;
+    this.#extractionSkip = options.extractionSkip;
     this.#extractionBatchSize = extractionBatchSize;
     this.#extractionTimeoutMs = extractionTimeoutMs;
   }
@@ -363,6 +403,11 @@ export class IngestService {
     const dryRun = options.dryRun ?? false;
     const waitForExtraction = options.waitForExtraction ?? true;
     const extractionTimeoutMs = options.extractionTimeoutMs ?? this.#extractionTimeoutMs;
+    // 「本该跑阶段二」的三个条件：不是 dry-run、用户要等、超时不为 0。
+    const extractionRequested = !dryRun && waitForExtraction && extractionTimeoutMs > 0;
+    // 没有可用模型时跳过阶段二，而不是让每个会话各失败一次。阶段一（归档）不依赖
+    // 模型，先导进来本身就是价值；但报告必须说明记忆没被抽取。
+    const skipReason = extractionRequested ? this.#extractionSkip : undefined;
     if (!dryRun) {
       this.#requireWriter();
       if (this.#cursors === undefined) {
@@ -371,7 +416,11 @@ export class IngestService {
           '导入需要游标仓储；`dryRun` 之外必须注入 IngestCursorRepository。',
         );
       }
-      if (waitForExtraction && extractionTimeoutMs > 0 && this.#extraction === undefined) {
+      if (
+        extractionRequested &&
+        skipReason === undefined &&
+        this.#extraction === undefined
+      ) {
         throw new ComemError(
           'INVALID_ARGUMENT',
           '导入默认等待阶段二；要跳过抽取请显式传 waitForExtraction: false。',
@@ -380,11 +429,13 @@ export class IngestService {
       }
     }
 
-    // dry-run 不跑阶段二：没有任务，也不能为了「看看抽取效果」去真的调模型。
     const extraction =
-      dryRun || !waitForExtraction || extractionTimeoutMs === 0
-        ? null
-        : createExtraction();
+      extractionRequested && skipReason === undefined ? createExtraction() : null;
+    if (skipReason !== undefined) {
+      this.#logger.warn('阶段二被跳过：providers.llm.default.type 是 disabled', {
+        reason: skipReason,
+      });
+    }
 
     const since = this.#parseSince(options.since);
     const batchSize = this.#parseBatchSize(options.limitPerSession);
@@ -484,7 +535,12 @@ export class IngestService {
 
     return {
       harnesses: reports,
-      extraction: extraction === null ? null : freezeExtraction(extraction),
+      extraction:
+        extraction !== null
+          ? freezeExtraction(extraction)
+          : skipReason === undefined
+            ? null
+            : { skipped: true, reason: skipReason },
     };
   }
 
@@ -803,6 +859,7 @@ function createExtraction(): MutableExtraction {
 
 function freezeExtraction(extraction: MutableExtraction): IngestExtractionReport {
   return {
+    skipped: false,
     tasksCompleted: extraction.tasksCompleted,
     tasksFailed: extraction.tasksFailed,
     memoriesExtracted: extraction.memories.size,

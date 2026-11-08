@@ -56,7 +56,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | 键 | 默认值 | 是什么 / 什么时候改 |
 |---|---|---|
 | `dataDir` | `""` | 数据根。空串表示按运行形态推导（§6.5）：容器里 `/var/lib/comem`、root 运行 `/var/lib/comem`、其余 `$XDG_DATA_HOME/comem`。挂卷或备份到别处时显式写 |
-| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule` 且 `memory.consolidation.enabled` 必须是 `false`，否则启动失败 |
+| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule` 且 `memory.consolidation.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
 | `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。**默认值是 IANA 保留域名（RFC 2606），永远不可达**；保持它启动时会打一条 `warn`，说明摘要、记忆抽取、合并与检索改写都不会工作。换成自建网关或真实供应商地址 |
 | `providers.llm.default.model` | `gpt-4o-mini` | 模型名。摘要质量与成本由它决定 |
 | `providers.llm.default.apiKey` | `""` | 密钥。模板里是 `${COMEM_LLM_KEY}`；空串时调用会失败，但没有密钥也能启动 |
@@ -1292,6 +1292,21 @@ pnpm ingest --source all --json           # 机器可读
 - `--no-wait` 只导入。报告会明确写「`find` 暂时搜不到内容」。
 - 执行器是全局 FIFO 队列，不按 `--source` 过滤；历史积压会被先认领。
 - `--dry-run` 忽略等待：没有任务可跑。报告里的 `extraction` 是 `null`。
+- **没有可用 LLM 时跳过阶段二并在报告里写明。** `providers.llm.default.type` 是
+  `disabled` 时，阶段二每个任务都会停在 `DisabledLlmProvider`。此时阶段一照常：会话
+  归档、任务建好（停在 `pending`），报告里的 `extraction` 是
+  `{ "skipped": true, "reason": "llm_disabled" }`，同时记一条 `warn` 日志：
+
+  ```text
+  阶段二被跳过：providers.llm.default.type 是 disabled
+  ```
+
+  **这是合法的降级部署**（先把数据导进来、模型以后配），不是配置错误——所以不拒绝
+  命令，只降级。阶段一不依赖模型：原始对话落盘、能按内容检索，本身就有价值。但
+  报告与终端输出都会说明「记忆还没抽取，`find` 暂时搜不到内容」；配好
+  `providers.llm` 后重跑 `pnpm ingest`，积压的任务会被执行器认领。
+- `--no-wait` 与降级是两件事：显式 `--no-wait` 时 `extraction` 仍是 `null`（「没
+  等」），不会写成「跳过」。
 
 ### 输出怎么读
 
@@ -1306,6 +1321,22 @@ pnpm ingest --source all --json           # 机器可读
   合计：完成 38 个任务，失败 0 个，抽取 25 条记忆（21 条 active，4 条待复核），耗时 183.6s
   待复核的记忆不会出现在检索结果里：用 `GET /api/v1/memories/pending` 查看，`POST /api/v1/memories/{uri}/approve` 通过。
 ```
+
+没有可用 LLM 时阶段二不跑了，输出是这一行（`--json` 时是 `extraction` 字段）：
+
+```text
+来源 claude-code：发现 1,076 个会话
+  ✅ 新建 1,076 个会话，共 12,004 条消息
+
+阶段二（记忆抽取）：跳过——providers.llm.default.type 是 disabled，没有可用的模型。会话已归档、任务已建，但记忆还没抽取，`find` 暂时搜不到内容。配好 providers.llm 后重跑本命令，积压的任务会被执行器认领。
+```
+
+```json
+{ "extraction": { "skipped": true, "reason": "llm_disabled" } }
+```
+
+退出码仍是 0：会话确实导进来了。要不要当成失败取决于调用方——`skipped` 是显式
+字段，不是靠「`extraction` 为 `null`」猜。
 
 失败会带 `locator`（源文件路径），单条会话的失败不影响其它会话。命令在有失败时以
 退出码 1 结束，`--json` 的报告里 `harnesses[].errors` 是完整清单。

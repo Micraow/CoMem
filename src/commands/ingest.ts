@@ -426,7 +426,8 @@ class ExtractionRunnerImpl implements ExtractionRunner {
   }
 }
 
-function renderReport(report: IngestReport, dryRun: boolean): string {
+/** 人类可读的终端输出。导出只为了测试「降级那行确实打印出来」。 */
+export function renderReport(report: IngestReport, dryRun: boolean): string {
   const lines: string[] = [];
   for (const source of report.harnesses) {
     lines.push(
@@ -460,10 +461,18 @@ function renderReport(report: IngestReport, dryRun: boolean): string {
     }
   }
 
-  if (report.extraction !== null) {
+  const extraction = report.extraction;
+  if (extraction !== null && extraction.skipped) {
+    // 降级必须让用户看见：跑完 1,076 个会话却不说「记忆没被抽取」，用户会以为
+    // `find` 能搜到。
+    lines.push('');
+    lines.push(
+      '阶段二（记忆抽取）：跳过——providers.llm.default.type 是 disabled，没有可用的模型。会话已归档、任务已建，但记忆还没抽取，`find` 暂时搜不到内容。配好 providers.llm 后重跑本命令，积压的任务会被执行器认领。',
+    );
+  } else if (extraction !== null) {
     lines.push('');
     lines.push('阶段二（记忆抽取）：');
-    for (const batch of report.extraction.batches) {
+    for (const batch of extraction.batches) {
       const scope = `${formatNumber(batch.sessions)} 个会话`;
       if (batch.error !== null) {
         lines.push(`  第 ${batch.index} 批（${scope}）❌ 失败：${batch.error}`);
@@ -475,7 +484,7 @@ function renderReport(report: IngestReport, dryRun: boolean): string {
         `  第 ${batch.index} 批（${scope}）✅ 抽取 ${formatNumber(batch.memoriesExtracted)} 条记忆（${formatNumber(active)} 条 active，${formatNumber(batch.memoriesPendingReview)} 条待复核）${suffix} ${formatDuration(batch.durationMs)}`,
       );
     }
-    const total = report.extraction;
+    const total = extraction;
     const active = total.memoriesExtracted - total.memoriesPendingReview;
     lines.push(
       `  合计：完成 ${formatNumber(total.tasksCompleted)} 个任务，失败 ${formatNumber(total.tasksFailed)} 个，抽取 ${formatNumber(total.memoriesExtracted)} 条记忆（${formatNumber(active)} 条 active，${formatNumber(total.memoriesPendingReview)} 条待复核），耗时 ${formatDuration(total.durationMs)}`,
@@ -602,6 +611,13 @@ async function runWithConfig(
     const sessions = writers?.sessions;
     const cursors = writers?.cursors ?? readOnly?.cursors;
     const extraction = writers?.extraction;
+    // 没有可用模型时阶段二注定失败：每个会话的任务都会停在 `DisabledLlmProvider`。
+    // 阶段一（归档）不依赖模型，所以降级成「只归档」并把原因写进报告，而不是让
+    // 1,076 个会话各失败一次、也不是拒绝整个命令——「先导数据、后配模型」合法。
+    const extractionSkip =
+      config.providers.llm.default.type === 'disabled'
+        ? ('llm_disabled' as const)
+        : undefined;
     const service = new IngestService({
       sources: createSources(config, logger),
       scopeUri: scopeUriOf(config.server.subject),
@@ -613,6 +629,7 @@ async function runWithConfig(
       ...(sessions === undefined ? {} : { sessions }),
       ...(cursors === undefined ? {} : { cursors }),
       ...(extraction === undefined ? {} : { extraction }),
+      ...(extractionSkip === undefined ? {} : { extractionSkip }),
     });
 
     return await service.run({

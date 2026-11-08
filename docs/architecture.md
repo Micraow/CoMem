@@ -1734,6 +1734,15 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 路径。所以 `pnpm ingest` 在导完一批会话之后必须把阶段二驱动到结束——否则任务停在
 `pending`，用户得到的是「导了 908 个会话，`find` 0 命中」。见「导入后的处理」。
 
+**没有可用模型时阶段二跳过，不报错。** `providers.llm.default.type: disabled` 时
+每个任务都会停在 `DisabledLlmProvider`。阶段一（归档）不依赖模型，「先把数据导进来、
+模型以后配」是合法的部署顺序，所以这里降级而不是拒绝：会话照常归档、任务照常建
+（停在 `pending`），报告的 `extraction` 是 `{ "skipped": true, "reason":
+"llm_disabled" }`，并记一条 `warn` 日志。**跳过必须可见**——两个字段、一条日志、
+一行终端输出——否则用户以为跑完 1,076 个会话就抽好了记忆，实际 `find` 一条都搜不到。
+与 `rerank.enabled` 的差别在这里：开了重排却不重排没有任何用处，开了导入却不抽取
+还有一半用处（原始对话落盘、可检索）。
+
 #### 两条路，同一段管线
 
 本机历史对话有两条入口，**不是二选一**：它们负责的阶段不同。
@@ -1804,7 +1813,7 @@ ingest_cursor：原生会话 → 我们的 session URI + 读到的位置
 
 | 选项 | 默认 | 作用 |
 |---|---|---|
-| `waitForExtraction` | `true` | 导入后等阶段二。关掉时报告里的 `extraction` 是 `null` |
+| `waitForExtraction` | `true` | 导入后等阶段二。关掉时报告里的 `extraction` 是 `null`；没有可用模型时是 `{ skipped: true, reason: 'llm_disabled' }` |
 | `ingest.extractionBatchSize` | `20` | 每批等多少个会话；来源见 `config/schema.ts` 的注释 |
 | `ingest.extractionTimeoutMs` | `1800000`（30 分钟） | 每批的最长等待。`0` = 不等 |
 | `--no-wait` | — | 只导入、立即返回 |
@@ -1916,7 +1925,8 @@ ingest:
 - **会话消息不进检索索引。** `messages.jsonl` 由 `SessionService` 直接写
   `ContentStore`，不经过 `IndexObserver`（§7 的取舍：`GET /sessions` 从磁盘列目录）。
   `find` 要搜到导入的内容，得等阶段二把它抽取成记忆；`pnpm ingest` 默认等阶段二
-  （见「导入后的处理」），`--no-wait` 时报告会明确说明「`find` 暂时搜不到」。
+  （见「导入后的处理」），`--no-wait` 时报告会明确说明「`find` 暂时搜不到」。没有
+  可用模型时阶段二被跳过，报告里的 `extraction.skipped` 为 `true`。
 - **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
   且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。
 - **Qwen 的损坏导出不可用。** 未转义的引号（`Expecting ',' delimiter`）不是脱敏
