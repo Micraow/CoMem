@@ -12,6 +12,7 @@ import {
   consoleIdentityState,
   fetchConsoleIdentity,
   identityHeaders,
+  logoutConsole,
   probeAuthEnabled,
   type ConsoleRequest,
   type HealthFetcher,
@@ -252,3 +253,102 @@ describe('认证探测（GET /auth/config）', () => {
 });
 
 
+describe('退出登录', () => {
+  function installStorage(): Map<string, string> {
+    const store = new Map<string, string>();
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: {
+        getItem: (key: string): string | null => store.get(key) ?? null,
+        setItem: (key: string, value: string): void => {
+          store.set(key, value);
+        },
+        removeItem: (key: string): void => {
+          store.delete(key);
+        },
+        clear: (): void => {
+          store.clear();
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    return store;
+  }
+
+  function removeStorage(): void {
+    Reflect.deleteProperty(globalThis, 'sessionStorage');
+  }
+
+  const SESSION: ConsoleSession = {
+    token: 'v1.test.token',
+    subject: 'user:alice',
+    principals: ['user:alice'],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+
+  it('等响应体读完再返回，避免导航中止请求（W59）', async () => {
+    installStorage();
+    try {
+      clearConsoleSession();
+      writeConsoleSession(SESSION);
+
+      let bodyConsumed = false;
+      const request: ConsoleRequest = async (url, init) => {
+        expect(url).toBe(`${BASE}/auth/logout`);
+        expect(init?.method).toBe('POST');
+        expect(init?.headers?.['authorization']).toBe('Bearer v1.test.token');
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', result: { loggedOut: true } }),
+          text: async () => {
+            bodyConsumed = true;
+            return '{"status":"ok"}';
+          },
+        };
+      };
+
+      await logoutConsole(BASE, request);
+
+      // 旧实现只 `await request(...)`，不读响应体；调用方的 `location.assign`
+      // 会让浏览器把请求记成 `net::ERR_ABORTED`。
+      expect(bodyConsumed).toBe(true);
+      expect(readConsoleSession()).toBeNull();
+    } finally {
+      removeStorage();
+    }
+  });
+
+  it('请求失败也清本地会话（finally）', async () => {
+    installStorage();
+    try {
+      clearConsoleSession();
+      writeConsoleSession(SESSION);
+      const request: ConsoleRequest = async () => {
+        throw new Error('network down');
+      };
+
+      await expect(logoutConsole(BASE, request)).resolves.toBeUndefined();
+      expect(readConsoleSession()).toBeNull();
+    } finally {
+      removeStorage();
+    }
+  });
+
+  it('没有会话时不发请求', async () => {
+    installStorage();
+    try {
+      clearConsoleSession();
+      let called = false;
+      const request: ConsoleRequest = async () => {
+        called = true;
+        return { ok: true, status: 200, json: async () => ({}) };
+      };
+
+      await logoutConsole(BASE, request);
+      expect(called).toBe(false);
+    } finally {
+      removeStorage();
+    }
+  });
+});

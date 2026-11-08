@@ -85,6 +85,14 @@ export interface HealthResponseLike {
   readonly ok: boolean
   readonly status: number
   json(): Promise<unknown>
+  /**
+   * 读掉响应体。登出必须等它完成再导航，否则浏览器把请求标记成
+   * `net::ERR_ABORTED`（W59）。
+   *
+   * 可选是为了让只断言 `ok` / `json()` 的替身不必构造它；真实 `Response` 结构上
+   * 总是有。
+   */
+  text?(): Promise<string>
 }
 
 export type HealthFetcher = (url: string) => Promise<HealthResponseLike>
@@ -507,17 +515,18 @@ export async function loginConsole(
  */
 export async function logoutConsole(baseUrl: string, request: ConsoleRequest): Promise<void> {
   const session = readConsoleSession()
-  clearConsoleSession()
-  if (session === null) {
-    return
-  }
-
   try {
-    await request(`${trimBase(baseUrl)}/auth/logout`, {
+    if (session === null) {
+      return
+    }
+    const response = await request(`${trimBase(baseUrl)}/auth/logout`, {
       method: 'POST',
       headers: { accept: 'application/json', authorization: `Bearer ${session.token}` },
     })
+    await response.text?.()
   } catch {
     // 网络失败与服务端无状态都不改变「本地已经登出」。
+  } finally {
+    clearConsoleSession()
   }
 }
