@@ -51,14 +51,20 @@ const logger = new NullLogger();
 let dataDir: string;
 let configPath: string;
 
+/** 供应商返回的向量维度。用例可以在中途改它，模拟「换了一个不同维度的模型」。 */
+let mockDimension = DIMENSION;
+
 function embeddingResult(texts: readonly string[]): Record<string, unknown> {
   return {
-    embeddings: texts.map(() => [1, 0, 0]),
+    embeddings: texts.map(() =>
+      Array.from({ length: mockDimension }, (_value, index) => (index === 0 ? 1 : 0)),
+    ),
     usage: { tokens: texts.length },
   };
 }
 
 beforeEach(async () => {
+  mockDimension = DIMENSION;
   dataDir = await mkdtemp(join(tmpdir(), 'comem-reindex-'));
   configPath = join(dataDir, 'config.yaml');
   mocks.embedMany.mockImplementation(({ values }: { values: string[] }) =>
@@ -71,7 +77,7 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-async function writeConfig(embedding: boolean): Promise<void> {
+async function writeConfig(embedding: boolean, dimension = DIMENSION): Promise<void> {
   await writeFile(
     configPath,
     [
@@ -86,7 +92,7 @@ async function writeConfig(embedding: boolean): Promise<void> {
       '    baseUrl: https://example.test/v1',
       `    model: ${MODEL}`,
       '    apiKey: sk-test',
-      `    dimension: ${DIMENSION}`,
+      `    dimension: ${dimension}`,
       '',
     ].join('\n'),
     'utf8',
@@ -226,6 +232,38 @@ describe('embeddings 重建', () => {
     try {
       const embeddings = new EmbeddingRepository({ db, logger });
       expect(embeddings.count()).toBe(5);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('配置换维度后重建虚拟表（旧表先备份，成功后删掉）', async () => {
+    const file = `${ROOT}/memories/dimension.md`;
+    await writeConfig(true, 3);
+    await writeBody(file, '维度会变的正文。');
+    openDb().close();
+
+    const first = await runReindex({ dataDir, configPath, only: 'embeddings' });
+    expect(first.failed).toBe(0);
+    expect(first.rewritten).toBeGreaterThanOrEqual(1);
+
+    mockDimension = 4;
+    await writeConfig(true, 4);
+
+    const second = await runReindex({ dataDir, configPath, only: 'embeddings' });
+    expect(second.failed).toBe(0);
+
+    const db = openDb();
+    try {
+      const embeddings = new EmbeddingRepository({ db, logger });
+      expect(embeddings.storedDimension()).toBe(4);
+      expect(embeddings.count()).toBe(1);
+      expect(embeddings.get(file)?.vector).toHaveLength(4);
+      // 成功之后备份表不留在库里。
+      const backup = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('node_embedding_backup');
+      expect(backup).toBeUndefined();
     } finally {
       db.close();
     }

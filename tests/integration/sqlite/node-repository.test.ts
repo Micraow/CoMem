@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
-import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
+import { NodeRepository, type NodeAccessStats, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 let db: DatabaseSync;
@@ -45,6 +45,10 @@ function row(uri: string, overrides: Partial<NodeRow> = {}): NodeRow {
 
 function uris(rows: readonly NodeRow[]): string[] {
   return rows.map((item) => item.uri);
+}
+
+function urisOf(stats: readonly NodeAccessStats[]): string[] {
+  return stats.map((item) => item.uri);
 }
 
 beforeEach(() => {
@@ -256,5 +260,111 @@ describe('count', () => {
     repository.upsert([row('comem://user/alice/a.md'), row('comem://user/alice/b.md')]);
 
     expect(repository.count()).toBe(2);
+  });
+});
+
+describe('recordAccess', () => {
+  const A = 'comem://user/alice/a.md';
+  const B = 'comem://user/alice/b.md';
+  const C = 'comem://user/alice/c.md';
+  const AT = new Date('2026-11-08T12:00:00.000Z');
+
+  beforeEach(() => {
+    repository.upsert([row(A), row(B), row(C)]);
+  });
+
+  it('批量累加访问计数并写入最近访问时间', () => {
+    expect(repository.recordAccess([A, B], AT)).toBe(2);
+
+    expect(repository.readAccessStats([A, B])).toEqual([
+      { uri: A, accessCount: 1, lastAccessedAt: AT.toISOString() },
+      { uri: B, accessCount: 1, lastAccessedAt: AT.toISOString() },
+    ]);
+  });
+
+  it('重复调用是累加，不是覆盖', () => {
+    const later = new Date('2026-11-09T12:00:00.000Z');
+
+    repository.recordAccess([A], AT);
+    repository.recordAccess([A], AT);
+    repository.recordAccess([A], later);
+
+    expect(repository.readAccessStats([A])).toEqual([
+      { uri: A, accessCount: 3, lastAccessedAt: later.toISOString() },
+    ]);
+  });
+
+  it('一批只开一个写事务', () => {
+    const exec = vi.spyOn(db, 'exec');
+
+    repository.recordAccess([A, B, C], AT);
+
+    const begins = exec.mock.calls.filter(([sql]) => String(sql).startsWith('BEGIN'));
+    expect(begins).toHaveLength(1);
+    // 50 条命中是 50 次 UPDATE、1 次事务；逐个 UPDATE 各自开事务是它要避免的。
+    expect(exec.mock.calls.some(([sql]) => String(sql).startsWith('COMMIT'))).toBe(true);
+
+    exec.mockRestore();
+  });
+
+  it('不修改 updated_at：访问不是内容变更', () => {
+    const before = repository.get(A)?.updatedAt;
+
+    repository.recordAccess([A], AT);
+
+    expect(repository.get(A)?.updatedAt).toBe(before);
+  });
+
+  it('不存在的 URI 静默跳过，返回实际命中行数', () => {
+    expect(repository.recordAccess([A, 'comem://user/alice/missing.md'], AT)).toBe(1);
+
+    expect(repository.readAccessStats([A])[0]?.accessCount).toBe(1);
+  });
+
+  it('空数组是合法的空操作', () => {
+    expect(repository.recordAccess([], AT)).toBe(0);
+  });
+
+  it('非法 Date 抛 INVALID_ARGUMENT', () => {
+    expect(() => repository.recordAccess([A], new Date(Number.NaN))).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+    );
+    expect(repository.readAccessStats([A])[0]?.accessCount).toBe(0);
+  });
+});
+
+describe('readAccessStats', () => {
+  const A = 'comem://user/alice/a.md';
+  const B = 'comem://user/alice/b.md';
+  const AT = new Date('2026-11-08T12:00:00.000Z');
+
+  beforeEach(() => {
+    repository.upsert([row(A), row(B)]);
+  });
+
+  it('从没访问过时 accessCount 是 0，lastAccessedAt 是 null', () => {
+    expect(repository.readAccessStats([A])).toEqual([
+      { uri: A, accessCount: 0, lastAccessedAt: null },
+    ]);
+  });
+
+  it('按入参顺序返回', () => {
+    repository.recordAccess([A], AT);
+
+    expect(urisOf(repository.readAccessStats([B, A]))).toEqual([B, A]);
+  });
+
+  it('不在索引里的 URI 不返回（不补一条 0）', () => {
+    expect(repository.readAccessStats([A, 'comem://user/alice/missing.md'])).toHaveLength(1);
+  });
+
+  it('空数组返回空结果，不查库', () => {
+    const prepare = vi.spyOn(db, 'prepare');
+
+    expect(repository.readAccessStats([])).toEqual([]);
+    // 空 IN () 是语法错误；空入参必须在拼 SQL 之前返回。
+    expect(prepare).not.toHaveBeenCalled();
+
+    prepare.mockRestore();
   });
 });

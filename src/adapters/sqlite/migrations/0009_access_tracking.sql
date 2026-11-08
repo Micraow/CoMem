@@ -1,0 +1,33 @@
+-- 0009_access_tracking.sql —— 访问计数（架构文档 §17.5 的热度衰减、§8.1 的 `node` 表）
+--
+-- 热度衰减的公式是 `sigmoid(log1p(activeCount)) × exp(-ln2 × ageDays / halfLifeDays)`，
+-- 它需要两个输入：**被访问过多少次**、**最后一次访问是什么时候**。`node` 表此前
+-- 两个都没有，所以 `telemetry.hotness.halfLifeHours` 是一个没有调用点的配置项。
+--
+-- ## 为什么单独一列而不是复用 `updated_at`
+--
+-- `updated_at` 是「内容变了」，访问是「被读到了」。把读当写会让「检索命中」触发
+-- 摘要失效（§9.3 的失效传播比较 `body_digest` 与 `updated_at` 的邻域），也会让
+-- 「这条记忆最近被改过」这个判断永久为真——那是灾难。
+--
+-- ## 为什么 `last_accessed_at` 可空
+--
+-- 从没被访问过的记忆没有「最后一次访问时间」。填 `created_at` 会让新记忆看起来
+-- 刚被访问过，填 `'1970-01-01'` 会把「没访问过」和「访问过但很久以前」混成一件
+-- 事。NULL 是唯一能表达「没有」的取值，`hotnessScore` 对它的处理是返回 0。
+--
+-- ## 为什么建 `last_accessed_at` 的索引
+--
+-- 记忆健康度（§17.5）要回答「哪些记忆最久没被访问」，那是 `ORDER BY
+-- last_accessed_at`。没有索引时这条查询是整表扫描 + 排序，而它是控制台每次打开
+-- 统计页都会跑的一次查询。`access_count` 不建索引：没有任何查询按它过滤或排序
+-- （热度是算出来的，不是查出来的）。
+--
+-- ## 幂等
+--
+-- SQLite 的 `ALTER TABLE ... ADD COLUMN` 没有 `IF NOT EXISTS` 形式，重复执行
+-- 报 `duplicate column name`。幂等由迁移框架保证（按 `schema_version` 跳过已应用
+-- 的版本），这也是本仓库所有 `ALTER` 迁移的行事方式。
+ALTER TABLE node ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE node ADD COLUMN last_accessed_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_node_last_accessed ON node(last_accessed_at);

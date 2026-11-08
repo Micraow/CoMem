@@ -473,7 +473,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
   const embeddings = new EmbeddingRepository({ db, logger });
-  const vectors = new SqliteVectorIndex({ db, embeddings, logger });
+  const vectors = new SqliteVectorIndex({ db, logger });
 
   // ── 模型 ──
   const llmConfig = config.providers.llm.default;
@@ -524,6 +524,14 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
       timeoutMs: embeddingConfig.timeoutSeconds * MILLISECONDS_PER_SECOND,
     },
   });
+  // 启动期就把向量表建好、把维度与配置对齐：等到第一次写入才发现维度不一致，
+  // 那时错误已经落在「用户等着检索结果」的路径上，而且症状是「一条都搜不到」。
+  //
+  // 未配置嵌入时不建表：默认维度 1536 会写进元数据，之后换成 1024 维的模型要先
+  // 跑一次 `reindex` 才能启动，而那次重建没有任何数据要救。
+  if (embeddingConfig.type !== 'disabled') {
+    embeddings.ensureSchema(embeddingConfig.dimension, embeddingConfig.model);
+  }
   if (config.retrieval.engine !== 'fts5' && embedding.available) {
     logger.info('向量检索已启用', {
       engine: config.retrieval.engine,

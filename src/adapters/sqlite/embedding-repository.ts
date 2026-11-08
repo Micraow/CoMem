@@ -1,20 +1,33 @@
 /**
  * 嵌入向量仓储（架构文档 §8.1 的 `node_embedding` 表）。
  *
- * 只负责这张表的读写：批量 upsert、按 URI 读、按段边界/模型删、回填游标。余弦
- * 计算在 `vector-index.ts`，嵌入调用在 `adapters/llm/embedding-provider.ts`——三者
- * 拆开是因为它们的失败模式不同：仓储失败是磁盘/事务，索引失败是数据（模型换了、
- * 维度不匹配），提供者失败是网络。
+ * 存储是 `sqlite-vec` 的 `vec0` 虚拟表：`uri` 是主键，`model` / `content_digest`
+ * 是普通列，`embedding` 是 `FLOAT[N]` 向量列，距离度量 `cosine`（`distance =
+ * 1 - 余弦`）。余弦与量化在扩展的 C 层完成，这里只做行级读写。
  *
- * **为什么 `iterMissingUris` 查的是 `node`。** 「还没有嵌入的 URI」这个集合定义在
- * `node` 上，`node_embedding` 只能回答「已经嵌了哪些」。反查 `node` 而不是给
- * `node_embedding` 加一列 `embedded`，让「缺一行」本身就是缺失的表示——不需要在
- * 两个地方维护同一个布尔值。
+ * ## 为什么维度不在迁移里
+ *
+ * `vec0` 的维度在 `CREATE VIRTUAL TABLE` 时固定，而维度来自
+ * `providers.embedding.dimension`——换模型就变。写死在静态 SQL 里会让「换模型」
+ * 变成「静默跳过所有行」，所以虚拟表由 `ensureSchema` 在启动时按配置建，迁移
+ * （`0007_embedding.sql`）只建记录模型与维度的单行表 `embedding_model`。
+ *
+ * ## 为什么 `iterMissingUris` 查的是 `node`
+ *
+ * 「还没有嵌入的 URI」这个集合定义在 `node` 上，`node_embedding` 只能回答「已经
+ * 嵌了哪些」。反查 `node` 而不是给 `node_embedding` 加一列 `embedded`，让「缺一行」
+ * 本身就是缺失的表示——不需要在两个地方维护同一个布尔值。
+ *
+ * ## 失败模式的分工
+ *
+ * 仓储失败是磁盘 / 事务，索引失败是数据（模型换了、维度不匹配），提供者失败是
+ * 网络。三者拆开是因为处置完全不同。
  */
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 
 import type { Logger } from '../../domain/log.js';
+import { normalizeVector } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, placeholders } from './node-repository.js';
@@ -23,11 +36,8 @@ import { globPrefixPattern, placeholders } from './node-repository.js';
 export interface EmbeddingRow {
   readonly uri: string;
   readonly model: string;
-  readonly dimension: number;
-  readonly vector: Uint8Array;
-  readonly scale: number;
   readonly contentDigest: string;
-  readonly createdAt: string;
+  readonly vector: readonly number[];
 }
 
 export interface EmbeddingRepositoryDeps {
@@ -44,42 +54,64 @@ export interface EmbeddingRepositoryDeps {
  */
 const URI_CHUNK_SIZE = 500;
 
-const COLUMN_NAMES = [
-  'uri',
-  'model',
-  'dimension',
-  'vector',
-  'scale',
-  'content_digest',
-  'created_at',
-] as const;
+const COLUMNS = 'uri, model, content_digest, embedding';
 
-const COLUMNS = COLUMN_NAMES.join(', ');
+/** `Float32Array` 的元素字节数。向量列的 BLOB 是它的原始字节。 */
+const FLOAT_BYTES = Float32Array.BYTES_PER_ELEMENT;
 
-function text(value: unknown): string {
-  return String(value);
+/**
+ * 建向量虚拟表。`reindex` 重建维度时要用同一份定义，所以导出。
+ *
+ * 维度直接拼进 SQL 文本：`vec0` 的 `FLOAT[N]` 是 DDL 语法的一部分，没有绑定参数
+ * 能表达它。因此这里先校验它是正整数——拼进 SQL 的值必须先过类型。
+ */
+export function createEmbeddingTable(db: DatabaseSync, dimension: number): void {
+  if (!Number.isInteger(dimension) || dimension <= 0) {
+    throw new ComemError('INVALID_ARGUMENT', '向量维度必须是正整数。', { dimension });
+  }
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS node_embedding USING vec0(
+    uri TEXT PRIMARY KEY,
+    model TEXT,
+    content_digest TEXT,
+    embedding FLOAT[${String(dimension)}] distance_metric=cosine
+  )`);
 }
 
 /**
- * BLOB 列 → `Uint8Array`。
+ * 浮点数组 → `FLOAT[N]` 列的 BLOB。
  *
- * `node:sqlite` 对 BLOB 就返回 `Uint8Array`，这里只是让类型收窄。空数组是兜底：
- * 列是 `NOT NULL`，正常路径走不到；真读到空值时让下游的维度校验先报错，比在
- * 映射函数里抛一个没有上下文的异常更容易定位。
+ * `node:sqlite` 的绑定参数只认 `Uint8Array`（BLOB）。`Float32Array` 与它位模式
+ * 相同，按同一段内存重解释即可，不要走 `Array.from` 再转——那是逐元素拷贝。
  */
-function blob(value: unknown): Uint8Array {
-  return value instanceof Uint8Array ? value : new Uint8Array();
+export function toVectorBlob(vector: readonly number[]): Uint8Array {
+  const floats = new Float32Array(vector);
+  return new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength);
+}
+
+/**
+ * `FLOAT[N]` 列的 BLOB → 浮点数组。
+ *
+ * 空数组是兜底：列可空，正常路径不会读到 `null`；真读到时空向量会让调用方的
+ * 维度校验先报错，比在映射函数里抛一个没有上下文的异常更容易定位。
+ */
+function fromBlob(value: unknown): number[] {
+  if (!(value instanceof Uint8Array)) {
+    return [];
+  }
+  const floats = new Float32Array(value.buffer, value.byteOffset, value.byteLength / FLOAT_BYTES);
+  return Array.from(floats);
+}
+
+function text(value: unknown): string {
+  return String(value);
 }
 
 function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {
   return {
     uri: text(row['uri']),
     model: text(row['model']),
-    dimension: Number(row['dimension']),
-    vector: blob(row['vector']),
-    scale: Number(row['scale']),
     contentDigest: text(row['content_digest']),
-    createdAt: text(row['created_at']),
+    vector: fromBlob(row['embedding']),
   };
 }
 
@@ -93,47 +125,71 @@ export class EmbeddingRepository {
   }
 
   /**
+   * 确保虚拟表存在，且维度与配置一致。
+   *
+   * 维度不一致时**抛 `CONFLICT`** 并带 `stored` / `configured`：`vec0` 的维度在
+   * 建表时固定，配置改小 / 改大之后旧表里的向量既插不进去也查不出来。静默跳过会
+   * 让语义检索永久返回空且不报错——使用者只会看到「记忆里明明有这条，就是搜不到」。
+   *
+   * `model` 也一起写进元数据：它是「当前库里的向量属于哪个向量空间」的标注，换模型
+   * 后旧行靠 `model = ?` 过滤，清理是 `deleteByModel` 的显式操作。
+   */
+  ensureSchema(dimension: number, model: string): void {
+    const stored = this.storedDimension();
+    if (stored !== null && stored !== dimension) {
+      throw new ComemError(
+        'CONFLICT',
+        `向量维度与库中记录不一致：库中 ${String(stored)} 维，配置 ${String(dimension)} 维。`,
+        {
+          stored,
+          configured: dimension,
+          hint: '运行 `reindex --only=embeddings` 按当前配置重建向量表。',
+        },
+      );
+    }
+    createEmbeddingTable(this.#db, dimension);
+    // 单行表：第一次启动插入，之后把模型与维度刷成当前配置（幂等）。
+    this.#db
+      .prepare(
+        `INSERT INTO embedding_model (id, model, dimension, created_at) VALUES (1, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET model = excluded.model, dimension = excluded.dimension`,
+      )
+      .run(model, dimension, new Date().toISOString());
+    this.#logger.debug('向量表就绪', { model, dimension });
+  }
+
+  /**
    * 批量 upsert，单事务。
    *
-   * 用 `ON CONFLICT(uri) DO UPDATE` 而不是先查后写：回填时同一批里可能既有新节点
-   * 又有重嵌的旧节点，逐条分支会把一次写入变成 N 次读 + N 次写。`created_at` 跟着
-   * 一起更新——它记的是「这份向量什么时候算出来的」，不是「这行什么时候插进去的」。
+   * `vec0` **不支持 UPSERT**：`INSERT ... ON CONFLICT(uri) DO UPDATE` 报
+   * `UPSERT not implemented for virtual table`，`INSERT OR REPLACE` 报
+   * `UNIQUE constraint failed`。所以按主键先删后插，两条语句在同一个事务里。
+   *
+   * `content_digest` 记的是「这份向量对应哪份正文」（FNV-1a），回填时用它跳过
+   * 没变的节点；它跟着向量一起更新，不是「这行什么时候插进去的」。
    */
   upsert(rows: readonly EmbeddingRow[]): void {
     if (rows.length === 0) {
       return;
     }
     withWriteTransaction(this.#db, () => {
-      const statement = this.#db.prepare(
-        `INSERT INTO node_embedding (${COLUMNS})
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(uri) DO UPDATE SET
-           model = excluded.model,
-           dimension = excluded.dimension,
-           vector = excluded.vector,
-           scale = excluded.scale,
-           content_digest = excluded.content_digest,
-           created_at = excluded.created_at`,
+      const remove = this.#db.prepare('DELETE FROM node_embedding WHERE uri = ?');
+      const insert = this.#db.prepare(
+        `INSERT INTO node_embedding (uri, model, content_digest, embedding) VALUES (?, ?, ?, ?)`,
       );
       for (const row of rows) {
-        statement.run(
-          row.uri,
-          row.model,
-          row.dimension,
-          row.vector,
-          row.scale,
-          row.contentDigest,
-          row.createdAt,
-        );
+        remove.run(row.uri);
+        // 归一化放在写入边界：「存进去的向量是单位长度」是这张表的唯一不变量，
+        // 分散到每个调用方就迟早有人忘。余弦度量对长度不敏感，归一化不改变分数，
+        // 但换成内积 / L2 时不需要回填。
+        insert.run(row.uri, row.model, row.contentDigest, toVectorBlob(normalizeVector(row.vector)));
       }
     });
     this.#logger.debug('嵌入写入', { count: rows.length });
   }
 
   get(uri: string): EmbeddingRow | null {
-    const row = this.#db
-      .prepare(`SELECT ${COLUMNS} FROM node_embedding WHERE uri = ?`)
-      .get(uri);
+    const row = this.#db.prepare(`SELECT ${COLUMNS} FROM node_embedding WHERE uri = ?`).get(uri);
     return row === undefined ? null : toEmbeddingRow(row);
   }
 
@@ -141,7 +197,7 @@ export class EmbeddingRepository {
    * 按 URI 批量读。
    *
    * 分片是为了绕开 SQLite 的绑定变量上限（见 `URI_CHUNK_SIZE`）。返回顺序不保证
-   * 与入参一致：调用方要么按 URI 建映射，要么只关心集合本身——向量检索属于后者。
+   * 与入参一致：调用方要么按 URI 建映射，要么只关心集合本身。
    */
   getMany(uris: readonly string[]): readonly EmbeddingRow[] {
     if (uris.length === 0) {
@@ -165,7 +221,7 @@ export class EmbeddingRepository {
    *
    * 与 `retrieval-index.ts` 的 `deleteByUri` 同一套子句：`uri = ?` 命中自身，
    * `GLOB 前缀 + '/*'` 命中子树。用 `GLOB` 而不是 `LIKE`——`LIKE` 的 `_` 是单字符
-   * 通配符，而 URI 段允许 `_`，`a_b` 的子树会被算进 `axb` 的范围。
+   * 通配符，而 URI 段允许 `_`，`a_b` 的子树会被算进 `axb` 的范围（跨用户越权）。
    */
   deleteByUri(uri: string, options: { readonly recursive?: boolean } = {}): number {
     const recursive = options.recursive ?? false;
@@ -204,6 +260,10 @@ export class EmbeddingRepository {
    *
    * 「还没嵌入」按 `model` 判定：换模型后旧向量还在表里，但它们对这个模型而言是
    * 缺失的，回填会全部重算。要清空用 `deleteByModel`，两件事分开做。
+   *
+   * `NOT EXISTS` 相关子查询在 `vec0` 上成立（走主键点查，不是全表扫），所以不需要
+   * 「把已嵌入 URI 读进内存 Set 再差集」。代价实测：1 万 `node` 行 × 1 万向量行
+   * 约 67ms，属于一次性回填可接受的范围；十万级要换成临时表，那时这条查询会先变慢。
    */
   iterMissingUris(
     model: string,
@@ -229,5 +289,15 @@ export class EmbeddingRepository {
       .prepare(sql)
       .all(...params)
       .map((row) => text(row['uri']));
+  }
+
+  /** 当前库里的维度；没有元数据行（还没建过向量表）时返回 `null`。 */
+  storedDimension(): number | null {
+    const row = this.#db.prepare('SELECT dimension FROM embedding_model WHERE id = 1').get();
+    if (row === undefined) {
+      return null;
+    }
+    const dimension = Number(row['dimension']);
+    return Number.isInteger(dimension) && dimension > 0 ? dimension : null;
   }
 }

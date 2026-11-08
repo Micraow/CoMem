@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ComemError } from '../../../src/domain/errors.js';
-import {
-  assertValidVector,
-  cosineSimilarity,
-  dequantizeVector,
-  normalizeVector,
-  quantizeVector,
-} from '../../../src/domain/embedding.js';
+import { assertValidVector, normalizeVector } from '../../../src/domain/embedding.js';
 
 function expectInvalidArgument(run: () => void): ComemError {
   let caught: unknown;
@@ -26,79 +20,6 @@ function norm(vector: readonly number[]): number {
   return Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
 }
 
-describe('cosineSimilarity', () => {
-  it('正交向量返回 0', () => {
-    expect(cosineSimilarity([1, 0], [0, 1])).toBe(0);
-    expect(cosineSimilarity([1, 0, 0], [0, 1, 0])).toBe(0);
-  });
-
-  it('同向向量返回 1', () => {
-    expect(cosineSimilarity([1, 2, 3], [1, 2, 3])).toBeCloseTo(1, 12);
-    // 同一方向、不同长度：余弦只看方向。
-    expect(cosineSimilarity([1, 2, 3], [2, 4, 6])).toBeCloseTo(1, 12);
-  });
-
-  it('反向向量返回 -1', () => {
-    expect(cosineSimilarity([1, 2, 3], [-1, -2, -3])).toBeCloseTo(-1, 12);
-  });
-
-  it('全零向量返回 0 而不是 NaN', () => {
-    expect(cosineSimilarity([0, 0, 0], [1, 2, 3])).toBe(0);
-    expect(cosineSimilarity([0, 0], [0, 0])).toBe(0);
-  });
-
-  it('维度不匹配抛 INVALID_ARGUMENT', () => {
-    expectInvalidArgument(() => cosineSimilarity([1, 2], [1, 2, 3]));
-  });
-
-  it('空向量抛 INVALID_ARGUMENT', () => {
-    expectInvalidArgument(() => cosineSimilarity([], []));
-  });
-});
-
-describe('quantizeVector / dequantizeVector', () => {
-  it('量化往返误差小于 scale / 2', () => {
-    const vector = [0.1, -0.5, 0.9, 0.004, -1];
-    const maxAbs = Math.max(...vector.map((value) => Math.abs(value)));
-    const scale = maxAbs / 127;
-
-    const restored = dequantizeVector(quantizeVector(vector), scale);
-
-    expect(restored).toHaveLength(vector.length);
-    for (const [index, value] of vector.entries()) {
-      expect(Math.abs((restored[index] ?? Number.NaN) - value)).toBeLessThanOrEqual(scale / 2);
-    }
-  });
-
-  it('最大分量落在 ±127，不会被回绕成反号', () => {
-    const quantized = quantizeVector([0.3, -0.3]);
-
-    expect(quantized[0]).toBe(127);
-    expect(quantized[1]).toBe(-127);
-  });
-
-  it('全零向量的 scale 为 0，往返不炸', () => {
-    const quantized = quantizeVector([0, 0, 0]);
-
-    expect(Array.from(quantized)).toEqual([0, 0, 0]);
-    expect(dequantizeVector(quantized, 0)).toEqual([0, 0, 0]);
-  });
-
-  it('空向量往返为空', () => {
-    expect(Array.from(quantizeVector([]))).toEqual([]);
-    expect(dequantizeVector(quantizeVector([]), 0)).toEqual([]);
-  });
-
-  it('负 scale 抛 INVALID_ARGUMENT', () => {
-    expectInvalidArgument(() => dequantizeVector(new Int8Array([1, 2]), -1));
-  });
-
-  it('非有限 scale 抛 INVALID_ARGUMENT', () => {
-    expectInvalidArgument(() => dequantizeVector(new Int8Array([1, 2]), Number.NaN));
-    expectInvalidArgument(() => dequantizeVector(new Int8Array([1, 2]), Number.POSITIVE_INFINITY));
-  });
-});
-
 describe('normalizeVector', () => {
   it('归一化后模长为 1', () => {
     for (const vector of [
@@ -115,7 +36,8 @@ describe('normalizeVector', () => {
 
     expect(normalized[0]).toBeCloseTo(0.6, 12);
     expect(normalized[1]).toBeCloseTo(0.8, 12);
-    expect(cosineSimilarity(normalized, [3, 4])).toBeCloseTo(1, 12);
+    // 方向不变 = 分量之间的比值不变。
+    expect((normalized[1] ?? 0) / (normalized[0] ?? 1)).toBeCloseTo(4 / 3, 12);
   });
 
   it('全零向量原样返回（模长 0，不是 NaN）', () => {

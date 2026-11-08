@@ -7,7 +7,7 @@ import type {
 } from '../../../src/domain/embedding.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
-import { EmbeddingService, quantizeForStorage } from '../../../src/services/embedding.js';
+import { EmbeddingService } from '../../../src/services/embedding.js';
 
 const DIMENSION = 3;
 const MODEL = 'test-embedding';
@@ -314,19 +314,5 @@ describe('构造校验', () => {
         ComemError,
       );
     }
-  });
-});
-
-describe('quantizeForStorage', () => {
-  it('返回可还原的 int8 向量与 scale', () => {
-    const { vector, scale } = quantizeForStorage([3, 4, 0]);
-
-    expect(vector).toHaveLength(3);
-    // 归一化后是 [0.6, 0.8, 0]，最大分量 0.8，所以 scale = 0.8 / 127。
-    expect(scale).toBeCloseTo(0.8 / 127, 12);
-    // 最大分量恰好落在 127 上（不会因越界回绕成反号）。
-    expect(vector[1]).toBe(127);
-    expect(vector[0]).toBe(Math.round(0.6 / (0.8 / 127)));
-    expect(vector[2]).toBe(0);
   });
 });

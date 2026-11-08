@@ -73,6 +73,43 @@ const embeddingProviderSchema = z
   })
   .prefault({});
 
+/**
+ * 重排供应商（架构文档 §18 的 `providers.rerank`）。
+ *
+ * `type: 'disabled'` 是默认值：重排是检索路径上的一次额外模型调用，没配就不该
+ * 产生。**不要静默降级**——`retrieval.rerank.enabled` 为 `true` 而这里仍是
+ * `disabled` 时 `loadConfig` 抛 `INVALID_ARGUMENT`，见下面的交叉校验。
+ *
+ * 与 `providers.embedding` 分开而不是合并：两者的失败处置不同（嵌入维度不匹配是
+ * 配置错误，重排超时该降级到融合分），合并之后配置层就没法为它们分别做交叉校验。
+ */
+const rerankProviderSchema = z
+  .object({
+    /** `http` 走 Cohere / Jina 兼容的 `POST /rerank`；`disabled` 不产生调用 */
+    type: z.enum(['http', 'disabled']).default('disabled'),
+    baseUrl: z.string().default(''),
+    /** 如 `BAAI/bge-reranker-v2-m3` */
+    model: z.string().default('BAAI/bge-reranker-v2-m3'),
+    apiKey: z.string().default(''),
+    /**
+     * 单次重排超时，秒。
+     *
+     * 10 秒是经验值：重排在检索路径上串行执行，超时直接加在用户等待时间上。一次
+     * 50 条文档的交叉编码通常 200–800ms，10 秒足够覆盖尾延迟，又不会让一次
+     * 「查一下」卡住十几秒。
+     */
+    timeoutSeconds: z.number().int().positive().default(10),
+    /**
+     * 最多重排多少条候选。
+     *
+     * 50 是经验值：重排是串行的额外延迟，5 条以内的区别用户感知不到；而向量召回
+     * 的 top-50 里噪声比 BM25 大，重排正是为了解决这一段。取 50 与「混合检索先
+     * 取 `candidateMultiplier × limit` 候选」的量级一致。
+     */
+    topN: z.number().int().positive().default(50),
+  })
+  .prefault({});
+
 const levelWeightsSchema = z
   .object({
     l0: z.number().positive().default(1.15),
@@ -121,6 +158,19 @@ const retrievalSchema = z.object({
       budgetMs: z.number().int().positive().default(500),
     })
     .prefault({}),
+  /**
+   * 重排（§8.5 的「后续的 rerank」）。
+   *
+   * **默认关**：重排多一次模型调用，默认开会让「查一下」变慢。它是「召回质量不够
+   * 时再打开」的旋钮，不是默认路径的一部分。
+   */
+  rerank: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** 重排后保留前多少条；0 = 不过滤（只重排，不截断） */
+      keepTopN: z.number().int().nonnegative().default(0),
+    })
+    .prefault({}),
 });
 
 const configObjectSchema = z.object({
@@ -135,6 +185,7 @@ const configObjectSchema = z.object({
         })
         .prefault({}),
       embedding: embeddingProviderSchema.prefault({}),
+      rerank: rerankProviderSchema.prefault({}),
     })
     .prefault({}),
 
@@ -228,6 +279,14 @@ const configObjectSchema = z.object({
         .object({
           /** 一周 */
           halfLifeHours: z.number().positive().default(168),
+          /**
+           * 热度对最终排序的影响。0 = 只用于冷热标记，1 = 与检索分同权。
+           *
+           * 默认 0 是架构文档 §17.5 的结论：热度是治理指标（「哪些记忆该清理」），
+           * 不是检索指标；混进排序会让老记忆永远赢，新记忆永远出不来。非 0 是
+           * 运维显式选择的取舍，不是我们推荐的默认值。
+           */
+          weight: z.number().min(0).max(1).default(0),
         })
         .prefault({}),
     })
@@ -271,6 +330,28 @@ const configSchema = configObjectSchema.transform((config) => {
       },
     );
   }
+
+  /**
+   * 交叉校验：开了重排就必须有重排供应商。
+   *
+   * **不能静默降级成「不重排」。** 用户把 `retrieval.rerank.enabled` 打开，是因为
+   * 他认为召回噪声需要模型压一压；退回融合分排序会给出「看起来能用、实际没按配置
+   * 生效」的结果。这类错误在启动时抛，比在「为什么检索质量没变」的排查里发现好。
+   *
+   * 与上面 embedding 的校验同一条理由、同一个写法（`transform` 而不是
+   * `superRefine`，见那段注释）。两条校验独立：同时配错时先报 embedding。
+   */
+  if (config.retrieval.rerank.enabled && config.providers.rerank.type === 'disabled') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      'retrieval.rerank.enabled 需要 providers.rerank：开启重排时必须配置重排供应商，否则重排不会发生。',
+      {
+        rerankType: config.providers.rerank.type,
+        field: 'providers.rerank',
+      },
+    );
+  }
+
   return config;
 });
 

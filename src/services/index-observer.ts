@@ -62,7 +62,7 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
-import { quantizeForStorage, type EmbeddingService } from './embedding.js';
+import type { EmbeddingService } from './embedding.js';
 import type { NodeWriteObserver } from './filesystem.js';
 import type { SummaryService } from './summary.js';
 
@@ -411,16 +411,12 @@ export class IndexObserver implements NodeWriteObserver {
           return;
         }
 
-        const quantized = quantizeForStorage(vector);
         embeddings.upsert([
           {
             uri: uri.toString(),
             model,
-            dimension: vector.length,
-            vector: quantized.vector,
-            scale: quantized.scale,
             contentDigest: digest,
-            createdAt: new Date().toISOString(),
+            vector,
           },
         ]);
       })

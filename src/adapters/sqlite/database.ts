@@ -10,6 +10,10 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
+import { getLoadablePath } from 'sqlite-vec';
+
+import { ComemError } from '../../domain/errors.js';
+
 export interface OpenOptions {
   readonly?: boolean;
 }
@@ -28,12 +32,49 @@ interface MigrationFile {
 }
 
 /**
+ * `sqlite-vec` 的预编译二进制路径，进程内只解析一次。
+ *
+ * `getLoadablePath()` 走 `import.meta.resolve`，每次调用都要重新做一遍包解析；
+ * 扩展的加载本身是**连接级**的（见 `loadVectorExtension`），路径可以共用。
+ */
+let loadablePath: string | null = null;
+
+/**
+ * 给连接挂上 `sqlite-vec`。
+ *
+ * 扩展是**每个连接**一份状态，`loadExtension` 必须对每个 `DatabaseSync` 各调一次
+ * ——`allowExtension: true` 只是允许加载，不等于加载过。两个连接只有一个挂上扩展时，
+ * 另一个会在 `CREATE VIRTUAL TABLE ... USING vec0` 上报 `no such module`。
+ * 动态链接器自己会缓存 `.so`，重复调用不会重复读盘。
+ *
+ * 加载失败直接抛 `INTERNAL` 并带 `hint`：向量检索是 `retrieval.engine = vector |
+ * hybrid` 的唯一实现，静默降级会让语义检索永久返回空且不报错。失败原因通常是当前
+ * 平台没有预编译包（`sqlite-vec-<platform>` 只覆盖 darwin/linux 的 x64 与 arm64）。
+ */
+function loadVectorExtension(db: DatabaseSync): void {
+  try {
+    loadablePath ??= getLoadablePath();
+    db.loadExtension(loadablePath);
+  } catch (error) {
+    throw new ComemError('INTERNAL', '加载 sqlite-vec 扩展失败，向量检索不可用。', {
+      hint: '`sqlite-vec` 需要平台预编译包，检查 `node_modules/sqlite-vec-<platform>` 是否存在。',
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
  * 打开数据库并设置连接级 PRAGMA。
+ *
+ * `allowExtension: true` 必须显式传：`node:sqlite` 默认是 `false`，不传时
+ * `loadExtension` 报 `ERR_INVALID_STATE`。
+ *
  * 只读连接不能改 `journal_mode`，因此只设 `busy_timeout` 与 `foreign_keys`。
  */
 export function openDatabase(file: string, options: OpenOptions = {}): DatabaseSync {
   const readonly = options.readonly ?? false;
-  const db = new DatabaseSync(file, { readOnly: readonly });
+  const db = new DatabaseSync(file, { readOnly: readonly, allowExtension: true });
+  loadVectorExtension(db);
   if (!readonly) {
     // 架构文档 §18「并发控制」：WAL 允许并发读、单写者。
     db.exec('PRAGMA journal_mode = WAL');

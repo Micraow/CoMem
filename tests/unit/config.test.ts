@@ -67,6 +67,14 @@ function expectedDefaults(dataDir: string): unknown {
         maxBatchSize: 128,
         timeoutSeconds: 30,
       },
+      rerank: {
+        type: 'disabled',
+        baseUrl: '',
+        model: 'BAAI/bge-reranker-v2-m3',
+        apiKey: '',
+        timeoutSeconds: 10,
+        topN: 50,
+      },
     },
     summary: { generator: 'llm', abstractMaxChars: 256, overviewMaxChars: 4000 },
     retrieval: {
@@ -83,6 +91,7 @@ function expectedDefaults(dataDir: string): unknown {
         rewriteTimeoutMs: 30000,
         budgetMs: 500,
       },
+      rerank: { enabled: false, keepTopN: 0 },
     },
     session: {
       autoCommit: {
@@ -102,7 +111,7 @@ function expectedDefaults(dataDir: string): unknown {
       metrics: { enabled: true, includeAccountLabel: false },
       requestLog: { enabled: true, retainDays: 7, retainRows: 100000, sampleRate: 1 },
       hookOverhead: { enabled: true },
-      hotness: { halfLifeHours: 168 },
+      hotness: { halfLifeHours: 168, weight: 0 },
     },
     task: { leaseSeconds: 60, maxAttempts: 3, concurrency: 4 },
   };
@@ -178,6 +187,14 @@ describe('loadConfig', () => {
           dimension: 1024,
           maxBatchSize: 64,
           timeoutSeconds: 30,
+        },
+        rerank: {
+          type: 'disabled',
+          baseUrl: '',
+          model: 'BAAI/bge-reranker-v2-m3',
+          apiKey: '',
+          timeoutSeconds: 10,
+          topN: 50,
         },
       },
     });
@@ -344,6 +361,58 @@ describe('loadConfig', () => {
         expect(config.retrieval.engine).toBe(engine);
         expect(config.providers.embedding.type).toBe('openai-compatible');
       }
+    });
+
+    it('retrieval.rerank.enabled 为 true 而 providers.rerank 未配置时抛 INVALID_ARGUMENT', () => {
+      const error = loadError({
+        path: writeConfig('retrieval:\n  rerank:\n    enabled: true\n'),
+        env: testEnv(),
+      });
+
+      expect(error.code).toBe('INVALID_ARGUMENT');
+      expect(error.message).toContain('providers.rerank');
+      expect(error.details).toMatchObject({
+        field: 'providers.rerank',
+        rerankType: 'disabled',
+      });
+    });
+
+    it('配了 providers.rerank 之后重排可用', () => {
+      const config = loadConfig({
+        path: writeConfig(
+          [
+            'retrieval:',
+            '  rerank:',
+            '    enabled: true',
+            '    keepTopN: 10',
+            'providers:',
+            '  rerank:',
+            '    type: http',
+            '    baseUrl: https://rerank.example.test/v1',
+            '    model: test-reranker',
+          ].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(config.retrieval.rerank).toEqual({ enabled: true, keepTopN: 10 });
+      expect(config.providers.rerank).toMatchObject({
+        type: 'http',
+        baseUrl: 'https://rerank.example.test/v1',
+        model: 'test-reranker',
+        timeoutSeconds: 10,
+        topN: 50,
+      });
+    });
+
+    it('重排关闭时 providers.rerank 保持 disabled 也不报错', () => {
+      const config = loadConfig({
+        path: writeConfig('retrieval:\n  rerank:\n    enabled: false\n'),
+        env: testEnv(),
+      });
+
+      expect(config.providers.rerank.type).toBe('disabled');
+      expect(config.retrieval.rerank.enabled).toBe(false);
     });
   });
 

@@ -20,7 +20,7 @@
  */
 
 import type { EmbeddingProvider, EmbeddingResult } from '../domain/embedding.js';
-import { assertValidVector, normalizeVector, quantizeVector } from '../domain/embedding.js';
+import { assertValidVector } from '../domain/embedding.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 
@@ -72,12 +72,6 @@ const FAILURE_THRESHOLD = 5;
  */
 const COOLDOWN_MS = 30_000;
 
-/**
- * 量化上界。与 `domain/embedding.ts` 的 `INT8_MAX` 是同一个数，那个常量没有
- * 导出；这里重复一个字面量而不是把领域层内部常量抬成公共 API。
- */
-const QUANTIZATION_MAX = 127;
-
 type CircuitState = 'closed' | 'open' | 'half-open';
 
 interface MutableStats {
@@ -85,30 +79,6 @@ interface MutableStats {
   failures: number;
   tokens: number;
   degradedCalls: number;
-}
-
-/**
- * 量化并算出落库用的 scale。
- *
- * 先归一化再量化：余弦相似度在单位向量上退化成点积，而 `SqliteVectorIndex` 读取
- * 时按同一个公式还原。`scale = maxAbs / 127` 与 `quantizeVector` 内部的映射一致
- * （见 `domain/embedding.ts` 的 `quantizeVector` 注释）。
- */
-export function quantizeForStorage(vector: readonly number[]): {
-  readonly vector: Uint8Array;
-  readonly scale: number;
-} {
-  const normalized = normalizeVector(vector);
-  let maxAbs = 0;
-  for (const value of normalized) {
-    maxAbs = Math.max(maxAbs, Math.abs(value));
-  }
-  const quantized = quantizeVector(normalized);
-  return {
-    // `Int8Array` 与 SQLite BLOB 的 `Uint8Array` 位模式相同，按同一段内存重解释。
-    vector: new Uint8Array(quantized.buffer, quantized.byteOffset, quantized.length),
-    scale: maxAbs === 0 ? 0 : maxAbs / QUANTIZATION_MAX,
-  };
 }
 
 export class EmbeddingService {

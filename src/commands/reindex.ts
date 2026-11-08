@@ -27,6 +27,7 @@
 
 import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import { ContentStore } from '../adapters/fs/content-store.js';
@@ -35,7 +36,10 @@ import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
-import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
+import {
+  EmbeddingRepository,
+  createEmbeddingTable,
+} from '../adapters/sqlite/embedding-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { NodeRow } from '../adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
@@ -46,7 +50,7 @@ import type { ContextType, NodeStatus } from '../domain/node.js';
 import { stableDigest } from '../domain/node.js';
 import type { IndexRecord } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
-import { EmbeddingService, quantizeForStorage } from '../services/embedding.js';
+import { EmbeddingService } from '../services/embedding.js';
 
 export interface ReindexOptions {
   readonly dataDir?: string;
@@ -70,6 +74,15 @@ export interface ReindexResult {
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
 const DATABASE_FILE = 'comem.sqlite';
+
+/**
+ * 维度变化时的备份表名。
+ *
+ * 普通表，不是虚拟表：`vec0` 的 shadow 表（`node_embedding_info` / `_chunks` …）
+ * 不跟着 `ALTER TABLE ... RENAME` 改名，建同名新表会撞
+ * `table "node_embedding_info" already exists`。复制成普通表是唯一能保留旧向量的做法。
+ */
+const EMBEDDING_BACKUP_TABLE = 'node_embedding_backup';
 
 /**
  * 进度输出间隔。
@@ -293,6 +306,48 @@ function progress(
   );
 }
 
+interface EmbeddingBackup {
+  readonly model: string;
+  readonly dimension: number;
+}
+
+/**
+ * 把当前向量表复制到备份表，返回它的模型与维度。
+ *
+ * `vec0` 的向量列能直接 `SELECT` 出来（BLOB），也能原样写回同维度的新表，所以备份
+ * 是一次 `CREATE TABLE ... AS SELECT`，不需要逐行读向量。
+ */
+function backupEmbeddings(db: DatabaseSync): EmbeddingBackup {
+  const row = db.prepare('SELECT model, dimension FROM embedding_model WHERE id = 1').get();
+  const dimension = Number(row?.['dimension']);
+  const model = String(row?.['model'] ?? '');
+  if (!Number.isInteger(dimension) || dimension <= 0) {
+    throw new ComemError('INTERNAL', '向量表缺少维度元数据，无法备份重建。', { dimension });
+  }
+  db.exec(`DROP TABLE IF EXISTS ${EMBEDDING_BACKUP_TABLE}`);
+  db.exec(`CREATE TABLE ${EMBEDDING_BACKUP_TABLE} AS
+    SELECT uri, model, content_digest, embedding FROM node_embedding`);
+  return { model, dimension };
+}
+
+/**
+ * 回滚：删掉按新维度建的表，按备份的维度重建，再把行写回去。
+ *
+ * 元数据行也要改回旧维度——否则下次启动时 `ensureSchema` 会认为「库里的维度与
+ * 配置一致」，而实际表是旧维度，写入时报一句没有上下文的 SQL 错误。
+ */
+function restoreEmbeddings(db: DatabaseSync, backup: EmbeddingBackup, logger: Logger): void {
+  db.exec('DROP TABLE IF EXISTS node_embedding');
+  db.exec('DELETE FROM embedding_model WHERE id = 1');
+  createEmbeddingTable(db, backup.dimension);
+  db.exec(`INSERT INTO node_embedding (uri, model, content_digest, embedding)
+    SELECT uri, model, content_digest, embedding FROM ${EMBEDDING_BACKUP_TABLE}`);
+  db.prepare(
+    'INSERT INTO embedding_model (id, model, dimension, created_at) VALUES (1, ?, ?, ?)',
+  ).run(backup.model, backup.dimension, new Date().toISOString());
+  logger.warn('向量表重建失败，已回滚到旧维度。', { dimension: backup.dimension });
+}
+
 /**
  * 重建索引。
  *
@@ -334,6 +389,8 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
   // 不会替调用方建父目录。
   await mkdir(join(config.dataDir, META_DIRECTORY), { recursive: true });
   const db = openDatabase(join(config.dataDir, META_DIRECTORY, DATABASE_FILE));
+  /** 维度变化时的备份；成功回填之后删掉，抛错时用它回滚。 */
+  let backup: EmbeddingBackup | null = null;
   try {
     runMigrations(db);
 
@@ -375,6 +432,26 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     let skipped = 0;
     let failed = 0;
 
+    // 维度变了要整表重建：`vec0` 的维度固定在 `CREATE VIRTUAL TABLE` 时，旧表里的
+    // 向量一条都用不了。先备份，回填成功后再删；中途抛错就回滚到旧维度。
+    //
+    // 「没有元数据行」不是变化：全新库 / 只跑过 `--only=index` 的库由
+    // `ensureSchema` 直接建表。
+    if (needsEmbeddings) {
+      const stored = embeddings.storedDimension();
+      if (stored !== null && stored !== embeddingConfig.dimension) {
+        backup = backupEmbeddings(db);
+        db.exec('DROP TABLE node_embedding');
+        db.exec('DELETE FROM embedding_model WHERE id = 1');
+        logger.info('向量维度变化，已备份旧表并重建。', {
+          stored,
+          configured: embeddingConfig.dimension,
+          backup: EMBEDDING_BACKUP_TABLE,
+        });
+      }
+      embeddings.ensureSchema(embeddingConfig.dimension, embeddingConfig.model);
+    }
+
     for (const [indexInBatch, node] of nodes.entries()) {
       const uri = node.uri.toString();
       const existing = nodeRepository.get(uri);
@@ -410,18 +487,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
                   reason: outcome.reason ?? '没有返回向量。',
                 });
               } else {
-                const quantized = quantizeForStorage(vector);
-                embeddings.upsert([
-                  {
-                    uri,
-                    model,
-                    dimension: vector.length,
-                    vector: quantized.vector,
-                    scale: quantized.scale,
-                    contentDigest: digest,
-                    createdAt: new Date().toISOString(),
-                  },
-                ]);
+                embeddings.upsert([{ uri, model, contentDigest: digest, vector }]);
                 wrote = true;
               }
             }
@@ -444,7 +510,26 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     }
 
     progress(nodes.length, nodes.length, rewritten, skipped, failed);
+    if (backup !== null) {
+      db.exec(`DROP TABLE IF EXISTS ${EMBEDDING_BACKUP_TABLE}`);
+    }
     return { scanned: nodes.length, rewritten, skipped, failed };
+  } catch (error) {
+    // 单个节点的失败在循环里已经计入 `failed`，走到这里的只有全局故障（磁盘满、
+    // 表结构被外部改坏）。旧表还在备份表里，先还原再往上抛。
+    if (backup !== null) {
+      try {
+        restoreEmbeddings(db, backup, logger);
+      } catch (restoreError) {
+        // 回滚自己失败时不能盖掉原始错误：那会让「为什么重建失败」变成「为什么
+        // 回滚失败」。备份表留在库里，运维还能手工恢复。
+        logger.error('回滚向量表失败，旧向量保留在备份表。', {
+          backup: EMBEDDING_BACKUP_TABLE,
+          reason: errorMessage(restoreError),
+        });
+      }
+    }
+    throw error;
   } finally {
     db.close();
   }

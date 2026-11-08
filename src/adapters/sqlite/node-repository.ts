@@ -9,6 +9,7 @@
 
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 
+import { ComemError } from '../../domain/errors.js';
 import type { Level } from '../../domain/level.js';
 import type { Logger } from '../../domain/log.js';
 import type { ContextType, NodeKind, NodeStatus } from '../../domain/node.js';
@@ -34,6 +35,21 @@ export interface NodeRow {
 export interface NodeRepositoryDeps {
   readonly db: DatabaseSync;
   readonly logger: Logger;
+}
+
+/**
+ * 热度衰减的输入（架构文档 §17.5、`0009_access_tracking.sql`）。
+ *
+ * 与 `NodeRow` 分开：`NodeRow` 是检索的读模型（`uri` / `level` / `abstract` 这些
+ * 一次查询就要的列），访问计数只在算热度时用。混进去会让「检索命中」这个热路径
+ * 每次都多读两列，而它们只在控制台的统计页上有意义。
+ */
+export interface NodeAccessStats {
+  readonly uri: string;
+  /** 被检索命中并注入的次数。从没访问过是 0。 */
+  readonly accessCount: number;
+  /** ISO 8601；从没访问过是 `null`。 */
+  readonly lastAccessedAt: string | null;
 }
 
 /** 列顺序与 `NodeRow` 字段顺序一致，映射函数只依赖这个常量。 */
@@ -242,5 +258,78 @@ export class NodeRepository {
   count(): number {
     const row = this.#db.prepare('SELECT COUNT(*) AS total FROM node').get();
     return Number(row?.['total'] ?? 0);
+  }
+
+  /**
+   * 批量累加访问计数。**不走 `updated_at`**——访问不是修改。
+   *
+   * 一次检索命中 50 条，逐个 UPDATE 是 50 次事务（每次 `BEGIN IMMEDIATE` 都要拿
+   * 写锁并落盘）。这里一条事务 + 一条预编译语句，50 条是 50 次 `run`。
+   *
+   * **不存在的 URI 静默跳过**：索引与磁盘不同步是正常状态（文件被外部删除、
+   * 重建索引前），为它抛错会让一次正常的检索失败。返回的是实际命中的行数。
+   *
+   * **不去重**：同一个 URI 在入参里出现两次就是两次访问。合并检索结果时按 URI
+   * 去重是调用方的职责（§8.4 的合并规则），这里再做一次会让「命中两次」这件事
+   * 在计数上消失。
+   */
+  recordAccess(uris: readonly string[], at: Date): number {
+    if (uris.length === 0) {
+      return 0;
+    }
+    if (Number.isNaN(at.getTime())) {
+      // 非法 Date 调 `toISOString()` 抛的是 `RangeError: Invalid time value`，
+      // 消息里没有字段名，上层只能看到一个内部错误。
+      throw new ComemError('INVALID_ARGUMENT', '访问时间不是合法的 Date。', { at: at.toString() });
+    }
+
+    const timestamp = at.toISOString();
+    const updated = withWriteTransaction(this.#db, () => {
+      const statement = this.#db.prepare(
+        'UPDATE node SET access_count = access_count + 1, last_accessed_at = ? WHERE uri = ?',
+      );
+      let changes = 0;
+      for (const uri of uris) {
+        changes += Number(statement.run(timestamp, uri).changes);
+      }
+      return changes;
+    });
+
+    this.#logger.debug('节点访问计数累加', { uris: uris.length, updated });
+    return updated;
+  }
+
+  /**
+   * 读热度所需的两个字段，**按入参顺序**返回。
+   *
+   * 不在索引里的 URI 不返回（不是补一条 `accessCount: 0`）：补零会让「这条记忆
+   * 不在索引里」和「这条记忆从没被访问过」变成同一件事，而前者是数据不一致，
+   * 排查时需要的正是这个区别。
+   */
+  readAccessStats(uris: readonly string[]): readonly NodeAccessStats[] {
+    if (uris.length === 0) {
+      // 空 IN () 是语法错误。调用方在「一条都没命中」时不该产生一次查询。
+      return [];
+    }
+
+    const rows = this.#db
+      .prepare(
+        `SELECT uri, access_count, last_accessed_at FROM node WHERE uri IN (${placeholders(uris.length)})`,
+      )
+      .all(...uris);
+
+    const byUri = new Map<string, NodeAccessStats>();
+    for (const row of rows) {
+      const uri = text(row['uri']);
+      byUri.set(uri, {
+        uri,
+        accessCount: integer(row['access_count']),
+        lastAccessedAt: nullableText(row['last_accessed_at']),
+      });
+    }
+
+    return uris
+      .map((uri) => byUri.get(uri))
+      .filter((stats): stats is NodeAccessStats => stats !== undefined);
   }
 }

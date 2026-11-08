@@ -13,7 +13,6 @@ import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repo
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { SqliteVectorIndex } from '../../../src/adapters/sqlite/vector-index.js';
-import { normalizeVector, quantizeVector } from '../../../src/domain/embedding.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -80,7 +79,8 @@ beforeEach(async () => {
   metadata = new MetadataFileStore({ dataDir, logger });
   authorizer = new AllowAllAuthorizer();
   embeddings = new EmbeddingRepository({ db, logger });
-  vectors = new SqliteVectorIndex({ db, logger, embeddings });
+  embeddings.ensureSchema(2, MODEL);
+  vectors = new SqliteVectorIndex({ db, logger });
   nodes = new NodeRepository({ db, logger });
 });
 
@@ -133,23 +133,14 @@ function deny(uri: string, principal = 'user:alice'): void {
   ).run(uri, principal);
 }
 
-/** 量化后落库，与 `SqliteVectorIndex` 的读取侧同一套 scale 公式。 */
+/** 落库：归一化由仓储在写入边界做（见 `EmbeddingRepository.upsert`）。 */
 function storeVector(uri: string, vector: readonly number[]): void {
-  const normalized = normalizeVector(vector);
-  let maxAbs = 0;
-  for (const value of normalized) {
-    maxAbs = Math.max(maxAbs, Math.abs(value));
-  }
-  const quantized = quantizeVector(normalized);
   embeddings.upsert([
     {
       uri,
       model: MODEL,
-      dimension: normalized.length,
-      vector: new Uint8Array(quantized.buffer, quantized.byteOffset, quantized.length),
-      scale: maxAbs === 0 ? 0 : maxAbs / 127,
       contentDigest: '0000000000000000',
-      createdAt: CREATED_AT,
+      vector,
     },
   ]);
 }
