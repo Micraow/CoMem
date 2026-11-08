@@ -1,7 +1,7 @@
 # 运维手册
 
 面向要把 CoMem 跑起来的人：装什么、怎么配、数据落在哪、出问题看哪里。
-架构与设计取舍在 [`architecture.md`](architecture.md)，答辩材料在 [`defense.md`](defense.md)。
+架构与设计取舍在 [`architecture.md`](architecture.md)。
 
 ## 系统要求
 

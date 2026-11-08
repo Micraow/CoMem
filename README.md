@@ -127,7 +127,7 @@ pnpm test:e2e
 
 ## 六条核心链路
 
-答辩和排障都按这六条走（验收点见 §20）。
+排障按这六条走（验收点见 §20）。
 
 | 链路 | 做什么 | 代码 |
 |---|---|---|
@@ -176,7 +176,6 @@ ACL 求值就没法用内存数据穷举测试。
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | 架构与设计的唯一真相（21 节：分层、数据布局、六条链路、错误模型、里程碑） |
 | [`docs/operations.md`](docs/operations.md) | 部署、配置、数据布局、备份、监控、排障、已知限制 |
-| [`docs/defense.md`](docs/defense.md) | 答辩材料：8 分钟演示分镜、六个设计决策、15 个问题、backlog |
 | [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、六个 hook、bypass、去重、HTTP 契约 |
 
 ## 开发

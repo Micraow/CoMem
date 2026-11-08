@@ -2316,7 +2316,7 @@ comem_llm_cost_usd_total{purpose, provider, model}       # 按配置单价换算
 comem_llm_errors_total{purpose, code}
 ```
 
-**为什么要有 cost**：答辩被问「跑一次演示多少钱」，能直接答出来。单价配置在 `providers.llm.default.pricing`，不写死。
+**为什么要有 cost**：部署方要知道「跑一个月多少钱」，这条指标直接答。单价配置在 `providers.llm.default.pricing`，不写死。
 
 **`purpose` 的取值**：`summary`（目录摘要）、`extract`（记忆抽取）、`intent`（意图分析）、`working_memory`。分开才能看出「钱花在哪」。
 
@@ -2682,10 +2682,10 @@ task:
 | P6 | ACL 与用户组 | 权限链路测试通过 |
 | P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 |
 | P8 | MCP 16 工具 | MCP 客户端可连 |
-| P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 答辩能看到「CoMem 让每个请求多花多少毫秒」 |
+| P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 能看到「CoMem 让每个请求多花多少毫秒」 |
 | P10 | 控制台六页 | 完整演示路径 |
 | P11 | Hook 插件（Claude Code + DSH） | 真实会话自动入库 |
-| P12 | 文档与答辩材料 | 文档定稿 |
+| P12 | 文档定稿 | 全部文档与实现一致 |
 
 **路径锁与元数据写保护排在 P2，Context Assembly 与 Recall Ledger 排在 P3。** 前两者是**正确性**问题，晚补等于在错误的地基上盖楼；后两者跟检索是同一层，拆开做要改两遍。
 
