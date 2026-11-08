@@ -19,9 +19,10 @@
  * ## 身份为什么可以不校验
  *
  * v1 不做认证：身份由反向代理（Hook 插件、控制台网关）注入 `x-comem-subject`，本服务
- * 只负责把它变成 `RequestContext.subject`。**没这个头时默认 `user:local`**——单用户
- * 桌面部署没有代理，要求它配置一个头只会让 `curl /health` 之类的手工调用全部 401。
- * 多租户部署要换成真正的认证，那时这里必须改成「缺失即 401 UNAUTHENTICATED」。
+ * 只负责把它变成 `RequestContext.subject`。**没这个头时用服务图绑定的主体**
+ * （`server.subject`）——单用户桌面部署没有代理，要求它配置一个头只会让
+ * `curl /health` 之类的手工调用全部 401。多租户部署要换成真正的认证，那时这里必须
+ * 改成「缺失即 401 UNAUTHENTICATED」。
  *
  * ## 中间件抛错
  *
@@ -42,15 +43,6 @@ export const REQUEST_ID_HEADER = 'x-request-id';
 
 /** 注入身份的请求头。v1 由反向代理设置。 */
 export const SUBJECT_HEADER = 'x-comem-subject';
-
-/**
- * v1 的默认身份。
- *
- * 单用户部署的根标识是 `local`（§6.5 的桌面单用户形态），邮箱形式的 uid 由代理注入。
- * 值必须是合法主体（`user:` 前缀 + 根标识字符集），否则 `AclService.resolvePrincipals`
- * 会在第一次求权时抛 INVALID_ARGUMENT。
- */
-export const DEFAULT_SUBJECT = 'user:local';
 
 /** 通配主体（§12.1）。身份展开时永远追加在末尾。 */
 const USER_WILDCARD = 'user:*';
@@ -253,7 +245,7 @@ export function createObservabilityMiddleware(
   };
 }
 
-/** 默认身份展开：`user:local` + 通配主体。v1 没有组。 */
-export function defaultIdentity(subject: string = DEFAULT_SUBJECT): Identity {
+/** 默认身份展开：绑定主体 + 通配主体。v1 没有组。 */
+export function defaultIdentity(subject: string): Identity {
   return { subject, principals: [subject, USER_WILDCARD] };
 }

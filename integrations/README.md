@@ -123,7 +123,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `baseUrl` | `COMEM_BASE_URL` | `http://127.0.0.1:1933` | 服务端地址 |
 | `userId` | `COMEM_USER_ID` | 空 | 个人根标识；为空时不召回、不采集，`doctor` 报失败 |
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
-| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时（§15.9 的 `expansionTimeoutMs`） |
+| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
 | `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 低于此分不注入（§15.9 的「三条前提」之二） |

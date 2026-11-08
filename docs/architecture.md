@@ -2105,24 +2105,30 @@ v1 做两个：**Claude Code**（hooks + MCP，最常用）和 **DSH**（plugin 
 ```
 integrations/
 ├── package.json
-├── cli.mjs                    # co-mem install / doctor
-├── scripts/
-│   ├── hook.mjs               # 唯一入口，按 host 分发
-│   └── uri-guard.mjs          # comem:// 路径守卫
-├── servers/
-│   └── mcp-proxy.mjs          # stdio → Streamable HTTP
-├── hosts/
-│   ├── index.mjs              # 适配器注册
+├── README.md
+├── cli.mjs                    # co-mem install / doctor / uninstall
+├── servers/                   # 六个可执行入口，stdin JSON → stdout JSON
+│   ├── session-start.mjs
+│   ├── user-prompt-submit.mjs
+│   ├── pre-tool-use.mjs
+│   ├── post-tool-use.mjs
+│   ├── stop.mjs
+│   └── pre-compact.mjs
+├── hosts/                     # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
 │   └── dsh.mjs
-└── lib/
-    ├── runtime.mjs            # 去重、游标、文件锁
-    ├── capture.mjs            # 采集本轮消息
-    ├── recall.mjs             # 检索并注入
-    └── config.mjs             # 凭据解析
+├── lib/                       # 与宿主无关的共享模块
+│   ├── config.mjs             # 配置 + 宿主解析 + bypass
+│   ├── http.mjs               # 超时 / 重试 / 错误封套
+│   ├── dedup.mjs              # 事件去重（500ms 窗口）
+│   ├── lock.mjs               # 跨进程会话锁
+│   ├── cursor.mjs             # 消息游标
+│   ├── filter.mjs             # sed 风格查询过滤
+│   └── telemetry.mjs          # 四阶段开销上报
+└── tests/                     # node:test
 ```
 
-宿主适配器只回答四个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**。其余状态机（去重、游标、锁、重试）由 `lib/runtime.mjs` 统一承担。
+宿主适配器只回答四个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**。其余状态机由 `lib/` 承担：去重（`dedup.mjs`）、游标（`cursor.mjs`）、跨进程锁（`lock.mjs`）、超时与重试（`http.mjs`）。
 
 ### 15.9 召回阻塞与预算
 

@@ -12,6 +12,7 @@
 import { z } from 'zod';
 
 import { ComemError } from '../domain/errors.js';
+import { USER_ID_PATTERN } from '../domain/identity.js';
 
 const llmProviderSchema = z.object({
   /**
@@ -283,6 +284,23 @@ const configObjectSchema = z.object({
     .object({
       host: z.string().default('127.0.0.1'),
       port: z.number().int().min(1).max(65535).default(1933),
+      /**
+       * 服务图绑定的主体，形如 `user:alice`。
+       *
+       * **这是单用户部署的绑定身份**：HTTP 的 `x-comem-subject` 与它不一致时拒绝。
+       * 默认 `user:local` 只是为了让 `pnpm dev` 开箱即用——生产部署应该显式配置。
+       *
+       * 格式与用户目录的 ID 同一套（`domain/identity.ts` 的 `USER_ID_PATTERN`），
+       * 前缀只允许 `user` / `group`；服务图目前只接受 `user` 主体，`group` 形式
+       * 在启动时由 `createContainer` 以 `INVALID_ARGUMENT` 拒绝。
+       */
+      subject: z
+        .string()
+        .regex(
+          new RegExp(`^(?:user|group):${USER_ID_PATTERN.source.slice(1, -1)}$`),
+          'server.subject 必须是 user:{id} 或 group:{id} 形式，id 为小写字母或数字开头、最长 64 个字符',
+        )
+        .default('user:local'),
     })
     .prefault({}),
 
