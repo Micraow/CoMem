@@ -16,14 +16,19 @@ import { USER_ID_PATTERN } from '../domain/identity.js';
 
 const llmProviderSchema = z.object({
   /**
-   * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`。
+   * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`，
+   * `disabled` 表示「没有模型，不产生任何调用」。
    *
-   * **没有 `offline` 这一档。** 曾经有过一个「不连网络、返回空结果」的假提供者，
-   * 用来让演示在没有模型凭据时跑通。删掉的理由：它让「阶段二从未真正执行」这个
-   * 缺陷看起来像正常状态——任务显示 `done`，但没有一条记忆被抽出来。
-   * 演示脚本现在直接读 `COMEM_LLM_*` 环境变量，没配就明确说「这一步需要模型」。
+   * **`disabled` 不是 `offline` 假提供者。** 曾经有过一个「不连网络、返回空结果」的
+   * 假提供者，用来让演示在没有模型凭据时跑通。删掉的理由：它让「阶段二从未真正执行」
+   * 这个缺陷看起来像正常状态——任务显示 `done`，但没有一条记忆被抽出来。演示脚本
+   * 现在直接读 `COMEM_LLM_*` 环境变量，没配就明确说「这一步需要模型」。
+   *
+   * `disabled` 与 `providers.embedding` / `providers.rerank` 的同名档一致：它不
+   * 假装成功，只表达「不产生调用」。需要模型的功能（摘要、记忆抽取、合并）由
+   * 下面的交叉校验在启动期拒绝，见 `configSchema` 的 `transform`。
    */
-  type: z.enum(['openai-compatible', 'anthropic']).default('openai-compatible'),
+  type: z.enum(['openai-compatible', 'anthropic', 'disabled']).default('openai-compatible'),
   baseUrl: z.string().default('https://api.example.com/v1'),
   model: z.string().default('gpt-4o-mini'),
   apiKey: z.string().default(''),
@@ -538,17 +543,45 @@ const configSchema = configObjectSchema.transform((config) => {
    * 规则生成器（`summary.generator: rule`）产不出操作列表——它的存在是为了让没有
    * 模型凭据的部署（以及不需要模型的测试）仍能生成摘要。开着合并却用它，端点的
    * 每一次调用都会停在模型之前，看起来像「没有可合并的记忆」而实际是配置没生效。
-   * 这种错误在启动时抛，比在第一次合并时发现好。
+   * `providers.llm.default.type: disabled` 是同一个判据的另一种写法：两者都表示
+   * 「没有可用的模型」。这种错误在启动时抛，比在第一次合并时发现好。
    *
    * 与上面两条同一条理由、同一个写法（`transform` 而不是 `superRefine`）。
    */
-  if (config.memory.consolidation.enabled && config.summary.generator !== 'llm') {
+  const llmEnabled = config.providers.llm.default.type !== 'disabled';
+  if (
+    config.memory.consolidation.enabled &&
+    (config.summary.generator !== 'llm' || !llmEnabled)
+  ) {
     throw new ComemError(
       'INVALID_ARGUMENT',
-      'memory.consolidation.enabled 需要 summary.generator 为 llm：规则生成器产不出合并操作列表，开启合并时必须配置模型。',
+      'memory.consolidation.enabled 需要可用的 LLM：summary.generator 必须是 llm，且 providers.llm.default.type 不能是 disabled。',
       {
         field: 'memory.consolidation.enabled',
         summaryGenerator: config.summary.generator,
+        llmType: config.providers.llm.default.type,
+      },
+    );
+  }
+
+  /**
+   * 交叉校验：摘要生成器是 `llm` 就必须有可用的 LLM 提供者。
+   *
+   * 默认生成器是 `llm`，而 `providers.llm.default.type` 的占位默认值指不到任何
+   * 真实网关。没有模型凭据的部署（本地开发、CI、只用规则摘要）必须能把 LLM 显式
+   * 关掉——但「关掉」与「摘要仍然走 llm」互相矛盾，此时每一次摘要都会停在模型
+   * 之前。让它在启动时失败，而不是每次写文件都投递一次注定失败的摘要失效。
+   *
+   * 与上面几条同一条理由、同一个写法（`transform` 而不是 `superRefine`）。
+   */
+  if (config.summary.generator === 'llm' && !llmEnabled) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      'summary.generator 是 llm 但没有可用的 LLM 提供者：providers.llm.default.type 是 disabled。把 summary.generator 改成 rule，或配置 providers.llm。',
+      {
+        field: 'providers.llm.default',
+        summaryGenerator: config.summary.generator,
+        llmType: config.providers.llm.default.type,
       },
     );
   }

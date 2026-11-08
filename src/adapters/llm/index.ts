@@ -6,4 +6,5 @@
  */
 
 export { AiSdkLlmProvider, type AiSdkProviderOptions } from './ai-sdk-provider.js';
+export { DisabledLlmProvider } from './disabled-provider.js';
 export { FakeLlmProvider, type FakeCall, type FakeResponse } from './fake-provider.js';

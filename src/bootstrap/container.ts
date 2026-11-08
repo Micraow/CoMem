@@ -71,6 +71,7 @@ import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
+import { DisabledLlmProvider } from '../adapters/llm/disabled-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { HttpRerankProvider } from '../adapters/llm/rerank-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
@@ -592,18 +593,25 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const vectors = new SqliteVectorIndex({ db, logger });
 
   // ── 模型 ──
+  //
+  // `type: disabled` 时构造桩：每个方法都抛 `INVALID_ARGUMENT`，保证「关掉模型」
+  // 不会产生任何网络调用。选桩而不是 `null`，理由见 `adapters/llm/disabled-provider.ts`。
   const llmConfig = config.providers.llm.default;
+  const llmProvider =
+    llmConfig.type === 'disabled'
+      ? new DisabledLlmProvider()
+      : new AiSdkLlmProvider({
+          type: llmConfig.type,
+          ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
+          model: llmConfig.model,
+          apiKey: llmConfig.apiKey,
+          maxTokens: llmConfig.maxTokens,
+          timeoutSeconds: llmConfig.timeoutSeconds,
+          pricing: llmConfig.pricing,
+          logger,
+        });
   const llm = new LlmService({
-    provider: new AiSdkLlmProvider({
-      type: llmConfig.type,
-      ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
-      model: llmConfig.model,
-      apiKey: llmConfig.apiKey,
-      maxTokens: llmConfig.maxTokens,
-      timeoutSeconds: llmConfig.timeoutSeconds,
-      pricing: llmConfig.pricing,
-      logger,
-    }),
+    provider: llmProvider,
     logger,
     pricing: llmConfig.pricing,
     model: llmConfig.model,

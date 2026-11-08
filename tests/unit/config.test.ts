@@ -582,6 +582,87 @@ describe('loadConfig', () => {
     });
   });
 
+  /**
+   * 回归（W59）：没有 LLM 凭据的部署无法表达「我没有模型」。`embedding` / `rerank`
+   * 都有 `disabled`，`llm` 是唯一的例外。
+   *
+   * 交叉校验的两条判据都表示「没有可用的模型」：摘要生成器是 `llm`，或开了记忆
+   * 合并。两者在启动期失败，而不是让每次写文件都投递一次注定失败的摘要失效。
+   */
+  describe('providers.llm.default.type = disabled', () => {
+    it('规则摘要 + 关闭合并时合法，配置里保留 disabled', () => {
+      const config = loadConfig({
+        path: writeConfig(
+          [
+            'providers:',
+            '  llm:',
+            '    default:',
+            '      type: disabled',
+            'summary:',
+            '  generator: rule',
+          ].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(config.providers.llm.default.type).toBe('disabled');
+    });
+
+    it('summary.generator 是 llm 时启动失败，错误消息指向两条修法', () => {
+      const error = loadError({
+        path: writeConfig(
+          ['providers:', '  llm:', '    default:', '      type: disabled'].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(error.code).toBe('INVALID_ARGUMENT');
+      expect(error.message).toContain('summary.generator');
+      expect(error.message).toContain('rule');
+      expect(error.message).toContain('providers.llm');
+      expect(error.details).toMatchObject({
+        field: 'providers.llm.default',
+        summaryGenerator: 'llm',
+        llmType: 'disabled',
+      });
+    });
+
+    it('开了记忆合并时启动失败（复用 consolidation 的判据）', () => {
+      for (const generator of ['llm', 'rule']) {
+        const error = loadError({
+          path: writeConfig(
+            [
+              'providers:',
+              '  llm:',
+              '    default:',
+              '      type: disabled',
+              'summary:',
+              `  generator: ${generator}`,
+              'memory:',
+              '  consolidation:',
+              '    enabled: true',
+            ].join('\n'),
+          ),
+          env: testEnv(),
+        });
+
+        expect(error.code, generator).toBe('INVALID_ARGUMENT');
+        expect(error.message, generator).toContain('memory.consolidation.enabled');
+        expect(error.details, generator).toMatchObject({
+          field: 'memory.consolidation.enabled',
+          summaryGenerator: generator,
+          llmType: 'disabled',
+        });
+      }
+    });
+
+    it('没有配置 providers.llm 时保持 openai-compatible 默认值（默认部署不变）', () => {
+      const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
+
+      expect(config.providers.llm.default.type).toBe('openai-compatible');
+    });
+  });
+
   describe('argv', () => {
     it('--data-dir 覆盖 dataDir', () => {
       const config = loadConfig({
