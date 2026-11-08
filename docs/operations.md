@@ -666,13 +666,13 @@ load_backend: loaded CPU backend from /usr/local/bin/libggml-cpu-alderlake.so
     绕开办法：`GGML_BACKEND_PATH` 直接指向 `libggml-vulkan.so` 文件（`ggml_backend_load`
     按单个文件 dlopen，不查前缀、不查 score）。镜像里这个变量指向
     `/opt/comem-inference/backends/libggml-vulkan.so`（符号链接）。
-14. **时区是 UTC。** 日志时间戳（`time` 字段）是 UTC ISO 8601，容器里没有
+15. **时区是 UTC。** 日志时间戳（`time` 字段）是 UTC ISO 8601，容器里没有
     tzdata 之外的本地时区配置。`-e TZ=Asia/Shanghai` 可以改，但日志格式本身不变。
 
 ### 容器内验证
 
 ```bash
-# 全量测试（99 个文件 / 1914 个用例；3 个失败见下）
+# 全量测试（99 个文件 / 1925 个用例）
 docker run --rm comem:test-suite pnpm test
 
 # 类型检查
@@ -1436,47 +1436,44 @@ COMEM_SERVER_PORT=8080 pnpm dev
 2. **TTL 没有「给已有记忆批量设过期时间」的接口。** `memory.ttl.defaultDays` 只影响之后
    写入的记忆；存量要追平得直接改库（见「TTL 配错了」一节的 SQL）。`TtlService.setExpiry`
    是服务层方法，没有对应的 HTTP 路由。
-3. **单用户部署。** 服务图在启动时绑定一个身份（默认 `user:local`），
-   `Authorizer` 的三个方法没有 subject 参数（§12.4）。请求头 `x-comem-subject` 与它不一致
-   时直接 401，不静默降级——但也没有「多用户」这一档。多租户要的是每请求一份服务图。
-4. **ACL 的过滤效果无法用第二个身份验证。** 因为上一条：个人空间里 owner 恒 `manage`，
-   `deny` 收不回去；组空间在 v1 没有成员关系（`groups` 只能由装配方传入，`main.ts` 传的是
-   空数组），所以 HTTP 层建不出组空间。ACL 求值本身由 `tests/unit/domain/acl.test.ts`
-   （41 个用例）与 `tests/integration/services/acl.test.ts` 覆盖，演示脚本只能演到「管理面 +
-   被拒绝的组空间写入」。
-5. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
+3. **认证默认关闭，控制台没有登录流程。** `auth.enabled: false` 时身份来自
+   `x-comem-subject`，且必须等于 `server.subject`（`src/bootstrap/container.ts` 的
+   `resolveIdentityOf`）——这是单用户形态。打开 `auth.enabled` 后身份来自凭据（session
+   token 或 API Key），`Authorizer` 按每请求的 `principals` 求权：组外用户读不到组根
+   （`tests/integration/services/acl.test.ts` 的 `user:bob` 用例）。但控制台只发
+   `x-comem-subject`（`web/composables/consoleIdentity.ts:92`），没有登录页也没有 Bearer
+   凭据，所以多用户管理面目前只能走 curl 或自建前端。
+4. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
    索引坏了只能靠文件系统继续读写，检索能力等于没有。
-6. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
+5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
    日志，不落盘也不进数据库（`src/services/memory.ts`）。事后要复盘「为什么拒了」只能翻日志。
-7. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
+6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
    description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模摘要三字段，
    `ContentStore.readText` 不暴露任意键。Hook 注入的 `<available-skills>` 因此只有名字，
    这是 §15.2 允许的最低一档，不是静默丢失。
-8. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
+7. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
    `services/` 不能 `import node:fs`、`ContentStore` 也没有 chmod 入口，所以脚本装进去之后
    不可执行。要补需要给 `ContentStore` 加一个 chmod 方法，现在没有。
-9. **`stop.mjs` 的 50ms 断言余量很薄。** 它测的是进程总耗时（含 ~20ms Node 启动），
-   当前机器 40–48ms。更慢的门禁机上这条会先红——那是环境问题，不是实现问题。
-10. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
+8. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
     去重放它。所以「索引双写补偿」只做了「记下来」这一半。处理办法见排障一节。
-11. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
+9. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
     `node:fs` 构造不出来。为一条几乎走不到的分支给生产类加可注入接缝，成本大于收益。
-12. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
+10. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
     多实例要共享密钥，那时再加配置项。
-13. **向量检索是暴力检索，没有 ANN 索引。** `sqlite-vec` 的 `vec0` 虚拟表是 C + SIMD
+11. **向量检索是暴力检索，没有 ANN 索引。** `sqlite-vec` 的 `vec0` 虚拟表是 C + SIMD
     的暴力检索。实测 1 万条 × 1024 维：不带候选集 8–10ms，带 1 万条 URI 候选集 78ms。
     **十万节点会先撞上「候选集全量」这个假设**（按线性外推约 800ms）。届时要么把 scope
     过滤下推到 `vec0`（给 `uri` 加分区列），要么换 ANN——这是架构决策，不是调参能解决的。
 
-14. **记忆合并没有回滚。** `MemoryService` 没有事务（一条记忆一个文件），`filesystem`
+12. **记忆合并没有回滚。** `MemoryService` 没有事务（一条记忆一个文件），`filesystem`
     端口也拿不回逐字节前像（`created_at`、`status` 会在重写时被重新计算）。写盘前的
     全部校验都在任何写入之前完成，把「中途失败」压到只剩 I/O 与加锁失败；真的中途失败
     时错误 `details` 里带已经应用过的 `adds` / `updates` / `deletes`，按它收尾。
 
-15. **记忆合并的清单有 200 条上限。** 超过时只合并前 200 条，每次合并记一条 `warn`。
+13. **记忆合并的清单有 200 条上限。** 超过时只合并前 200 条，每次合并记一条 `warn`。
     更多记忆应该先按目录拆 scope，而不是把清单撑到模型看不完。
 
-16. **撤权扫描有 10,000 个目录的上限。** `AclService.purgePrincipal` 在反查表之外
+14. **撤权扫描有 10,000 个目录的上限。** `AclService.purgePrincipal` 在反查表之外
     还会扫描数据根下所有带 `.acl.json` 的目录（手工改过文件的授权也要撤）。扫描按目录
     数计数，达到 `MAX_PURGE_SCAN_DIRECTORIES = 10000` 时停止并记一条 `truncated: true`
     的 `warn`，账号删除继续执行。上限之外如果正好有属于被删账号的手工授权，
@@ -1484,21 +1481,30 @@ COMEM_SERVER_PORT=8080 pnpm dev
     重建后 `materializeNode` 会把它算回来。没有 `acl:rebuild` 命令可以自动收口；目录数
     接近上限的部署应当在删账号后手工检查相关目录，或者按业务拆分数据根。
 
-16. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
+15. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
     整条 KNN 查询就返回空。而「权限候选集里的 URI 刚被并发删除」是正常竞态，静默返回
     空等于语义检索偶尔查不出东西。当前做法是先用全表主键扫描求交（1 万行 5.8ms）。
     **不要换成按候选集点查**：`vec0` 主键点查约 7µs/条，1 万条 70ms，比全表扫贵一个
     数量级。上游修复后可以简化。
 
-17. **导入的会话把来源记在游标表，不是 `.meta.json`。** `SessionMeta` 没有 `source`
+16. **导入的会话把来源记在游标表，不是 `.meta.json`。** `SessionMeta` 没有 `source`
     字段，`metadata-file.ts` 读回时也会丢弃未知字段。`ingest_cursor` 的
     `(harness, native_session_id, session_uri)` 是唯一可追溯来源的地方。要在
     `.meta.json` 里直接看到来源，需要先扩 `SessionMeta`。
 
-18. **导入的重复窗口是「一批 100 条」。** 一批消息写完之后、游标写回之前崩溃，重跑
+17. **导入的重复窗口是「一批 100 条」。** 一批消息写完之后、游标写回之前崩溃，重跑
     会把这一批再追加一次。最坏情况 100 条重复，不是整段对话。彻底消除要按源消息 ID
     逐条去重，v1 不做。
 
+18. **`ingest_cursor` 不随账号删除。** 游标表按 `(harness, native_session_id)` 存
+    `session_uri` 与 `cursor_value`（`src/adapters/sqlite/ingest-cursor-repository.ts:9`），
+    而 `IdentityService.deleteUser` 只清身份行、成员关系、API Key、组 owner 与召回账本
+    （`src/services/identity.ts:210`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
+    原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest.ts:602`），
+    读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest.ts:647`），新账号的会话
+    目录里没有消息。恢复：删掉对应行再重跑导入
+    （`DELETE FROM ingest_cursor WHERE harness = '...' AND native_session_id = '...'`，
+    见「导入本机 Agent 对话」的幂等一段）。
 19. **导出前的脱敏会破坏 JSON（`密码保护`）。** 真实语料里数字串被替换成了中文字符
     串：`"total_tokens":4密码保护811`、`"create_time": 1791275310.6密码保护9`。整份
     导出因此不是合法 JSON，而 Qwen 是**单文件 35MB**、ChatGPT 是 19MB——整体
