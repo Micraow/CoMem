@@ -146,9 +146,6 @@ const hasChecked = computed(() => checked.value.length > 0)
           <ClipboardCheck :size="20" :stroke-width="1.4" />
         </span>
         <span class="empty__title">没有待复核的记忆</span>
-        <span class="empty__text">
-          经验与规则类记忆写入后进入这里；通过之前它们不会出现在检索结果中。
-        </span>
       </div>
 
       <ul v-else class="rrows">

@@ -417,10 +417,7 @@ onMounted(() => {
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader
-        title="用户与组"
-        description="用户列表、组列表与组成员维护。"
-      >
+      <DomainPageHeader title="用户与组">
         <template #actions>
           <UiButton variant="primary" size="sm" @click="openCreate">
             <Plus :size="14" :stroke-width="1.8" />
@@ -471,20 +468,20 @@ onMounted(() => {
           <UiInput
             v-model="userForm.id"
             :disabled="editingUser !== null"
-            placeholder="alice"
+            placeholder="用户 ID"
             aria-label="用户 ID"
           />
           <span class="field__hint">小写字母或数字开头，最长 64 个字符。</span>
         </label>
         <label class="field">
           <span class="field__label">显示名</span>
-          <UiInput v-model="userForm.displayName" placeholder="Alice" aria-label="显示名" />
+          <UiInput v-model="userForm.displayName" aria-label="显示名" />
         </label>
         <label class="field">
           <span class="field__label">邮箱</span>
           <UiInput
             v-model="userForm.email"
-            placeholder="alice@example.com"
+            placeholder="name@example.com"
             aria-label="邮箱"
           />
         </label>
@@ -512,21 +509,20 @@ onMounted(() => {
           <UiInput
             v-model="groupForm.id"
             :disabled="editingGroup !== null"
-            placeholder="eng"
+            placeholder="组 ID"
             aria-label="组 ID"
           />
           <span class="field__hint">小写字母或数字开头，最长 64 个字符。</span>
         </label>
         <label class="field">
           <span class="field__label">显示名</span>
-          <UiInput v-model="groupForm.displayName" placeholder="工程组" aria-label="组显示名" />
+          <UiInput v-model="groupForm.displayName" aria-label="组显示名" />
         </label>
         <label class="field">
           <span class="field__label">描述</span>
           <UiTextarea
             v-model="groupForm.description"
             :rows="3"
-            placeholder="这个组负责什么"
             aria-label="组描述"
           />
         </label>

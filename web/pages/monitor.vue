@@ -357,10 +357,7 @@ onMounted(load)
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader
-        title="监控"
-        description="开销归因、吞吐与用量、记忆健康度，以及请求记录的当前边界。"
-      >
+      <DomainPageHeader title="监控">
         <template #actions>
           <UiBadge v-if="healthBadge !== null" :variant="healthBadge.variant">
             {{ healthBadge.label }}
@@ -420,14 +417,10 @@ onMounted(load)
         <UiCard title="最近的请求" panel>
           <div class="callout callout--info mb-16">
             <AlertTriangle :size="15" :stroke-width="1.4" />
-            <div>
-              <b>服务端没有暴露请求明细端点。</b>
-              每个请求会写进本地请求记录表，但没有 HTTP 读出口，所以这里拿不到逐条记录。
-              要按路由、状态码、用户筛选，得先加一个查询端点。
-            </div>
+            <div>请求明细还没有查询端点。</div>
           </div>
 
-          <p class="requests__lead">当前能从指标里看到的是这些聚合项：</p>
+          <p class="requests__lead">指标里的聚合项：</p>
 
           <ul v-if="availableMetrics.length > 0" class="requests__list">
             <li v-for="label in availableMetrics" :key="label">{{ label }}</li>

@@ -334,14 +334,9 @@ function commitTitleOf(session: SessionSummaryPayload): string {
             <span class="empty__icon">
               <MessageSquare :size="20" :stroke-width="1.4" />
             </span>
-            <template v-if="session.status === 'open'">
-              <span class="empty__title">这个会话还没有消息</span>
-              <span class="empty__text">消息由 Hook 插件在宿主侧采集后写入。</span>
-            </template>
-            <template v-else>
-              <span class="empty__title">没有待提交的消息</span>
-              <span class="empty__text">已归档的消息在归档目录里，不在会话的待提交列表中。</span>
-            </template>
+            <span class="empty__title">
+              {{ session.status === 'open' ? '这个会话还没有消息' : '没有待提交的消息' }}
+            </span>
           </div>
 
           <ol v-else class="messages">
@@ -395,7 +390,6 @@ function commitTitleOf(session: SessionSummaryPayload): string {
         <CheckCircle2 :size="20" :stroke-width="1.4" />
       </span>
       <span class="empty__title">还没有会话</span>
-      <span class="empty__text">Hook 插件采集到消息后，会话会出现在这里。</span>
     </div>
   </div>
 </template>

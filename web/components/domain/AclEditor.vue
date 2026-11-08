@@ -202,8 +202,7 @@ function confirm(): void {
       <span class="empty__icon">
         <ShieldAlert :size="22" :stroke-width="1.4" />
       </span>
-      <span class="empty__title">从左侧选择一个节点</span>
-      <span class="empty__text">选中目录后在这里查看和修改它的授权。</span>
+      <span class="empty__title">还没有选择节点</span>
     </div>
 
     <div v-else-if="props.error !== null" class="empty">
@@ -211,7 +210,6 @@ function confirm(): void {
         <ShieldAlert :size="22" :stroke-width="1.4" />
       </span>
       <span class="empty__title">{{ props.error }}</span>
-      <span class="empty__text">ACL 的读写都要求 manage 权限。</span>
     </div>
 
     <template v-else>
@@ -241,8 +239,8 @@ function confirm(): void {
           <br>
           {{
             isRestricted
-              ? '有效权限只看本节点的直接授权，上游的 allow 不会传进来；同节点上的 deny 仍然优先。'
-              : '有效权限 = 本节点直接授权 ∪ 父节点的有效权限，一直回溯到根。'
+              ? '只使用本节点的直接授权，不继承上游。'
+              : '本节点直接授权与祖先链的授权累加。'
           }}
         </div>
       </div>
@@ -295,9 +293,7 @@ function confirm(): void {
           <span class="empty__title">这个节点没有直接授权</span>
           <span class="empty__text">
             {{
-              isRestricted
-                ? 'restricted 且没有直接授权：所有主体在这个节点上都没有权限。'
-                : '权限全部来自祖先链；在下面添加一条即可覆盖继承。'
+              isRestricted ? 'restricted 且没有直接授权：所有主体都没有权限。' : '权限全部来自祖先链。'
             }}
           </span>
         </div>
@@ -315,7 +311,7 @@ function confirm(): void {
           <UiInput
             v-model="principalId"
             class="grantbar__id"
-            placeholder="alice 或 *"
+            placeholder="用户 ID 或 *"
             aria-label="主体标识"
             size="sm"
           />
@@ -327,9 +323,7 @@ function confirm(): void {
           </UiButton>
         </div>
 
-        <p class="caption grantbar__hint">
-          `user:*` 是通配主体，匹配所有用户；同节点上的 deny 优先。
-        </p>
+        <p class="caption grantbar__hint">user:* 匹配所有用户；同节点上的 deny 优先。</p>
 
         <p v-if="formError !== null" class="grantbar__error">{{ formError }}</p>
       </section>

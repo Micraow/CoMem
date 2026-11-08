@@ -38,9 +38,9 @@ const layerTabs = [
 ] as const
 
 const LAYER_NOTE: Readonly<Record<Layer, string>> = {
-  l0: '一句话摘要，256 字符以内。先读这一层判断相关性。',
-  l1: '目录级上下文，4000 字符以内。用来决定要不要展开原文。',
-  l2: '完整正文。目录的第三档列出直接子项。',
+  l0: '一句话摘要，256 字符以内。',
+  l1: '目录级上下文，4000 字符以内。',
+  l2: '完整正文；目录列出直接子项。',
 }
 
 const route = useRoute()
@@ -247,8 +247,7 @@ onBeforeUnmount(() => {
           <span class="empty__icon">
             <FolderOpen :size="22" :stroke-width="1.4" />
           </span>
-          <span class="empty__title">从左侧选择一个文件</span>
-          <span class="empty__text">选中后在这里查看摘要、概览与原文。</span>
+          <span class="empty__title">还没有选择文件</span>
         </div>
 
         <div v-else class="doc-pane">
@@ -320,7 +319,6 @@ onBeforeUnmount(() => {
                   </div>
                   <div v-else class="empty">
                     <span class="empty__title">还没有摘要</span>
-                    <span class="empty__text">这个节点尚未生成 L0 摘要。</span>
                   </div>
                 </template>
 
@@ -328,7 +326,6 @@ onBeforeUnmount(() => {
                   <pre v-if="overviewText !== null" class="doc-raw">{{ overviewText }}</pre>
                   <div v-else class="empty">
                     <span class="empty__title">还没有概览</span>
-                    <span class="empty__text">这个节点尚未生成 L1 概览。</span>
                   </div>
                 </template>
 
@@ -356,7 +353,6 @@ onBeforeUnmount(() => {
                     </UiTable>
                     <div v-else class="empty">
                       <span class="empty__title">这个目录是空的</span>
-                      <span class="empty__text">目录下没有任何可读条目。</span>
                     </div>
                   </template>
 
@@ -364,7 +360,6 @@ onBeforeUnmount(() => {
                     <pre v-if="contentText !== null && contentText !== ''" class="doc-raw">{{ contentText }}</pre>
                     <div v-else class="empty">
                       <span class="empty__title">这个文件是空的</span>
-                      <span class="empty__text">文件存在，但正文没有任何字符。</span>
                     </div>
                   </template>
                 </template>

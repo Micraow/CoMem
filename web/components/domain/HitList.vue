@@ -130,10 +130,7 @@ function filePathOf(uri: string): string {
       <span class="empty__icon">
         <Sparkles :size="20" :stroke-width="1.4" />
       </span>
-      <span class="empty__title">输入关键词开始检索</span>
-      <span class="empty__text">
-        检索会走索引，不会碰文件系统；无权限的节点不会以占位形式出现。
-      </span>
+      <span class="empty__title">还没有检索</span>
     </div>
 
     <div v-else-if="props.hits === null || props.hits.length === 0" class="empty">
@@ -141,9 +138,6 @@ function filePathOf(uri: string): string {
         <SearchX :size="20" :stroke-width="1.4" />
       </span>
       <span class="empty__title">没有找到匹配的内容</span>
-      <span class="empty__text">
-        换一个关键词，或放宽层级与类型筛选；当前范围内确实没有命中。
-      </span>
     </div>
 
     <ul v-else class="hitrows">

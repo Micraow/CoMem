@@ -109,6 +109,10 @@ acl:
 server:
   host: 127.0.0.1
   port: 1933
+  # 服务图绑定的主体（user:{id} 或 group:{id}，id 为小写字母或数字开头、最长 64 个字符）。
+  # 这是单用户部署的绑定身份：HTTP 的 x-comem-subject 与它不一致时 401。
+  # user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置成实际的用户。
+  subject: user:local
 
 logging:
   level: info

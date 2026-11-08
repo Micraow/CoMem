@@ -171,10 +171,7 @@ onMounted(() => {
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader
-        title="检索调试"
-        description="同一条 query 分别走 find 与 search，对比召回差异。"
-      >
+      <DomainPageHeader title="检索调试">
         <template #actions>
           <UiBadge :variant="mode === 'search' ? 'blue' : 'gray'">
             {{ mode === 'search' ? 'search · 含查询计划' : 'find · 语义检索' }}
@@ -217,7 +214,7 @@ onMounted(() => {
         </header>
 
         <template v-if="plan === null">
-          <p class="caption plan__empty">执行一次 search 后显示查询计划。</p>
+          <p class="caption plan__empty">还没有查询计划。</p>
         </template>
 
         <template v-else>
@@ -227,7 +224,7 @@ onMounted(() => {
           </p>
 
           <p v-else-if="plan.queries.length === 0" class="caption plan__empty">
-            这次查询不需要检索。模型判断没有需要召回的内容。
+            这次查询不需要检索。
           </p>
 
           <ul v-else class="plan__list">

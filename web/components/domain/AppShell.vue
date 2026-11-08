@@ -22,6 +22,20 @@ const theme = useState<'dark' | 'light'>('comem-console-theme', () => 'dark')
 
 const currentLabel = computed(() => navLabelOf(route.path))
 
+/**
+ * 头像只显示当前主体的首字母。
+ *
+ * 主体名是部署配置里的内部标识，不进入可见区域；没有主体时显示 `?`，不显示一个
+ * 假的占位人。
+ */
+const scopeRoot = useScopeRoot()
+const subjectInitial = computed(() => {
+  const root = scopeRoot.value.replace(/\/+$/u, '')
+  const id = root.slice(root.lastIndexOf('/') + 1)
+  const first = id.charAt(0)
+  return first === '' ? '?' : first.toUpperCase()
+})
+
 function applyTheme(value: 'dark' | 'light'): void {
   document.documentElement.dataset.theme = value
   try {
@@ -100,7 +114,7 @@ watch(
             <Sun v-if="theme === 'dark'" :size="16" :stroke-width="1.4" />
             <Moon v-else :size="16" :stroke-width="1.4" />
           </button>
-          <span class="avatar" title="user:local">LO</span>
+          <span class="avatar" aria-hidden="true">{{ subjectInitial }}</span>
         </div>
       </header>
 

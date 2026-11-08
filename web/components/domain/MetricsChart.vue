@@ -106,7 +106,6 @@ const isEmpty = computed(() => cards.value.length === 0 && tokenData.value.lengt
       <BarChart3 :size="20" :stroke-width="1.4" />
     </span>
     <span class="empty__title">还没有指标数据</span>
-    <span class="empty__text">服务端还没有记录到请求或模型调用。</span>
   </div>
 
   <div v-else class="usage">

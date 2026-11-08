@@ -2218,6 +2218,10 @@ Nuxt 3 + shadcn-vue + Tailwind。七个页面：
 
 **界面文案原则**：不把提示词抄到 UI 上。开发期内部术语（page_id、digest、pendingChanges）不进用户可见区域，用「基线」「待刷新」这类词。
 
+**控制台不显示绑定主体名。** `user:local` 是 `server.subject` 的默认值，属于部署配置而不是用户信息；头像只显示当前主体的首字母（`user:alice` → `A`），没有主体时显示 `?`。表单占位符写真实输入约束（如邮箱格式 `name@example.com`、用户 ID 的字符集），不写示例人名。
+
+**请求明细没有查询端点。** `request_log` 只落 SQLite，`src/api/http/routes/` 里没有 `GET /stats/requests`；监控页只列 `/metrics` 里的聚合项，不伪造逐条记录。要按路由、状态码、用户筛选，得先加一个查询端点。
+
 ## 17. 可观测性与运维
 
 四个问题要能回答：**系统现在在干什么、刚才那次为什么慢、那次失败错在哪、用 CoMem 让每个请求多花了多少时间。**
@@ -2512,6 +2516,9 @@ acl:
 server:
   host: 127.0.0.1
   port: 1933
+  # 服务图绑定的主体：HTTP 的 x-comem-subject 与它不一致时 401。
+  # 默认 user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置。
+  subject: user:local
 
 logging:
   level: info
@@ -2538,6 +2545,8 @@ task:
 ```
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
+
+**`server.subject` 是服务图绑定的身份，不是认证配置。** 服务图只有一份（§12.4 的 `Authorizer` 没有 subject 参数），所以启动时把主体写进服务图，之后每个请求的 `x-comem-subject` 必须与它一致，否则 401。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`），否则所有请求都以 `local` 的身份求权。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但服务图只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组身份要的是每请求一份服务图，不在 v1。
 
 **`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
 

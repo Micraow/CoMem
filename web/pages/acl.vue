@@ -20,7 +20,6 @@ import { AlertTriangle, ShieldX } from 'lucide-vue-next'
 
 import {
   ApiClientError,
-  DEFAULT_SUBJECT,
   errorMessageOf,
   useApi,
   type AclPayload,
@@ -38,6 +37,16 @@ type AclEffect = 'allow' | 'deny'
 const api = useApi()
 const scopeRoot = useScopeRoot()
 const toast = useToast()
+
+/** 当前主体：作用域根是 `comem://user/{uid}`，从它拼回 `user:{uid}`。 */
+const subject = computed(() => {
+  const path = scopeRoot.value.replace(/^comem:\/\//u, '').replace(/\/+$/u, '')
+  const separator = path.indexOf('/')
+  if (separator <= 0) {
+    return ''
+  }
+  return `${path.slice(0, separator)}:${path.slice(separator + 1)}`
+})
 
 const selectedUri = ref<string | null>(null)
 const selectedKind = ref<'file' | 'directory' | null>(null)
@@ -242,7 +251,7 @@ async function revoke(principal: string): Promise<void> {
                   <span class="spacer" />
                   <ShieldX :size="14" :stroke-width="1.4" class="sec-icon" aria-hidden="true" />
                 </div>
-                <DomainAclChain :levels="levels" :subject="DEFAULT_SUBJECT" :loading="loading" />
+                <DomainAclChain :levels="levels" :subject="subject" :loading="loading" />
               </section>
             </DomainAclEditor>
           </div>

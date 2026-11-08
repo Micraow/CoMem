@@ -135,7 +135,7 @@ onMounted(load)
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader title="概览" description="索引、任务、复核与摘要的整体状态。">
+      <DomainPageHeader title="概览">
         <template #actions>
           <UiBadge v-if="health !== null" :variant="health.status === 'degraded' ? 'orange' : 'green'">
             {{ health.status === 'degraded' ? '降级运行' : '运行正常' }}
@@ -174,7 +174,6 @@ onMounted(load)
             <CheckCircle2 :size="20" :stroke-width="1.4" />
           </span>
           <span class="empty__title">队列是空的</span>
-          <span class="empty__text">没有排队或运行中的后台任务。</span>
         </div>
 
         <UiTable v-else-if="tasks !== null" caption="最近任务">
@@ -206,8 +205,7 @@ onMounted(load)
           <span class="empty__icon">
             <Inbox :size="20" :stroke-width="1.4" />
           </span>
-          <span class="empty__title">还没有任务数据</span>
-          <span class="empty__text">提交一次会话后，归档与抽取任务会出现在这里。</span>
+          <span class="empty__title">还没有任务</span>
         </div>
       </UiCard>
     </div>

@@ -38,7 +38,8 @@
  *
  * `AclService` 在构造期绑定身份（`Authorizer` 的三个方法没有 subject 参数，§12.4），
  * 而 `Container.services` 只有一份。v1 是单用户部署：服务图绑定在
- * `options.subject`（默认 `user:local`）。HTTP 的 `x-comem-subject` 与它不一致时
+ * `config.server.subject`（`options.subject` 可覆盖，测试与脚本用）。HTTP 的
+ * `x-comem-subject` 与它不一致时
  * 直接 401——让「换一个身份」静默降级成「用绑定的身份」就是冒充。多租户要的是
  * 每请求一份服务图，那是另一套装配，不在本 wave。
  *
@@ -76,7 +77,7 @@ import type { ToolRegistry } from '../api/mcp/registry.js';
 import { McpHttpServer } from '../api/mcp/server.js';
 import type { HttpRouteGroup } from '../api/http/server.js';
 import { createHttpRouteGroups } from '../api/http/routes/index.js';
-import { DEFAULT_SUBJECT, type Identity, type IdentityHeaders, type IdentityResolver } from '../api/http/middleware.js';
+import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
 import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
@@ -146,7 +147,7 @@ export interface CreateContainerOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** 命令行参数，识别 `--config` 与 `--data-dir`（§18） */
   readonly argv?: readonly string[];
-  /** 服务图绑定的身份；默认 `user:local`（v1 单用户部署） */
+  /** 覆盖配置里的 `server.subject`；缺省取 `config.server.subject`（默认 `user:local`） */
   readonly subject?: string;
   /** 身份所属的组（`group:eng` 形式）；默认空 */
   readonly groups?: readonly string[];
@@ -601,7 +602,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   }
 
   // ── 身份与服务图 ──
-  const subject = options.subject ?? DEFAULT_SUBJECT;
+  const subject = options.subject ?? config.server.subject;
   const boundPrincipal = parsePrincipal(subject);
   if (boundPrincipal.kind !== 'user') {
     throw new ComemError('INVALID_ARGUMENT', `服务图身份必须是 user 主体：${subject}`, {
@@ -1069,9 +1070,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
 /**
  * 解析请求身份。
  *
- * v1 不做认证：身份由反向代理注入 `x-comem-subject`。**没有这个头时用 `user:local`**
- * ——单用户桌面部署没有代理，要求它配一个头只会让 `curl /health` 之外的手工调用
- * 全部 401。
+ * v1 不做认证：身份由反向代理注入 `x-comem-subject`。**没有这个头时用服务图绑定的
+ * 主体**（`server.subject`）——单用户桌面部署没有代理，要求它配一个头只会让
+ * `curl /health` 之外的手工调用全部 401。
  *
  * 与绑定身份不一致时抛 `UNAUTHENTICATED`：服务图只有一份（见文件头），静默换成
  * 绑定的身份就是冒充。多租户部署要换成真正的认证 + 每请求服务图。

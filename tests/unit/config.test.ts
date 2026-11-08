@@ -103,7 +103,7 @@ function expectedDefaults(dataDir: string): unknown {
       consolidation: { enabled: false, maxIterations: 10 },
     },
     acl: { groupDefaultLevel: 'write' },
-    server: { host: '127.0.0.1', port: 1933 },
+    server: { host: '127.0.0.1', port: 1933, subject: 'user:local' },
     logging: { level: 'info', file: '' },
     telemetry: {
       metrics: { enabled: true, includeAccountLabel: false },
@@ -156,6 +156,41 @@ describe('loadConfig', () => {
     expect(config.summary.generator).toBe('rule');
     expect(config.summary.abstractMaxChars).toBe(256);
     expect(config.memory.reviewRequired).toEqual(['rules']);
+  });
+
+  it('server.subject 默认是 user:local（单用户桌面形态）', () => {
+    const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
+
+    expect(config.server.subject).toBe('user:local');
+  });
+
+  it('server.subject 可以配成实际部署的用户', () => {
+    const config = loadConfig({
+      path: writeConfig('server:\n  subject: user:alice\n'),
+      env: testEnv(),
+    });
+
+    expect(config.server.subject).toBe('user:alice');
+  });
+
+  it('server.subject 缺少 user / group 前缀时抛 INVALID_ARGUMENT', () => {
+    const error = loadError({
+      path: writeConfig('server:\n  subject: alice\n'),
+      env: testEnv(),
+    });
+
+    expect(error.code).toBe('INVALID_ARGUMENT');
+    expect(error.details).toMatchObject({ fields: ['server.subject'] });
+  });
+
+  it('server.subject 含大写字母时抛 INVALID_ARGUMENT', () => {
+    const error = loadError({
+      path: writeConfig('server:\n  subject: user:Alice\n'),
+      env: testEnv(),
+    });
+
+    expect(error.code).toBe('INVALID_ARGUMENT');
+    expect(error.details).toMatchObject({ fields: ['server.subject'] });
   });
 
   it('显式 dataDir 原样保留', () => {

@@ -286,12 +286,7 @@ onMounted(() => {
         <p class="body-sm muted">
           将删除 {{ checked.length }} 条待复核记录。原因会记入服务端日志，不会保存在记忆文件里。
         </p>
-        <UiTextarea
-          v-model="batchReason"
-          aria-label="批量拒绝原因"
-          placeholder="例如：这批抽取的规则条件过宽，需要重新提炼"
-          :rows="3"
-        />
+        <UiTextarea v-model="batchReason" aria-label="批量拒绝原因" :rows="3" />
         <div class="rowflex">
           <span class="spacer" />
           <UiButton variant="secondary" @click="batchRejectOpen = false">取消</UiButton>

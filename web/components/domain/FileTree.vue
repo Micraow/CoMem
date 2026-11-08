@@ -126,13 +126,6 @@ watch([() => props.selected, state], () => {
         <span class="empty__title">
           {{ filter.trim() === '' ? '这个命名空间还没有内容' : '没有匹配的路径' }}
         </span>
-        <span class="empty__text">
-          {{
-            filter.trim() === ''
-              ? '写入第一个记忆或资源后，目录树会出现在这里。'
-              : '换一个关键词，或清空筛选。'
-          }}
-        </span>
       </div>
 
       <div v-else class="tree" role="tree" aria-label="命名空间目录树">

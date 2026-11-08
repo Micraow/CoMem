@@ -143,9 +143,7 @@ const finalVariant = computed<'gray' | 'blue' | 'teal'>(() => {
       <span class="caption">· {{ props.subject }}</span>
     </div>
 
-    <p v-if="hasGap" class="caption chain__note">
-      推导链需要服务端补充 effective 字段：链上有节点读不到授权，最终权限只能显示已读到的那部分。
-    </p>
+    <p v-if="hasGap" class="caption chain__note">部分节点读不到授权。</p>
   </div>
 </template>
 

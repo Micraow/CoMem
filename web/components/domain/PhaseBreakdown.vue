@@ -78,11 +78,7 @@ function chartDataOf(breakdown: HookEventBreakdown) {
     <span class="empty__icon">
       <Timer :size="20" :stroke-width="1.4" />
     </span>
-    <span class="empty__title">还没有 hook 上报</span>
-    <span class="empty__text">
-      宿主侧的 Hook 插件会在每轮结束时上报各阶段耗时。装好插件并跑过一轮对话后，
-      这里会显示开销归因。
-    </span>
+    <span class="empty__title">还没有开销上报</span>
   </div>
 
   <div v-else class="hooks">

@@ -228,6 +228,71 @@ describe('权限与参数', () => {
   });
 });
 
+describe('身份绑定可配置', () => {
+  /** 用独立临时容器验证 `server.subject` 真的决定服务图身份。 */
+  async function withContainer(
+    env: Record<string, string>,
+    run: (created: Container) => Promise<void>,
+  ): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-http-subject-'));
+    const created = await createContainer({
+      configPath: join(dir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: dir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_LOGGING_LEVEL: 'error',
+        ...env,
+      },
+    });
+    try {
+      await run(created);
+    } finally {
+      await created.services.indexObserver.drain();
+      await created.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('server.subject 决定容器绑定的主体', async () => {
+    await withContainer({ COMEM_SERVER_SUBJECT: 'user:alice' }, async (created) => {
+      await expect(created.resolveIdentity({})).resolves.toEqual({
+        subject: 'user:alice',
+        principals: ['user:alice', 'user:*'],
+      });
+    });
+  });
+
+  it('默认绑定 user:local', async () => {
+    await withContainer({}, async (created) => {
+      await expect(created.resolveIdentity({})).resolves.toEqual({
+        subject: 'user:local',
+        principals: ['user:local', 'user:*'],
+      });
+    });
+  });
+
+  it('server.subject 非法时启动即抛 INVALID_ARGUMENT', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-http-subject-bad-'));
+    try {
+      await expect(
+        createContainer({
+          configPath: join(dir, 'config.yaml'),
+          env: {
+            ...process.env,
+            COMEM_DATA_DIR: dir,
+            COMEM_SUMMARY_GENERATOR: 'rule',
+            COMEM_LOGGING_LEVEL: 'error',
+            COMEM_SERVER_SUBJECT: 'alice',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('文件系统与内容', () => {
   it('mkdir → write → ls → tree → stat → read → edit → mv → cp → delete', async () => {
     const directory = `${ROOT}/memories`;

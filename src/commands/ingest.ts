@@ -43,7 +43,6 @@ import { ConsoleLogger } from '../adapters/log/console.js';
 import { openDatabase } from '../adapters/sqlite/database.js';
 import { IngestCursorRepository } from '../adapters/sqlite/ingest-cursor-repository.js';
 import type { TaskRow } from '../adapters/sqlite/task-repository.js';
-import { DEFAULT_SUBJECT } from '../api/http/middleware.js';
 import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
@@ -601,7 +600,7 @@ async function runWithConfig(
     const extraction = writers?.extraction;
     const service = new IngestService({
       sources: createSources(config, logger),
-      scopeUri: scopeUriOf(DEFAULT_SUBJECT),
+      scopeUri: scopeUriOf(config.server.subject),
       logger,
       batchSize: config.ingest.batchSize,
       extractionBatchSize: config.ingest.extractionBatchSize,

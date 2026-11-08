@@ -155,9 +155,6 @@ function nameOf(uri: string): string {
         <Check :size="22" :stroke-width="1.4" />
       </span>
       <span class="empty__title">复核队列已清空</span>
-      <span class="empty__text">
-        新的经验与规则会在下一次会话提交后进入队列。
-      </span>
     </div>
 
     <template v-else>
@@ -216,7 +213,7 @@ function nameOf(uri: string): string {
 
               <template v-else>
                 <p v-if="!hasDifference" class="diff__same">
-                  两侧内容一致：待生效版本已经写入文件，通过或拒绝决定它是否进入检索。
+                  两侧内容一致。
                 </p>
 
                 <div class="dgrid">
@@ -251,12 +248,7 @@ function nameOf(uri: string): string {
         <p class="body-sm muted">
           拒绝会删除这条待复核记录。原因会记入服务端日志，不会保存在记忆文件里。
         </p>
-        <UiTextarea
-          v-model="rejectReason"
-          aria-label="拒绝原因"
-          placeholder="例如：条件过宽，找不到明确的可执行边界"
-          :rows="3"
-        />
+        <UiTextarea v-model="rejectReason" aria-label="拒绝原因" :rows="3" />
         <div class="rowflex">
           <span class="spacer" />
           <UiButton variant="secondary" @click="rejectOpen = false">取消</UiButton>

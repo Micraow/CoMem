@@ -9,8 +9,7 @@
  * 300ms 是「停手了」与「还没想好」之间的经验值，短于此会打出一串必然作废的
  * 检索，长于此会让人觉得输入没反应。
  *
- * `find` / `search` 的差别写在面板里而不是文档里：两者返回形状相近，不写清
- * 差异，用户只会一直点 `find`，永远看不到查询计划。
+ * `find` / `search` 的差别靠选项标签表达（「带查询计划」），不写说明段落。
  */
 import type { SearchContextType, SearchMode, SearchLevel } from './HitList.vue'
 
@@ -55,14 +54,7 @@ const CONTEXT_OPTIONS = [
   { value: 'session', label: '会话' },
 ] as const
 
-const MODE_HINT: Readonly<Record<SearchMode, string>> = {
-  find: '不确定内容落在哪个目录时用：只按相关度取回命中，不做意图分析。',
-  search: '带查询计划：先做意图分析得到补充查询，再检索；下方会展示实际生效的过滤条件。',
-}
-
 const canSubmit = computed(() => query.value.trim() !== '' && !props.loading)
-
-const modeHint = computed(() => MODE_HINT[mode.value])
 
 let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -105,7 +97,6 @@ onBeforeUnmount(() => {
       <UiTextarea
         v-model="query"
         aria-label="检索词"
-        placeholder="输入检索词，可以是多行"
         :rows="3"
         :disabled="props.loading"
       />
@@ -124,7 +115,7 @@ onBeforeUnmount(() => {
         <span class="field__label">范围</span>
         <UiInput
           v-model="scope"
-          placeholder="comem://user/local（留空用当前命名空间）"
+          placeholder="留空使用当前命名空间"
           aria-label="检索范围"
           size="sm"
         />
@@ -145,8 +136,6 @@ onBeforeUnmount(() => {
         <UiSelect v-model="contextType" :options="CONTEXT_OPTIONS" aria-label="类型筛选" />
       </label>
     </div>
-
-    <p class="caption panel__hint">{{ modeHint }}</p>
   </form>
 </template>
 
@@ -193,9 +182,5 @@ onBeforeUnmount(() => {
   padding-left: 2px;
   font-size: 13px;
   color: var(--label-3);
-}
-
-.panel__hint {
-  margin: 0;
 }
 </style>

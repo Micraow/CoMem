@@ -171,10 +171,7 @@ onMounted(() => {
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader
-        title="会话与任务"
-        description="会话在这里提交，归档与抽取作为后台任务继续跑。"
-      >
+      <DomainPageHeader title="会话与任务">
         <template #actions>
           <UiButton
             variant="secondary"

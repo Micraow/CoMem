@@ -196,7 +196,7 @@ function isRetryDisabled(task: TaskRowPayload): boolean {
       <AlertTriangle :size="15" :stroke-width="1.4" />
       <div>
         <b>{{ expiredCount }} 个任务的租约已过期。</b>
-        执行器不会再续租这些任务，下次启动扫描会把它们重置为排队中，并增加一次重试。
+        执行器不再续租，下次启动会重置为排队中并增加一次重试。
       </div>
     </div>
 
@@ -278,7 +278,6 @@ function isRetryDisabled(task: TaskRowPayload): boolean {
           <RotateCcw :size="20" :stroke-width="1.4" />
         </span>
         <span class="empty__title">队列是空的</span>
-        <span class="empty__text">没有排队、运行中或可重试的任务。</span>
       </div>
     </UiCard>
   </div>
