@@ -12,24 +12,36 @@
 # - 每条查询上面的注释写清「为什么这几条相关、为什么相关程度不同」。没有注释的
 #   标注无法复核，等于没有标注。
 #
-# ## 查询分布
+# ## 查询分布（105 条）
 #
-# 1. 中文双字词（记忆 / 偏好 / 严格 / 物化 / 降级 / 缓存 / 提交 / 部署 / 权限）：
-#    `unicode61` 的分词盲区，CoMem 用 CJK 单字切分 + 短语匹配覆盖。
-# 2. 同义改写：query 用 A 说法，语料用 B 说法，只有语义检索能命中。
-# 3. 专有名词 / 标识符（sqlite-vec / pnpm verify / URI_CHUNK_SIZE /
-#    node_permission / bge-m3）：只有关键词检索能精确命中。
-# 4. 分级相关性：一条查询对应多篇文档，相关程度不同。
-# 5. 难负例：`记忆化缓存` 与 `记忆` / `缓存` 字面重叠但语义不同。
+# 1. 中文双字词（28）：记忆 / 偏好 / 严格 / 物化 / 降级 / 缓存 / 提交 / 部署 / 权限 /
+#    摘要 / 索引 / 向量 / 会话 / 归档 / 补丁 / 租约 / 游标 / 备份 / 监控 / 提示词 /
+#    重试 / 排序 / 并发 / 授权 / 加权 / 校验 / 过期 / 过滤。`unicode61` 的分词盲区，
+#    CoMem 用 CJK 单字切分 + 短语匹配覆盖。
+# 2. 同义改写（56）：query 用 A 说法，语料用 B 说法，只有语义检索能命中。
+# 3. 专有名词 / 标识符（15）：sqlite-vec / pnpm verify / URI_CHUNK_SIZE /
+#    node_permission / bge-m3 / COMEM_BYPASS_SESSION / keepRecentCount / dedup_turns /
+#    .abstract.md / rule_search / expires_at / GLOB / pnpm check:config /
+#    memory_diff.json / bge-reranker-v2-m3。只有关键词检索能精确命中。
+# 4. 分级相关性（3）：一条查询对应多篇文档，相关程度不同。
+# 5. 难负例（3）：`记忆化缓存` 与 `记忆` / `缓存`、`摘要模型` 与 `bge-m3` /
+#    `rerank-model`、`许可证过期` 与 `ttl-sweep` 字面重叠但语义不同。
 #
 # ## 语料根
 #
 # 全部在 `comem://user/lin` 下。评估执行器按语料的根绑定服务图身份（`user:lin`），
 # 换一个根只需要改这里的 URI。
+#
+# ## 与旧集合的关系
+#
+# 扩集之前的 34 条查询 / 23 篇语料冻结在 `eval/datasets/basic-v1.yaml`。这 23 篇里
+# 有 22 篇与这里逐字相同；`resources/ttl-sweep.md` 在 basic 里补了「存在 expires_at
+# 列里」一句（`expires_at` 标识符查询与「许可证过期」难负例需要这个词在语料里
+# 有落点）。除此之外，「新集合 vs 旧集合」的分数差只反映**新增查询与新增语料**。
 
 name: basic
 description: >-
-  CoMem 检索质量基线：34 条查询，覆盖中文双字词、同义改写、标识符、分级相关性与
+  CoMem 检索质量基线：105 条查询，覆盖中文双字词、同义改写、标识符、分级相关性与
   难负例。语料取自项目自身文档中的真实主题。
 
 corpus:
@@ -60,6 +72,27 @@ corpus:
     日志每行一个 JSON，requestId 贯穿一次请求到后台任务与模型调用。
     延迟按阶段归因，不要只报一个总数。错误日志里带稳定错误码，方便按码聚合。
 
+  "comem://user/lin/memories/preferences/api-response.md": |
+    统一响应封套
+
+    成功时返回 { result }，失败时返回 { error: { code, message, details } }。
+    HTTP 状态码表示协议层的成败，code 是稳定的机器可读标识；message 给人看，details 放定位用的字段。
+    不要在同一个接口里返回两种形状，否则客户端写不出通用的错误处理。
+
+  "comem://user/lin/memories/preferences/config-discipline.md": |
+    配置项纪律
+
+    每个配置项必须有消费方。没有读取点的配置比报错更危险：它让人以为改了会生效。
+    新增一项要同时改默认值、环境变量名与文档，pnpm check:config 会拦住没有读取点的孤儿项。
+    环境变量统一 COMEM_ 前缀，嵌套段用下划线连接，环境变量优先于配置文件。
+
+  "comem://user/lin/memories/preferences/documentation.md": |
+    文档写作规范
+
+    先给结论或结果，再给证据与注意事项。用简单、事实性的完整句子，少用指代词，直接写出被指代的对象。
+    只在区分易混概念或防止误操作时保留「是……不是……」的对比。
+    来源不确定时明确说明不确定，不要编造依据。
+
   # ── 记忆：实体 ──────────────────────────────────────────────────────────
 
   "comem://user/lin/memories/entities/comem-project.md": |
@@ -87,6 +120,42 @@ corpus:
     重排用 bge-reranker-v2-m3，一次最多送 50 条候选，超时 10 秒。
     重排是检索路径上的额外模型调用，默认关闭。开启后按重排分数保留前 keepTopN 条。
 
+  "comem://user/lin/memories/entities/mcp-tools.md": |
+    MCP 工具清单
+
+    对外只暴露 16 个工具：10 个只读、4 个写、2 个摄取。find 与 search 的差别只有「是否先做查询意图分析」，
+    rule_search 的阈值是相对于本次最高分的比例，不是绝对分数下限。
+    ACL 的两个工具不进 MCP——能给自己授权的 agent 就是提权漏洞，只走 Web 与 HTTP。
+    加第 17 个工具之前先确认现有工具确实覆盖不了。
+
+  "comem://user/lin/memories/entities/recall-ledger.md": |
+    召回账本
+
+    账本按作用域分片，条目按会话过滤：同一用户的两个会话不能共用一个轮次时钟，否则新会话前几轮会被静默压制。
+    去重窗口是「本会话最近 dedup_turns 轮投过什么」，只记真的给了正文的条目，只给 URI 的不记。
+    轮次时钟取消息总数，按 turn - 4 × dedup_turns 裁剪，上限 500 条。
+
+  "comem://user/lin/memories/entities/context-assembly.md": |
+    上下文组装
+
+    检索结果到模型输入之间还有一层：按 token 预算分层投放。events 从 L1 概览起步，其余从 L0 摘要起步，
+    放不下就沿 L2 → L1 → L0 → 只有 URI 降级，降到底还放不下就丢弃并计数。
+    然后是去重（同一次请求内）与配额（chat / coding 两套预设按类别分配条目数）。
+
+  "comem://user/lin/memories/entities/uri-canonicalization.md": |
+    URI 规范化
+
+    规范化必须唯一：段做 NFC、合并重复斜杠、去掉末尾斜杠、拒绝 . 与 ..、拒绝控制字符与反斜杠、
+    单段不超过 255 字节、保留名不能当普通文件名。权限按路径记录，同一个文件有两个路径就有两套权限。
+    大小写不折叠——comem://user/Alice 与 comem://user/alice 是两个用户。
+
+  "comem://user/lin/memories/entities/metadata-files.md": |
+    元数据文件
+
+    每个目录可以带 .acl.json（权限）、.abstract.md（L0 摘要）、.overview.md（L1 概览）。
+    归档目录多 .meta.json、memory_diff.json 与 .done，其中 .done 是唯一的完成信号，最后写。
+    这些名字是保留名，不能当普通文件名。索引是派生数据，删掉 _meta 下的库跑一次重建即可恢复。
+
   # ── 记忆：经历 ──────────────────────────────────────────────────────────
 
   "comem://user/lin/memories/experiences/monorepo-migration.md": |
@@ -108,6 +177,34 @@ corpus:
     两把锁按 URI 字符串排序后获取，避免两个相反方向的移动互相等待。
     互为祖先的路径直接拒绝：移动 a 到 a/b 会在拿第二把锁时等自己，最后报一个误导性的超时。
 
+  "comem://user/lin/memories/experiences/summary-stale.md": |
+    摘要一直显示待刷新
+
+    先看 node 表的 summary_pending 与 summary_baseline：计数到不了阈值就只记脏不重算，这是设计行为。
+    小目录（直接子项不超过 32 条）或 pendingChanges / totalEntries 达到 0.10 会立刻重算。
+    对账脚本可以用 SummaryService.regenerate 从指定目录往上重算整条链。
+
+  "comem://user/lin/memories/experiences/search-miss.md": |
+    刚写的内容搜不到
+
+    先确认写的是记忆还是普通文件：只有带 memory_type 的写入会进摘要与检索，会话消息按设计不进索引。
+    再确认 status 是不是 pending——待复核的 experiences 与 rules 不参与检索，通过复核才变成 active。
+    最后才看嵌入：供应商不可用时语义那条路会降级，此时只有关键词能命中。
+    故障排查按这个顺序走，三步都正常才是真的检索失败。
+
+  "comem://user/lin/memories/experiences/session-403.md": |
+    会话页返回 403
+
+    403 不是「没有会话」，是「没有权限」。会话目录挂在根下，根预置只给 owner manage，
+    用别人的身份打开会拿到 403 而不是空列表——空列表和没有权限是两件事。
+    先看请求头里的身份有没有被正确解析，再看根预置的 ACL 条目是不是被删掉了。
+
+  "comem://user/lin/memories/experiences/dev-port.md": |
+    pnpm dev 起不来的几种情况
+
+    端口被占用时 pnpm dev 会明确报错，不会把控制台接到别的服务上；两边一起换端口用 COMEM_SERVER_PORT。
+    控制台是独立包，忘了在 web/ 下装依赖时它起不来，后端却是好的。数据根不可写会让迁移直接失败。
+
   # ── 记忆：规则 ──────────────────────────────────────────────────────────
 
   "comem://user/lin/memories/rules/license-review.md": |
@@ -121,6 +218,30 @@ corpus:
 
     任何降级都要写日志，并把原因带回给调用方。静默降级会让真实缺陷看起来像正常状态。
     模型超时、嵌入失败、重排不可用都走这条规则：返回结果，同时带 reason。
+
+  "comem://user/lin/memories/rules/no-any.md": |
+    不要用 any 绕过类型检查
+
+    需要收窄时用 unknown 再写类型守卫，不要 any 加断言。类型断言要能解释运行时值为什么一定成立。
+    strict 与 noUncheckedIndexedAccess 都开着，索引访问返回联合类型不是麻烦，是问题被提前暴露。
+
+  "comem://user/lin/memories/rules/clean-room.md": |
+    参考实现不能出现在交付物里
+
+    可以读成熟实现的代码与设计来对齐质量，但交付物中不得出现它的名字、代码片段、文件路径或提交信息。
+    需要记录对比时写进本地笔记，不进版本控制。直接复制粘贴不算自己写出来的实现。
+
+  "comem://user/lin/memories/rules/irreversible-ask.md": |
+    停下来问的三种情况
+
+    范围变更或不可逆操作、前提事实有误或需求互相矛盾、需要本地拿不到的凭据与环境——这三类先问，不要自己拍。
+    其余的实现路径、风格偏好、细节取舍自己决定，并记进决策记录。
+
+  "comem://user/lin/memories/rules/no-fake-result.md": |
+    不要为了演示产出假结果
+
+    一个永远返回空列表的接口，比一个明确报错的接口更难发现。假实现的代价不是以后重写，
+    而是让真实缺陷看起来像正常状态。演示用合成数据时要标明是合成的，不要让读数被当成测量结果。
 
   # ── 资料 ────────────────────────────────────────────────────────────────
 
@@ -167,13 +288,106 @@ corpus:
     记忆过期清扫
 
     TTL 只做软过期：把 status 改成 archived，不物理删除文件。
-    过期时间存绝对时刻，不存 N 天后。清扫按批处理，每批最多 100 条，避免一次锁住数据库。
+    过期时间存在 expires_at 列里，是绝对时刻，不存 N 天后。清扫按批处理，每批最多 100 条，避免一次锁住数据库。
 
   "comem://user/lin/resources/memoization.md": |
     记忆化（memoization）
 
     记忆化是把函数的计算结果缓存起来，下次用同样的参数调用时直接返回。
     它和上下文记忆是两回事：前者是进程内的性能优化，后者是跨会话的知识存储。
+
+  "comem://user/lin/resources/prompt-override.md": |
+    提示词覆盖
+
+    提示词的静态骨架在 prompts/*.md，动态部分由服务层渲染成字符串再用占位符注入，不在代码里拼。
+    控制台改过的模板优先于仓库里的默认值，改完下一次生成就生效，不需要重启。
+    升级后要检查「我的覆盖落后了」：默认模板加了新占位符而覆盖里没有，渲染出来就少一段。
+
+  "comem://user/lin/resources/backup-restore.md": |
+    备份与恢复
+
+    要备两样东西：内容目录（Markdown 与附件）和 _meta 下的 SQLite 库。只备内容时索引可以重建，
+    只备库时文件没了就什么都恢复不了。恢复后先跑一次重建索引，再确认摘要有没有降级。
+    停机备份最省事：拷贝时不要有写入，否则库可能拿到半写状态。
+
+  "comem://user/lin/resources/health-metrics.md": |
+    健康检查与指标
+
+    /health 返回服务状态、当前身份、可寻址的根、索引条数与摘要降级标记，是给 agent 拼绝对地址用的。
+    /metrics 是 Prometheus 文本格式，指标名带单位后缀，接监控时直接抓这个端点。延迟按阶段归因，不要只报一个总数。
+    健康检查不要依赖外部供应商——供应商挂了服务本身还是健康的，那属于降级标记。
+
+  "comem://user/lin/resources/ingest-cursor.md": |
+    导入游标
+
+    「读到哪」记在 _meta 库的 ingest_cursor 表里，主键是来源加原生会话 ID。
+    同一个来源跑第二次全部计入跳过，不产生重复会话；想重导某个会话就删掉对应行。
+    游标按会话推进，不是按文件字节偏移——导出的对话文件会追加。
+
+  "comem://user/lin/resources/review-gate.md": |
+    复核闸门
+
+    experiences 与 rules 写入时是 pending，不参与检索；人工通过才变成 active，拒绝则删除并记录原因。
+    其余记忆类型直接 active。只报总数会让人以为「导进来一百条，一百条都能搜到」，
+    实际有一部分要过闸门，报告里要分开写。
+
+  "comem://user/lin/resources/group-sharing.md": |
+    组空间的三层共享
+
+    组内全员可读写就在组根预置 group:{gid} = write；个人文件给全组看就在该节点挂 group 的 read；
+    只给组里几个人看就在更深节点设 restricted 切断继承，再挂具体用户的直接授权。
+    退组立即生效，因为 ACL 存的是组标识而不是展开后的成员列表。
+
+  "comem://user/lin/resources/project-scope.md": |
+    项目作用域
+
+    项目是根下面的二级命名空间，结构跟根同构，少 sessions 与 projects 两段。
+    项目 ID 从 git origin 派生：把非字母数字换成连字符；不在仓库里时用目录名。
+    同一个仓库的不同克隆、worktree、子目录都归到同一个项目，可以用 .comem/config.json 显式指定。
+
+  "comem://user/lin/resources/query-filter.md": |
+    查询过滤
+
+    用户的 prompt 里混着斜杠命令、@ 文件提及、代码块、URL 与「继续」这类无实质内容，
+    先过一组 sed 风格的正则替换再检索。分隔符和正则里的元字符会打架，pattern 里的竖线要转义。
+    过滤后为空就不检索——拿空串去查会返回随机结果。
+
+  "comem://user/lin/resources/bypass.md": |
+    临时关掉记忆
+
+    演示想对比「有记忆 / 没记忆」、调试想隔离变量、这段对话不该入库，三种场景要临时关掉记忆。
+    整个会话关掉用 COMEM_BYPASS_SESSION，只关一部分路径用它的 PATTERNS 变体（glob 里的 * 跨 /）。
+    生效位置在 Hook 层：注入与采集都跳过，服务端不知道有这回事，它只是没收到请求。
+
+  "comem://user/lin/resources/hybrid-candidates.md": |
+    候选放大与截断
+
+    先取 limit × 4 条候选，权限过滤与去重之后再截到 limit。只取 limit 条时，
+    前几条没权限就会返回不足数，用户看到「没有结果」而实际上有。
+    多路召回按 URI 去重取最高分，排序与截断只能在合并之后做。
+
+  "comem://user/lin/resources/session-archive.md": |
+    会话提交的两阶段
+
+    阶段一在请求内做完：分配归档序号、写 messages.jsonl、写 .meta.json、建 task 然后返回 taskId。
+    阶段二在后台跑四个步骤：归档摘要、抽取记忆、应用补丁、标记祖先摘要失效。
+    自动提交有五个阈值，未提交 token 与消息数都是严格大于才触发，minCommitIntervalSeconds 是全局闸门。
+    归档时用 keepRecentCount 保留最近 N 条，序号 archive_NNN 单调递增、从不复用。
+
+  "comem://user/lin/resources/task-recovery.md": |
+    任务恢复
+
+    认领用一条带条件的 UPDATE 拿到租约，租约 60 秒，心跳每 20 秒续一次。
+    多个执行器并发认领时靠这条 UPDATE 的原子性保证同一条任务只被认领一次。
+    进程崩了之后启动扫描把过期的 running 重置成 pending，尝试次数加一；超过 3 次置为 failed 并写错误。
+    重试必须幂等：记忆操作重复应用会造出重复记录，所以已完成步骤记在 steps_done 里。
+
+  "comem://user/lin/resources/patch-merge.md": |
+    补丁合并
+
+    同 URI 的多条 patch 按输出顺序应用，不调模型：第 2 条的 SEARCH 在第 1 条应用后的正文上匹配。
+    SEARCH 必须唯一命中，命中零处或多处整条失败并记进 skippedOperations，不做模糊匹配。
+    同一批次里既 upsert 又 delete 同一 URI 时保留 upsert，视为误判。
 
   # ── 技能 ────────────────────────────────────────────────────────────────
 
@@ -273,6 +487,213 @@ cases:
     graded:
       comem://user/lin/resources/acl-materialization.md: 3
       comem://user/lin/memories/rules/license-review.md: 0
+
+  # 「摘要」在摘要排障文档里是主题（为什么一直待刷新）；层级加权文档讲 L0 摘要的
+  # 排序权重；上下文预算文档讲摘要该占多少 token。三篇都直接谈摘要，但一个讲新鲜度、
+  # 一个讲排序、一个讲预算。
+  - query: 摘要
+    relevant:
+      - comem://user/lin/memories/experiences/summary-stale.md
+      - comem://user/lin/resources/level-weighting.md
+      - comem://user/lin/resources/context-window-budget.md
+    graded:
+      comem://user/lin/memories/experiences/summary-stale.md: 3
+      comem://user/lin/resources/level-weighting.md: 2
+      comem://user/lin/resources/context-window-budget.md: 2
+
+  # 元数据文件文档把「索引是派生数据」当核心区分，是主题；权限物化文档讲权限为什么
+  # 要物化进索引；分词文档讲索引侧怎么切分。三篇的「索引」不是同一个东西。
+  - query: 索引
+    relevant:
+      - comem://user/lin/memories/entities/metadata-files.md
+      - comem://user/lin/resources/acl-materialization.md
+      - comem://user/lin/resources/fts5-segmentation.md
+    graded:
+      comem://user/lin/memories/entities/metadata-files.md: 3
+      comem://user/lin/resources/acl-materialization.md: 2
+      comem://user/lin/resources/fts5-segmentation.md: 2
+
+  # sqlite-vec 文档是向量索引的主题；bge-m3 文档讲向量维度（换模型必须改维度）；
+  # 候选放大文档讲向量召回这条路径的候选集与截断。
+  - query: 向量
+    relevant:
+      - comem://user/lin/memories/entities/sqlite-vec.md
+      - comem://user/lin/memories/entities/bge-m3.md
+      - comem://user/lin/resources/hybrid-candidates.md
+    graded:
+      comem://user/lin/memories/entities/sqlite-vec.md: 3
+      comem://user/lin/memories/entities/bge-m3.md: 2
+      comem://user/lin/resources/hybrid-candidates.md: 2
+
+  # 会话提交管线文档是主题（会话怎么归档、怎么变成记忆）；403 排障讲会话页的权限；
+  # 召回账本按会话过滤，是会话维度的下游细节。
+  - query: 会话
+    relevant:
+      - comem://user/lin/resources/session-archive.md
+      - comem://user/lin/memories/experiences/session-403.md
+      - comem://user/lin/memories/entities/recall-ledger.md
+    graded:
+      comem://user/lin/resources/session-archive.md: 3
+      comem://user/lin/memories/experiences/session-403.md: 2
+      comem://user/lin/memories/entities/recall-ledger.md: 1
+
+  # 「归档」在提交管线文档里是主题（archive_NNN、.done 最后写）；任务恢复讲归档任务
+  # 崩溃后怎么回收；摘要排障讲归档之后祖先目录为什么要重算。
+  - query: 归档
+    relevant:
+      - comem://user/lin/resources/session-archive.md
+      - comem://user/lin/resources/task-recovery.md
+      - comem://user/lin/memories/experiences/summary-stale.md
+    graded:
+      comem://user/lin/resources/session-archive.md: 3
+      comem://user/lin/resources/task-recovery.md: 2
+      comem://user/lin/memories/experiences/summary-stale.md: 1
+
+  # 补丁合并文档是主题（同 URI 多条 patch 按序应用、SEARCH 唯一命中）；提交管线只
+  # 把「应用补丁」当作四个步骤之一提了一句。
+  - query: 补丁
+    relevant:
+      - comem://user/lin/resources/patch-merge.md
+      - comem://user/lin/resources/session-archive.md
+    graded:
+      comem://user/lin/resources/patch-merge.md: 3
+      comem://user/lin/resources/session-archive.md: 1
+
+  # 「租约」只出现在任务恢复文档里（60 秒租约、20 秒心跳续租）；提交管线提到建任务，
+  # 边缘相关。
+  - query: 租约
+    relevant:
+      - comem://user/lin/resources/task-recovery.md
+      - comem://user/lin/resources/session-archive.md
+    graded:
+      comem://user/lin/resources/task-recovery.md: 3
+      comem://user/lin/resources/session-archive.md: 1
+
+  # 游标只有导入文档在讲（ingest_cursor 表、按会话推进）。Hook 插件里也有游标，但
+  # 语料里没有对应文档，不标。
+  - query: 游标
+    relevant:
+      - comem://user/lin/resources/ingest-cursor.md
+    graded:
+      comem://user/lin/resources/ingest-cursor.md: 3
+
+  # 备份与恢复文档是主题（内容目录 + _meta 库两样都要）；元数据文件文档讲「索引是
+  # 派生数据、删库可重建」，是备份的替代路径。
+  - query: 备份
+    relevant:
+      - comem://user/lin/resources/backup-restore.md
+      - comem://user/lin/memories/entities/metadata-files.md
+    graded:
+      comem://user/lin/resources/backup-restore.md: 3
+      comem://user/lin/memories/entities/metadata-files.md: 1
+
+  # 健康检查与指标文档是主题（/health、/metrics）；可观测性偏好文档讲日志与延迟
+  # 按阶段归因，是同一件事的另一半。
+  - query: 监控
+    relevant:
+      - comem://user/lin/resources/health-metrics.md
+      - comem://user/lin/memories/preferences/observability.md
+    graded:
+      comem://user/lin/resources/health-metrics.md: 3
+      comem://user/lin/memories/preferences/observability.md: 2
+
+  # 提示词覆盖文档是主题（模板可改、覆盖优先、升级落后检测）；上下文组装文档讲
+  # 渲染格式，相关但更偏出参。
+  - query: 提示词
+    relevant:
+      - comem://user/lin/resources/prompt-override.md
+      - comem://user/lin/memories/entities/context-assembly.md
+    graded:
+      comem://user/lin/resources/prompt-override.md: 3
+      comem://user/lin/memories/entities/context-assembly.md: 1
+
+  # 重试在任务恢复文档里是核心（租约到期重试、上限 3 次）；降级规则文档讲失败要
+  # 带 reason，与重试是同一套失败处理的两面。
+  - query: 重试
+    relevant:
+      - comem://user/lin/resources/task-recovery.md
+      - comem://user/lin/memories/rules/no-silent-degradation.md
+    graded:
+      comem://user/lin/resources/task-recovery.md: 3
+      comem://user/lin/memories/rules/no-silent-degradation.md: 2
+
+  # 排序分怎么算写在层级加权文档里（bm25 × 权重）；RRF 文档讲名次怎么融合；候选
+  # 放大文档讲截断只能在合并后做。三篇都影响排序，分别管权重、融合、截断。
+  - query: 排序
+    relevant:
+      - comem://user/lin/resources/level-weighting.md
+      - comem://user/lin/resources/hybrid-candidates.md
+      - comem://user/lin/resources/rrf-fusion.md
+    graded:
+      comem://user/lin/resources/level-weighting.md: 3
+      comem://user/lin/resources/hybrid-candidates.md: 2
+      comem://user/lin/resources/rrf-fusion.md: 2
+
+  # 路径锁竞争文档讲并发写同一个文件时的锁顺序；任务恢复讲租约与在途任务；提交管线
+  # 讲并发认领任务。三篇的并发粒度不同（文件、任务、管线）。
+  - query: 并发
+    relevant:
+      - comem://user/lin/memories/experiences/lock-contention.md
+      - comem://user/lin/resources/task-recovery.md
+      - comem://user/lin/resources/session-archive.md
+    graded:
+      comem://user/lin/memories/experiences/lock-contention.md: 3
+      comem://user/lin/resources/task-recovery.md: 2
+      comem://user/lin/resources/session-archive.md: 1
+
+  # 组空间共享文档讲授权怎么挂（组根 write、组 read、restricted 加直接授权）；权限
+  # 物化文档讲授权为什么要算进索引；URI 规范化文档讲「权限按路径记录」这个前提。
+  - query: 授权
+    relevant:
+      - comem://user/lin/resources/group-sharing.md
+      - comem://user/lin/resources/acl-materialization.md
+      - comem://user/lin/memories/entities/uri-canonicalization.md
+    graded:
+      comem://user/lin/resources/group-sharing.md: 3
+      comem://user/lin/resources/acl-materialization.md: 3
+      comem://user/lin/memories/entities/uri-canonicalization.md: 1
+
+  # 层级加权文档是主题（1.15 / 1.05 / 1.00 这组数）；RRF 文档讲混合检索下加权贡献
+  # 怎么算进融合分。
+  - query: 加权
+    relevant:
+      - comem://user/lin/resources/level-weighting.md
+      - comem://user/lin/resources/rrf-fusion.md
+    graded:
+      comem://user/lin/resources/level-weighting.md: 3
+      comem://user/lin/resources/rrf-fusion.md: 2
+
+  # 「校验」在配置纪律文档里是主题（check:config 拦没有读取点的孤儿项）；URI 规范化
+  # 的六条规则也是一种校验，但作用在路径层。
+  - query: 校验
+    relevant:
+      - comem://user/lin/memories/preferences/config-discipline.md
+      - comem://user/lin/memories/entities/uri-canonicalization.md
+    graded:
+      comem://user/lin/memories/preferences/config-discipline.md: 3
+      comem://user/lin/memories/entities/uri-canonicalization.md: 2
+
+  # 记忆过期清扫文档是主题（软过期、存绝对时刻）；缓存失效文档讲旧值要删不要覆盖，
+  # 是「过期数据」的另一面。
+  - query: 过期
+    relevant:
+      - comem://user/lin/resources/ttl-sweep.md
+      - comem://user/lin/memories/experiences/cache-invalidation.md
+    graded:
+      comem://user/lin/resources/ttl-sweep.md: 3
+      comem://user/lin/memories/experiences/cache-invalidation.md: 1
+
+  # 查询过滤文档讲检索前的噪音清理；权限物化文档讲检索侧的权限过滤子查询；上下文
+  # 组装讲去重与配额。三处都叫过滤，语义分别是文本、权限、重复。
+  - query: 过滤
+    relevant:
+      - comem://user/lin/resources/query-filter.md
+      - comem://user/lin/resources/acl-materialization.md
+      - comem://user/lin/memories/entities/context-assembly.md
+    graded:
+      comem://user/lin/resources/query-filter.md: 3
+      comem://user/lin/resources/acl-materialization.md: 2
+      comem://user/lin/memories/entities/context-assembly.md: 1
 
   # ── 同义改写（只有语义检索能命中）──────────────────────────────────────
 
@@ -414,6 +835,316 @@ cases:
     graded:
       comem://user/lin/resources/context-window-budget.md: 3
 
+  # 问的是「给模型的上下文装不下」，语料里是上下文组装的分层投放与丢弃计数；
+  # 上下文预算文档讲 1600 token 这个总预算，是同一机制的上游参数。
+  - query: 模型返回的上下文太长塞不下怎么办
+    relevant:
+      - comem://user/lin/memories/entities/context-assembly.md
+      - comem://user/lin/resources/context-window-budget.md
+    graded:
+      comem://user/lin/memories/entities/context-assembly.md: 3
+      comem://user/lin/resources/context-window-budget.md: 2
+
+  # 问的是跨轮重复投放怎么避免，语料里是召回账本；上下文组装文档讲同一次请求内的
+  # 去重，是另一种去重，相关但不同层。
+  - query: 同一条记忆被重复塞给模型怎么避免
+    relevant:
+      - comem://user/lin/memories/entities/recall-ledger.md
+      - comem://user/lin/memories/entities/context-assembly.md
+    graded:
+      comem://user/lin/memories/entities/recall-ledger.md: 3
+      comem://user/lin/memories/entities/context-assembly.md: 2
+
+  # 问的是为什么要多取候选再截断，语料里是候选放大与截断（limit × 4）。
+  - query: 一次检索为什么要多取几条候选再截断
+    relevant:
+      - comem://user/lin/resources/hybrid-candidates.md
+    graded:
+      comem://user/lin/resources/hybrid-candidates.md: 3
+
+  # 问的是分数能不能跨引擎比较，语料里是 MCP 工具清单（三种引擎的分数量纲不同）；
+  # RRF 文档讲「只用名次就没有这个问题」，是同一结论的另一种说法。
+  - query: 检索结果里的分数能不能跨引擎比较
+    relevant:
+      - comem://user/lin/memories/entities/mcp-tools.md
+      - comem://user/lin/resources/rrf-fusion.md
+    graded:
+      comem://user/lin/memories/entities/mcp-tools.md: 3
+      comem://user/lin/resources/rrf-fusion.md: 2
+
+  # 问的是大小写不同的用户名会不会串权限，语料里是 URI 规范化（大小写不折叠）与
+  # 权限物化（LIKE 对 ASCII 大小写不敏感会越权）。
+  - query: 两个用户同名会不会串权限
+    relevant:
+      - comem://user/lin/memories/entities/uri-canonicalization.md
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/memories/entities/uri-canonicalization.md: 3
+      comem://user/lin/resources/acl-materialization.md: 2
+
+  # 问的是目录里那些点开头的文件是干什么的，语料里是元数据文件。
+  - query: 目录里的元数据文件都是干什么的
+    relevant:
+      - comem://user/lin/memories/entities/metadata-files.md
+    graded:
+      comem://user/lin/memories/entities/metadata-files.md: 3
+
+  # 问的是删掉索引库会不会丢数据，语料里是元数据文件（索引是派生数据、可重建）；
+  # 备份文档讲备份范围，是同一结论的运维版本。
+  - query: 删了索引库会不会丢数据
+    relevant:
+      - comem://user/lin/memories/entities/metadata-files.md
+      - comem://user/lin/resources/backup-restore.md
+    graded:
+      comem://user/lin/memories/entities/metadata-files.md: 3
+      comem://user/lin/resources/backup-restore.md: 2
+
+  # 问的是备份范围，语料里是备份与恢复（内容目录 + _meta 库）。
+  - query: 备份应该包含哪些东西
+    relevant:
+      - comem://user/lin/resources/backup-restore.md
+    graded:
+      comem://user/lin/resources/backup-restore.md: 3
+
+  # 问的是恢复后为什么要重建索引，语料里是备份与恢复（恢复后先重建再确认摘要降级）；
+  # 元数据文件文档讲索引与内容的从属关系，是原因。
+  - query: 恢复之后为什么要重建索引
+    relevant:
+      - comem://user/lin/resources/backup-restore.md
+      - comem://user/lin/memories/entities/metadata-files.md
+    graded:
+      comem://user/lin/resources/backup-restore.md: 3
+      comem://user/lin/memories/entities/metadata-files.md: 2
+
+  # 问的是怎么判断服务活着，语料里是健康检查与指标（/health）。
+  - query: 怎么知道服务是不是健康的
+    relevant:
+      - comem://user/lin/resources/health-metrics.md
+    graded:
+      comem://user/lin/resources/health-metrics.md: 3
+
+  # 问的是有哪些指标可以接监控，语料里是健康检查与指标（/metrics 是 Prometheus 文本）；
+  # 可观测性偏好文档讲日志与延迟归因，是同一套观测体系。
+  - query: 有什么指标可以接监控
+    relevant:
+      - comem://user/lin/resources/health-metrics.md
+      - comem://user/lin/memories/preferences/observability.md
+    graded:
+      comem://user/lin/resources/health-metrics.md: 3
+      comem://user/lin/memories/preferences/observability.md: 2
+
+  # 问的是重复导入怎么避免，语料里是导入游标（幂等、按会话跳过）。
+  - query: 导入历史对话为什么会重复
+    relevant:
+      - comem://user/lin/resources/ingest-cursor.md
+    graded:
+      comem://user/lin/resources/ingest-cursor.md: 3
+
+  # 问的是导入进度存在哪，语料里是导入游标（ingest_cursor 表）。
+  - query: 上次导入到哪了
+    relevant:
+      - comem://user/lin/resources/ingest-cursor.md
+    graded:
+      comem://user/lin/resources/ingest-cursor.md: 3
+
+  # 问的是为什么抽出来的记忆要人看一眼，语料里是复核闸门（experiences 与 rules 走
+  # pending → active）。
+  - query: 抽出来的记忆为什么要人工看一眼
+    relevant:
+      - comem://user/lin/resources/review-gate.md
+    graded:
+      comem://user/lin/resources/review-gate.md: 3
+
+  # 问的是待复核的记忆搜不搜得到，语料里是复核闸门（pending 不参与检索）；
+  # 搜不到排障文档把「status 是 pending」列为第一个原因。
+  - query: 待复核的记忆能不能搜到
+    relevant:
+      - comem://user/lin/resources/review-gate.md
+      - comem://user/lin/memories/experiences/search-miss.md
+    graded:
+      comem://user/lin/resources/review-gate.md: 3
+      comem://user/lin/memories/experiences/search-miss.md: 2
+
+  # 问的是怎么只把一个目录分享给组里几个人，语料里是组空间的三层共享（restricted 加
+  # 直接授权）。
+  - query: 怎么只把一个目录分享给组里几个人
+    relevant:
+      - comem://user/lin/resources/group-sharing.md
+    graded:
+      comem://user/lin/resources/group-sharing.md: 3
+
+  # 问的是退组之后权限还在不在，语料里是组空间共享（ACL 存组标识、不展开成员）；
+  # 权限物化文档讲物化行为什么不能替代 ACL 文件，是同一机制的另一半。
+  - query: 退出组之后权限还在吗
+    relevant:
+      - comem://user/lin/resources/group-sharing.md
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/resources/group-sharing.md: 3
+      comem://user/lin/resources/acl-materialization.md: 2
+
+  # 问的是项目 ID 从哪来，语料里是项目作用域（从 git origin 派生）。
+  - query: 项目 ID 是怎么来的
+    relevant:
+      - comem://user/lin/resources/project-scope.md
+    graded:
+      comem://user/lin/resources/project-scope.md: 3
+
+  # 问的是同一个仓库的多个克隆怎么归到一起，语料里是项目作用域（克隆、worktree、
+  # 子目录都归同一个项目）。
+  - query: 同一个仓库的不同克隆怎么归到一起
+    relevant:
+      - comem://user/lin/resources/project-scope.md
+    graded:
+      comem://user/lin/resources/project-scope.md: 3
+
+  # 问的是用户输入里混着斜杠命令怎么办，语料里是查询过滤（sed 规则）。
+  - query: 用户的输入里带着斜杠命令怎么处理
+    relevant:
+      - comem://user/lin/resources/query-filter.md
+    graded:
+      comem://user/lin/resources/query-filter.md: 3
+
+  # 问的是怎么临时关掉记忆，语料里是「临时关掉记忆」那篇（按会话或按路径通配，
+  # 生效在 Hook 层）。
+  - query: 怎么临时关掉记忆
+    relevant:
+      - comem://user/lin/resources/bypass.md
+    graded:
+      comem://user/lin/resources/bypass.md: 3
+
+  # 问的是提示词能不能改，语料里是提示词覆盖（模板可改、改完下次生效）。
+  - query: 提示词能不能改
+    relevant:
+      - comem://user/lin/resources/prompt-override.md
+    graded:
+      comem://user/lin/resources/prompt-override.md: 3
+
+  # 问的是升级之后自己改过的模板会怎样，语料里是提示词覆盖（「我的覆盖落后了」检测）。
+  - query: 升级之后我自己改的模板会怎样
+    relevant:
+      - comem://user/lin/resources/prompt-override.md
+    graded:
+      comem://user/lin/resources/prompt-override.md: 3
+
+  # 问的是一段对话怎么变成可检索的记忆，语料里是会话提交的两阶段；补丁合并文档讲
+  # 阶段二里「应用补丁」那一步，相关但更细。
+  - query: 会话是怎么变成记忆的
+    relevant:
+      - comem://user/lin/resources/session-archive.md
+      - comem://user/lin/resources/patch-merge.md
+    graded:
+      comem://user/lin/resources/session-archive.md: 3
+      comem://user/lin/resources/patch-merge.md: 1
+
+  # 问的是提交做到一半进程崩了怎么办，语料里是会话提交的两阶段（.done 最后写、重放
+  # 跳过已完成）与任务恢复（租约过期回收）。
+  - query: 提交到一半崩了怎么办
+    relevant:
+      - comem://user/lin/resources/session-archive.md
+      - comem://user/lin/resources/task-recovery.md
+    graded:
+      comem://user/lin/resources/session-archive.md: 3
+      comem://user/lin/resources/task-recovery.md: 2
+
+  # 问的是卡在运行中的任务怎么回收，语料里是任务恢复（启动扫描把过期 running 重置）。
+  - query: 任务卡在运行中怎么回收
+    relevant:
+      - comem://user/lin/resources/task-recovery.md
+    graded:
+      comem://user/lin/resources/task-recovery.md: 3
+
+  # 问的是一条记忆要改好几个地方怎么合起来，语料里是补丁合并（同 URI 多条 patch
+  # 按序应用）。
+  - query: 一条记忆要改好几个地方怎么合到一起
+    relevant:
+      - comem://user/lin/resources/patch-merge.md
+    graded:
+      comem://user/lin/resources/patch-merge.md: 3
+
+  # 问的是补丁找不到原文字怎么办，语料里是补丁合并（SEARCH 零处或多处整条失败，
+  # 不做模糊匹配）。
+  - query: 补丁找不到原文字怎么办
+    relevant:
+      - comem://user/lin/resources/patch-merge.md
+    graded:
+      comem://user/lin/resources/patch-merge.md: 3
+
+  # 问的是配置项加了没人用怎么办，语料里是配置项纪律（check:config 拦孤儿项）。
+  - query: 配置项加了没人用怎么办
+    relevant:
+      - comem://user/lin/memories/preferences/config-discipline.md
+    graded:
+      comem://user/lin/memories/preferences/config-discipline.md: 3
+
+  # 问的是环境变量怎么覆盖配置文件，语料里是配置项纪律（COMEM_ 前缀、下划线、优先级）。
+  - query: 环境变量怎么覆盖配置
+    relevant:
+      - comem://user/lin/memories/preferences/config-discipline.md
+    graded:
+      comem://user/lin/memories/preferences/config-discipline.md: 3
+
+  # 问的是接口出错时返回什么，语料里是统一响应封套。
+  - query: 接口出错时返回什么
+    relevant:
+      - comem://user/lin/memories/preferences/api-response.md
+    graded:
+      comem://user/lin/memories/preferences/api-response.md: 3
+
+  # 问的是错误码与 HTTP 状态码怎么分工，语料里是统一响应封套。
+  - query: 错误码和 HTTP 状态码怎么分工
+    relevant:
+      - comem://user/lin/memories/preferences/api-response.md
+    graded:
+      comem://user/lin/memories/preferences/api-response.md: 3
+
+  # 问的是文档该怎么写，语料里是文档写作规范。
+  - query: 文档应该怎么写
+    relevant:
+      - comem://user/lin/memories/preferences/documentation.md
+    graded:
+      comem://user/lin/memories/preferences/documentation.md: 3
+
+  # 问的是为什么禁止 any，语料里是「不要用 any 绕过类型检查」。
+  - query: 为什么要禁止 any
+    relevant:
+      - comem://user/lin/memories/rules/no-any.md
+    graded:
+      comem://user/lin/memories/rules/no-any.md: 3
+
+  # 问的是参考实现的名字能不能出现在交付物里，语料里是 clean-room 规则。
+  - query: 参考实现的名字能不能出现在交付物里
+    relevant:
+      - comem://user/lin/memories/rules/clean-room.md
+    graded:
+      comem://user/lin/memories/rules/clean-room.md: 3
+
+  # 问的是哪些操作要先问过用户，语料里是「停下来问的三种情况」。
+  - query: 什么操作要先问过用户
+    relevant:
+      - comem://user/lin/memories/rules/irreversible-ask.md
+    graded:
+      comem://user/lin/memories/rules/irreversible-ask.md: 3
+
+  # 问的是演示用假数据行不行，语料里是「不要为了演示产出假结果」。
+  - query: 演示用的假数据可以吗
+    relevant:
+      - comem://user/lin/memories/rules/no-fake-result.md
+    graded:
+      comem://user/lin/memories/rules/no-fake-result.md: 3
+
+  # 问的是摘要生成在供应商不可用时会怎样。没有一篇文档直接回答这个问题：摘要
+  # 排障文档讲的是「摘要一直显示待刷新」的计数与重算路径（供应商挂掉时的症状），
+  # 降级规则文档讲「模型超时、嵌入失败、重排不可用」都要带 reason 返回。
+  # 两条都是间接回答，标 1；提示词覆盖文档讲摘要模板的渲染，与断网无关，不标。
+  - query: 摘要断网的时候会怎样
+    relevant:
+      - comem://user/lin/memories/experiences/summary-stale.md
+      - comem://user/lin/memories/rules/no-silent-degradation.md
+    graded:
+      comem://user/lin/memories/experiences/summary-stale.md: 1
+      comem://user/lin/memories/rules/no-silent-degradation.md: 1
+
   # ── 专有名词 / 标识符（只有关键词检索能精确命中）────────────────────────
 
   # 标识符同时出现在项目介绍（一句带过）与 sqlite-vec 专篇（主题）里。
@@ -456,6 +1187,81 @@ cases:
       comem://user/lin/memories/entities/bge-m3.md: 3
       comem://user/lin/memories/entities/sqlite-vec.md: 0
 
+  # 环境变量名只出现在「临时关掉记忆」那篇的正文里（整个会话关掉的开关）。
+  - query: COMEM_BYPASS_SESSION
+    relevant:
+      - comem://user/lin/resources/bypass.md
+    graded:
+      comem://user/lin/resources/bypass.md: 3
+
+  # 参数名只出现在会话提交管线那篇（自动提交保留最近 N 条）。
+  - query: keepRecentCount
+    relevant:
+      - comem://user/lin/resources/session-archive.md
+    graded:
+      comem://user/lin/resources/session-archive.md: 3
+
+  # 配置项名只出现在召回账本那篇（去重窗口轮数）。
+  - query: dedup_turns
+    relevant:
+      - comem://user/lin/memories/entities/recall-ledger.md
+    graded:
+      comem://user/lin/memories/entities/recall-ledger.md: 3
+
+  # 文件名同时出现在元数据文件（保留名清单）与层级加权（L0 权重）里，前者是主题。
+  - query: .abstract.md
+    relevant:
+      - comem://user/lin/memories/entities/metadata-files.md
+      - comem://user/lin/resources/level-weighting.md
+    graded:
+      comem://user/lin/memories/entities/metadata-files.md: 3
+      comem://user/lin/resources/level-weighting.md: 2
+
+  # 工具名只出现在 MCP 工具清单那篇（相对阈值 0.65）。
+  - query: rule_search
+    relevant:
+      - comem://user/lin/memories/entities/mcp-tools.md
+    graded:
+      comem://user/lin/memories/entities/mcp-tools.md: 3
+
+  # 列名只出现在记忆过期清扫那篇（0010 迁移加的绝对时刻列）。
+  - query: expires_at
+    relevant:
+      - comem://user/lin/resources/ttl-sweep.md
+    graded:
+      comem://user/lin/resources/ttl-sweep.md: 3
+
+  # 通配符只出现在权限物化那篇（路径范围必须用 GLOB 不能用 LIKE）。
+  - query: GLOB
+    relevant:
+      - comem://user/lin/resources/acl-materialization.md
+    graded:
+      comem://user/lin/resources/acl-materialization.md: 3
+
+  # 命令只出现在配置项纪律那篇（配置自检）。
+  - query: "pnpm check:config"
+    relevant:
+      - comem://user/lin/memories/preferences/config-discipline.md
+    graded:
+      comem://user/lin/memories/preferences/config-discipline.md: 3
+
+  # 文件名同时出现在元数据文件（归档目录的产物）与提交管线（阶段二写它）里，
+  # 前者是主题。
+  - query: memory_diff.json
+    relevant:
+      - comem://user/lin/memories/entities/metadata-files.md
+      - comem://user/lin/resources/session-archive.md
+    graded:
+      comem://user/lin/memories/entities/metadata-files.md: 3
+      comem://user/lin/resources/session-archive.md: 1
+
+  # 模型名只出现在重排模型那篇。
+  - query: bge-reranker-v2-m3
+    relevant:
+      - comem://user/lin/memories/entities/rerank-model.md
+    graded:
+      comem://user/lin/memories/entities/rerank-model.md: 3
+
   # ── 分级相关性（一条查询多篇相关，程度不同）────────────────────────────
 
   # 「向量检索」是 sqlite-vec 专篇的主题；RRF 与 bge-m3 是它的上下游；项目介绍
@@ -472,6 +1278,36 @@ cases:
       comem://user/lin/memories/entities/bge-m3.md: 2
       comem://user/lin/memories/entities/comem-project.md: 1
 
+  # 「上下文」这条查询的理想答案是四层各管一段：组装文档讲分层投放，预算文档讲
+  # 1600 token 这个数，层级加权讲 L0 摘要的权重，账本讲跨轮去重。
+  - query: 上下文
+    relevant:
+      - comem://user/lin/memories/entities/context-assembly.md
+      - comem://user/lin/resources/context-window-budget.md
+      - comem://user/lin/resources/level-weighting.md
+      - comem://user/lin/memories/entities/recall-ledger.md
+    graded:
+      comem://user/lin/memories/entities/context-assembly.md: 3
+      comem://user/lin/resources/context-window-budget.md: 2
+      comem://user/lin/resources/level-weighting.md: 1
+      comem://user/lin/memories/entities/recall-ledger.md: 1
+
+  # 「故障排查」是四篇排障文档的合集：搜不到内容讲 status 与嵌入降级，摘要待刷新
+  # 讲 pending 计数，403 讲身份解析，pnpm dev 讲端口与依赖。健康检查是入口，最边缘。
+  - query: 故障排查
+    relevant:
+      - comem://user/lin/memories/experiences/search-miss.md
+      - comem://user/lin/memories/experiences/summary-stale.md
+      - comem://user/lin/memories/experiences/session-403.md
+      - comem://user/lin/memories/experiences/dev-port.md
+      - comem://user/lin/resources/health-metrics.md
+    graded:
+      comem://user/lin/memories/experiences/search-miss.md: 3
+      comem://user/lin/memories/experiences/summary-stale.md: 2
+      comem://user/lin/memories/experiences/session-403.md: 2
+      comem://user/lin/memories/experiences/dev-port.md: 2
+      comem://user/lin/resources/health-metrics.md: 1
+
   # ── 难负例（字面相似但语义无关）────────────────────────────────────────
 
   # 「记忆化缓存」是 memoization 的完整说法；缓存失效经历讲的是同一类问题的另一面
@@ -484,3 +1320,23 @@ cases:
       comem://user/lin/resources/memoization.md: 3
       comem://user/lin/memories/experiences/cache-invalidation.md: 2
       comem://user/lin/memories/entities/comem-project.md: 0
+
+  # 问的是「摘要由哪个模型生成」，提示词覆盖文档讲摘要模板怎么渲染，是最接近的一篇。
+  # 嵌入模型与重排模型都字面含「模型」，但一个是向量化、一个是候选打分，与摘要生成
+  # 无关，标 0。
+  - query: 摘要模型
+    relevant:
+      - comem://user/lin/resources/prompt-override.md
+    graded:
+      comem://user/lin/resources/prompt-override.md: 2
+      comem://user/lin/memories/entities/bge-m3.md: 0
+      comem://user/lin/memories/entities/rerank-model.md: 0
+
+  # 问的是依赖的许可证到期问题。许可证检查文档讲兼容性与读 LICENSE 全文，是「许可证」
+  # 这个主题；TTL 文档里的「过期」是记忆软过期，与许可证无关，标 0。
+  - query: 许可证过期
+    relevant:
+      - comem://user/lin/memories/rules/license-review.md
+    graded:
+      comem://user/lin/memories/rules/license-review.md: 2
+      comem://user/lin/resources/ttl-sweep.md: 0
