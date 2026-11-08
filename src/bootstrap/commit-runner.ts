@@ -44,8 +44,15 @@ import type { TaskService } from '../services/task.js';
 /** 轮询间隔：1 秒。经验值，来源未知——架构文档没给。 */
 const DEFAULT_INTERVAL_SECONDS = 1;
 
-/** 并发上限：2。来源同 `config.task.concurrency` 的默认值。 */
-const DEFAULT_CONCURRENCY = 2;
+/**
+ * 兜底并发：4。与 `config.task.concurrency` 的默认值一致。
+ *
+ * 生产路径走 `container.ts` 传入的 `config.task.concurrency`，这个常量只在构造
+ * 时没给 `concurrency` 的测试里生效。两处必须同值，否则测试跑出的并发行为与
+ * 生产不同——2026-11 之前这里是 2 而配置默认是 4，注释还写着「来源同默认值」，
+ * 属于典型的「文档与代码各说各话」。
+ */
+const DEFAULT_CONCURRENCY = 4;
 
 /**
  * 会话目录名（`services/session.ts` 的私有常量，同一个布局）。
