@@ -1,12 +1,15 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
+import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { UserRepository } from '../../../src/adapters/sqlite/user-repository.js';
 import { toErrorEnvelope } from '../../../src/api/http/error-mapper.js';
 import {
@@ -19,6 +22,7 @@ import { createContainer, type Container } from '../../../src/bootstrap/containe
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
 import type { Authorizer } from '../../../src/services/authorizer.js';
 import { IdentityService } from '../../../src/services/identity.js';
 
@@ -421,6 +425,205 @@ describe('删除账号的授权清理', () => {
     );
     expect(members['members']).toEqual([]);
   });
+
+  it('删用户改写 .acl.json：重新物化也不会把授权算回来', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    const aliceRoot = Uri.parse('comem://user/alice');
+    await container.services.acl.ensureRootPreset(aliceRoot);
+    await container.services.acl.setAcl(
+      aliceRoot,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 1, effect: 'allow' }],
+      },
+      'user:alice',
+    );
+
+    const aclPath = join(dataDir, 'user', 'alice', '.acl.json');
+    expect(await readFile(aclPath, 'utf8')).toContain('user:bob');
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/bob' }));
+
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string }[];
+    };
+    expect(onDisk.entries).toEqual([]);
+
+    // `.acl.json` 是 ACL 的真相：再物化一次，已经撤掉的授权不能回来。
+    await container.services.acl.materializeNode(aliceRoot.child('project'));
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?', 'user:bob'),
+    ).toBe(0);
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+    ).toBe(0);
+  });
+
+  it('删组改写 .acl.json：group 主体不再出现在授权文件里', async () => {
+    await createUser('alice');
+    await createGroup('eng');
+    const aliceRoot = Uri.parse('comem://user/alice');
+    await container.services.acl.ensureRootPreset(aliceRoot);
+    await container.services.acl.setAcl(
+      aliceRoot,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'group:eng', level: 1, effect: 'allow' }],
+      },
+      'user:alice',
+    );
+
+    const aclPath = join(dataDir, 'user', 'alice', '.acl.json');
+    expect(await readFile(aclPath, 'utf8')).toContain('group:eng');
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/groups/eng' }));
+
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly unknown[];
+    };
+    expect(onDisk.entries).toEqual([]);
+
+    await container.services.acl.materializeNode(aliceRoot.child('project'));
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?', 'group:eng'),
+    ).toBe(0);
+  });
+
+  it('重建同 ID 的用户不继承旧授权（提权回归）', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    const aliceRoot = Uri.parse('comem://user/alice');
+    await container.services.acl.ensureRootPreset(aliceRoot);
+    await container.services.acl.setAcl(
+      aliceRoot,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 3, effect: 'allow' }],
+      },
+      'user:alice',
+    );
+
+    await inject({ method: 'DELETE', url: '/api/v1/admin/users/bob' });
+    // 同一个 ID 重新建号：如果 `.acl.json` 里那条授权还在，重建的账号会立刻拿回
+    // write —— 删账号等于没删。
+    await createUser('bob');
+    await container.services.acl.materializeNode(aliceRoot.child('project'));
+
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/users' }));
+    const bob = (listed['users'] as Record<string, unknown>[]).find((row) => row['id'] === 'bob');
+    expect(bob?.['permissionCount']).toBe(0);
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+    ).toBe(0);
+  });
+
+  it('不能删除当前登录用户', async () => {
+    const response = await inject({ method: 'DELETE', url: '/api/v1/admin/users/local' });
+
+    expect(response.statusCode).toBe(409);
+    expect(errorOf(response)['code']).toBe('CONFLICT');
+
+    // 主体还在：删掉它会让服务继续跑但每个请求 401。
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/users' }));
+    expect((listed['users'] as Record<string, unknown>[]).map((row) => row['id'])).toContain(
+      'local',
+    );
+  });
+
+  it('不能删除当前主体所属的组', async () => {
+    await createGroup('eng');
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/members',
+      payload: { userId: 'local' },
+    });
+
+    const response = await inject({ method: 'DELETE', url: '/api/v1/admin/groups/eng' });
+
+    expect(response.statusCode).toBe(409);
+    expect(errorOf(response)['code']).toBe('CONFLICT');
+
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/groups' }));
+    expect((listed['groups'] as Record<string, unknown>[]).map((row) => row['id'])).toContain('eng');
+  });
+});
+
+describe('purgePrincipal 的事务边界', () => {
+  it('写 .acl.json 失败时回滚数据库，物化行与反查行保持原样', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    const aliceRoot = Uri.parse('comem://user/alice');
+    await container.services.acl.ensureRootPreset(aliceRoot);
+    await container.services.acl.setAcl(
+      aliceRoot,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 1, effect: 'allow' }],
+      },
+      'user:alice',
+    );
+    const permissionsBefore = countRows(
+      'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?',
+      'user:bob',
+    );
+    expect(permissionsBefore).toBeGreaterThan(0);
+
+    // 同一份数据库与数据根，只把 `.acl.json` 的写入换成必然失败。
+    const aclFile = new AclFileStore({ dataDir, logger: container.logger });
+    const acl = new AclService({
+      dataDir,
+      db: container.db,
+      aclFile,
+      permissions: new PermissionRepository({ db: container.db, logger: container.logger }),
+      nodes: new NodeRepository({ db: container.db, logger: container.logger }),
+      logger: container.logger,
+      subject: 'user:local',
+    });
+    vi.spyOn(aclFile, 'write').mockRejectedValue(new Error('磁盘满'));
+
+    await expect(acl.purgePrincipal('user:bob')).rejects.toThrow('磁盘满');
+
+    // 文件没写成功，数据库必须停在原值：半撤的授权比不撤更难排查。
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?', 'user:bob'),
+    ).toBe(permissionsBefore);
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+    ).toBe(1);
+  });
+});
+
+describe('组的根预置', () => {
+  it('建组后 comem://group/{gid}/ 有 ACL 根，成员有可读范围', async () => {
+    await createGroup('eng');
+
+    const aclPath = join(dataDir, 'group', 'eng', '.acl.json');
+    expect(JSON.parse(await readFile(aclPath, 'utf8'))).toEqual({
+      mode: 'inherit',
+      entries: [{ principal: 'group:eng', level: 'write', effect: 'allow' }],
+    });
+
+    const row = container.db
+      .prepare('SELECT level, effect FROM node_permission WHERE node_uri = ? AND principal = ?')
+      .get('comem://group/eng', 'group:eng');
+    expect(row?.['effect']).toBe('allow');
+    expect(Number(row?.['level'])).toBe(3);
+
+    // 成员能读到的前提是「组主体在根上有授权」+「成员关系存在」。
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/members',
+      payload: { userId: 'local' },
+    });
+    expect(
+      countRows(
+        'SELECT COUNT(*) AS total FROM group_member WHERE group_id = ? AND user_id = ?',
+        'eng',
+        'local',
+      ),
+    ).toBe(1);
+  });
 });
 
 describe('授权', () => {
@@ -458,7 +661,10 @@ describe('授权', () => {
       memberCounts: () => new Map(),
       userCount: () => 0,
       groupCount: () => 0,
-      revoke: () => 0,
+    };
+    const acl = {
+      ensureRootPreset: async () => {},
+      purgePrincipal: async () => 0,
     };
 
     const denyingApp = Fastify({ logger: false });
@@ -474,7 +680,7 @@ describe('授权', () => {
       const mapped = toErrorEnvelope(error);
       reply.code(mapped.statusCode).send(mapped.body);
     });
-    denyingApp.register(createAdminRoutes({ identity, authorizer, adminAccess }).register, {
+    denyingApp.register(createAdminRoutes({ identity, authorizer, adminAccess, acl }).register, {
       prefix: '/admin',
     });
     await denyingApp.ready();

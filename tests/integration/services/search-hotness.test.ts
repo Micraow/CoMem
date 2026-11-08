@@ -4,6 +4,9 @@
  * 索引是假的：分数写死，才能断言 `finalScore = score × (1 + weight × hotness)` 的
  * 实测值；访问统计是真的（内存 SQLite 的 `NodeRepository`），否则「一次 `find` 之后
  * `access_count` 有没有涨」只能靠 mock 自证。
+ *
+ * 最后一组用**真实装配**（`createContainer`）：服务层单测全绿而生产装配没传依赖，
+ * 是「配置项存在但不生效」这类缺陷唯一能藏住的地方。
  */
 
 import type { DatabaseSync } from 'node:sqlite';
@@ -18,10 +21,12 @@ import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
+import { createContainer } from '../../../src/bootstrap/container.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
 import type { RetrievalIndex, SearchHit } from '../../../src/domain/retrieval.js';
+import { Uri } from '../../../src/domain/uri.js';
 import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
@@ -398,5 +403,74 @@ describe('构造期校验', () => {
     expect(() => createService(fakeIndex([]), { weight: -1 })).toThrowError(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
     );
+  });
+});
+
+/**
+ * 生产装配（`createContainer`）的接线。
+ *
+ * 前面的用例都自己 `new SearchService`，它们证明的是「依赖传进来之后公式成立」。
+ * 这一组证明的是**生产装配真的会传**：`config.telemetry.hotness.weight` 是配置项，
+ * 而 `SearchServiceDeps` 的四个字段全是可选的——漏传不会报错，只会静默不生效。
+ */
+describe('装配接线（真实 createContainer）', () => {
+  it('telemetry.hotness.weight = 1 时热度参与排序，且 find 之后访问计数落库', async () => {
+    const containerDir = await mkdtemp(join(tmpdir(), 'comem-hotness-wiring-'));
+    const container = await createContainer({
+      configPath: join(containerDir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: containerDir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_LOGGING_LEVEL: 'error',
+        COMEM_TELEMETRY_HOTNESS_WEIGHT: '1',
+      },
+    });
+
+    try {
+      expect(container.config.telemetry.hotness.weight).toBe(1);
+
+      const HOT = Uri.parse('comem://user/local/memories/hot.md');
+      const COLD = Uri.parse('comem://user/local/memories/cold.md');
+      // 正文相同 → BM25 相同 → 排序只能由热度决定。
+      await container.services.filesystem.write(HOT, '热度接线验证');
+      await container.services.filesystem.write(COLD, '热度接线验证');
+      await container.services.indexObserver.drain();
+
+      // 访问计数是热度公式里唯一随时间变化的部分；直接写库构造「HOT 刚被读过 100 次」。
+      container.db
+        .prepare('UPDATE node SET access_count = 100, last_accessed_at = ? WHERE uri = ?')
+        .run(new Date().toISOString(), HOT.toString());
+      container.db
+        .prepare('UPDATE node SET access_count = 0, last_accessed_at = NULL WHERE uri = ?')
+        .run(COLD.toString());
+
+      const hits = await container.services.search.find('热度接线验证', {
+        scopes: ['comem://user/local/memories'],
+        subject: 'user:local',
+        principals: ['user:local', 'user:*'],
+      });
+
+      expect(hits.map((hit) => hit.uri)).toEqual([HOT.toString(), COLD.toString()]);
+      expect(hits[0]?.hotness).toBeGreaterThan(0);
+      expect(hits[1]?.hotness).toBe(0);
+      expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? Number.NaN);
+
+      // `recordAccess` 也是装配期注入的：不接线的话计数永远停在 100 / 0。
+      await container.services.indexObserver.drain();
+      const counts = new Map(
+        (
+          container.db
+            .prepare('SELECT uri, access_count FROM node WHERE uri IN (?, ?)')
+            .all(HOT.toString(), COLD.toString()) as { uri: string; access_count: number }[]
+        ).map((row) => [row.uri, Number(row.access_count)]),
+      );
+      expect(counts.get(COLD.toString())).toBe(1);
+      expect(counts.get(HOT.toString())).toBe(101);
+    } finally {
+      await container.services.indexObserver.drain();
+      await container.close();
+      await rm(containerDir, { recursive: true, force: true });
+    }
   });
 });

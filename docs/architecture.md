@@ -1448,12 +1448,16 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 
 ### 12.6 根预置
 
-| 根 | 预置 |
-|---|---|
-| `comem://user/{uid}/` | `user:{uid} = manage` |
-| `comem://group/{gid}/` | `group:{gid} = write` |
+| 根 | 预置 | 谁写 |
+|---|---|---|
+| `comem://user/{uid}/` | `user:{uid} = manage` | 启动时给配置的主体预置（`bootstrap/container.ts`） |
+| `comem://group/{gid}/` | `group:{gid} = write` | 创建组时预置（`POST /admin/groups` → `AclService.ensureRootPreset`） |
 
 两个预置都是普通 ACL 条目，可以改（owner 那一条除外）。写死会让组空间无法降级成只读。
+
+**为什么不统一放 bootstrap。** 配置里声明的用户根是启动期就能确定的，组不是：控制台可以在运行期建组，而根预置必须在组 ID 存在之后写。把组根留给 bootstrap，新建的组就没有任何可授权的节点，成员也拿不到可读范围——这个组是死的。
+
+**为什么要真改 `.acl.json`。** 根预置与普通授权一样，`node_permission` 是它的物化结果。删用户 / 删组时只删物化行不够：下次 `materializeNode` 会把文件里的条目重新算出来，删掉的账号重新创建同 ID 的用户就继承了旧授权（提权）。撤销主体走 `AclService.purgePrincipal`，它改写所有 `.acl.json` 再删两张表的行。
 
 ## 13. MCP 工具契约
 
@@ -1893,7 +1897,13 @@ comem_llm_errors_total{purpose, code}
 
 **热度的算法**：`sigmoid(log1p(activeCount)) × exp(-ln2 × ageHours / halfLifeHours)`。`activeCount` 是记忆被检索命中并注入的次数，`halfLifeHours` 默认 168（一周）。分桶：≥0.7 热、≥0.3 温、其余冷。
 
-**为什么热度不影响排序**：热度是治理指标（「哪些记忆该清理」），不是检索指标。混进排序会让老记忆永远赢，新记忆永远出不来。
+**`weight` 默认 0 时不影响排序**：热度是治理指标（「哪些记忆该清理」），不是检索指标。混进排序会让老记忆永远赢，新记忆永远出不来。这一档不查 `node.access_count`，`hotness` 恒为 `null`（「没算」），与「算出来是 0」（从没被访问过）不是一回事。
+
+**非 0 时是乘性加权**：`finalScore = score × (1 + weight × hotness)`，`hotness ∈ [0, 1]`，`weight = 1` 时最高把相关性分翻倍。
+
+为什么是乘性而不是加性：RRF 融合分是 `0.016–0.033` 量级，热度是 `[0, 1]`。加法会让热度完全压过相关性——一条只被单路命中、但刚被读过几十次的记忆，加 `0.3` 就排到双路第一前面。乘性保住「先按相关性排序，热度只在同档次内做区分」这条语义。
+
+为什么不用归一化后线性混合：RRF 分数没有绝对尺度，归一化等于每次查询按当前结果集重新缩放，多返回一条结果就会改变所有分数，「为什么这条排第一」无法复现。乘性不依赖结果集。
 
 ### 17.6 请求记录
 

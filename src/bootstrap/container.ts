@@ -60,7 +60,7 @@ import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
-import { openDatabase, runMigrations, withWriteTransaction } from '../adapters/sqlite/database.js';
+import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
@@ -700,6 +700,17 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     vectors,
     nodes,
     engine: config.retrieval.engine,
+    // `telemetry.hotness.*` 是四个可选依赖：不传不会报错，只会让配置项静默失效
+    // （`weight` 恒为 0、`hotness` 恒为 `null`）。服务层单测全绿也发现不了这种
+    // 缺口，只有真实装配能证明配置生效。
+    hotnessWeight: config.telemetry.hotness.weight,
+    hotnessHalfLifeHours: config.telemetry.hotness.halfLifeHours,
+    accessStats: (uris) => nodes.readAccessStats(uris),
+    // `recordAccess` 是 fire-and-forget：`SearchService` 内部已经 catch，闭包不能
+    // 写成 `async`（返回的 Promise 会被丢掉，拒绝就没人接）。
+    recordAccess: (uris) => {
+      nodes.recordAccess(uris, new Date());
+    },
   });
 
   /**
@@ -887,7 +898,6 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
       memberCounts: (groupIds) => memberCountsOf(db, groupIds),
       userCount: () => userRepository.count(),
       groupCount: () => groupRepository.count(),
-      revoke: (principal, work) => revokePrincipalPermissions(db, principal, work),
     },
   });
 
@@ -968,11 +978,14 @@ async function resolveIdentityOf(
   };
 }
 
-// ── 管理面的统计与 ACL 清理 ──
+// ── 管理面的统计 ──
 //
 // `api/` 不能 import `adapters/`（架构文档 §4.2），所以 `AdminAccess` 的 SQL 实现
-// 留在这里。三个函数都是同步的：`node:sqlite` 是同步 API，事务边界也必须是同步
+// 留在这里。两个函数都是同步的：`node:sqlite` 是同步 API，事务边界也必须是同步
 // 回调，异步函数会让 `withWriteTransaction` 在 Promise 完成前提交。
+//
+// 撤权不在这一层：它要改 `.acl.json`（异步文件写入），编排在 `AclService.purgePrincipal`
+// 里，由 `DELETE /admin/users/{id}` / `DELETE /admin/groups/{id}` 调用。
 
 /** 每个主体在物化表里的行数。一次 `IN (...)` 查询，不按用户逐条查。 */
 function permissionCountsOf(
@@ -1010,34 +1023,6 @@ function memberCountsOf(
     )
     .all(...groupIds);
   return new Map(rows.map((row) => [String(row['group_id']), Number(row['total'])]));
-}
-
-/**
- * 删除主体的全部 ACL 行，并在同一事务里执行删除账号的回调。
- *
- * `acl_entry` 与 `node_permission` 都清：前者是授权反查的来源，留着会让控制台
- * 列出一个不存在的主体；后者是求权实际读的表，留着会让同名用户重建后立即继承
- * 旧授权。返回 `node_permission` 的删除行数——它才是「撤掉了多少个节点的授权」。
- *
- * 不碰 `.acl.json`：那是 ACL 的真相，不是账号的派生数据。删除账号不应该改写
- * 用户留在目录里的授权文件；要彻底撤销需要管理员显式改 ACL。这个取舍写在
- * `services/identity.ts` 的文件头，也写进了本 wave 的报告。
- */
-function revokePrincipalPermissions(
-  db: DatabaseSync,
-  principal: string,
-  work: () => void,
-): number {
-  return withWriteTransaction(db, () => {
-    const row = db
-      .prepare('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?')
-      .get(principal);
-    const revoked = Number(row?.['total'] ?? 0);
-    db.prepare('DELETE FROM acl_entry WHERE principal = ?').run(principal);
-    db.prepare('DELETE FROM node_permission WHERE principal = ?').run(principal);
-    work();
-    return revoked;
-  });
 }
 
 /**

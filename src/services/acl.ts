@@ -78,16 +78,30 @@ const USER_WILDCARD = 'user:*';
 /**
  * `services/` 不能 import `node:sqlite`（§4.2，连类型导入都算依赖）。
  *
- * 这里只声明 `check` 需要的最小形状：`node_permission` 的级别查询要按
- * `action` 过滤，而 `PermissionRepository.readableUris` 固定 `level >= 1`
- * （只服务 read 过滤）。`DatabaseSync` 结构上可赋值。
+ * 这里只声明用到的形状：`node_permission` 的级别查询要按 `action` 过滤，而
+ * `PermissionRepository.readableUris` 固定 `level >= 1`（只服务 read 过滤）；
+ * `purgePrincipal` 按主体删两张表的行，仓储没有这个方法，只能写在这里。
+ * `DatabaseSync` 结构上可赋值。
  */
 export interface AclDatabase {
   readonly isTransaction: boolean;
   exec(sql: string): void;
   prepare(sql: string): {
     get(...params: unknown[]): Record<string, unknown> | undefined;
+    run(...params: unknown[]): { readonly changes: number | bigint };
   };
+}
+
+/**
+ * `purgePrincipal` 要写回的一个 `.acl.json`。
+ *
+ * `previous` 是写盘之前的内容，只用于回滚：数据库删除失败时把它写回去，
+ * 否则磁盘上撤了权、数据库里还留着旧行，下一个请求会按旧行放行。
+ */
+interface PurgeRewrite {
+  readonly uri: Uri;
+  readonly previous: AclFile;
+  readonly next: AclFile;
 }
 
 export interface AclSnapshot {
@@ -471,6 +485,68 @@ export class AclService implements Authorizer {
   }
 
   /**
+   * 从所有 `.acl.json` 里移除某个主体。
+   *
+   * **必须真改文件**，不能只删 `acl_entry` / `node_permission` 的行——那两张表是
+   * `.acl.json` 的物化结果，下次 `materializeNode` 会把它们重新算出来。删掉的账号
+   * 重新创建同 ID 的用户就会立刻继承旧授权，这是一条提权路径。
+   *
+   * 受影响的目录来自 `acl_entry` 的反查索引（`acl_principal`），**不扫盘**：一条
+   * 授权对应一个目录，没有授权的目录不需要打开。反查表与文件不同步时以文件为准
+   * （那是真相），文件里没有该主体就只删行、不写盘。
+   *
+   * 返回被改动的目录数。空操作返回 0。
+   *
+   * **事务边界**：文件写入与两张表的删除包在同一个 `BEGIN IMMEDIATE` 里。写文件
+   * 失败时 `ROLLBACK`，数据库保持旧值；数据库删除失败时把已经写出去的 `.acl.json`
+   * 写回原内容。抛出的异常不会留下半撤的状态。
+   *
+   * **崩溃窗口**：进程在 `.acl.json` 写完、`COMMIT` 之前被杀掉时，SQLite 会回滚
+   * 事务，物化表仍是旧行——`check` 读的是物化表，会按旧授权放行。文件与 SQLite
+   * 之间没有跨介质事务，这个窗口只能靠「以 `.acl.json` 为真相重算物化表」收口，
+   * 而那个重建命令现在还不存在（`docs/operations.md` 的已知限制），要人工对相关
+   * 目录调一次 `materializeNode`。窗口与 `setAcl` 的崩溃窗口同源。
+   */
+  async purgePrincipal(principal: string): Promise<number> {
+    // 主体是调用方输入，进 SQL 之前按 §12.1 的形态校验。
+    parsePrincipal(principal);
+
+    const rewrites: PurgeRewrite[] = [];
+    for (const row of this.#permissions.entriesByPrincipal(principal)) {
+      const uri = Uri.parse(row.uri);
+      const previous = await this.#aclFile.read(uri);
+      if (previous === null) {
+        // 节点被外部删除、或反查表比文件新：没有文件要改，行仍然要删。
+        continue;
+      }
+      const entries = previous.entries.filter((entry) => entry.principal !== principal);
+      if (entries.length === previous.entries.length) {
+        continue;
+      }
+      rewrites.push({ uri, previous, next: { mode: previous.mode, entries } });
+    }
+
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const rewrite of rewrites) {
+        await this.#aclFile.write(rewrite.uri, rewrite.next);
+      }
+      this.#deletePrincipalRows(principal);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      await this.#restoreAclFiles(rewrites);
+      throw error;
+    }
+
+    this.#logger.info('主体授权已撤销', {
+      principal,
+      directories: rewrites.length,
+    });
+    return rewrites.length;
+  }
+
+  /**
    * 主体展开：`user:alice` + 所属组 → 查询用的 principals 数组。
    *
    * 退组立即生效（§12.5）靠的就是「每次重新展开」：ACL 里存的是
@@ -661,6 +737,36 @@ export class AclService implements Authorizer {
     const file = await this.#aclFile.read(directory);
     cache.set(key, file);
     return file;
+  }
+
+  /**
+   * 删掉主体的物化行与反查行（列名见迁移 0002 的两张表）。
+   *
+   * 两张表都要清：`node_permission` 是求权实际读的表，留着就等于授权还在；
+   * `acl_entry` 是反查来源，留着会让控制台列出一个不存在的主体。
+   */
+  #deletePrincipalRows(principal: string): void {
+    this.#db.prepare('DELETE FROM acl_entry WHERE principal = ?').run(principal);
+    this.#db.prepare('DELETE FROM node_permission WHERE principal = ?').run(principal);
+  }
+
+  /**
+   * 回滚已经写出去的 `.acl.json`（`purgePrincipal` 的数据库删除失败时）。
+   *
+   * 尽力而为：恢复失败只记 `error`，原始错误继续抛。掩盖原始错误会让「为什么
+   * 删账号失败」变成「为什么磁盘上有两份不同的授权」，后者更难定位。
+   */
+  async #restoreAclFiles(rewrites: readonly PurgeRewrite[]): Promise<void> {
+    for (const rewrite of rewrites) {
+      try {
+        await this.#aclFile.write(rewrite.uri, rewrite.previous);
+      } catch (error) {
+        this.#logger.error('回滚 .acl.json 失败，磁盘授权与物化表不一致', {
+          uri: rewrite.uri.toString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   /**

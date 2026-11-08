@@ -13,20 +13,30 @@
  * `Authorizer.assert` 抛的是 `PERMISSION_DENIED`：`ComemErrorCode` 是冻结枚举，
  * 没有 `FORBIDDEN`，403 的稳定码就是它。错误封套走标准的 `toErrorEnvelope`。
  *
- * ## 删除用户 / 组：清理物化权限，但不删节点
+ * ## 删除用户 / 组：撤权，但不删节点
  *
  * 删账号与删记忆是两件事。`node_permission` 里 `principal = user:{id}` 的行如果
  * 留着，反查会列出不存在的主体；更糟的是同名用户重建后会**立即继承**这些行。
- * 所以删除账号时在同一个事务里清掉该主体的 `node_permission` 与 `acl_entry` 行，
- * 并把撤销的节点数返回给调用方（`revokedPermissions`）。
+ *
+ * 只删行还不够：两张表是 `.acl.json` 的物化结果，下次 `materializeNode` 会把
+ * 授权重新算出来。所以删除账号之前必须调 `AclService.purgePrincipal` 真改文件。
+ * 顺序是「先撤权、再删账号」——反过来时撤权失败会留下一个「账号没了、授权还在」
+ * 的状态，而失败方向应当收得更紧，不是更松。
  *
  * **不递归删节点。** 用户写过的记忆仍然属于那个根，所有权转移或显式删除是另一个
  * 动作。把「删账号」实现成「删数据」会让一次误操作不可恢复。
  *
- * ## 事务边界
+ * ## 不能删掉当前绑定主体
  *
- * `AdminAccess.revoke` 是 bootstrap 注入的端口：它开事务、清 ACL 行、再执行删除
- * 用户的回调。`api/` 不能 import `adapters/`（架构文档 §4.2），事务细节留在装配层。
+ * 删掉 `user:local` 之后服务仍在跑，但它绑定的 `app_user` 行没了，控制台每个
+ * 请求都 401；重启会重建用户，而授权已经被撤掉。删组同理：当前主体属于那个组时，
+ * 删组会让它失去组空间的全部可读范围。两者都返回 409。
+ *
+ * ## 建组要写根预置
+ *
+ * `IdentityService.createGroup` 只写 `app_group`。没有 `comem://group/{gid}/` 的
+ * ACL 根，这个组任何节点都无法授权、成员也没有可读范围——它是一个死组。根预置是
+ * 异步写盘（`ensureRootPreset`），只能在路由里等它完成。
  */
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -83,10 +93,10 @@ export type AdminIdentity = Pick<
 >;
 
 /**
- * 管理面需要的统计与 ACL 清理端口。
+ * 管理面需要的统计端口。
  *
- * 实现由 `bootstrap/container.ts` 注入：`api/` 不能 import `adapters/`，而
- * 「按主体清 ACL 行」必须和「删用户」在同一个事务里。
+ * 实现由 `bootstrap/container.ts` 注入：`api/` 不能 import `adapters/`（架构文档
+ * §4.2），SQL 细节留在装配层。
  */
 export interface AdminAccess {
   /** 每个主体在 `node_permission` 里的行数（按主体分组）。 */
@@ -95,14 +105,20 @@ export interface AdminAccess {
   memberCounts(groupIds: readonly string[]): ReadonlyMap<string, number>;
   userCount(): number;
   groupCount(): number;
-  /**
-   * 在一个事务里删除该主体的 ACL 行，并执行 `work`，返回删除的
-   * `node_permission` 行数。`work` 抛错时整个事务回滚。
-   */
-  revoke(principal: string, work: () => void): number;
 }
 
-export type AdminRouteServices = Pick<HttpRouteServices, 'identity' | 'authorizer' | 'adminAccess'>;
+/**
+ * 管理面需要的 ACL 操作。
+ *
+ * 用 `Pick` 而不是整个 `AclService`：路由只需要「建根预置」与「按主体撤权」两个
+ * 方法。`AclService` 结构上满足它。
+ */
+export type AdminAcl = Pick<HttpRouteServices['acl'], 'ensureRootPreset' | 'purgePrincipal'>;
+
+export type AdminRouteServices = Pick<
+  HttpRouteServices,
+  'identity' | 'authorizer' | 'adminAccess'
+> & { readonly acl: AdminAcl };
 
 function invalidArgument(field: string, expected: string, value: unknown): ComemError {
   return new ComemError('INVALID_ARGUMENT', `参数 ${field} 必须是${expected}。`, {
@@ -172,7 +188,7 @@ async function assertManage(request: FastifyRequest, authorizer: Authorizer): Pr
 }
 
 export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess } = services;
+  const { identity, authorizer, adminAccess, acl } = services;
 
   return {
     prefix: '/admin',
@@ -238,9 +254,16 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const id = assertValidUserId(request.params.id);
         await assertManage(request, authorizer);
 
-        const revokedPermissions = adminAccess.revoke(userPrincipal(id), () =>
-          identity.deleteUser(id),
-        );
+        const principal = userPrincipal(id);
+        if (requestContextOf(request).subject === principal) {
+          throw new ComemError('CONFLICT', `不能删除当前登录用户：${principal}。`, {
+            principal,
+          });
+        }
+
+        const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
+        await acl.purgePrincipal(principal);
+        identity.deleteUser(id);
         return ok({ id, deleted: true, revokedPermissions });
       });
 
@@ -287,6 +310,9 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           displayName,
           ...(description === undefined ? {} : { description }),
         });
+        // 根预置必须在建组之后：`ensureRootPreset` 只接受根 URI，而根要由组 ID
+        // 拼出来。不补这一步，组空间没有任何可授权的节点，成员也拿不到可读范围。
+        await acl.ensureRootPreset(Uri.parse(`comem://group/${group.id}`));
         return ok({ group });
       });
 
@@ -308,9 +334,18 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const id = assertValidGroupId(request.params.id);
         await assertManage(request, authorizer);
 
-        const revokedPermissions = adminAccess.revoke(groupPrincipal(id), () =>
-          identity.deleteGroup(id),
-        );
+        const principal = groupPrincipal(id);
+        // 当前主体属于这个组时，删组会连同它的可读范围一起消失；控制台随后每个
+        // 依赖组授权的请求都会变成 403，而重建同 ID 的组不会恢复成员关系。
+        if (requestContextOf(request).principals.includes(principal)) {
+          throw new ComemError('CONFLICT', `不能删除当前主体所属的组：${principal}。`, {
+            principal,
+          });
+        }
+
+        const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
+        await acl.purgePrincipal(principal);
+        identity.deleteGroup(id);
         return ok({ id, deleted: true, revokedPermissions });
       });
 

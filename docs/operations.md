@@ -89,7 +89,8 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。**同上**，表会一直长 |
 | `telemetry.requestLog.sampleRate` | `1.0` | 采样率。**错误请求永远全量记录** |
 | `telemetry.hookOverhead.enabled` | `true` | **未接线**：`/telemetry/hook` 总是记录 |
-| `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。**未接线**，热度算法还没落到接口上 |
+| `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 只做冷热标记，不参与排序；非 0 时 `find` 会多查一次访问统计，并把本次命中累加进 `node.access_count`（fire-and-forget，不等它完成） |
+| `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。调小让热度掉得更快 |
 | `task.leaseSeconds` | `60` | 任务租约。到期未续租会被启动扫描回收（§10.4） |
 | `task.maxAttempts` | `3` | 单个任务最多执行 3 次，超限置 `failed` |
 | `task.concurrency` | `4` | **未接线**：v1 没有常驻任务执行器 |
@@ -417,7 +418,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
 9. **`retrieval.recall.*` 未接线。** 自适应升级（先 `find`，top1 低于阈值再走查询扩展）
    的配置项在，`SearchService` 还没读它。改这几个值不会有任何效果。
 10. **`acl.enabled`、`task.concurrency`、`telemetry.metrics.enabled`、
-    `telemetry.hookOverhead.enabled`、`telemetry.hotness.halfLifeHours`、`memory.reviewRequired`
+    `telemetry.hookOverhead.enabled`、`memory.reviewRequired`
     未接线。** 校验通过，但代码里是常量或没有分支。改配置前先看「配置项」表里的标注。
 11. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
     去重放它。所以「索引双写补偿」只做了「记下来」这一半。处理办法见排障一节。

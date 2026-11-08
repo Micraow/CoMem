@@ -7,18 +7,26 @@
  * `domain/identity.ts`，持久化全部在两个仓储，这里只做三件事：校验入口、把
  * 「不存在」翻译成 `NOT_FOUND`、把「解析失败」翻译成 `null`。
  *
- * ## 删用户与删组不级联 ACL
+ * ## 删账号与撤权是同一次操作
  *
- * 成员关系要删：孤儿行会让 `listMembers` 返回不存在的用户，而那份列表没有任何
- * 查询方能解释它。ACL 里的 `user:{uid}` / `group:{gid}` 条目**不删**：删账号是
- * 账号管理，撤权是管理员的显式动作（§12.5）。两者混在一起，一次误删账号会静默
- * 清掉所有授权，重建用户后权限全部消失。
+ * 删一个用户 / 组时，除了成员关系（孤儿行会让 `listMembers` 返回不存在的用户），
+ * 还必须把该主体的 ACL 条目从各目录的 `.acl.json` 里移除。`node_permission` 与
+ * `acl_entry` 是 `.acl.json` 的物化结果：只删行不改文件，下一次 `materializeNode`
+ * 就会把授权算回来——删掉的账号重新创建同 ID 的用户会立刻继承旧授权，这是一条
+ * 提权路径。
+ *
+ * **编排在 HTTP 管理面（`api/http/routes/admin.ts`），不在这里。** 改 `.acl.json`
+ * 是异步文件写入，而 `deleteUser` / `deleteGroup` 是同步方法（`node:sqlite` 的写
+ * 事务也要求同步回调）；改成 `async` 会波及所有调用方。所以
+ * `DELETE /admin/users/{id}` 与 `DELETE /admin/groups/{id}` 先调
+ * `AclService.purgePrincipal` 撤权，再调这里的删除。
  *
  * ## 根预置不在这里
  *
- * `createUser` 只写 `app_user`，不往 `.acl.json` 写 `user:{uid} = manage`。根预置
- * 是 bootstrap 的职责（§12.6），服务层越界写盘会让「用服务建用户」和「用 bootstrap
- * 建根」两条路径各有一份预置逻辑。
+ * `createUser` / `createGroup` 只写目录表，不往 `.acl.json` 写根预置（§12.6）。
+ * bootstrap 预置配置主体的 user 根；控制台建的组由路由在创建后调
+ * `AclService.ensureRootPreset`——「组只能由 bootstrap 预置」这个划分在「控制台
+ * 能建组」之后就不成立了，不补的话新建的组没有任何可授权、可读的根。
  *
  * ## `user:*` 不自动加入
  *
@@ -105,6 +113,10 @@ export class IdentityService {
    *
    * 先删成员关系再删用户：反过来的话，删用户成功后成员关系写入失败就留下孤儿行，
    * 而那条行连「属于谁」都查不到。
+   *
+   * 这里**不**撤 ACL。撤权是 `AclService.purgePrincipal`（异步写 `.acl.json`），
+   * 由 `DELETE /admin/users/{id}` 在调用本方法之前完成——只删物化行不改文件的话，
+   * 下次物化会把授权算回来。见文件头。
    */
   deleteUser(id: string): void {
     if (this.#users.get(id) === null) {
@@ -117,7 +129,13 @@ export class IdentityService {
 
   // ── 组 ──
 
-  /** 创建组。ID 非法抛 `INVALID_ARGUMENT`，已存在抛 `CONFLICT`。 */
+  /**
+   * 创建组。ID 非法抛 `INVALID_ARGUMENT`，已存在抛 `CONFLICT`。
+   *
+   * 不写 `comem://group/{gid}/` 的根预置：那是 `AclService.ensureRootPreset` 的
+   * 异步写盘，由 `POST /admin/groups` 在创建后调用。不补的话组没有任何可授权的根，
+   * 成员也拿不到可读范围——这个组是死的。见文件头。
+   */
   createGroup(
     input: {
       readonly id: string;
@@ -157,7 +175,12 @@ export class IdentityService {
     return updated;
   }
 
-  /** 删除组，同时清掉它的成员关系。不存在抛 `NOT_FOUND`。 */
+  /**
+   * 删除组，同时清掉它的成员关系。不存在抛 `NOT_FOUND`。
+   *
+   * 同 `deleteUser`：ACL 由路由先调 `AclService.purgePrincipal` 撤掉，这里只删
+   * 目录行与成员关系。
+   */
   deleteGroup(id: string): void {
     if (this.#groups.get(id) === null) {
       throw groupNotFound(id);
