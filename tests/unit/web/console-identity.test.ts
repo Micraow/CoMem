@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  clearConsoleSession,
+  readConsoleSession,
+  writeConsoleSession,
+  type ConsoleSession,
+} from '../../../web/composables/consoleAuth.js';
+import {
   ConsoleIdentityError,
   consoleIdentityOrThrow,
   consoleIdentityState,
@@ -118,6 +124,75 @@ describe('控制台身份引导', () => {
     expect(identity.scopes).toEqual([]);
   });
 });
+describe('控制台会话存储', () => {
+  /** 装一个最小 sessionStorage 替身；`clear()` 模拟浏览器的全量清空。 */
+  function installStorage(): { clear: () => void } {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (key: string): string | null => store.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        store.set(key, value);
+      },
+      removeItem: (key: string): void => {
+        store.delete(key);
+      },
+      clear: (): void => {
+        store.clear();
+      },
+    };
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: storage,
+      configurable: true,
+      writable: true,
+    });
+    return { clear: () => storage.clear() };
+  }
+
+  function removeStorage(): void {
+    Reflect.deleteProperty(globalThis, 'sessionStorage');
+  }
+
+  function sessionOf(token = 'v1.test.token'): ConsoleSession {
+    return {
+      token,
+      subject: 'user:alice',
+      principals: ['user:alice'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+  }
+
+  it('清 sessionStorage 等于登出：identityHeaders 不再带 Bearer（W59）', () => {
+    const storage = installStorage();
+    try {
+      clearConsoleSession();
+      writeConsoleSession(sessionOf());
+      const identity = { subject: 'user:alice', scopes: [], authEnabled: true };
+      expect(identityHeaders(identity)).toEqual({ authorization: 'Bearer v1.test.token' });
+
+      // 另一个标签页登出 / 用户手动清存储：模块级缓存不能继续发旧 token。
+      storage.clear();
+
+      expect(readConsoleSession()).toBeNull();
+      expect(identityHeaders(identity)).toEqual({});
+    } finally {
+      removeStorage();
+    }
+  });
+
+  it('再次写入后读到的是新 token', () => {
+    installStorage();
+    try {
+      clearConsoleSession();
+      writeConsoleSession(sessionOf('first'));
+      writeConsoleSession(sessionOf('second'));
+
+      expect(readConsoleSession()?.token).toBe('second');
+    } finally {
+      removeStorage();
+    }
+  });
+});
+
 describe('认证探测（GET /auth/config）', () => {
   function requestOf(
     result: unknown,

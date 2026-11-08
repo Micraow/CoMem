@@ -38,12 +38,14 @@ const SESSION_KEY = 'comem-console-session'
 const SCOPE_KEY = 'comem-console-scope'
 
 /**
- * 最近一次读到的会话。
+ * 存储不可用时的内存副本（隐私模式 / 配额满 / 被策略禁用）。
  *
- * `undefined` 表示还没读过存储；`null` 表示读过且没有。用三态而不是每次读
- * sessionStorage：`useApi` 的每个请求都要判断凭据，存储读取在热路径上。
+ * **不是缓存。** 只要 `sessionStorage` 能读，会话就只以存储为准——否则
+ * `sessionStorage.clear()` 不会等价于登出：模块级缓存会继续拿旧 token 发请求
+ * （W59 的实测现象是「另一个标签页登出后，这个标签页还能操作」）。只有存储本身
+ * 拿不到时才用它，让隐私模式下当前标签页仍能完成登录。
  */
-let cached: ConsoleSession | null | undefined
+let memoryOnlySession: ConsoleSession | null = null
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -103,27 +105,28 @@ function parseSession(value: unknown): ConsoleSession | null {
   }
 }
 
-/** 读会话。存储里是坏数据时顺手清掉，不让它每次加载都失败一次。 */
+/**
+ * 读会话。存储里是坏数据时顺手清掉，不让它每次加载都失败一次。
+ *
+ * **每次都读 `sessionStorage`。** 一次同步 `getItem` 是微秒级，而模块级缓存会让
+ * `sessionStorage.clear()` 不再是登出——旧的 token 会一直用到整页刷新。
+ */
 export function readConsoleSession(): ConsoleSession | null {
-  if (cached !== undefined) {
-    return cached
-  }
-
   const storage = storageOf()
   if (storage === null) {
-    cached = null
-    return null
+    return memoryOnlySession
   }
 
   let raw: string | null
   try {
     raw = storage.getItem(SESSION_KEY)
   } catch {
-    cached = null
-    return null
+    // 读不了存储（安全策略）时只能用内存副本；没有副本就是「没有会话」。
+    return memoryOnlySession
   }
   if (raw === null) {
-    cached = null
+    // 存储被清空（`sessionStorage.clear()` / 另一标签页登出）等价于登出。
+    memoryOnlySession = null
     return null
   }
 
@@ -132,17 +135,18 @@ export function readConsoleSession(): ConsoleSession | null {
     parsed = JSON.parse(raw)
   } catch {
     removeStoredSession(storage)
-    cached = null
+    memoryOnlySession = null
     return null
   }
 
   const session = parseSession(parsed)
   if (session === null) {
     removeStoredSession(storage)
-    cached = null
+    memoryOnlySession = null
     return null
   }
-  cached = session
+  // 存储里有合法会话：内存副本没有存在的必要，清掉避免两份状态分叉。
+  memoryOnlySession = null
   return session
 }
 
@@ -156,21 +160,23 @@ function removeStoredSession(storage: SessionStorageLike): void {
 
 /** 登录成功后写入。存储被禁用时只保留在内存里，当前标签页仍可用。 */
 export function writeConsoleSession(session: ConsoleSession): void {
-  cached = session
   const storage = storageOf()
   if (storage === null) {
+    memoryOnlySession = session
     return
   }
   try {
     storage.setItem(SESSION_KEY, JSON.stringify(session))
+    memoryOnlySession = null
   } catch {
-    // 配额或隐私模式：内存里已有，不把登录判失败。
+    // 配额或隐私模式：内存里留着，不把登录判失败。读取时以存储为准。
+    memoryOnlySession = session
   }
 }
 
-/** 退出登录 / 收到 401 时清空。 */
+/** 退出登录 / 收到 401 时清空。存储与内存副本必须一起清。 */
 export function clearConsoleSession(): void {
-  cached = null
+  memoryOnlySession = null
   const storage = storageOf()
   if (storage !== null) {
     removeStoredSession(storage)
