@@ -1026,7 +1026,7 @@ score(d) = Σ_retriever levelWeight(level_d) / (k + rank_retriever(d))
 
 RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF（`1.0 * x === x`）。
 
-单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎就是 `hybrid`**，只给单引擎加权的实现等于「配置项在默认部署下不生效」。
+单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎是 `fts5`**（`src/config/schema.ts:165` 的 `engine` 默认值），只给单引擎加权的实现会在切到 `hybrid` 时让配置项失效。
 
 **重排之后先验仍然保留**（§18 的「重排的实际语义」）：模型分替换的是相关性判断，不是层级先验。不保留时 `hybrid + rerank` 下层级权重只在「模型没给分」的尾部候选上生效。
 
@@ -2333,8 +2333,10 @@ integrations/
 | 输入过滤（§8.8） | 是 | < 1ms |
 | 检索（FTS5 / 向量 / 融合） | 是 | 20–100ms（向量变体含查询嵌入的网络往返） |
 | 上下文组装 + 序列化 | 是 | < 5ms |
-| 采集写入（`Stop`） | 是 | 5–20ms |
+| 写 worker 载荷（`Stop`） | 是 | 5–20ms |
 | 归档 + 抽取 + 合并 + 摘要 | **否**（后台） | 几秒到几十秒 |
+
+**服务端采集与提交在 detached worker 里，不阻塞用户。** `Stop` 的主进程只做去重、bypass、写 worker 载荷文件、spawn（`integrations/servers/stop.mjs` 的文件头）：`POST /sessions/{id}/messages` 与 `POST /sessions/{id}/commit` 都在 `detached: true` + `unref()` 的子进程里跑，主进程不等它。只有 `PreCompact` / `SessionEnd` 会等提交完成（§15.3）。
 
 **hook 路径不调 LLM，是刻意的取舍。** 意图分析（§8.4）能补全「那它呢」「继续」这类指代，代价是一次模型调用：估计 300–500ms 起，超时上限 10 秒（`REWRITE_TIMEOUT_MS`）。把这次调用放进每一轮的阻塞路径，等于把用户的输入延迟绑在供应商的尾延迟上。
 
@@ -2353,7 +2355,7 @@ integrations/
 **注入的三条前提**（缺一条，召回噪音就会盖过收益）：
 
 1. **召回为空就不注入**——不要给模型一段「没有相关记忆」的废话；
-2. **低于阈值不注入**——低分命中是噪音。阈值是**相对于本次最高分的比例**（`score >= topScore × recallScoreThreshold`），不是绝对分数下限：`fts5` 取负的 bm25、`vector` 的余弦、`hybrid` 的 RRF 融合分（`0.016–0.033`）量纲不同，绝对阈值在默认引擎 `hybrid` 下一条都留不下，hook 静默返回 `undefined`——功能看起来「正常」但从未注入过。默认 `0.5` 表示「只保留与最佳命中差距不到一半的」；最高分为 0 或负时（分数不可用）全部保留，不静默丢数据。重排开启时它比较的是重排后的 `P(yes)`，标定方法见 `local-inference/README.md` 的「阈值怎么标定」；
+2. **低于阈值不注入**——低分命中是噪音。阈值是**相对于本次最高分的比例**（`score >= topScore × recallScoreThreshold`），不是绝对分数下限：`fts5` 取负的 bm25、`vector` 的余弦、`hybrid` 的 RRF 融合分（`0.016–0.033`）量纲不同，绝对阈值在 `hybrid` 下一条都留不下，hook 静默返回 `undefined`——功能看起来「正常」但从未注入过。默认 `0.5` 表示「只保留与最佳命中差距不到一半的」；最高分为 0 或负时（分数不可用）全部保留，不静默丢数据。重排开启时它比较的是重排后的 `P(yes)`，标定方法见 `local-inference/README.md` 的「阈值怎么标定」；
 3. **账本去重**——同一记忆不重复投喂（§8.7）。
 
 **注入块里不写绝对分数。** 分数只在同一次检索的同一个引擎内可比（§13.2）：RRF 下 rank 1 与 rank 5 的比值是 `0.938`，`toFixed(2)` 会把两条都渲染成 `0.02`——既不携带「哪条比哪条更相关」，又暗示一个不存在的精度。归一化成百分比同样不行：那是按当前结果集重新缩放，多返回一条命中就会改变所有分数（§17.5 的同一理由）。顺序是唯一稳定的信息，所以行首只编号：
@@ -2457,10 +2459,12 @@ Prometheus 文本              分析型 JSON
 | Hook 进程启动（`node hook.mjs`） | **是** | 30–50ms |
 | 检索（`find` / `search`） | **是** | 20–100ms |
 | 注入序列化 | **是** | < 5ms |
-| 采集写入（`Stop` 时的消息落盘） | **是** | 5–20ms |
+| 写 worker 载荷（`Stop`） | **是** | 5–20ms |
 | 归档 + 抽取 + 合并 + 摘要 | 否（后台） | 几秒到几十秒 |
 
-**单轮阻塞开销 = 进程启动 + 检索 + 序列化 + 采集写入**，典型 60–180ms。异步部分不算进去——用户没等它。
+**服务端采集与提交在 detached worker 里，不阻塞用户。** `Stop` 只写 worker 载荷并 spawn（`integrations/servers/stop.mjs` 的 `main`）；`/messages` 与 `/commit` 的 HTTP 往返都在 `detached: true` + `unref()` 的子进程里。
+
+**单轮阻塞开销 = 进程启动 + 检索 + 序列化 + 写 worker 载荷**，典型 60–180ms。异步部分不算进去——用户没等它。
 
 **为什么必须单独测进程启动**：hook 起一个新 Node 进程就是 30–50ms 纯开销。把它藏在「检索 20ms」后面会误导人，让人以为 CoMem 只花 20ms。
 
