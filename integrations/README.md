@@ -126,7 +126,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
-| `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 低于此分不注入（§15.9 的「三条前提」之二） |
+| `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 相对阈值：只保留分数不低于本次最高分 × 该值的命中（§15.9 的「三条前提」之二） |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
 | `queryFilters` | `COMEM_QUERY_FILTERS`（换行分隔） | §8.8 的五条 | sed 风格正则 |
 
@@ -143,6 +143,15 @@ queryFilters:
 
 **过滤后为空就不检索。** 空查询返回的是随机结果，比不返回更糟——模型会以为它真的
 对应某条记忆，还会写进召回账本。
+
+**阈值是相对于本次最高分的比例，不是绝对分数下限。** 三种检索引擎的分数量纲不同：
+`fts5` 是取负的 bm25，`vector` 是余弦，`hybrid` 是 RRF 融合分（`Σ 1 / (60 + rank)`，
+只有 `0.016–0.033`）。绝对阈值跨引擎不可比，`0.5` 在默认引擎 `hybrid` 下会把全部
+命中丢掉，hook 静默返回「没有记忆」。`recallScoreThreshold: 0.5` 表达的是「只保留
+与最佳命中差距不到一半的」；最高分为 0 或负（分数不可用）时全部保留，不静默丢数据。
+
+注入块的行首只编号、不写绝对分数：RRF 下 rank 1 与 rank 5 的比值是 `0.938`，
+两位小数会把两条都渲染成 `0.02`，既不携带「哪条更相关」，又暗示不存在的精度。
 
 **宿主名**：`co-mem install` 写进 hook 命令的 `--host` 参数（或 `COMEM_HOST`），
 `lib/config.mjs` 按名字动态 import `hosts/<name>.mjs`。加第三个宿主只加一个文件，

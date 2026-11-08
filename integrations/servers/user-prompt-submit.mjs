@@ -14,7 +14,9 @@
  * ## 为什么阈值在 hook 侧再过一遍
  *
  * 服务端的 `find` 支持 `scoreThreshold`，但 hook 与服务端的版本可以不同步（插件
- * 是独立交付物）。阈值是「注入还是噪音」的判定，必须由注入方自己负责。
+ * 是独立交付物）。阈值是「注入还是噪音」的判定，必须由注入方自己负责。hook
+ * **不把阈值下推给 `find`**：它作用在最终排序分上，而排序分的量纲由引擎决定
+ * （见 `formatRecallBlock` 的「为什么阈值是相对的」）。
  *
  * ## 检索失败不注入
  *
@@ -64,22 +66,53 @@ function readHits(result) {
 /**
  * 渲染注入块（§8.6 的展示格式与 §13.2 的 `find` 返回值同构）。
  *
- * 分数保留两位小数：三位以上在上下文里只是噪音。摘要按行缩进，模型才能把
- * 「一行 URI + 若干行摘要」当一条记录读。
+ * ## 为什么阈值是相对的
+ *
+ * 服务端 `find` 在默认的 `retrieval.engine: hybrid` 下返回的是 RRF 融合分
+ * （`Σ levelWeight / (60 + rank)`，量级 `1/61 ≈ 0.016` 到 `2/61 ≈ 0.033`），
+ * 不是相关度分。把 `0.5` 当绝对下限，`hybrid` 下**一条都留不下**：这里返回
+ * `undefined`，hook 静默不注入，功能看起来「正常」但从未工作过——不报错、
+ * 不打日志、无法归因。
+ *
+ * 阈值因此按**本次最高分**的比例计算：`score >= topScore × threshold`。语义
+ * 变成「只保留与最佳命中差距不到 `1 - threshold` 的」，与引擎无关：`fts5` 取
+ * 负的 bm25、`vector` 的余弦、`hybrid` 的 RRF 分都成立。
+ *
+ * 两个边界：
+ *
+ * - `hits` 为空时 `Math.max()` 是 `-Infinity`，必须先判空；
+ * - `topScore <= 0`（bm25 取负后为 0、余弦为负）时相对阈值没有意义，**全部保
+ *   留**。这是正确的降级——分数不可用时不要静默丢数据。
+ *
+ * ## 为什么行首是编号而不是分数
+ *
+ * 分数只在**同一次检索的同一个引擎内**可比（§13.2）。RRF 下 rank 1 与 rank 5
+ * 的比值是 `0.938`，`toFixed(2)` 把两条都渲染成 `0.02`——它既不携带「哪条更
+ * 相关」，又暗示一个不存在的精度。归一化成百分比同样不行：那是按当前结果集
+ * 重新缩放，多返回一条命中就会改变所有分数（§17.5 的同一理由）。顺序是这里
+ * 唯一可用的信息，所以只编号。
+ *
+ * 摘要按行缩进，模型才能把「一行 URI + 若干行摘要」当一条记录读。
  *
  * @param {readonly { uri: string, score: number, memoryType: string | null, contextType: string | null, abstract: string | null }[]} hits
- * @param {number} threshold
+ * @param {number} threshold 相对于本次最高分的比例；`0.5` 表示「只保留与最佳命中差距不到一半的」
  * @returns {string | undefined}
  */
 export function formatRecallBlock(hits, threshold) {
-  const kept = hits.filter((hit) => hit.score >= threshold);
+  if (hits.length === 0) {
+    return undefined;
+  }
+  const topScore = Math.max(...hits.map((hit) => hit.score));
+  const cutoff = topScore > 0 ? topScore * threshold : Number.NEGATIVE_INFINITY;
+  const kept = hits.filter((hit) => hit.score >= cutoff);
   if (kept.length === 0) {
+    // 阈值配到 1 以上时一条都留不下。保留这条分支：调用方仍然拿到「没有记忆」。
     return undefined;
   }
   const lines = [RECALL_OPEN];
-  for (const hit of kept) {
+  for (const [index, hit] of kept.entries()) {
     const type = hit.memoryType ?? hit.contextType ?? 'memory';
-    lines.push(`- [${type} ${hit.score.toFixed(2)}] ${hit.uri}`);
+    lines.push(`${index + 1}. [${type}] ${hit.uri}`);
     const abstract = hit.abstract?.trim() ?? '';
     if (abstract !== '') {
       lines.push(`  ${abstract.replaceAll('\n', '\n  ')}`);

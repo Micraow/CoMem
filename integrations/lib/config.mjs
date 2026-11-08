@@ -61,7 +61,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** `PreCompact` 等提交的超时：§17.2 的单步 LLM 上限 30000ms（`rewriteTimeoutMs`） */
   commitTimeoutMs: 30000,
   recallLimit: 10,
-  /** 低于此分不注入（§15.9「三条前提」之一） */
+  /**
+   * 相对阈值：只保留分数不低于**本次最高分 × 该值**的命中（§15.9 的「三条前提」
+   * 之二）。不是绝对分数下限——`fts5` / `vector` / `hybrid` 三种引擎的分数量纲
+   * 不同，`hybrid` 的 RRF 融合分只有 `0.016–0.033`，绝对阈值会把全部命中丢掉。
+   * 默认 `0.5` 表示「只保留与最佳命中差距不到一半的」。
+   */
   recallScoreThreshold: 0.5,
   skillBudgetTokens: DEFAULT_SKILL_BUDGET_TOKENS,
   queryFilters: DEFAULT_QUERY_FILTERS,
@@ -217,6 +222,10 @@ function coerce(key, value) {
  *
  * 文件不存在不是错误：全部走默认值与环境变量。只有**存在但解析失败**才抛
  * `HOOK_INVALID_CONFIG`——静默吞掉一个拼错的配置，比报错更难查。
+ *
+ * `recallScoreThreshold` 是**相对阈值**（`score >= topScore × 该值`），不是绝对
+ * 分数下限：三种检索引擎的分数量纲不同，`hybrid` 的 RRF 融合分只有 `0.016–0.033`，
+ * 绝对阈值在默认引擎下会把全部命中丢掉（§15.9）。
  *
  * @param {{ env?: NodeJS.ProcessEnv }} [options]
  * @returns {Promise<{
