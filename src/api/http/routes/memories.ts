@@ -19,6 +19,7 @@ import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { ConsolidationResult } from '../../../services/consolidation.js';
+import type { MemoryLink } from '../../../domain/memory-link.js';
 import type { MemoryRecord } from '../../../services/memory.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -66,7 +67,7 @@ function scopeOfSubject(subject: string): string {
 }
 
 export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { memory, authorizer, consolidation, config } = services;
+  const { memory, memoryLink, authorizer, consolidation, config } = services;
 
   return {
     prefix: '/memories',
@@ -126,7 +127,52 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         await memory.reject(uri, reason);
         return ok({ uri: uri.toString(), removed: true, reason });
       });
+
+      // 记忆关联边（§11.10）。**只读**：`links` 是派生/关联数据，产生端在写入路径上。
+      // `direction` 决定返回正向（谁指向别人）还是派生（谁指向我）。
+      app.get<{ Params: { uri: string }; Querystring: Record<string, unknown> }>(
+        '/:uri/links',
+        async (request) => {
+          const context = requestContextOf(request);
+          const uri = parseMemoryUri(request.params.uri);
+          const query = requireRecord(request.query, 'memories/links');
+          const direction = parseLinkDirection(query['direction']);
+          await authorizer.assert(uri, READ, context.principals);
+          const links =
+            direction === 'backlinks' ? memoryLink.backlinksOf(uri) : memoryLink.linksOf(uri);
+          return ok({ uri: uri.toString(), direction, links: links.map(serializeLink) });
+        },
+      );
     },
+  };
+}
+
+/**
+ * `direction`：`links`（默认，正向）或 `backlinks`（派生）。
+ *
+ * 缺省正向：调用方通常先说「这条记忆关联了哪些东西」，反查是第二问。
+ */
+function parseLinkDirection(raw: unknown): 'links' | 'backlinks' {
+  if (raw === undefined) {
+    return 'links';
+  }
+  if (raw === 'links' || raw === 'backlinks') {
+    return raw;
+  }
+  throw new ComemError('INVALID_ARGUMENT', 'links 的 direction 只能是 links 或 backlinks。', {
+    field: 'direction',
+    value: raw,
+  });
+}
+
+function serializeLink(link: MemoryLink): Record<string, unknown> {
+  return {
+    from: link.fromUri.toString(),
+    to: link.toUri.toString(),
+    linkType: link.linkType,
+    weight: link.weight,
+    matchText: link.matchText,
+    description: link.description,
   };
 }
 

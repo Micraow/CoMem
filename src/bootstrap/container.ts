@@ -79,6 +79,7 @@ import { EmbeddingCacheRepository } from '../adapters/sqlite/embedding-cache.js'
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
+import { MemoryLinkRepository } from '../adapters/sqlite/memory-link-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { PromptRepository } from '../adapters/sqlite/prompt-repository.js';
@@ -117,6 +118,7 @@ import { IdentityService, type UserNamespace } from '../services/identity.js';
 import { IndexObserver } from '../services/index-observer.js';
 import { LlmService } from '../services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../services/memory.js';
+import { MemoryLinkService } from '../services/memory-link.js';
 import { ObservabilityService } from '../services/observability.js';
 import { PromptService } from '../services/prompt-service.js';
 import { bindPromptRenderer } from '../services/prompts/registry.js';
@@ -218,6 +220,8 @@ export interface ContainerServices {
   readonly ledger: RecallLedger;
   /** 检索索引。测试与对账脚本要直接查它，不经过 `SearchService` 的排序与过滤。 */
   readonly index: RetrievalIndex;
+  /** 记忆关联边（§11.10）。存 + 查；不参与 `find`。 */
+  readonly memoryLink: MemoryLinkService;
   /** 写路径的派生数据维护；`drain()` 给测试一个确定的完成点。 */
   readonly indexObserver: IndexObserver;
   /** 任务行的只读查询端口（`TaskRepository`）。路由用它查任务。 */
@@ -565,6 +569,11 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     defaultTtlDays: config.memory.ttl.defaultDays,
   });
   const nodes = new NodeRepository({ db, logger });
+  // 记忆关联边（§11.10）：存一张 `memory_link` 表，不进检索索引。
+  const memoryLink = new MemoryLinkService({
+    repository: new MemoryLinkRepository({ db, logger }),
+    logger,
+  });
   const permissions = new PermissionRepository({ db, logger });
   const userRepository = new UserRepository({ db, logger });
   const groupRepository = new GroupRepository({ db, logger });
@@ -1182,6 +1191,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     assembler,
     ledger,
     index,
+    memoryLink,
     indexObserver,
     taskStore: taskRepository,
     prompts,
@@ -1201,6 +1211,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     tasks: task,
     taskStore: taskRepository,
     memory,
+    memoryLink,
     consolidation,
     resource,
     skill,

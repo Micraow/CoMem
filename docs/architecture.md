@@ -2076,6 +2076,84 @@ ingest:
   按文件导入会得到 4.7 倍重复；适配器按 `session_id` 发现会话。
 - **`.meta.json` 里没有 `source`。** 见「溯源的边界」。
 
+### 11.10 记忆关联边（links / backlinks）
+
+记忆之间可以有**关联边**：一条记忆指向另一条记忆（谁引用了谁、一条结论从哪条资源
+推出来）。这一节定义它的存储、产生端与查询面。**它不是多跳检索**——`links` 不参与
+`find`、不进 `node_fts` / 向量索引、检索时不展开邻居。它是**关联数据 / 溯源**，与
+「检索到之后展开上下文」是两件事。
+
+#### 存哪里：SQLite，不是 frontmatter
+
+一张 `memory_link` 表（迁移 `0003_memory_link.sql`），不是每条记忆 `.md` 的
+frontmatter 字段。理由：
+
+- **`backlinks` 是反查。** 「谁指向我」= `SELECT * FROM memory_link WHERE to_uri = ?`，
+  一条索引就是一次查询。放进 frontmatter 就得**扫全库记忆文件**才能回答——`read`
+  一条记忆要打开成百上千个文件。
+- **`links` 是索引，不是内容。** CoMem 的分工是「文件系统存内容 + SQLite 存索引」
+  （§7）。`links` 不参与检索、不进 FTS，但它和 `node_permission` / `acl_entry` 一样
+  是**关系型读模型**：回答的是「谁和谁有关」，不是「这条记忆说了什么」。内容仍是
+  记忆正文；边是正文之外的派生关系。
+- **双向查询都靠索引。** 正向（`from_uri`）与反向（`to_uri`）各建一个索引，两种
+  查询都是 O(log n)。
+
+表结构（列名与语义）：
+
+| 列 | 类型 | 含义 |
+|---|---|---|
+| `from_uri` | TEXT | 边的起点（记忆 URI） |
+| `to_uri` | TEXT | 边的终点 |
+| `link_type` | TEXT | 语义标签（`references` / `derived_from` / `related` …），开放字符串 |
+| `weight` | REAL | 关联强度，默认 1.0 |
+| `match_text` | TEXT | 触发链接的原文片段；空串 = 无具体出处 |
+| `description` | TEXT | 一句话说明 |
+| `created_at` / `updated_at` | TEXT | ISO 8601；`weight` 被抬高时刷新 `updated_at` |
+
+去重键是 `(from_uri, to_uri, match_text)` 的唯一索引。**`match_text` 用空串而不是
+`NULL`**：`NULL` 在唯一索引里互不相等，同一条裸链接（无出处）会被反复插入。
+
+**不设跨存储外键。** 记忆正文在文件系统里，不在本库；`from_uri` / `to_uri` 指向的
+记忆是否存在，SQLite 无从校验。悬空边写时不拦、读时容忍——删一条记忆不级联删边，
+但反查只回答「谁指向这个 URI」，悬空边不会污染别的记忆的查询。
+
+#### 谁产生 links：产生端只支持显式给定（最小可行）
+
+本次只做**存储层 + 查询 API**，产生端只接受调用方显式给出的 `links`。**抽取时让 LLM
+在实体之间产出链接需要改抽取提示词**（`prompts/extract-*.md` 与 `memory-extract` 的
+输出解析），那是大改动，不在本次范围。数据结构和查询先站住，产生端以后再补。
+
+- 不做「抽取时 LLM 产出 entity 间链接」：它要改提示词与 `memory_extract` / `memory_merge`
+  两步的输出契约，成本从「中」变「大」。
+- 不做「资源摄取时自动建立资源 → 记忆链接」：`add_resource` 写的是资源，不产出记忆；
+  记忆由后续抽取产生，两者不在同一步。等抽取端能产出链接时再接。
+- **本次唯一入口是服务 API**：`MemoryLinkService.addLinks(fromUri, links)`。HTTP 层
+  目前只暴露读端点（见下），写端点等产生端定了再开——先不开一个「谁能写边」的
+  授权面。
+
+#### 查询面：HTTP 端点，不改 MCP `read`
+
+`GET /api/v1/memories/{uri}/links?direction=links|backlinks`（`direction` 缺省
+`links`）。返回 `{ uri, direction, links: [{ from, to, linkType, weight, matchText,
+description }] }`。
+
+**不改 `read` 的 MCP 输出。** `read` 是 16 个 MCP 工具之一，它的返回形状是模型可见的
+**契约**；把 links / backlinks 塞进 `read` 会改变每个调用 `read` 的模型的输入，属于
+MCP 契约变更。`links` 不是「读这条记忆的正文」的一部分——它是查询另一张表才能拿到
+的派生关系。所以走独立 HTTP 端点：控制台与运维脚本按需查，MCP 契约不动，仍是 16 个
+工具。
+
+#### `link_merge` 去重：weight 取 max，不累加
+
+同一条边（同 `from_uri` + `to_uri` + `match_text`）被写两次时，`weight` **取 max**：
+
+- `weight` 是这条关联的**强度判断**，不是「被看见的次数」。累加会把「反复跑同一批
+  抽取」混进「有多相关」，跑 10 次的边会比真正强关联的边更重。
+- max 保留产生方给出的最强判断；重复写不改变它，重跑幂等。
+- 这与参考实现 `link_merge` 的去重一致（`url + to + match_text` 命中后 weight 取
+  max）。`link_type` / `description` 以最新一次写入为准（说明是文字，取最新比留多版本
+  好）。
+
 ## 12. 权限模型
 
 ### 12.1 基本元素
@@ -2408,7 +2486,7 @@ interface AddResourceInput {
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry` |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject` |
+| 记忆 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源/技能 | `POST /resources`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET|POST /admin/users`、`GET|POST /admin/groups`、`POST /admin/groups/{id}/members` |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`；`PUT /prompts/{id}`；`DELETE /prompts/{id}`；`POST /prompts/{id}/preview` |

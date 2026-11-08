@@ -19,6 +19,7 @@ import type { ConsolidationService } from '../../../services/consolidation.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
 import type { IdentityService } from '../../../services/identity.js';
 import type { MemoryService } from '../../../services/memory.js';
+import type { MemoryLinkService } from '../../../services/memory-link.js';
 import type { ObservabilityService } from '../../../services/observability.js';
 import type { PromptService } from '../../../services/prompt-service.js';
 import type { RecallLedger } from '../../../services/recall-ledger.js';
@@ -76,6 +77,8 @@ export interface HttpRouteServices {
   /** 任务行的只读查询端口；由 bootstrap 注入 `TaskRepository`。 */
   readonly taskStore: TaskQueryStore;
   readonly memory: MemoryService;
+  /** 记忆关联边（§11.10）：`GET /memories/:uri/links` 读它。不进 MCP。 */
+  readonly memoryLink: MemoryLinkService;
   /** 记忆合并（§11.8）。破坏性操作，只在 `POST /memories/consolidate` 上暴露。 */
   readonly consolidation: ConsolidationService;
   readonly resource: ResourceService;

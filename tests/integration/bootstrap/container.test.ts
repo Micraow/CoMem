@@ -81,6 +81,7 @@ describe('createContainer', () => {
         'indexObserver',
         'ledger',
         'memory',
+        'memoryLink',
         'prompts',
         'resource',
         'search',
