@@ -1,0 +1,501 @@
+/**
+ * 索引重建命令（架构文档 §7「删库可重建」、§20 的运维链路）。
+ *
+ * **只从磁盘读，不信任 SQLite。** 索引坏了才是要重建的理由：拿 `node` 表当输入
+ * 等于假设「坏掉的东西还能用」。这里遍历真实文件系统，重新解析 frontmatter、重新
+ * 计算 digest、重新写 `node` / `node_fts` / `node_embedding`。
+ *
+ * ## 断点续跑
+ *
+ * 按 URI 升序处理，每一步都是幂等 upsert。中途失败（供应商抖动、进程被杀）后重跑：
+ * 已写入的嵌入按 `content_digest` 判定为「没变」直接跳过，只处理剩下的。游标不必
+ * 落盘——**磁盘是真相**，重跑重新遍历一遍就得到同一份候选集。
+ *
+ * ## 范围
+ *
+ * 只重建**检索索引**（`node` / `node_fts`）与**向量**（`node_embedding`）。
+ * 物化权限（`node_permission`）不在这里重算：它由 `.acl.json` 与所有者推导，
+ * 归属 `AclService` 的写路径（§8.2「写时算，读时查」）。索引损坏（表被删、写坏）
+ * 而权限表完好是常态；整库丢失时权限要另走 ACL 重建，不在本命令的职责里。
+ *
+ * ## 输出约定
+ *
+ * 进度写 stderr（`ConsoleLogger` 与 `progress()` 都走 stderr），stdout 只留最终
+ * 一行「成功了」。这样 `reindex > report.json` 拿到的是一份干净结果，而不是几万
+ * 行进度。
+ */
+
+import { mkdir, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+import { ContentStore } from '../adapters/fs/content-store.js';
+import { parseDocument } from '../adapters/fs/frontmatter.js';
+import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
+import { ConsoleLogger } from '../adapters/log/console.js';
+import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
+import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
+import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
+import { NodeRepository } from '../adapters/sqlite/node-repository.js';
+import type { NodeRow } from '../adapters/sqlite/node-repository.js';
+import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
+import { loadConfig } from '../config/index.js';
+import { ComemError } from '../domain/errors.js';
+import type { Logger } from '../domain/log.js';
+import type { ContextType, NodeStatus } from '../domain/node.js';
+import { stableDigest } from '../domain/node.js';
+import type { IndexRecord } from '../domain/retrieval.js';
+import { Uri } from '../domain/uri.js';
+import { EmbeddingService, quantizeForStorage } from '../services/embedding.js';
+
+export interface ReindexOptions {
+  readonly dataDir?: string;
+  readonly configPath?: string;
+  /** `--only=embeddings|index|all`，默认 all */
+  readonly only?: 'embeddings' | 'index' | 'all';
+  readonly dryRun?: boolean;
+}
+
+export interface ReindexResult {
+  /** 磁盘上的节点数（文件 + 目录）。`dryRun` 时是「会被处理」的数量 */
+  readonly scanned: number;
+  /** 实际写入的检索索引 / 向量条数 */
+  readonly rewritten: number;
+  /** 嵌入没变而跳过的文件数 */
+  readonly skipped: number;
+  /** 解析失败或嵌入降级的节点数 */
+  readonly failed: number;
+}
+
+/** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
+const META_DIRECTORY = '_meta';
+const DATABASE_FILE = 'comem.sqlite';
+
+/**
+ * 进度输出间隔。
+ *
+ * 100 是经验值：再密会把 stderr 刷成噪声（大库几十万行），再疏就看不到「卡在
+ * 哪一段」。只在 stderr 输出，不影响 stdout 的结果行。
+ */
+const PROGRESS_INTERVAL = 100;
+
+/** 秒 → 毫秒。`providers.embedding.timeoutSeconds` 是秒。 */
+const MILLISECONDS_PER_SECOND = 1000;
+
+/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
+const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
+  memories: 'memory',
+  resources: 'resource',
+  skills: 'skill',
+  sessions: 'session',
+};
+
+/**
+ * 认不出的目录按 `resource` 处理，与 `IndexObserver` / `SummaryService` 的兜底
+ * 一致：把普通目录当记忆比当资料更危险。
+ */
+const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
+
+const DOCUMENT_LEVEL = 'L2';
+const DIRECTORY_LEVEL = 'L0';
+const ACTIVE_STATUS: NodeStatus = 'active';
+
+interface DiskNode {
+  readonly uri: Uri;
+  readonly kind: 'file' | 'directory';
+}
+
+interface FrontmatterFields {
+  readonly memoryType: string | null;
+  readonly status: NodeStatus | null;
+}
+
+function isNodeStatus(value: unknown): value is NodeStatus {
+  return value === 'active' || value === 'pending' || value === 'archived';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function fsErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return null;
+  }
+  const code: unknown = error.code;
+  return typeof code === 'string' ? code : null;
+}
+
+/** §6.3：`projects/{pid}/` 先剥一层，再按段名推 `context_type`。 */
+function contextTypeOf(uri: Uri): ContextType {
+  const segments = uri.segments[0] === 'projects' ? uri.segments.slice(2) : uri.segments;
+  const head = segments[0];
+  if (head === undefined) {
+    return DEFAULT_CONTEXT_TYPE;
+  }
+  return CONTEXT_TYPE_BY_DIRECTORY[head] ?? DEFAULT_CONTEXT_TYPE;
+}
+
+/** 记忆文件的 `memory_type` / `status`（`IndexObserver` 的同一份映射）。 */
+function readFrontmatterFields(data: Readonly<Record<string, unknown>>): FrontmatterFields {
+  const memoryType = data['memory_type'];
+  const status = data['status'];
+  return {
+    memoryType: typeof memoryType === 'string' && memoryType !== '' ? memoryType : null,
+    status: isNodeStatus(status) ? status : null,
+  };
+}
+
+/** 数据根下的两个 scope 目录（`user` / `group`）。不存在不是错误。 */
+async function listRoots(dataDir: string): Promise<readonly Uri[]> {
+  const roots: Uri[] = [];
+  for (const scope of ['user', 'group'] as const) {
+    let names: readonly string[];
+    try {
+      names = await readdir(join(dataDir, scope));
+    } catch (error) {
+      if (fsErrorCode(error) === 'ENOENT') {
+        continue;
+      }
+      throw error;
+    }
+    for (const name of names) {
+      try {
+        roots.push(Uri.parse(`comem://${scope}/${name}`));
+      } catch {
+        // 不是合法根标识的目录（`_meta` 之外的临时产物）：`Uri` 表示不了，跳过。
+      }
+    }
+  }
+  return roots;
+}
+
+/**
+ * 遍历磁盘上的全部节点。
+ *
+ * 用 `ContentStore.list` 而不是 `node:fs` 裸遍历：它已经处理了 NFC 规范化、
+ * 保留名、临时文件过滤与「URI 表示不了的条目」——重写一遍这些规则只会让两处
+ * 慢慢漂移。排序放在最后，保证重跑时处理顺序稳定（断点续跑的依据）。
+ */
+async function walkDataDir(dataDir: string, logger: Logger): Promise<readonly DiskNode[]> {
+  const store = new ContentStore({ dataDir, logger });
+  const nodes: DiskNode[] = [];
+
+  for (const root of await listRoots(dataDir)) {
+    const stat = await store.stat(root);
+    if (stat === null) {
+      continue;
+    }
+    nodes.push({ uri: root, kind: stat.kind });
+
+    const stack: Uri[] = stat.kind === 'directory' ? [root] : [];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === undefined) {
+        break;
+      }
+      let children;
+      try {
+        children = await store.list(current);
+      } catch (error) {
+        if (error instanceof ComemError && error.code === 'NOT_FOUND') {
+          continue;
+        }
+        throw error;
+      }
+      for (const child of children) {
+        nodes.push({ uri: child.uri, kind: child.kind });
+        if (child.kind === 'directory') {
+          stack.push(child.uri);
+        }
+      }
+    }
+  }
+
+  return nodes.sort((left, right) => {
+    const leftUri = left.uri.toString();
+    const rightUri = right.uri.toString();
+    if (leftUri === rightUri) {
+      return 0;
+    }
+    return leftUri < rightUri ? -1 : 1;
+  });
+}
+
+/** 从磁盘重建一条 `IndexRecord`。失败抛 `ComemError`（坏 frontmatter 等）。 */
+async function buildRecord(
+  store: ContentStore,
+  metadata: MetadataFileStore,
+  node: DiskNode,
+  existing: NodeRow | null,
+): Promise<IndexRecord> {
+  const stat = await store.stat(node.uri);
+  if (stat === null) {
+    throw new ComemError('NOT_FOUND', `磁盘上的节点已不可寻址：${node.uri.toString()}`, {
+      uri: node.uri.toString(),
+    });
+  }
+
+  const contextType = contextTypeOf(node.uri);
+  const parentUri = node.uri.parent()?.toString() ?? '';
+
+  if (node.kind === 'directory') {
+    const summary = await metadata.readSummary(node.uri);
+    return {
+      uri: node.uri.toString(),
+      parentUri,
+      scope: node.uri.scope,
+      kind: 'directory',
+      contextType: existing?.contextType ?? contextType,
+      memoryType: existing?.memoryType ?? null,
+      level: DIRECTORY_LEVEL,
+      abstract: summary.abstract === '' ? null : summary.abstract,
+      content: '',
+      bodyDigest: stableDigest(''),
+      size: stat.size,
+      updatedAt: stat.updatedAt,
+      status: existing?.status ?? ACTIVE_STATUS,
+    };
+  }
+
+  const raw = Buffer.from(await store.readBytes(node.uri)).toString('utf8');
+  const document = parseDocument(raw);
+  const fields = readFrontmatterFields(document.data);
+  const summary = document.data['summary'];
+
+  return {
+    uri: node.uri.toString(),
+    parentUri,
+    scope: node.uri.scope,
+    kind: 'document',
+    contextType,
+    // frontmatter 是记忆类型的唯一真相；读不出来时保留索引里的旧值。
+    memoryType: fields.memoryType ?? existing?.memoryType ?? null,
+    level: DOCUMENT_LEVEL,
+    abstract: typeof summary === 'string' && summary !== '' ? summary : null,
+    content: document.body,
+    bodyDigest: stableDigest(document.body),
+    size: stat.size,
+    updatedAt: stat.updatedAt,
+    status: fields.status ?? existing?.status ?? ACTIVE_STATUS,
+  };
+}
+
+function progress(
+  scanned: number,
+  total: number,
+  rewritten: number,
+  skipped: number,
+  failed: number,
+): void {
+  process.stderr.write(
+    `reindex: ${scanned}/${total} 已扫描，重写 ${rewritten}，跳过 ${skipped}，失败 ${failed}\n`,
+  );
+}
+
+/**
+ * 重建索引。
+ *
+ * `dryRun` 不打开数据库：`openDatabase` 会创建文件、`runMigrations` 会写
+ * `schema_version`，那就不是「只报数不改」了。dry-run 只遍历磁盘并报告
+ * `scanned`，其余计数保持 0——它们描述的是「实际写入了什么」。
+ */
+export async function runReindex(options: ReindexOptions = {}): Promise<ReindexResult> {
+  const config = loadConfig({
+    ...(options.configPath === undefined ? {} : { path: options.configPath }),
+    argv: options.dataDir === undefined ? [] : ['--data-dir', options.dataDir],
+  });
+  const only = options.only ?? 'all';
+  const dryRun = options.dryRun ?? false;
+
+  // 进度与诊断都走 stderr；stdout 只留最终结果。
+  const logger = new ConsoleLogger({
+    level: config.logging.level,
+    write: (line) => process.stderr.write(line),
+  });
+
+  const nodes = await walkDataDir(config.dataDir, logger);
+  if (dryRun) {
+    progress(0, nodes.length, 0, 0, 0);
+    return { scanned: nodes.length, rewritten: 0, skipped: 0, failed: 0 };
+  }
+
+  const embeddingConfig = config.providers.embedding;
+  const needsEmbeddings = only === 'embeddings' || only === 'all';
+  if (needsEmbeddings && embeddingConfig.type === 'disabled') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      '重算嵌入需要配置 providers.embedding（当前是 disabled）。',
+      { only },
+    );
+  }
+
+  // 数据根可能还没建过 `_meta`（全新目录 / 只恢复了内容文件）：`openDatabase`
+  // 不会替调用方建父目录。
+  await mkdir(join(config.dataDir, META_DIRECTORY), { recursive: true });
+  const db = openDatabase(join(config.dataDir, META_DIRECTORY, DATABASE_FILE));
+  try {
+    runMigrations(db);
+
+    const store = new ContentStore({ dataDir: config.dataDir, logger });
+    const metadata = new MetadataFileStore({ dataDir: config.dataDir, logger });
+    const index = new SqliteFtsIndex({
+      db,
+      logger,
+      candidateMultiplier: config.retrieval.candidateMultiplier,
+    });
+    const nodeRepository = new NodeRepository({ db, logger });
+    const embeddings = new EmbeddingRepository({ db, logger });
+    const embedding = new EmbeddingService({
+      provider:
+        embeddingConfig.type === 'disabled'
+          ? null
+          : new AiSdkEmbeddingProvider({
+              type: embeddingConfig.type,
+              ...(embeddingConfig.baseUrl === ''
+                ? {}
+                : { baseUrl: embeddingConfig.baseUrl }),
+              model: embeddingConfig.model,
+              apiKey: embeddingConfig.apiKey,
+              dimension: embeddingConfig.dimension,
+              maxBatchSize: embeddingConfig.maxBatchSize,
+              timeoutSeconds: embeddingConfig.timeoutSeconds,
+              logger,
+            }),
+      logger,
+      config: {
+        dimension: embeddingConfig.dimension,
+        maxBatchSize: embeddingConfig.maxBatchSize,
+        timeoutMs: embeddingConfig.timeoutSeconds * MILLISECONDS_PER_SECOND,
+      },
+    });
+
+    const model = embedding.model;
+    let rewritten = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const [indexInBatch, node] of nodes.entries()) {
+      const uri = node.uri.toString();
+      const existing = nodeRepository.get(uri);
+      let wrote = false;
+
+      try {
+        // 1) 检索索引：按磁盘内容重建 `node` + `node_fts`。
+        if (only === 'index' || only === 'all') {
+          await index.upsert([await buildRecord(store, metadata, node, existing)]);
+          wrote = true;
+        }
+
+        // 2) 向量：只处理有正文的文件。目录的 L0 摘要不参与语义检索。
+        if (needsEmbeddings && node.kind === 'file' && model !== null) {
+          const raw = Buffer.from(await store.readBytes(node.uri)).toString('utf8');
+          const document = parseDocument(raw);
+          if (document.body !== '') {
+            const digest = stableDigest(document.body);
+            const current = embeddings.get(uri);
+            if (
+              current !== null &&
+              current.model === model &&
+              current.contentDigest === digest
+            ) {
+              skipped += 1;
+            } else {
+              const outcome = await embedding.embed([document.body]);
+              const vector = outcome.vectors[0];
+              if (outcome.degraded || vector === undefined) {
+                failed += 1;
+                logger.warn('嵌入降级，跳过写入', {
+                  uri,
+                  reason: outcome.reason ?? '没有返回向量。',
+                });
+              } else {
+                const quantized = quantizeForStorage(vector);
+                embeddings.upsert([
+                  {
+                    uri,
+                    model,
+                    dimension: vector.length,
+                    vector: quantized.vector,
+                    scale: quantized.scale,
+                    contentDigest: digest,
+                    createdAt: new Date().toISOString(),
+                  },
+                ]);
+                wrote = true;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        // 坏文件（frontmatter 不合法、读盘失败）只影响自己：整批中断会让「一个
+        // 坏文件卡住全库重建」，而 reindex 的用途恰恰是修复。
+        failed += 1;
+        logger.warn('重建索引跳过节点', { uri, error: errorMessage(error) });
+        continue;
+      }
+
+      if (wrote) {
+        rewritten += 1;
+      }
+      if ((indexInBatch + 1) % PROGRESS_INTERVAL === 0) {
+        progress(indexInBatch + 1, nodes.length, rewritten, skipped, failed);
+      }
+    }
+
+    progress(nodes.length, nodes.length, rewritten, skipped, failed);
+    return { scanned: nodes.length, rewritten, skipped, failed };
+  } finally {
+    db.close();
+  }
+}
+
+/** 解析 `--only` 的取值。非法值直接抛 `INVALID_ARGUMENT`，不静默取默认。 */
+function parseOnly(raw: string): ReindexOptions['only'] {
+  if (raw === 'embeddings' || raw === 'index' || raw === 'all') {
+    return raw;
+  }
+  throw new ComemError('INVALID_ARGUMENT', `--only 只支持 embeddings | index | all：${raw}`, {
+    only: raw,
+  });
+}
+
+function readFlag(argv: readonly string[], name: string): string | undefined {
+  const prefixed = `--${name}`;
+  for (const [index, arg] of argv.entries()) {
+    if (arg === prefixed) {
+      return argv[index + 1];
+    }
+    if (arg.startsWith(`${prefixed}=`)) {
+      return arg.slice(prefixed.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function parseArgs(argv: readonly string[]): ReindexOptions {
+  const dataDir = readFlag(argv, 'data-dir');
+  const configPath = readFlag(argv, 'config');
+  const only = readFlag(argv, 'only');
+  return {
+    ...(dataDir === undefined ? {} : { dataDir }),
+    ...(configPath === undefined ? {} : { configPath }),
+    ...(only === undefined ? {} : { only: parseOnly(only) }),
+    ...(argv.includes('--dry-run') ? { dryRun: true } : {}),
+  };
+}
+
+/** 只有直接执行（`tsx src/commands/reindex.ts`）时才跑 CLI 入口，测试 import 不触发。 */
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runReindex(parseArgs(process.argv.slice(2))).then(
+    (result) => {
+      process.stdout.write(
+        `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，跳过 ${result.skipped}，失败 ${result.failed}。\n`,
+      );
+    },
+    (error: unknown) => {
+      process.stderr.write(`reindex 失败：${errorMessage(error)}\n`);
+      process.exitCode = 1;
+    },
+  );
+}

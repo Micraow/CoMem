@@ -58,6 +58,15 @@ function expectedDefaults(dataDir: string): unknown {
           pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6 },
         },
       },
+      embedding: {
+        type: 'disabled',
+        baseUrl: '',
+        model: 'text-embedding-3-small',
+        apiKey: '',
+        dimension: 1536,
+        maxBatchSize: 128,
+        timeoutSeconds: 30,
+      },
     },
     summary: { generator: 'llm', abstractMaxChars: 256, overviewMaxChars: 4000 },
     retrieval: {
@@ -142,7 +151,10 @@ describe('loadConfig', () => {
   });
 
   it('config.example.yaml 可被加载，且与 §18 一致', () => {
-    const config = loadConfig({ path: EXAMPLE_CONFIG_PATH, env: testEnv({ COMEM_LLM_KEY: 'test-key' }) });
+    const config = loadConfig({
+      path: EXAMPLE_CONFIG_PATH,
+      env: testEnv({ COMEM_LLM_KEY: 'test-key', COMEM_EMBEDDING_KEY: 'test-embedding-key' }),
+    });
 
     expect(config).toEqual({
       ...(expectedDefaults(join(tempDir, 'xdg', 'comem')) as Record<string, unknown>),
@@ -157,6 +169,15 @@ describe('loadConfig', () => {
             timeoutSeconds: 120,
             pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6 },
           },
+        },
+        embedding: {
+          type: 'openai-compatible',
+          baseUrl: 'https://api.example.com/v1',
+          model: 'BAAI/bge-m3',
+          apiKey: 'test-embedding-key',
+          dimension: 1024,
+          maxBatchSize: 64,
+          timeoutSeconds: 30,
         },
       },
     });
@@ -291,6 +312,38 @@ describe('loadConfig', () => {
 
       expect(error.code).toBe('INVALID_ARGUMENT');
       expect(error.details).toMatchObject({ fields: ['server.port'] });
+    });
+
+    it('retrieval.engine 非 fts5 而 providers.embedding 未配置时抛 INVALID_ARGUMENT', () => {
+      const error = loadError({
+        path: writeConfig('retrieval:\n  engine: vector\n'),
+        env: testEnv(),
+      });
+
+      expect(error.code).toBe('INVALID_ARGUMENT');
+      expect(error.message).toContain('providers.embedding');
+      expect(error.details).toMatchObject({ field: 'providers.embedding', engine: 'vector' });
+    });
+
+    it('配了 providers.embedding 之后 vector / hybrid 引擎可用', () => {
+      for (const engine of ['vector', 'hybrid']) {
+        const config = loadConfig({
+          path: writeConfig(
+            [
+              `retrieval:`,
+              `  engine: ${engine}`,
+              `providers:`,
+              `  embedding:`,
+              `    type: openai-compatible`,
+              `    model: test-embedding`,
+            ].join('\n'),
+          ),
+          env: testEnv(),
+        });
+
+        expect(config.retrieval.engine).toBe(engine);
+        expect(config.providers.embedding.type).toBe('openai-compatible');
+      }
     });
   });
 

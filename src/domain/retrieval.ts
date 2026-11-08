@@ -139,6 +139,106 @@ export interface SearchResult {
   readonly plan: SearchPlan;
 }
 
+/**
+ * 检索后端（§18 的 `retrieval.engine`）。
+ *
+ * `hybrid` 不是一个独立实现，是「并行跑 fts5 与 vector 再融合」的调度方式，融合规则
+ * 由 `reciprocalRankFusion` 定义。写进联合类型是因为它是配置里的一个合法取值，
+ * 名字必须与 §18 的 YAML 逐字一致。
+ */
+export type RetrievalEngine = 'fts5' | 'vector' | 'hybrid';
+
+/** 混合检索的融合结果。 */
+export interface FusedHit extends SearchHit {
+  /** 各后端的名次（1 起），用于解释「为什么这条排在这」 */
+  readonly ranks: Readonly<Record<RetrievalEngine, number | null>>;
+}
+
+/**
+ * RRF 的 k 值。
+ *
+ * `score(d) = Σ_retriever 1 / (k + rank_retriever(d))`，k = 60。
+ *
+ * 60 来自 RRF 原论文（Cormack et al., 2009）的经验值，不是本项目测量出来的，也
+ * 不是「调参调出来的最佳值」。它只影响「名次差多少算差很多」：k 越大，前几名之间
+ * 的分数差越小。
+ */
+const DEFAULT_RRF_K = 60;
+
+/**
+ * 倒数排名融合（RRF）。
+ *
+ * **为什么用 RRF 而不是分数加权**：BM25 的分数是无界的，向量余弦在 [-1, 1]，
+ * 两者相加前必须归一化，而归一化依赖当次查询的候选集——同一份文档在不同查询下
+ * 权重会漂移。RRF 只用名次，没有这个问题（这是它被广泛采用的唯一理由）。
+ *
+ * **名次取结果集里的下标 + 1**，不重新按 `score` 排：结果集是后端给出的排序，
+ * 再排一次等于替后端做决定，而两个后端的分数不可比正是要用 RRF 的原因。
+ *
+ * 同一 URI 在多个结果集里出现只算一条，`ranks` 记每个后端的最高名次（没出现记
+ * `null`）：「最高」指最靠前，即数值最小的那个。同分按 URI 升序——不是审美，
+ * 而是 `Array.prototype.sort` 在 V8 上虽然稳定，但依赖「输入顺序稳定」在并发合并
+ * 场景下不成立；显式给出全序才能让同一份输入每次都得到同一份输出。
+ *
+ * `limit` 截断；不传 `limit` 时不截断。纯函数，无 IO。
+ */
+export function reciprocalRankFusion(
+  resultSets: readonly { readonly engine: RetrievalEngine; readonly hits: readonly SearchHit[] }[],
+  options: { readonly k?: number; readonly limit?: number } = {},
+): FusedHit[] {
+  const k = options.k ?? DEFAULT_RRF_K;
+  if (!Number.isFinite(k) || k <= 0) {
+    throw invalidArgument('k 必须是正数。', { k });
+  }
+  if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit <= 0)) {
+    throw invalidArgument('limit 必须是正整数。', { limit: options.limit });
+  }
+
+  interface Accumulator {
+    readonly hit: SearchHit;
+    readonly ranks: Record<RetrievalEngine, number | null>;
+  }
+
+  const byUri = new Map<string, Accumulator>();
+  for (const resultSet of resultSets) {
+    for (const [index, hit] of resultSet.hits.entries()) {
+      const rank = index + 1;
+      let accumulator = byUri.get(hit.uri);
+      if (accumulator === undefined) {
+        accumulator = { hit, ranks: { fts5: null, vector: null, hybrid: null } };
+        byUri.set(hit.uri, accumulator);
+      }
+      const current = accumulator.ranks[resultSet.engine];
+      if (current === null || rank < current) {
+        accumulator.ranks[resultSet.engine] = rank;
+      }
+    }
+  }
+
+  const fused: FusedHit[] = [];
+  for (const [uri, accumulator] of byUri) {
+    let score = 0;
+    for (const rank of Object.values(accumulator.ranks)) {
+      if (rank !== null) {
+        score += 1 / (k + rank);
+      }
+    }
+    fused.push({ ...accumulator.hit, uri, score, ranks: accumulator.ranks });
+  }
+
+  fused.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    if (left.uri === right.uri) {
+      return 0;
+    }
+    return left.uri < right.uri ? -1 : 1;
+  });
+
+  return options.limit === undefined ? fused : fused.slice(0, options.limit);
+}
+
 export interface GrepQuery {
   readonly pattern: string;
   readonly scopes: readonly string[];

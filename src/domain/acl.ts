@@ -104,6 +104,51 @@ export function formatPrincipal(principal: Principal): string {
 }
 
 /**
+ * `group:{gid}` 主体。
+ *
+ * 组 principal 的成员可能不存在（组被删了），求值时按空集处理——组不存在时没有
+ * 任何主体拿得到这条授权，不需要额外的存在性检查。
+ */
+export function groupPrincipal(groupId: string): string {
+  return formatPrincipal({ kind: 'group', id: groupId });
+}
+
+/** `user:{uid}` 主体。 */
+export function userPrincipal(userId: string): string {
+  return formatPrincipal({ kind: 'user', id: userId });
+}
+
+/**
+ * 从 principal 里取出组 ID；不是组返回 null。
+ *
+ * 复用 `parsePrincipal` 而不是自己比前缀：`group:*`（§12.1 明确拒绝）、
+ * `group:`、`group:a:b` 这些畸形串在解析层就被挡掉，这里不必各写一份判断。
+ */
+export function groupIdOf(principal: string): string | null {
+  try {
+    const parsed = parsePrincipal(principal);
+    return parsed.kind === 'group' ? parsed.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从 principal 里取出用户 ID；不是 user 返回 null。
+ *
+ * `user:*` 返回 `'*'`：它是合法的 user 主体，但不是真实用户。调用方拿它查用户
+ * 目录会得到 null，正是通配符该有的行为。
+ */
+export function userIdOf(principal: string): string | null {
+  try {
+    const parsed = parsePrincipal(principal);
+    return parsed.kind === 'user' ? parsed.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `granted` 是否覆盖 `required`（§12.1「高位包含低位」）。
  *
  * 位运算比大小表意更直接：7 & 3 === 3，7 & 1 === 1，3 & 1 === 1。

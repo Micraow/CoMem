@@ -52,6 +52,7 @@
  */
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
+import type { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { Logger } from '../domain/log.js';
@@ -61,6 +62,7 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
+import { quantizeForStorage, type EmbeddingService } from './embedding.js';
 import type { NodeWriteObserver } from './filesystem.js';
 import type { SummaryService } from './summary.js';
 
@@ -107,6 +109,16 @@ export interface IndexObserverDeps {
    */
   readonly permissions: Pick<PermissionRepository, 'deleteSubtree'>;
   readonly logger: Logger;
+  /**
+   * 嵌入服务（§8.1 的 `node_embedding`、§17.2 的异步阶段）。
+   *
+   * 可选是给「只关心检索索引」的调用方（存量测试、只读脚本）留的：不注入就
+   * 完全不产生嵌入调用，而不是每次写入都打一次必定降级的网络。生产装配
+   * （`bootstrap/container.ts`）总是注入。
+   */
+  readonly embedding?: Pick<EmbeddingService, 'embed' | 'model'>;
+  /** 向量仓储。与 `embedding` 成对出现；只注入一个时嵌入阶段整体跳过。 */
+  readonly embeddings?: EmbeddingRepository;
 }
 
 interface FrontmatterFields {
@@ -200,7 +212,9 @@ export class IndexObserver implements NodeWriteObserver {
   readonly #nodes: NodeRepository;
   readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'>;
   readonly #logger: Logger;
-  /** 已排期但未完成的摘要失效任务（见文件头「延后」）。 */
+  readonly #embedding: Pick<EmbeddingService, 'embed' | 'model'> | undefined;
+  readonly #embeddings: EmbeddingRepository | undefined;
+  /** 已排期但未完成的摘要失效 / 嵌入任务（见文件头「延后」）。 */
   readonly #pending = new Set<Promise<void>>();
 
   constructor(deps: IndexObserverDeps) {
@@ -211,6 +225,9 @@ export class IndexObserver implements NodeWriteObserver {
     this.#nodes = deps.nodes;
     this.#permissions = deps.permissions;
     this.#logger = deps.logger;
+    // 两个依赖必须成对：只给一个时嵌入阶段无法完成，整体跳过比半途抛错清楚。
+    this.#embedding = deps.embedding;
+    this.#embeddings = deps.embeddings;
   }
 
   async onNodeWritten(uri: Uri, kind: 'file' | 'directory'): Promise<void> {
@@ -233,6 +250,9 @@ export class IndexObserver implements NodeWriteObserver {
       await this.#index.deleteByUri(uri.toString(), { recursive: true });
       // 物化权限没有外键级联（见 `IndexObserverDeps.permissions`），子树的行要显式删。
       this.#permissions.deleteSubtree(uri.toString());
+      // 向量同理：`node_embedding` 也没有外键，删节点不清理会留下指向不存在
+      // 文件的向量行——`find` 会命中一条打不开的记录。
+      this.#embeddings?.deleteByUri(uri.toString(), { recursive: true });
 
       const parent = uri.parent();
       if (parent !== null) {
@@ -306,6 +326,12 @@ export class IndexObserver implements NodeWriteObserver {
     // 物化要在索引之后：`materializeNode` 从 `node` 表读 kind 决定链的起点。
     await this.#acl.materializeNode(uri);
 
+    // 嵌入是派生数据的派生（§7）：正文变了才重算，且推到锁释放之后（见文件头
+    // 「为什么摘要失效要延后到锁释放之后」——嵌入要打网络，更不能在锁里做）。
+    if (kind === 'file') {
+      this.#scheduleEmbedding(uri, record.content);
+    }
+
     // 摘要失效的目标是父目录：新增 / 修改一个子项（文件或目录）都会改变父目录的 L1
     // 输入。根节点没有父目录，但它自己的 L0 也不需要重算（没有上级摘要用它）。
     const parent = uri.parent();
@@ -331,6 +357,78 @@ export class IndexObserver implements NodeWriteObserver {
         (error: unknown) => {
           this.#logger.error('摘要失效投递失败，已忽略。', {
             directory: directory.toString(),
+            error: errorMessage(error),
+          });
+        },
+      );
+    this.#pending.add(task);
+    void task.then(() => {
+      this.#pending.delete(task);
+    });
+  }
+
+  /**
+   * 排期一次嵌入。
+   *
+   * **正文没变就跳过**（`contentDigest` 相同）：重复写同一内容不应该重复调模型。
+   * 模型名也参与比较——换模型之后旧向量必须重算，否则向量空间混着两个模型的
+   * 结果，余弦相似度全是噪音。
+   *
+   * 失败只记日志（降级），不抛：写操作已经落盘，嵌入是派生数据（§7 的同一原则）。
+   */
+  #scheduleEmbedding(uri: Uri, text: string): void {
+    const embedding = this.#embedding;
+    const embeddings = this.#embeddings;
+    if (embedding === undefined || embeddings === undefined || text === '') {
+      return;
+    }
+    const model = embedding.model;
+    // 没配供应商（`type: disabled`，默认值）时静默跳过：这是「不做语义检索」的
+    // 正常配置，不是降级。每次写都记 warn 只会把真正的故障淹掉。
+    if (model === null) {
+      return;
+    }
+
+    const digest = stableDigest(text);
+    const task = new Promise<void>((resolve) => {
+      // 与摘要失效同一个理由：推到 `withLock` 的 `finally` 之后。嵌入要打网络，
+      // 在路径锁里做会把一次写操作拖成秒级。
+      setImmediate(resolve);
+    })
+      .then(async () => {
+        const existing = embeddings.get(uri.toString());
+        if (existing !== null && existing.model === model && existing.contentDigest === digest) {
+          return;
+        }
+
+        const outcome = await embedding.embed([text]);
+        const vector = outcome.vectors[0];
+        if (outcome.degraded || vector === undefined) {
+          this.#logger.warn('嵌入降级，跳过写入', {
+            uri: uri.toString(),
+            reason: outcome.reason ?? '没有返回向量。',
+          });
+          return;
+        }
+
+        const quantized = quantizeForStorage(vector);
+        embeddings.upsert([
+          {
+            uri: uri.toString(),
+            model,
+            dimension: vector.length,
+            vector: quantized.vector,
+            scale: quantized.scale,
+            contentDigest: digest,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          this.#logger.error('嵌入写入失败，已忽略。', {
+            uri: uri.toString(),
             error: errorMessage(error),
           });
         },

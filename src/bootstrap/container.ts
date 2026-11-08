@@ -54,13 +54,16 @@ import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
+import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
 import { OfflineLlmProvider } from '../adapters/llm/offline-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
+import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { RequestLogRepository } from '../adapters/sqlite/request-log-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../adapters/sqlite/task-repository.js';
+import { SqliteVectorIndex } from '../adapters/sqlite/vector-index.js';
 import { createToolRegistry } from '../api/mcp/tools/index.js';
 import type { ToolRegistry } from '../api/mcp/registry.js';
 import { McpHttpServer } from '../api/mcp/server.js';
@@ -81,6 +84,7 @@ import { MemoryExtractStep } from '../services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../services/commit/steps/summary-invalidate.js';
 import { ContextAssembler } from '../services/context-assembler.js';
+import { EmbeddingService } from '../services/embedding.js';
 import { FileSystemService } from '../services/filesystem.js';
 import { IndexObserver } from '../services/index-observer.js';
 import { LlmService } from '../services/llm.js';
@@ -120,6 +124,9 @@ const RECONCILE_LOG_FILE = 'reconcile.log';
 
 /** 临时上传的元数据后缀。与文件同目录，`listStaged` 靠它枚举。 */
 const STAGED_METADATA_SUFFIX = '.meta.json';
+
+/** 秒 → 毫秒。`providers.embedding.timeoutSeconds` 是秒，`EmbeddingService` 收毫秒。 */
+const MILLISECONDS_PER_SECOND = 1000;
 
 /** `Container` 的构造参数。`subject` / `groups` / `argv` 是任务草图之外的必要项。 */
 export interface CreateContainerOptions {
@@ -465,6 +472,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const permissions = new PermissionRepository({ db, logger });
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
+  const embeddings = new EmbeddingRepository({ db, logger });
+  const vectors = new SqliteVectorIndex({ db, embeddings, logger });
 
   // ── 模型 ──
   const llmConfig = config.providers.llm.default;
@@ -487,6 +496,41 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     pricing: llmConfig.pricing,
     model: llmConfig.model,
   });
+
+  // ── 嵌入 ──
+  //
+  // `type: disabled`（默认）时传 `null`，`EmbeddingService` 因此 `available: false`，
+  // 写路径与检索路径都不会打网络。这是「没配就不该悄悄产生嵌入调用」的唯一实现点。
+  const embeddingConfig = config.providers.embedding;
+  const embeddingProvider =
+    embeddingConfig.type === 'disabled'
+      ? null
+      : new AiSdkEmbeddingProvider({
+          type: embeddingConfig.type,
+          ...(embeddingConfig.baseUrl === '' ? {} : { baseUrl: embeddingConfig.baseUrl }),
+          model: embeddingConfig.model,
+          apiKey: embeddingConfig.apiKey,
+          dimension: embeddingConfig.dimension,
+          maxBatchSize: embeddingConfig.maxBatchSize,
+          timeoutSeconds: embeddingConfig.timeoutSeconds,
+          logger,
+        });
+  const embedding = new EmbeddingService({
+    provider: embeddingProvider,
+    logger,
+    config: {
+      dimension: embeddingConfig.dimension,
+      maxBatchSize: embeddingConfig.maxBatchSize,
+      timeoutMs: embeddingConfig.timeoutSeconds * MILLISECONDS_PER_SECOND,
+    },
+  });
+  if (config.retrieval.engine !== 'fts5' && embedding.available) {
+    logger.info('向量检索已启用', {
+      engine: config.retrieval.engine,
+      model: embedding.model,
+      dimension: embeddingConfig.dimension,
+    });
+  }
 
   // ── 身份与服务图 ──
   const subject = options.subject ?? DEFAULT_SUBJECT;
@@ -556,6 +600,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     nodes,
     permissions,
     logger,
+    embedding,
+    embeddings,
   });
 
   const authorizer = new InheritingAuthorizer(acl, store);
@@ -603,6 +649,10 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     ledger,
     llm,
     sessions: session,
+    embedding,
+    vectors,
+    nodes,
+    engine: config.retrieval.engine,
   });
 
   /**

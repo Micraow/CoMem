@@ -27,6 +27,8 @@
  * 不是按「索引实现看起来已经做了」。这是纵深防御，不是重复劳动。
  */
 
+import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
+import type { SqliteVectorIndex, VectorHit } from '../adapters/sqlite/vector-index.js';
 import { parsePrincipal } from '../domain/acl.js';
 import {
   type AssemblyCandidate,
@@ -47,11 +49,13 @@ import {
 } from '../domain/query-filter.js';
 import {
   MAX_TYPED_QUERIES,
+  reciprocalRankFusion,
+  type FusedHit,
   type GrepHit,
+  type RetrievalEngine,
   type RetrievalIndex,
   type SearchHit,
   type SearchPlan,
-  type SearchResult,
   type SearchResultHit,
   type TypedQuery,
 } from '../domain/retrieval.js';
@@ -60,6 +64,7 @@ import { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
 import type { ContextAssembler } from './context-assembler.js';
+import type { EmbeddingService } from './embedding.js';
 import type { FileSystemService } from './filesystem.js';
 import type { LlmService } from './llm.js';
 import {
@@ -119,6 +124,25 @@ export interface SearchServiceDeps {
    * 只是省略的主语补不回来。
    */
   readonly sessions?: Pick<SessionService, 'load'>;
+  /**
+   * 嵌入（§8.3、§18 的 `retrieval.engine`）。只有 `vector` / `hybrid` 用到。
+   *
+   * 三个向量相关依赖是可选的，但**不是可静默省略的**：`engine` 不是 `fts5` 时
+   * 缺任何一个都在构造期抛 `INVALID_ARGUMENT`。可选只是为了让「只跑 FTS5」的
+   * 调用方（测试、只读脚本）不必造一套用不上的向量图。
+   *
+   * `model` 也是必需的：`SqliteVectorIndex.search` 按模型过滤旧行，没有模型名
+   * 就分不清「当前模型的向量」与「换模型前的残留」。
+   */
+  readonly embedding?: Pick<EmbeddingService, 'embed' | 'available' | 'model'>;
+  readonly vectors?: Pick<SqliteVectorIndex, 'search'>;
+  /**
+   * 向量命中只有 URI + 分数，其余列（`level` / `abstract` / `contextType` /
+   * `memoryType` / `status`）从 `node` 表补。没有它 `SearchHit` 就是半成品。
+   */
+  readonly nodes?: Pick<NodeRepository, 'get'>;
+  /** §18 的 `retrieval.engine`，默认 `fts5`（与 schema 默认值一致）。 */
+  readonly engine?: RetrievalEngine;
 }
 
 export interface FindOptions {
@@ -158,6 +182,49 @@ export interface ScoredHit {
   readonly score: number;
 }
 
+/**
+ * `find` 的命中 + 各后端名次（1 起，没出现记 `null`）。
+ *
+ * 名次是「为什么这条排在这」的唯一解释（§8.4 的合并规则）。只有 `hybrid` 会
+ * 两个后端都有名次；`fts5` / `vector` 单引擎时只填自己那一位，另一位是 `null`。
+ *
+ * 不并进 `ScoredHit`：`ScoredHit` 是接口层的序列化形状（`api/http/routes/search.ts`
+ * 的 `serializeHit`），名次是融合过程的产物，不该改变那个契约的位置。
+ */
+export interface RankedScoredHit extends ScoredHit {
+  readonly ranks: Readonly<Record<RetrievalEngine, number | null>> | null;
+}
+
+/**
+ * `search` 合并后的命中。在 `SearchResultHit` 之上多带融合名次。
+ *
+ * `SearchResultHit` 在领域层（`domain/retrieval.ts`）没有 `ranks` 列，本层用
+ * 交叉类型补上——领域类型描述「检索结果」，名次是融合过程的产物，属于服务层。
+ */
+export interface ScoredSearchHit extends SearchResultHit {
+  readonly ranks: Readonly<Record<RetrievalEngine, number | null>> | null;
+}
+
+/** `search` 的返回体。结构上是 `SearchResult` 的子类型，多带 `ranks`。 */
+export interface ScoredSearchResult {
+  readonly hits: readonly ScoredSearchHit[];
+  readonly plan: SearchPlan;
+}
+
+/** 一次 `find` 的内部产物：命中 + 向量后端的降级原因。 */
+interface RetrieveOutcome {
+  readonly hits: readonly RankedScoredHit[];
+  /** 向量后端降级原因；`null` 表示这次没有降级 */
+  readonly degradation: string | null;
+}
+
+/** 向量检索需要的三个依赖。构造期保证 `engine !== 'fts5'` 时非空。 */
+interface VectorRetrievalDeps {
+  readonly embedding: Pick<EmbeddingService, 'embed' | 'available' | 'model'>;
+  readonly vectors: Pick<SqliteVectorIndex, 'search'>;
+  readonly nodes: Pick<NodeRepository, 'get'>;
+}
+
 /** `context` 变体的返回值就是组装结果（§8.6 的四步产物）。 */
 export type ContextAssembly = AssemblyResult;
 
@@ -192,6 +259,25 @@ const GREP_CANDIDATE_LIMIT = 200;
  * 不用 `*`：`*` 不跨 `/`（只匹配直接子项），而 `grep` 要扫整棵子树。
  */
 const GREP_CANDIDATE_PATTERN = '**';
+
+/**
+ * 向量检索的候选集：`scope` 下全部可读节点。
+ *
+ * 与 `grep` 用同一个 `**`（跨 `/` 的子树），区别只在数量——`grep` 有
+ * `GREP_CANDIDATE_LIMIT` 兜底，向量检索**不能截断**：传少了会漏掉「BM25 排
+ * 第 50 但向量排第 1」的命中，而 RRF 的意义正是在两个后端都有完整候选时融合。
+ */
+const VECTOR_CANDIDATE_PATTERN = '**';
+
+/**
+ * 向量检索候选集的上限：不截断。
+ *
+ * `GlobQuery.limit` 是必填参数（`validateGlobQuery` 要求正整数），这里用最大
+ * 安全整数表达「全部」。代价是每次向量检索都要把 `scope` 下的可读 URI 全查一遍
+ * （O(n) 行）——§8.2 已经承认过这种「先取全量候选再过滤」的代价，十万节点以上
+ * 必须换成带权限列的 ANN 索引。
+ */
+const VECTOR_CANDIDATE_LIMIT = Number.MAX_SAFE_INTEGER;
 
 /** 1 毫秒 = 1e6 纳秒。 */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
@@ -259,6 +345,13 @@ export class SearchService {
   readonly #llm: Pick<LlmService, 'generateJson'> | undefined;
   readonly #sessions: Pick<SessionService, 'load'> | undefined;
   readonly #queryFilters: readonly QueryFilter[];
+  readonly #engine: RetrievalEngine;
+  /**
+   * 向量检索的三个依赖。`engine === 'fts5'` 时是 `null`，其余情况在构造期保证
+   * 非空——这样查询路径上不需要反复判空，也不会把「少注入一个依赖」变成运行时
+   * 的静默降级。
+   */
+  readonly #vector: VectorRetrievalDeps | null;
 
   constructor(deps: SearchServiceDeps) {
     this.#index = deps.index;
@@ -272,6 +365,31 @@ export class SearchService {
     this.#sessions = deps.sessions;
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
     this.#queryFilters = compileQueryFilters(deps.config.queryFilters);
+
+    this.#engine = deps.engine ?? 'fts5';
+    if (this.#engine === 'fts5') {
+      this.#vector = null;
+    } else {
+      if (deps.embedding === undefined || deps.vectors === undefined || deps.nodes === undefined) {
+        throw new ComemError(
+          'INVALID_ARGUMENT',
+          `retrieval.engine = ${this.#engine} 需要注入 embedding / vectors / nodes，否则向量检索没有可用的数据来源。`,
+          {
+            engine: this.#engine,
+            missing: [
+              ...(deps.embedding === undefined ? ['embedding'] : []),
+              ...(deps.vectors === undefined ? ['vectors'] : []),
+              ...(deps.nodes === undefined ? ['nodes'] : []),
+            ],
+          },
+        );
+      }
+      this.#vector = {
+        embedding: deps.embedding,
+        vectors: deps.vectors,
+        nodes: deps.nodes,
+      };
+    }
   }
 
   /**
@@ -281,10 +399,34 @@ export class SearchService {
    * 的结果都是随机的，而这些随机结果会被当成「用户这句话对应的记忆」写进召回账本
    * （§8.8）。
    *
-   * `scoreThreshold` 在层级加权之后过滤（§8.5）——传给索引的话比较的是未加权分，
-   * 会把「L0 加权后过线」的条目错杀。
+   * ## 引擎差异（§18 的 `retrieval.engine`）
+   *
+   * | engine | 行为 |
+   * |---|---|
+   * | `fts5` | 只用关键词检索。**这是回归基线，行为与接入向量前逐字一致** |
+   * | `vector` | 只用语义检索。降级时返回空命中并在日志里说明，**不退回 FTS5** |
+   * | `hybrid` | 并行跑两者，`reciprocalRankFusion` 融合。向量降级时退化成纯 FTS5 |
+   *
+   * `vector` 降级不退回 FTS5，是因为用户显式选了语义检索：静默换引擎会给出
+   * 「看起来能用、其实换了实现」的结果，比空命中更让人困惑。
+   *
+   * ## `scoreThreshold` 的语义
+   *
+   * 三种引擎的分数量纲不同：FTS5 是 `bm25` 取负（无界正数），向量是余弦
+   * （`[-1, 1]`），融合是 RRF（约 `1/61` 到 `2/61`）。`scoreThreshold` 作用在
+   * **本引擎最终排序分**上——单引擎是层级加权后的分（§8.5），`hybrid` 是融合分。
+   * 同一个阈值在三种引擎下不可比，切换引擎时必须重新标定。
    */
-  async find(query: string, options: FindOptions): Promise<readonly ScoredHit[]> {
+  async find(query: string, options: FindOptions): Promise<readonly RankedScoredHit[]> {
+    const outcome = await this.#findWithOutcome(query, options);
+    return outcome.hits;
+  }
+
+  /**
+   * `find` 的内部实现。返回 `degradation` 让 `search` 能把「向量降级」写进
+   * `plan.reason`（`find` 的返回体里没有 plan 这一列）。
+   */
+  async #findWithOutcome(query: string, options: FindOptions): Promise<RetrieveOutcome> {
     const startedAt = process.hrtime.bigint();
     const limit = resolveLimit(options.limit);
     const filtered = applyQueryFilters(query, this.#queryFilters);
@@ -296,26 +438,235 @@ export class SearchService {
         returned: 0,
         durationMs: elapsedMs(startedAt),
       });
-      return [];
+      return { hits: [], degradation: null };
     }
 
-    const hits = await this.#index.search({
-      text: filtered,
-      scopes: options.scopes,
-      principals: options.principals,
-      contextTypes: options.contextTypes,
-      levels: options.levels,
-      limit,
-    });
-
-    const result = this.#rank(hits, limit, options.scoreThreshold);
+    const outcome = await this.#retrieve(filtered, options, limit);
+    if (outcome.degradation !== null) {
+      this.#logger.warn('向量检索降级', {
+        subject: options.subject,
+        engine: this.#engine,
+        reason: outcome.degradation,
+        returned: outcome.hits.length,
+      });
+    }
     this.#logger.info('检索完成', {
       subject: options.subject,
       queryLength: filtered.length,
-      returned: result.length,
+      engine: this.#engine,
+      returned: outcome.hits.length,
       durationMs: elapsedMs(startedAt),
     });
-    return result;
+    return outcome;
+  }
+
+  /** 按配置的引擎分派。`fts5` 分支与接入向量前的实现逐字一致（回归基线）。 */
+  async #retrieve(text: string, options: FindOptions, limit: number): Promise<RetrieveOutcome> {
+    if (this.#engine === 'fts5') {
+      const hits = await this.#index.search({
+        text,
+        scopes: options.scopes,
+        principals: options.principals,
+        contextTypes: options.contextTypes,
+        levels: options.levels,
+        limit,
+      });
+      return {
+        hits: this.#rank(hits, limit, options.scoreThreshold).map((hit) => ({
+          ...hit,
+          ranks: null,
+        })),
+        degradation: null,
+      };
+    }
+
+    const vector = this.#vector;
+    if (vector === null) {
+      // 构造期已经挡掉；走到这里说明实例被绕过构造器篡改过。
+      throw new ComemError('INTERNAL', `检索后端 ${this.#engine} 缺少向量依赖。`, {
+        engine: this.#engine,
+      });
+    }
+    return this.#engine === 'vector'
+      ? this.#retrieveVector(vector, text, options, limit)
+      : this.#retrieveHybrid(vector, text, options, limit);
+  }
+
+  /**
+   * 纯向量检索。
+   *
+   * 降级时返回空命中 + 原因，**不退回 FTS5**（见 `find` 的引擎差异）。调用方从
+   * 日志与 `search` 的 `plan.reason` 能看到原因。
+   */
+  async #retrieveVector(
+    vector: VectorRetrievalDeps,
+    text: string,
+    options: FindOptions,
+    limit: number,
+  ): Promise<RetrieveOutcome> {
+    const embedded = await vector.embedding.embed([text]);
+    const queryVector = embedded.vectors[0];
+    if (embedded.degraded || queryVector === undefined) {
+      return {
+        hits: [],
+        degradation: embedded.reason ?? '向量检索没有拿到查询向量。',
+      };
+    }
+
+    const model = vector.embedding.model;
+    if (model === null) {
+      return { hits: [], degradation: '没有配置嵌入模型，无法按模型过滤向量。' };
+    }
+
+    const uris = await this.#readableUris(options);
+    const raw = await vector.vectors.search({ vector: queryVector, model, uris, limit });
+    const enriched = this.#enrich(raw, options, vector.nodes);
+    const ranked = this.#rank(enriched, limit, options.scoreThreshold);
+    return {
+      hits: ranked.map((hit, index) => ({
+        ...hit,
+        ranks: { fts5: null, vector: index + 1, hybrid: null },
+      })),
+      degradation: null,
+    };
+  }
+
+  /**
+   * 混合检索：并行跑 FTS5 与向量，RRF 融合。
+   *
+   * **融合用两个后端自己的排序**，不先做层级加权：加权会改变名次，而 RRF 的输入
+   * 就是「各后端认为谁更相关」。层级加权只在单引擎与最终展示分上有意义。
+   *
+   * 向量降级时退化成纯 FTS5，并把原因带回给 `search` 的 `plan`。
+   */
+  async #retrieveHybrid(
+    vector: VectorRetrievalDeps,
+    text: string,
+    options: FindOptions,
+    limit: number,
+  ): Promise<RetrieveOutcome> {
+    // 两路并行：串行会让一次 hybrid 查询把两倍的索引延迟叠在用户身上。
+    const [ftsHits, embedded] = await Promise.all([
+      this.#index.search({
+        text,
+        scopes: options.scopes,
+        principals: options.principals,
+        contextTypes: options.contextTypes,
+        levels: options.levels,
+        limit,
+      }),
+      vector.embedding.embed([text]),
+    ]);
+
+    const queryVector = embedded.vectors[0];
+    const model = vector.embedding.model;
+    let vectorHits: SearchHit[] = [];
+    let degradation: string | null = null;
+
+    if (embedded.degraded || queryVector === undefined) {
+      degradation = embedded.reason ?? '向量检索没有拿到查询向量。';
+    } else if (model === null) {
+      degradation = '没有配置嵌入模型，无法按模型过滤向量。';
+    } else {
+      const uris = await this.#readableUris(options);
+      const raw = await vector.vectors.search({ vector: queryVector, model, uris, limit });
+      vectorHits = this.#enrich(raw, options, vector.nodes);
+    }
+
+    const fused = reciprocalRankFusion(
+      [
+        { engine: 'fts5', hits: ftsHits },
+        { engine: 'vector', hits: vectorHits },
+      ],
+      { limit },
+    );
+
+    return {
+      // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
+      hits: fused
+        .filter(
+          (hit: FusedHit) =>
+            options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
+        )
+        .map((hit: FusedHit) => ({
+          uri: hit.uri,
+          contextType: hit.contextType,
+          memoryType: hit.memoryType,
+          level: hit.level,
+          abstract: hit.abstract,
+          score: hit.score,
+          ranks: hit.ranks,
+        })),
+      degradation,
+    };
+  }
+
+  /**
+   * 向量检索的候选集：`scope` 下**全部**可读 URI。
+   *
+   * 不能传 `limit` 条：传少了会漏掉「BM25 排第 50 但向量排第 1」的命中，而 RRF
+   * 的意义正是两个后端都有完整候选。代价是每次查询把可读 URI 全查一遍（O(n)），
+   * 见 `VECTOR_CANDIDATE_LIMIT` 的说明。
+   *
+   * 权限过滤在这里完成（`glob` 的 SQL 里就是 `node_permission` 的 allow/deny
+   * 谓词），所以传进 `SqliteVectorIndex.search` 的已经是可读集合——向量索引不需要
+   * 再查一次权限。
+   */
+  async #readableUris(options: FindOptions): Promise<readonly string[]> {
+    return this.#index.glob({
+      pattern: VECTOR_CANDIDATE_PATTERN,
+      scopes: options.scopes,
+      principals: options.principals,
+      limit: VECTOR_CANDIDATE_LIMIT,
+    });
+  }
+
+  /**
+   * 向量命中补全成 `SearchHit`。
+   *
+   * 向量索引只返回 URI + 分数；`node` 表的 `level` / `abstract` / `context_type` /
+   * `memory_type` / `status` 必须补上，否则 §8.6 的分层投放拿不到层级、事件类记忆
+   * 会退化成一句话摘要。`node` 行已不存在（索引与磁盘短暂不一致）时跳过——留一条
+   * 打不开的命中比少一条更难查。
+   *
+   * `contextTypes` / `levels` / `status` 在这里过滤：FTS5 在 SQL 里做，向量后端
+   * 没有这些列，过滤必须落在补全之后。
+   */
+  #enrich(
+    hits: readonly VectorHit[],
+    options: FindOptions,
+    nodes: Pick<NodeRepository, 'get'>,
+  ): SearchHit[] {
+    const enriched: SearchHit[] = [];
+    for (const hit of hits) {
+      const node = nodes.get(hit.uri);
+      if (node === null || node.status !== 'active') {
+        continue;
+      }
+      if (
+        options.contextTypes !== undefined &&
+        options.contextTypes.length > 0 &&
+        !options.contextTypes.includes(node.contextType)
+      ) {
+        continue;
+      }
+      if (
+        options.levels !== undefined &&
+        options.levels.length > 0 &&
+        !options.levels.includes(node.level)
+      ) {
+        continue;
+      }
+      enriched.push({
+        uri: hit.uri,
+        level: node.level,
+        abstract: node.abstract,
+        score: hit.score,
+        contextType: node.contextType,
+        memoryType: node.memoryType,
+      });
+    }
+    return enriched;
   }
 
   /**
@@ -341,7 +692,7 @@ export class SearchService {
    * 可能不足 limit 条，宁可多取再合并。5 条查询各返回 10 条，合并去重后仍然最多
    * `limit` 条。
    */
-  async search(query: string, options: SearchOptions): Promise<SearchResult> {
+  async search(query: string, options: SearchOptions): Promise<ScoredSearchResult> {
     const startedAt = process.hrtime.bigint();
     const limit = resolveLimit(options.limit);
     const maxQueries = resolveMaxQueries(options.maxQueries);
@@ -387,7 +738,7 @@ export class SearchService {
     const ran = await Promise.all(
       analysis.queries.map(async (typedQuery) => ({
         typedQuery,
-        hits: await this.find(typedQuery.text, {
+        outcome: await this.#findWithOutcome(typedQuery.text, {
           scopes: options.scopes,
           subject: options.subject,
           principals: options.principals,
@@ -404,7 +755,13 @@ export class SearchService {
       original: query,
       queries: analysis.queries,
       analyzed: analysis.analyzed,
-      reason: analysis.reason,
+      // 向量降级与意图分析失败是两条独立的降级路径，都要能解释。`plan.reason`
+      // 是 `SearchPlan` 上唯一能承载「这次为什么不是完整结果」的字段，两条都
+      // 非空时拼接，不覆盖任何一条。
+      reason: combineReasons(
+        analysis.reason,
+        ran.map((entry) => entry.outcome.degradation),
+      ),
       elapsedMs: elapsedMs(startedAt),
     };
     this.#logger.info('检索完成（含意图分析）', {
@@ -827,12 +1184,12 @@ function fallbackQuery(query: string): TypedQuery {
  * 一次匹配。降序 + `slice(0, limit)` 与 `find` 的 `rankCandidates` 是同一套口径。
  */
 function mergeHits(
-  ran: readonly { readonly typedQuery: TypedQuery; readonly hits: readonly ScoredHit[] }[],
+  ran: readonly { readonly typedQuery: TypedQuery; readonly outcome: RetrieveOutcome }[],
   limit: number,
-): SearchResultHit[] {
-  const byUri = new Map<string, SearchResultHit>();
-  for (const { typedQuery, hits } of ran) {
-    for (const hit of hits) {
+): ScoredSearchHit[] {
+  const byUri = new Map<string, ScoredSearchHit>();
+  for (const { typedQuery, outcome } of ran) {
+    for (const hit of outcome.hits) {
       const existing = byUri.get(hit.uri);
       if (existing !== undefined && existing.score >= hit.score) {
         continue;
@@ -844,9 +1201,35 @@ function mergeHits(
         level: hit.level,
         abstract: hit.abstract,
         score: hit.score,
+        // 名次跟着命中的那条查询走：同一个 URI 被两条查询命中时，保留分数更高
+        // 的那次的 `ranks`，与 `score` / `matchedQuery` 同一套「取最好一次」口径。
+        ranks: hit.ranks,
         matchedQuery: typedQuery.text,
       });
     }
   }
   return [...byUri.values()].sort((left, right) => right.score - left.score).slice(0, limit);
+}
+
+/**
+ * 合并「意图分析降级」与「向量降级」两条原因。
+ *
+ * 两条都非空时拼接，不覆盖：它们回答的是不同问题（查询重写不可用 / 语义检索
+ * 不可用），只保留一条会让排查的人以为另一条没发生。去重是必要的——5 条
+ * TypedQuery 同时降级时原因完全相同，拼 5 遍只会让消息不可读。
+ */
+function combineReasons(
+  analysisReason: string | null,
+  degradations: readonly (string | null)[],
+): string | null {
+  const reasons: string[] = [];
+  if (analysisReason !== null) {
+    reasons.push(analysisReason);
+  }
+  for (const degradation of degradations) {
+    if (degradation !== null && !reasons.includes(degradation)) {
+      reasons.push(degradation);
+    }
+  }
+  return reasons.length === 0 ? null : reasons.join('；');
 }

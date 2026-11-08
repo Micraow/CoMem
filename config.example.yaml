@@ -14,13 +14,35 @@ providers:
         inputPerMillion: 0.15
         outputPerMillion: 0.60
 
+  # 语义检索的向量来源（OpenAI 兼容的 /v1/embeddings）。
+  #
+  # type: disabled 是默认值——没配就不产生嵌入调用。线上写记忆是热路径，
+  # 一次悄悄打出去的网络请求会把「本地数据库」变成「依赖第三方可用性的数据库」。
+  #
+  # 把 retrieval.engine 设为 vector / hybrid 而这里仍是 disabled 时，
+  # loadConfig 会抛 INVALID_ARGUMENT。不要静默降级：那正是「配置改了不生效」。
+  embedding:
+    type: openai-compatible    # openai-compatible | disabled
+    baseUrl: https://api.example.com/v1
+    model: BAAI/bge-m3
+    apiKey: ${COMEM_EMBEDDING_KEY}
+    # 必须与模型一致。写错在第一次嵌入时抛 PROVIDER_UNAVAILABLE——
+    # 维度不匹配时向量检索会把所有行当噪音跳过，且不报错。
+    dimension: 1024
+    maxBatchSize: 64           # 供应商常见上限 100–2048，取保守值
+    timeoutSeconds: 30
+
 summary:
   generator: llm          # llm | rule
   abstractMaxChars: 256
   overviewMaxChars: 4000
 
 retrieval:
-  engine: fts5            # fts5 | vector（v1 只有 fts5）
+  # fts5 | vector | hybrid
+  #   fts5   关键词检索（BM25 + 中文 unigram 分词），零依赖
+  #   vector 语义检索，需要 providers.embedding
+  #   hybrid 并行跑两者再按 RRF 融合（推荐：关键词擅长专有名词，语义擅长同义改写）
+  engine: fts5
   candidateMultiplier: 4  # 先取 limit×N 候选，再按权限过滤
   levelWeights:           # 层级加权，用于 BM25 平局时打破
     l0: 1.15

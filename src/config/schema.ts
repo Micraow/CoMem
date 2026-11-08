@@ -11,6 +11,8 @@
 
 import { z } from 'zod';
 
+import { ComemError } from '../domain/errors.js';
+
 const llmProviderSchema = z.object({
   /**
    * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`，
@@ -32,6 +34,45 @@ const llmProviderSchema = z.object({
     .prefault({}),
 });
 
+/**
+ * 嵌入供应商（架构文档 §18 的 `providers.embedding`）。
+ *
+ * `type: 'disabled'` 是默认值：没配就不该产生嵌入调用。线上写记忆是热路径，一次
+ * 悄悄打出去的网络请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败
+ * 还是静默降级的——用户只会看到语义检索查不出东西。
+ *
+ * 默认维度 1536 对应 `text-embedding-3-small`。**写错在第一次嵌入时抛
+ * `PROVIDER_UNAVAILABLE`**（见 `adapters/llm/embedding-provider.ts` 的维度校验），
+ * 不在配置加载期拦：维度是否与模型一致只有问过供应商才知道。
+ */
+const embeddingProviderSchema = z
+  .object({
+    /** `openai-compatible` | `anthropic` | `disabled` */
+    type: z.enum(['openai-compatible', 'anthropic', 'disabled']).default('disabled'),
+    baseUrl: z.string().default(''),
+    /** 如 `text-embedding-3-small` */
+    model: z.string().default('text-embedding-3-small'),
+    apiKey: z.string().default(''),
+    /**
+     * 向量维度。必须与模型一致，写错在第一次嵌入时抛 `PROVIDER_UNAVAILABLE`。
+     *
+     * 1536 是 `text-embedding-3-small` 的维度。换模型时要同步改这里，否则
+     * `node_embedding.dimension` 与查询向量长度不一致，向量检索会把所有行当噪音跳过。
+     */
+    dimension: z.number().int().positive().default(1536),
+    /**
+     * 单次请求的条数上限。
+     *
+     * 128 是经验值，来源是「供应商常见上限」：OpenAI 单次最多 2048 条，Azure
+     * 只有 16 条，多数兼容实现落在 100–2048 之间。取 128 对常见供应商都安全，
+     * 真实供应商有更小的上限时用这个字段覆盖。
+     */
+    maxBatchSize: z.number().int().positive().default(128),
+    /** 单批超时，秒。30 秒是经验值：嵌入是短请求，卡住不该占着租约等两分钟。 */
+    timeoutSeconds: z.number().int().positive().default(30),
+  })
+  .prefault({});
+
 const levelWeightsSchema = z
   .object({
     l0: z.number().positive().default(1.15),
@@ -41,8 +82,15 @@ const levelWeightsSchema = z
   .prefault({});
 
 const retrievalSchema = z.object({
-  /** `fts5` | `vector`（v1 只有 fts5） */
-  engine: z.enum(['fts5', 'vector']).default('fts5'),
+  /**
+   * 检索后端（§8.3、§18）。
+   *
+   * `fts5` 是关键词检索（`SqliteFtsIndex`），`vector` 是语义检索（`SqliteVectorIndex`），
+   * `hybrid` 并行跑两者再按 `reciprocalRankFusion` 融合。三个取值都必须能写进配置：
+   * 值域与 `domain/retrieval.ts` 的 `RetrievalEngine` 是同一个联合，少一个就是「写进
+   * 去不生效」的假配置。
+   */
+  engine: z.enum(['fts5', 'vector', 'hybrid']).default('fts5'),
   /** 先取 limit×N 候选，再按权限过滤 */
   candidateMultiplier: z.number().int().positive().default(4),
   /** 层级加权，用于 BM25 平局时打破 */
@@ -75,7 +123,7 @@ const retrievalSchema = z.object({
     .prefault({}),
 });
 
-const configSchema = z.object({
+const configObjectSchema = z.object({
   /** 数据根。留空表示按运行形态推导（见 §6.5），容器里由镜像钉死为 /var/lib/comem */
   dataDir: z.string().default(''),
 
@@ -86,6 +134,7 @@ const configSchema = z.object({
           default: llmProviderSchema.prefault({}),
         })
         .prefault({}),
+      embedding: embeddingProviderSchema.prefault({}),
     })
     .prefault({}),
 
@@ -191,6 +240,38 @@ const configSchema = z.object({
       concurrency: z.number().int().positive().default(4),
     })
     .prefault({}),
+});
+
+/**
+ * 交叉校验：检索后端要向量，就必须有嵌入供应商。
+ *
+ * **不能静默降级成 FTS5。** 用户把 `retrieval.engine` 改成 `vector`，是因为他要
+ * 语义检索；退回关键词检索会给出「看起来能用、实际没按配置生效」的结果，正是
+ * AGENTS.md §1 说的「假配置」。这种错误在启动时抛，比在第一次查询时发现好。
+ *
+ * 为什么写在 `transform` 里而不是 `superRefine`：`config/index.ts` 的
+ * `validate()` 只按 issue 的 `code` 生成消息（`describeIssue`），自定义 refine 的
+ * `message` 会被丢掉；而这条要求「说明 `retrieval.engine` 需要
+ * `providers.embedding`」，消息必须完整。`ComemError` 不是 `ZodError`，
+ * `safeParse` 会原样抛出。
+ *
+ * `anthropic` 不提供嵌入接口，但它在 `AiSdkEmbeddingProvider` 构造期抛
+ * `INVALID_ARGUMENT`——这里只判断 `disabled`，不重复判断供应商能力。
+ */
+const configSchema = configObjectSchema.transform((config) => {
+  const engine = config.retrieval.engine;
+  if (engine !== 'fts5' && config.providers.embedding.type === 'disabled') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      `retrieval.engine 需要 providers.embedding：engine 是 ${engine} 时必须配置嵌入模型，否则没有可用的向量来源。`,
+      {
+        engine,
+        embeddingType: config.providers.embedding.type,
+        field: 'providers.embedding',
+      },
+    );
+  }
+  return config;
 });
 
 export type ComemConfig = z.infer<typeof configSchema>;
