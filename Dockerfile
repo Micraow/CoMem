@@ -1,32 +1,38 @@
 # CoMem 生产镜像。
 #
-# 五个阶段，职责单一：
-#   deps       安装完整 Node 依赖（含 devDependencies——tsx 与 nuxt build 都要它）
-#   build      typecheck + 配置自检 + 控制台构建（web/.output）
-#   inference  源码编译 llama-cpp-python（CPU + Vulkan 后端）
-#   prod-deps  把 deps 的依赖树裁成生产子集 + 全局 tsx（运行时只需要这两样）
-#   runtime    最小运行时：node_modules + src + prompts + integrations + web/.output
-#              + 本地推理的 venv / 源码
+# 默认目标是**核心镜像**：没有本地推理（llama.cpp / Vulkan / Mesa / Python），
+# 适合绝大多数「嵌入走远程 OpenAI 兼容 API」的部署。本地推理是显式 target：
 #
-# 另有 test 阶段（FROM build），只在 CI / 本地验证时构建：生产镜像按定义不带
-# vitest / eslint，跑全量测试要它们。
+#   docker build -t comem:local .                                     # 核心（默认）
+#   docker build --target inference-runtime -t comem:local-inference . # 核心 + 本地推理
 #
-# 为什么运行时用 tsx 而不是先 tsc 出 dist/：
-#   仓库的 tsconfig 是 noEmit + moduleResolution: Bundler，源码按 ESM 惯例 import
-#   '../domain/errors.js'（只有编译后才存在）。改成 tsc 出 dist 要同时改
-#   moduleResolution、加 build 脚本、处理 .js 扩展名与 sourcemap 路径，改动会
-#   扩散到与「做镜像」无关的模块（AGENTS.md §6）。tsx 把这层解析接管掉，
-#   代价是一个 devDependency 与每次启动的 transpile（实测冷启动约 1s）。
+# 阶段划分：
+#   base        node 24 + ca-certificates（两个运行期镜像的共同底座）
+#   deps        pnpm + 完整 Node 依赖（含 devDependencies，构建要它们）
+#   build       typecheck + 配置自检 + 控制台构建 + `pnpm build`（dist/）
+#   test        lint + unit/integration + integrations 测试（只在 --target test 时构建）
+#   prod-deps   把 deps 的依赖树裁成生产子集
+#   inference   源码编译 llama-cpp-python（CPU + Vulkan），与 CoMem 源码无关
+#   core        核心运行时：dist + 生产 node_modules + prompts + integrations + web/.output
+#   inference-runtime  core + 推理 venv / Python / Vulkan 运行库
+#   runtime     默认目标，等于 core（放在最后，`docker build .` 产出核心镜像）
+#
+# 为什么生产跑 dist/ 而不是 tsx：`tsx` 会把 TypeScript（esbuild）带进运行镜像，
+# 实测 123MB，而它只省掉一次 `tsc`（1.9 秒）。`pnpm build` 用单独的
+# tsconfig.build.json 产出 dist/，`start` 就是 `node dist/bootstrap/main.js`。
 #
 # 为什么是 node:24 而不是 22：engines.node >= 22.5.0 是硬下限（node:sqlite），
 # 24 是当前 LTS 且 node:sqlite / node:test / fetch 都稳定。镜像标签固定到
 # 次版本（bookworm-slim），不用 latest。
+#
+# 不换 alpine：`sqlite-vec` 是 glibc 原生扩展，musl 上要重编译；`node:sqlite`
+# 的行为也不同。省下的约 100MB 不值得引入一整个平台的差异。
 
 # syntax=docker/dockerfile:1.7
 
 ARG NODE_IMAGE=node:24-bookworm-slim
 
-# ---------- base：pnpm + tsx（所有阶段共享） ----------
+# ---------- base：Node 运行时 + 根证书 ----------
 FROM ${NODE_IMAGE} AS base
 
 # ca-certificates 必须装：node:24-bookworm-slim 不带 /etc/ssl/certs，
@@ -36,22 +42,21 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# pnpm 与 tsx 都固定版本：镜像可复现，不随 latest 漂移。
-# tsx 版本必须与 pnpm-lock.yaml 一致，build 阶段有断言。
-ARG PNPM_VERSION=12.17.0
-ARG TSX_VERSION=4.23.15
-RUN npm install --global --no-fund --no-audit \
-      "pnpm@${PNPM_VERSION}" \
-      "tsx@${TSX_VERSION}"
-
-ENV PNPM_HOME=/pnpm \
-    PATH=/pnpm:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
-    NUXT_TELEMETRY_DISABLED=1
+# 控制台的 Nuxt 构建在 deps/build 阶段跑；运行期只是复制产物。
+ENV NUXT_TELEMETRY_DISABLED=1
 
 WORKDIR /app
 
-# ---------- deps：完整依赖（层缓存只依赖 lockfile） ----------
+# ---------- deps：pnpm + 完整依赖（层缓存只依赖 lockfile） ----------
 FROM base AS deps
+
+# pnpm 只装到构建链上：运行镜像用 `node dist/...` 启动，不需要包管理器。
+# 版本固定，镜像可复现，不随 latest 漂移。
+ARG PNPM_VERSION=12.17.0
+RUN npm install --global --no-fund --no-audit "pnpm@${PNPM_VERSION}"
+
+ENV PNPM_HOME=/pnpm \
+    PATH=/pnpm:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # 后端与控制台是**两个独立的 pnpm 包**：根 pnpm-workspace.yaml 只有 allowBuilds，
 # 没有 packages 字段；web/ 自带 package.json + pnpm-lock.yaml + pnpm-workspace.yaml。
@@ -65,11 +70,8 @@ RUN --mount=type=cache,id=comem-pnpm-store,target=/root/.local/share/pnpm/store 
 RUN --mount=type=cache,id=comem-pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --dir web
 
-# ---------- build：类型检查 + 配置自检 + 控制台产物 ----------
+# ---------- build：类型检查 + 配置自检 + 控制台 + 后端产物 ----------
 FROM deps AS build
-
-# 只在这一个阶段需要：校验「Dockerfile 里钉的 tsx 版本」与 lockfile 一致。
-ARG TSX_VERSION=4.23.15
 
 # 源码放在依赖之后：改一行源码只重跑这一层，依赖层命中缓存。
 COPY . .
@@ -81,19 +83,27 @@ RUN pnpm typecheck \
 # 控制台：Nuxt 3 独立构建，产物在 web/.output（自包含，含 server/node_modules）。
 RUN pnpm --dir web build
 
-# 断言 1：全局 tsx 与 lockfile 同版本，否则运行时的解析行为与本地不同。
-# 断言 2：sqlite-vec 的平台预编译包必须在产物里——它是可选依赖，装漏了
-#         `vec0` 虚拟表会在第一次向量检索时报 "no such module"。
-RUN test "$(node -p "require('./node_modules/tsx/package.json').version")" = "${TSX_VERSION}" \
- || (echo "tsx 版本漂移：lockfile=$(node -p "require('./node_modules/tsx/package.json').version") Dockerfile=${TSX_VERSION}" >&2; exit 1)
+# 后端：tsc 出 dist/（`start` 指向 dist/bootstrap/main.js）。SQL 迁移文件由
+# scripts/copy-build-assets.mjs 一起复制——`database.ts` 用 import.meta.url 定位。
+RUN pnpm build
+
+# 断言：sqlite-vec 的平台预编译包必须在产物里——它是可选依赖，装漏了
+# `vec0` 虚拟表会在第一次向量检索时报 "no such module"。
 RUN test -f "$(node -p "require('sqlite-vec').getLoadablePath()")" \
  || (echo "缺少 sqlite-vec 平台预编译包（getLoadablePath() 指向的 .so 不存在）" >&2; exit 1)
 
+# 断言：入口与迁移文件在 dist 里。少了任何一个，镜像都能构建成功但起不来。
+RUN test -f dist/bootstrap/main.js \
+ && test -d dist/adapters/sqlite/migrations \
+ || (echo "dist 产物不完整：缺少 bootstrap/main.js 或 SQL 迁移目录" >&2; exit 1)
+
 # ---------- test：只在验证/CI 里构建 ----------
-# 生产镜像不带 vitest / eslint（见 prod-deps）。全量测试与 lint 在这个阶段跑，
-# 它与 runtime 共用 base（同一个 Node、同一个 sqlite-vec 预编译包）。
+# 生产镜像不带 vitest / eslint（见 prod-deps）。全量门禁在这个阶段跑，它与
+# runtime 共用 base（同一个 Node、同一个 sqlite-vec 预编译包）。
 FROM build AS test
-RUN pnpm lint
+RUN pnpm lint \
+ && pnpm test \
+ && pnpm test:integrations
 
 # ---------- inference：源码编译 llama-cpp-python（CPU + Vulkan） ----------
 #
@@ -138,7 +148,7 @@ RUN apt-get update \
 # **bookworm 的 Vulkan 头文件太旧。** Debian 12 的 libvulkan-dev 是 1.3.239，
 # 而 llama-cpp-python 0.3.36 vendor 的 llama.cpp 用了 VK_EXT_layer_settings
 # （`vk::LayerSettingEXT`，Vulkan-Headers 1.3.263 起才有）。用系统头文件编译
-# 会在 ggml-vulkan.cpp 报一屏 `‘LayerSettingEXT’ is not a member of ‘vk’`。
+# 会在 ggml-vulkan.cpp 报一屏 `'LayerSettingEXT' is not a member of 'vk'`。
 #
 # 只换头文件、不换 loader：Vulkan 1.0 起 ABI 稳定，llama.cpp 用到的入口
 # 1.3.239 的 libvulkan.so 都导出。头文件版本钉死，构建可复现。
@@ -196,7 +206,7 @@ assert any("vulkan" in name for name in libs), f"没有编入 Vulkan 后端：{l
 # 不在包目录里。ggml 的 `ggml_backend_load_all()` 只扫「可执行文件所在目录」，
 # 而 venv 的 python 是 /usr/local/bin/python3.12 的符号链接，`/proc/self/exe`
 # 解析到 /usr/local/bin。所以变体要放到 /usr/local/bin，构建期先收进
-# /opt/comem-inference/backends/cpu，由 runtime 阶段 COPY 过去。
+# /opt/comem-inference/backends/cpu，由运行期阶段 COPY 过去。
 backends = pathlib.Path("/opt/comem-inference/backends")
 (backends / "cpu").mkdir(parents=True, exist_ok=True)
 variants = sorted(pathlib.Path(package.parent / "bin").glob("libggml-cpu-*.so"))
@@ -226,28 +236,81 @@ FROM deps AS prod-deps
 # node_modules，105ms 完成。
 #
 # `pnpm prune --prod` 保留 dependencies 的传递闭包（fastify / ai / zod / yaml /
-# sqlite-vec-<platform>），删掉 devDependencies（typescript / eslint / vitest）。
-# tsx 虽然在 devDependencies 里，但它已作为全局包装进 /usr/local，运行时用
-# PATH 解析，不依赖 node_modules/.bin。
+# sqlite-vec-<platform>），删掉 devDependencies（typescript / eslint / vitest / tsx）。
 RUN pnpm prune --prod
 
-# ---------- runtime ----------
-FROM base AS runtime
+# ---------- core：核心运行时（默认镜像） ----------
+FROM base AS core
 
-# 生产形态给 pnpm / node 看的开关。NODE_ENV=production 必须在这里设，
-# 不能设在 base：否则 deps 阶段的 `pnpm install` 会跳过 devDependencies，
-# tsx / nuxt / vitest 全装不上。
-# GGML_BACKEND_PATH 指向本地推理的 Vulkan 后端：DL 构建里 ggml 不会自动扫到它
-# （见 inference 阶段的说明）。指向符号链接；native 构建里这个 .so 已经作为依赖
-# 载入，再 dlopen 一次是幂等的。
+# 生产形态给 node 看的开关。NODE_ENV=production 必须在这里设，不能设在 base：
+# 否则 deps 阶段的 `pnpm install` 会跳过 devDependencies，nuxt / vitest 全装不上。
 ENV NODE_ENV=production \
-    COMEM_SERVER_HOST=0.0.0.0 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    GGML_BACKEND_PATH=/opt/comem-inference/backends/libggml-vulkan.so
+    COMEM_SERVER_HOST=0.0.0.0
+
+# 数据根（架构文档 §6.5：容器里固定 /var/lib/comem）。
+# 宿主挂匿名卷 / 命名卷时，Docker 从这里继承属主；bind mount 需要宿主自己 chown。
+RUN mkdir -p /var/lib/comem \
+ && chown node:node /var/lib/comem
+
+# 生产依赖（符号链接结构原样复制）。tsx / typescript / vitest 已被 prune 掉。
+COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+
+# 运行时要读的仓库文件。config.yaml 不在镜像里：它是部署方的配置，靠挂载提供。
+# package.json 必须留着：`"type": "module"` 决定 dist/ 按 ESM 解析。
+COPY --from=build --chown=node:node \
+     /app/package.json \
+     /app/config.example.yaml \
+     ./
+# 后端产物：dist/ 由 `pnpm build` 生成（含复制过去的 SQL 迁移）。
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/prompts ./prompts
+# 宿主 Hook 插件是纯 .mjs，不 import src/，独立复制。
+COPY --from=build --chown=node:node /app/integrations ./integrations
+COPY --from=build --chown=node:node /app/web/.output ./web/.output
+
+# 入口脚本只有 exec 一行：把 PID 1 让给 node，信号才能到进程。
+# 写成文件是为了让 `ENTRYPOINT` + `CMD` 分离，同时允许
+#   docker run comem:local node dist/commands/ingest.js --source all
+# 这种「整体替换命令」的用法。
+RUN printf '%s\n' '#!/bin/sh' 'set -e' 'exec "$@"' > /usr/local/bin/comem-entrypoint \
+ && chmod 0755 /usr/local/bin/comem-entrypoint
+
+USER node
+
+# 实际默认端口（config.schema.ts 的 server.port 默认 1933）。改端口用
+# `-e COMEM_SERVER_PORT=...` 或挂载配置，EXPOSE 只是元数据。
+EXPOSE 1933
+
+# 端口从「服务实际读到的配置」推导，不硬编码：
+#   1. /proc/1/cmdline 里的 --config（默认 CMD 传的就是它）
+#   2. 没有 --config 时回落到 /app/config.yaml（loadConfig 的默认路径）
+#   3. 环境变量 COMEM_SERVER_PORT / COMEM_SERVER_HOST 覆盖（与 loadConfig 的
+#      优先级一致：CLI > env > 文件 > 默认值）
+# 监听 0.0.0.0 / :: 时探 127.0.0.1。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "--input-type=module", "-e", "import fs from 'node:fs';import { createRequire } from 'node:module';const require = createRequire('/app/package.json');const parse = require('yaml').parse;const argv = fs.existsSync('/proc/1/cmdline') ? fs.readFileSync('/proc/1/cmdline', 'utf8').split('\\0') : [];const i = argv.indexOf('--config');const cfg = i >= 0 && argv[i + 1] ? argv[i + 1] : '/app/config.yaml';let port = 1933;let host = '127.0.0.1';try { const c = parse(fs.readFileSync(cfg, 'utf8')); port = c?.server?.port ?? port; host = c?.server?.host ?? host; } catch {}if (process.env.COMEM_SERVER_PORT) port = Number(process.env.COMEM_SERVER_PORT);if (process.env.COMEM_SERVER_HOST) host = process.env.COMEM_SERVER_HOST;if (host === '0.0.0.0' || host === '::') host = '127.0.0.1';const res = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });process.exit(res.ok ? 0 : 1);"]
+
+# 默认命令：跑服务端。`--config` 指向的文件可以不存在（loadConfig 把
+# 「文件不存在」当默认值），挂载进来就生效。
+ENTRYPOINT ["/usr/local/bin/comem-entrypoint"]
+CMD ["node", "dist/bootstrap/main.js", "--config", "/etc/comem/config.yaml"]
+
+# ---------- inference-runtime：core + 本地推理运行时 ----------
+#
+# 只有需要在容器里跑 embedding / rerank（llama.cpp）时才构建这个目标。
+# 多出来的 647MB 全是推理：Mesa + Vulkan + Python + venv。
+FROM core AS inference-runtime
+
+# 这个镜像有两种用法：默认 CMD 跑 Node 后端，compose / 文档里覆盖成 Python 推理
+# 服务。core 的 HEALTHCHECK 探的是 1933，对 Python 进程会一直报 unhealthy。
+# 关掉内置探活，由 compose 的 inference 服务定义 8089 的探活；单独 `docker run`
+# 时如果要探活，用 `--health-cmd` 自己加。
+HEALTHCHECK NONE
+
+USER root
 
 # 运行期依赖：
-#   ca-certificates  已在 base 装（LLM 供应商的 HTTPS）
-#   libvulkan1       Vulkan loader（推理容器 --device gpu 用）
+#   libvulkan1       Vulkan loader（--device /dev/dri 用）
 #   mesa-vulkan-drivers  Intel / AMD 的 Vulkan ICD（容器里没有它就看得到
 #                    loader、看不到物理设备）
 #   vulkan-tools     vulkaninfo，排查「GPU 设备可见吗」用
@@ -277,27 +340,6 @@ RUN echo 'deb http://deb.debian.org/debian bookworm-backports main' \
       libsqlite3-0 libncursesw6 libgdbm6 libnsl2 libtirpc3 libreadline8 \
  && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/bookworm-backports.list
 
-# 数据根（架构文档 §6.5：容器里固定 /var/lib/comem）。
-# 宿主挂匿名卷 / 命名卷时，Docker 从这里继承属主；bind mount 需要宿主自己 chown。
-RUN mkdir -p /var/lib/comem \
- && chown node:node /var/lib/comem
-
-# 生产依赖（符号链接结构原样复制，见 docs/operations.md「Docker 部署」的体积实测）
-COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
-
-# 运行时要读的仓库文件。config.yaml 不在镜像里：它是部署方的配置，靠挂载提供。
-COPY --from=build --chown=node:node \
-     /app/package.json \
-     /app/pnpm-lock.yaml \
-     /app/pnpm-workspace.yaml \
-     /app/tsconfig.json \
-     /app/config.example.yaml \
-     ./
-COPY --from=build --chown=node:node /app/src ./src
-COPY --from=build --chown=node:node /app/prompts ./prompts
-COPY --from=build --chown=node:node /app/integrations ./integrations
-COPY --from=build --chown=node:node /app/web/.output ./web/.output
-
 # 本地推理：源码 + 编译好的 venv。模型权重（1.28GB）不进镜像，运行时挂到 /models。
 # Python 3.12 的解释器从 inference 阶段复制：Debian 12 自带的 3.11 不满足
 # pyproject 的 requires-python，而且换解释器版本会让 venv 里的 .so 对不上。
@@ -313,29 +355,15 @@ COPY --from=inference /opt/comem-inference /opt/comem-inference
 COPY --from=inference /opt/comem-inference/backends/cpu/ /usr/local/bin/
 RUN ldconfig
 
-# 入口脚本只有 exec 一行：把 PID 1 让给 pnpm，信号才能到 node。
-# 写成文件是为了让 `ENTRYPOINT` + `CMD` 分离，同时允许
-#   docker run comem pnpm ingest --source all
-# 这种「整体替换命令」的用法。
-RUN printf '%s\n' '#!/bin/sh' 'set -e' 'exec "$@"' > /usr/local/bin/comem-entrypoint \
- && chmod 0755 /usr/local/bin/comem-entrypoint
+# GGML_BACKEND_PATH 指向本地推理的 Vulkan 后端：DL 构建里 ggml 不会自动扫到它
+# （见 inference 阶段的说明）。指向符号链接；native 构建里这个 .so 已经作为依赖
+# 载入，再 dlopen 一次是幂等的。
+ENV GGML_BACKEND_PATH=/opt/comem-inference/backends/libggml-vulkan.so \
+    PYTHONDONTWRITEBYTECODE=1
 
 USER node
 
-# 实际默认端口（config.schema.ts 的 server.port 默认 1933）。改端口用
-# `-e COMEM_SERVER_PORT=...` 或挂载配置，EXPOSE 只是元数据。
-EXPOSE 1933
-
-# 端口从「服务实际读到的配置」推导，不硬编码：
-#   1. /proc/1/cmdline 里的 --config（默认 CMD 传的就是它）
-#   2. 没有 --config 时回落到 /app/config.yaml（loadConfig 的默认路径）
-#   3. 环境变量 COMEM_SERVER_PORT / COMEM_SERVER_HOST 覆盖（与 loadConfig 的
-#      优先级一致：CLI > env > 文件 > 默认值）
-# 监听 0.0.0.0 / :: 时探 127.0.0.1。
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD ["node", "--input-type=module", "-e", "import fs from 'node:fs';import { createRequire } from 'node:module';const require = createRequire('/app/package.json');const parse = require('yaml').parse;const argv = fs.existsSync('/proc/1/cmdline') ? fs.readFileSync('/proc/1/cmdline', 'utf8').split('\\0') : [];const i = argv.indexOf('--config');const cfg = i >= 0 && argv[i + 1] ? argv[i + 1] : '/app/config.yaml';let port = 1933;let host = '127.0.0.1';try { const c = parse(fs.readFileSync(cfg, 'utf8')); port = c?.server?.port ?? port; host = c?.server?.host ?? host; } catch {}if (process.env.COMEM_SERVER_PORT) port = Number(process.env.COMEM_SERVER_PORT);if (process.env.COMEM_SERVER_HOST) host = process.env.COMEM_SERVER_HOST;if (host === '0.0.0.0' || host === '::') host = '127.0.0.1';const res = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });process.exit(res.ok ? 0 : 1);"]
-
-# 默认命令：跑服务端。`--config` 指向的文件可以不存在（loadConfig 把
-# 「文件不存在」当默认值），挂载进来就生效。
-ENTRYPOINT ["/usr/local/bin/comem-entrypoint"]
-CMD ["pnpm", "start", "--", "--config", "/etc/comem/config.yaml"]
+# ---------- runtime：默认目标，等于 core ----------
+# 单独一个阶段是为了让默认 target 落在核心镜像上：`docker build .` 不带
+# --target 时构建最后一个阶段。推理镜像用 `--target inference-runtime`。
+FROM core AS runtime

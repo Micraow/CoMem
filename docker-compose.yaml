@@ -12,9 +12,14 @@
 #
 # 用法：
 #   cp config.example.yaml config.yaml     # 填 providers 的 key（或留空跑离线）
-#   docker compose build
+#   docker compose build                   # 只构建核心镜像（comem:local）
 #   docker compose up -d
 #   curl http://127.0.0.1:18080/health
+#
+# 需要容器内本地推理（embedding / rerank 走 llama.cpp）时：
+#   docker compose --profile inference build
+#   docker compose --profile inference up -d
+# 推理镜像比核心镜像大 647MB，默认不构建也不启动（见 docs/operations.md「Docker 部署」）。
 #
 # 端口全部绑在 127.0.0.1，不监听宿主机外部地址。要对外提供服务，前面还有一层
 # 真正的入口（TLS、认证），见 docs/operations.md「Docker 部署」。
@@ -27,6 +32,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 默认 target = 最后一个阶段 = 核心镜像（不含本地推理）。
+      target: runtime
       args:
         # 0 = 按构建机 CPU 指令集编译（默认，在目标机上 build）
         # 1 = 多 ISA 变体（CI 构建后分发到不同 CPU 必须用这个）
@@ -71,8 +78,20 @@ services:
 
   # 本地推理：OpenAI 兼容的 /v1/embeddings + Cohere 兼容的 /v1/rerank。
   # 模型权重（1.28GB）不进镜像，从宿主目录只读挂载到 /models。
+  #
+  # **可选 profile**：绝大多数部署用远程嵌入 API（providers.embedding.type:
+  # openai-compatible），不需要 llama.cpp / Vulkan / Mesa / Python。这些依赖
+  # 只存在于 inference-runtime 目标里，默认的 comem:local 镜像没有它们。
+  # 不指定 `--profile inference` 时这个服务不会被构建，也不会启动。
   inference:
-    image: "comem:${COMEM_TAG:-local}"
+    profiles: ["inference"]
+    image: "comem:${COMEM_TAG:-local}-inference"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: inference-runtime
+      args:
+        COMEM_PORTABLE_CPU: "${COMEM_PORTABLE_CPU:-0}"
     init: true
     restart: unless-stopped
     entrypoint: ["/opt/comem-inference/.venv/bin/python", "/app/local-inference/server.py"]

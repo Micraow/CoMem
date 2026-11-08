@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // 生产构建单独一份配置：tsconfig.json 是 noEmit 的类型门禁，这里只负责产出。
+    // 用 NodeNext 而不是 Bundler：产物直接交给 `node dist/...` 跑，模块解析必须
+    // 与 Node 的 ESM 语义一致（源码的 import 已经带 `.js` 扩展名）。
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    // 只做类型检查 + 转译，不产出声明文件：没有消费者，声明只会让镜像变大。
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -356,25 +356,26 @@ bash scripts/demo.sh     # 一条命令跑完六条链路，用 /tmp/comem-demo 
 ### 生产
 
 ```bash
-node --import tsx src/bootstrap/main.ts --config /etc/comem/config.yaml
+pnpm build                # tsc -p tsconfig.build.json → dist/（含 SQL 迁移）
+node dist/bootstrap/main.js --config /etc/comem/config.yaml
 ```
 
-**v1 为什么用 tsx。** 仓库没有构建步骤：`tsconfig.json` 是 `noEmit: true`，跑的就是源码。
-Node 22.5 起自带类型剥离，但它要求模块说明符指向真实文件，而源码按 ESM 惯例写的是
-`import ... from '../domain/errors.js'`（编译后才是 `.js`）。直接跑会失败：
+`pnpm start` 等价于上面第二条命令。**开发仍用 `tsx`**（`pnpm dev` / `pnpm dev:server`），
+生产跑编译产物。
 
-```
-$ node --experimental-strip-types src/bootstrap/main.ts
-Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/home/.../src/api/http/server.js'
-    imported from /home/.../src/bootstrap/main.ts
-```
+**为什么需要 `tsconfig.build.json`。** 根 `tsconfig.json` 是 `noEmit: true` 的类型门禁，
+且用 `moduleResolution: Bundler`；产物要交给 Node 直接跑，模块解析必须按 Node 的 ESM
+语义来。构建配置改成 `module: NodeNext` + `moduleResolution: NodeNext`、`rootDir: src`、
+`outDir: dist`。源码的 import 本来就带 `.js` 扩展名（`import ... from '../domain/errors.js'`），
+所以不需要改任何源码。
 
-tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyntax` 的语义。
-代价是**没有类型检查**：类型门禁是 `pnpm typecheck`，CI 与本地都要跑，不能指望启动时报错。
+**SQL 迁移是 `.sql`，`tsc` 不会复制。** `database.ts` 用
+`new URL('./migrations', import.meta.url)` 定位它们，所以 `build` 脚本最后跑
+`scripts/copy-build-assets.mjs` 把 `src/adapters/sqlite/migrations/` 复制到
+`dist/adapters/sqlite/migrations/`。漏掉的表现是启动时 `ENOENT`，不是「少一张表」。
 
-`tsx` 是 devDependency。生产环境如果装依赖时带了 `--prod`，要显式把它算进去，或者换成
-先 `tsc` 出 `dist/` 再 `node dist/...`（仓库目前没有这个构建脚本）。**容器部署直接用
-下面的「Docker 部署」一节**：镜像把 tsx 作为全局包装好，`pnpm start` 开箱可用。
+`tsx` 仍是 devDependency，`pnpm test`（vitest）与 `pnpm dev` 用它。生产镜像里没有它：
+`pnpm start` 现在只是 `node dist/bootstrap/main.js` 的别名。
 
 ### 退出
 
@@ -386,8 +387,25 @@ tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyn
 ## Docker 部署
 
 生产镜像定义在仓库根的 [`Dockerfile`](../Dockerfile)，[`.dockerignore`](../.dockerignore)
-控制构建上下文。`docker-compose.yaml` 是可选的完整拓扑（后端 + 控制台 + 本地推理 +
-反向代理）。
+控制构建上下文。`docker-compose.yaml` 是可选的完整拓扑（后端 + 控制台 + 反向代理 +
+可选的本地推理）。
+
+### 两种镜像：核心与本地推理
+
+镜像里**只有核心是必需的**。本地推理（`llama.cpp` + Vulkan + Mesa + Python venv）
+是一个显式 target，默认不构建：
+
+| 镜像 | 构建命令 | 大小 | 什么时候需要 |
+|---|---|---:|---|
+| 核心 `comem:local` | `docker build -t comem:local .` | **285 MB** | 默认。嵌入 / 重排走远程 OpenAI 兼容 API（OpenAI、智谱、自建网关） |
+| 推理 `comem:local-inference` | `docker build --target inference-runtime -t comem:local-inference .` | **932 MB** | 容器内跑 embedding / rerank（`providers.embedding.type: openai-compatible` 指向本镜像的 `/v1/embeddings`） |
+
+两者只差推理运行时（+647 MB）：Vulkan loader + Mesa + `vulkan-tools`（257 MB）、
+Python 3.12 解释器（32 MB）、`llama-cpp-python` venv（358 MB）。**后端代码与 MCP 工具
+完全相同**，核心镜像不是「功能删减版」。
+
+`docker compose build` 只构建核心镜像；推理服务在 `inference` profile 里，不指定
+`--profile inference` 时既不构建也不启动。
 
 镜像**在目标机上构建**：`llama.cpp` 默认按构建机的 CPU 指令集编译
 （`-DGGML_NATIVE=ON`），编译机与运行机同一台时性能最优。CI 构建再分发到别的机器
@@ -397,37 +415,43 @@ tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyn
 
 | 阶段 | 基础镜像 | 职责 | 缓存键 |
 |---|---|---|---|
-| `base` | `node:24-bookworm-slim` | `ca-certificates` + 固定版本的 pnpm / tsx | 基础镜像 + 版本 ARG |
-| `deps` | `base` | 后端与控制台两份完整依赖（含 devDependencies） | 两个 `package.json` + 两个 `pnpm-lock.yaml` + 两个 `pnpm-workspace.yaml` |
-| `build` | `deps` | `pnpm typecheck` + `pnpm check:config` + `pnpm --dir web build` | 全部源码 |
-| `test` | `build` | `pnpm lint`（**只在 `--target test` 时构建**） | 全部源码 |
-| `inference` | `python:3.12-slim-bookworm` | 源码编译 `llama-cpp-python`（CPU + Vulkan 后端） | 只有版本 ARG，**与 CoMem 源码无关** |
+| `base` | `node:24-bookworm-slim` | `ca-certificates`（pnpm 只在构建链里装） | 基础镜像 |
+| `deps` | `base` | 固定版本的 pnpm + 后端与控制台两份完整依赖（含 devDependencies） | 两个 `package.json` + 两个 `pnpm-lock.yaml` + 两个 `pnpm-workspace.yaml` |
+| `build` | `deps` | `pnpm typecheck` + `pnpm check:config` + `pnpm --dir web build` + `pnpm build`（`dist/`） | 全部源码 |
+| `test` | `build` | `pnpm lint` + `pnpm test` + `pnpm test:integrations`（**只在 `--target test` 时构建**） | 全部源码 |
 | `prod-deps` | `deps` | `pnpm prune --prod` 裁出生产依赖子集 | 同 `deps` |
-| `runtime` | `base` | 生产依赖 + `src` + `prompts` + `integrations` + `web/.output` + 推理 venv | 上面各阶段的产物 |
+| `inference` | `python:3.12-slim-bookworm` | 源码编译 `llama-cpp-python`（CPU + Vulkan 后端） | 只有版本 ARG，**与 CoMem 源码无关** |
+| `core` | `base` | `dist` + 生产依赖 + `prompts` + `integrations` + `web/.output` | 上面各阶段的产物 |
+| `inference-runtime` | `core` | `core` + Vulkan / Mesa 运行库 + Python + 推理 venv | `inference` 阶段 + apt 包版本 |
+| `runtime` | `core` | **默认目标**，等于核心镜像（放在最后，`docker build .` 产出核心） | — |
 
 `inference` 阶段不 `COPY` 任何仓库文件，所以改一行 TypeScript 不会重编 `llama.cpp`
-（冷编译约 105 秒，热缓存 0 秒）。
+（冷编译约 105 秒，热缓存 0 秒）。核心镜像的构建完全不碰这个阶段。
 
 ### 构建
 
 ```bash
-# 生产镜像（默认目标 = runtime）
-docker build -t comem:0.1.0 .
+# 核心镜像（默认目标 = runtime）
+docker build -t comem:local .
 
-# 测试镜像：生产镜像按定义不带 vitest / eslint，全量测试与 lint 要单独构建
+# 本地推理镜像：核心 + llama.cpp / Vulkan / Mesa / Python
+docker build --target inference-runtime -t comem:local-inference .
+
+# 测试镜像：生产镜像按定义不带 vitest / eslint，全量门禁要单独构建
 docker build --target test -t comem:test-suite .
 
 # 可移植：多 ISA 变体，编译时间与体积都更大
-docker build --build-arg COMEM_PORTABLE_CPU=1 -t comem:0.1.0-portable .
+docker build --target inference-runtime --build-arg COMEM_PORTABLE_CPU=1 -t comem:portable .
 ```
 
 实测（16 核 / 30GB，本机）：
 
 | 场景 | 耗时 | 镜像大小 |
 |---|---|---|
-| 冷构建（`--no-cache`，含 `llama.cpp` 编译） | 见下 | 见「镜像体积」 |
-| 热构建（改一行 `src/`） | 约 15 秒 | 同上 |
-| 只重编 `llama.cpp`（`--target inference`，`pip` 层缓存失效） | 约 105 秒 | — |
+| 核心镜像冷构建（`--no-cache`） | 见 `local/env-log.md` | 285 MB |
+| 核心镜像热构建（改一行 `src/`） | 约 26 秒 | 285 MB |
+| 推理镜像（`inference` 阶段命中缓存） | 约 11 秒 | 932 MB |
+| 只重编 `llama.cpp`（`pip` 层缓存失效） | 约 105 秒 | — |
 
 依赖层只依赖两个 lockfile：改源码不会重装依赖。`pnpm` 的 store 用 BuildKit
 cache mount（`--mount=type=cache,id=comem-pnpm-store`），换 lockfile 才会重新下载。
@@ -441,16 +465,20 @@ docker run -d --name comem \
   -p 127.0.0.1:1933:1933 \
   -v comem-data:/var/lib/comem \
   -v "$PWD/config.yaml:/etc/comem/config.yaml:ro" \
-  comem:0.1.0
+  comem:local
 ```
 
 - `--init`：让 `tini` 当 PID 1，回收僵尸进程。镜像的 entrypoint 是
-  `exec "$@"`，`pnpm` 拿到 SIGTERM 后会转给 `tsx`/`node`；实测 `docker stop`
-  到进程退出 264ms，日志里有 `CoMem 已退出。`
-- 默认命令是 `pnpm start -- --config /etc/comem/config.yaml`。`--config` 指向的
-  文件**可以不存在**（`loadConfig` 把「文件不存在」当默认值），挂载进来就生效。
-- 覆盖命令：`docker run --rm comem:0.1.0 pnpm ingest --source all`。
-  `ENTRYPOINT` 是 `exec "$@"`，所以 `pnpm ...` 这种写法直接可用。
+  `exec "$@"`，`node` 直接拿到 SIGTERM；实测 `docker stop` 到进程退出 220ms，
+  日志里有 `CoMem 已退出。`
+- 默认命令是 `node dist/bootstrap/main.js --config /etc/comem/config.yaml`。
+  `--config` 指向的文件**可以不存在**（`loadConfig` 把「文件不存在」当默认值），
+  挂载进来就生效。
+- 覆盖命令：`docker run --rm comem:local node dist/commands/ingest.js --source all`。
+  `ENTRYPOINT` 是 `exec "$@"`，所以直接写 `node dist/commands/*.js` 即可。
+  **镜像里没有 pnpm**（运行期不需要包管理器），`pnpm <script>` 的写法在容器里不可用。
+- 镜像里只有编译产物 `dist/`，没有 `src/`。要调试就改源码后重新构建；不要试图
+  在容器里直接跑 `.ts`（源码的 import 是 `.js` 扩展名，Node 的类型剥离解析不到）。
 
 ### 环境变量
 
@@ -465,7 +493,7 @@ docker run -d --name comem \
 | `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY` | 无 | 只是示例配置里的变量名；`config.yaml` 用 `${VAR}` 引用它们 |
 | `TZ` | 未设置（UTC） | 日志时间戳是 UTC ISO 8601。需要本地时间就 `-e TZ=Asia/Shanghai` |
 | `VK_ICD_FILENAMES` | 不需要 | Mesa 的 ICD 在默认搜索路径里，不用手工指定 |
-| `GGML_BACKEND_PATH` | `/opt/comem-inference/backends/libggml-vulkan.so` | 镜像已经设好。DL 构建里 ggml 不会自动加载 Vulkan 后端（见「踩过的坑」第 14 条），这个变量是唯一入口。native 构建里它指向已载入的同一个 `.so`，重复 dlopen 是幂等的 |
+| `GGML_BACKEND_PATH` | `/opt/comem-inference/backends/libggml-vulkan.so` | **只存在于 `comem:local-inference`**。DL 构建里 ggml 不会自动加载 Vulkan 后端（见「踩过的坑」第 14 条），这个变量是唯一入口。native 构建里它指向已载入的同一个 `.so`，重复 dlopen 是幂等的 |
 
 **`server.host` 的坑。** 因为镜像把 `COMEM_SERVER_HOST` 设成了 `0.0.0.0`，而环境
 变量优先于配置文件，**`config.yaml` 里写 `server.host` 不会生效**。要改监听地址用
@@ -484,7 +512,7 @@ docker run -d --name comem \
 3. **两者混用**：环境变量覆盖文件里的同名叶子。
 
 `config.example.yaml` 在镜像里（`/app/config.example.yaml`），可以
-`docker run --rm comem:0.1.0 cat /app/config.example.yaml > config.yaml` 取出来改。
+`docker run --rm comem:local cat /app/config.example.yaml > config.yaml` 取出来改。
 
 ### 数据卷
 
@@ -519,25 +547,32 @@ x-powered-by: Nuxt
 ```bash
 docker run -d --name comem-console -p 127.0.0.1:3081:3081 \
   -e NITRO_HOST=0.0.0.0 -e NITRO_PORT=3081 \
-  comem:0.1.0 node web/.output/server/index.mjs
+  comem:local node web/.output/server/index.mjs
 ```
 
-### 本地推理（可选）
+### 本地推理（可选镜像）
 
-镜像里带了编译好的 `llama-cpp-python`（CPU + Vulkan 两个后端）与 `local-inference/`
-的源码。**模型权重（两个 GGUF，1.28GB）不进镜像**，运行时挂载：
+只有 `comem:local-inference`（`--target inference-runtime`）里有编译好的
+`llama-cpp-python`（CPU + Vulkan 两个后端）与 `local-inference/` 的源码。核心镜像
+（`comem:local`）没有 Python、没有 Vulkan、没有 venv，不能用来跑推理服务。
+**模型权重（两个 GGUF，1.28GB）不进镜像**，运行时挂载：
 
 ```bash
 docker run -d --name comem-inference \
   --device /dev/dri --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
   -p 127.0.0.1:8089:8089 \
   -v "$PWD/local-inference/models:/models:ro" \
-  comem:0.1.0 \
+  comem:local-inference \
   /opt/comem-inference/.venv/bin/python /app/local-inference/server.py \
     --device gpu --host 0.0.0.0 --port 8089 \
     --embedding-model /models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --rerank-model /models/qwen3-reranker-0.6b-q8_0.gguf
 ```
+
+推理镜像**没有内置健康检查**（`HEALTHCHECK NONE`）：默认 CMD 是 Node 后端，跑
+Python 推理时 core 的 1933 探活会一直报 unhealthy。`docker-compose.yaml` 的
+`inference` 服务自己定义了 8089 的探活；单独 `docker run` 需要探活时加
+`--health-cmd`。
 
 **Vulkan 的设备可见性在容器里是独立问题**，和镜像里有没有 Vulkan 后端无关：
 
@@ -550,7 +585,7 @@ docker run -d --name comem-inference \
 实测（`--device /dev/dri --group-add 989`，`--user node`）：
 
 ```
-$ docker run --rm --user node --device /dev/dri --group-add 989 comem:0.1.0 vulkaninfo --summary
+$ docker run --rm --user node --device /dev/dri --group-add 989 comem:local-inference vulkaninfo --summary
 Devices:
 GPU0:
 	apiVersion         = 1.4.305
@@ -570,7 +605,8 @@ GPU1:
 ### 可移植构建
 
 ```bash
-docker build --build-arg COMEM_PORTABLE_CPU=1 -t comem:portable .
+docker build --target inference-runtime \
+  --build-arg COMEM_PORTABLE_CPU=1 -t comem:portable .
 ```
 
 | `COMEM_PORTABLE_CPU` | CMake 参数 | 产物 | 什么时候用 |
@@ -582,8 +618,9 @@ docker build --build-arg COMEM_PORTABLE_CPU=1 -t comem:portable .
 构建机有、部署机没有的指令（AVX-512 等）会 SIGILL（非法指令，进程直接死）。
 `GGML_CPU_ALL_VARIANTS=ON` 与 `GGML_NATIVE=ON` 不能同时开，Dockerfile 里是互斥分支。
 
-可移植构建实测：200 秒（同一台 16 核机器），镜像 990MB（**比 native 小 65MB**：
-变体各自按基线指令集编译，代码体积比 `-march=native` 展开 AVX-512 后小）。
+可移植构建实测：29 秒（`inference` 阶段命中缓存；冷编译约 105 秒），
+镜像 867MB（**比 native 的 932MB 小 65MB**：变体各自按基线指令集编译，代码体积
+比 `-march=native` 展开 AVX-512 后小）。
 编出 14 个 CPU 变体：
 
 ```
@@ -599,25 +636,50 @@ load_backend: loaded CPU backend from /usr/local/bin/libggml-cpu-alderlake.so
 
 ### 镜像体积
 
+核心镜像（`comem:local` = 默认 target）：
+
 | 层 | 大小 | 来源 |
 |---|---:|---|
 | `node:24-bookworm-slim` | 230 MB | 基础镜像 |
 | `base`：`ca-certificates` | 9.4 MB | 运行期 HTTPS |
-| `base`：pnpm 12.17.0 + tsx 4.23.15（全局） | 123 MB | 运行时跑 `tsx` / `pnpm <script>` |
-| 运行期 apt：Mesa 25.0.7 + Vulkan loader + `vulkan-tools` + Python 动态库 | 257 MB | 本地推理的 GPU 设备枚举 |
-| Python 3.12 解释器（从 `python:3.12-slim` 复制） | 32 MB | 推理 venv 的解释器 |
-| 推理 venv（`llama-cpp-python` + fastapi / uvicorn + ggml 后端库） | 358 MB | 本地推理 |
-| 生产 `node_modules`（`pnpm prune --prod`） | 41 MB | 后端 |
+| 生产 `node_modules`（`pnpm prune --prod`） | 40.9 MB | 后端 |
 | `web/.output` | 2.3 MB | 控制台 |
-| `src` + `prompts` + `integrations` + 配置 | ~2 MB | — |
-| **runtime 镜像合计** | **1.06 GB** | `docker image ls` |
+| `dist` | 1.46 MB | 后端编译产物 |
+| `prompts` + `integrations` + `package.json` | 0.2 MB | — |
+| **`comem:local` 合计** | **285 MB** | `docker image ls` |
 
-各目标阶段的镜像大小（同一份代码）：`deps` 748 MB、`build` 770 MB、`test` 775 MB、
-`inference` 1.04 GB、`runtime` 1.06 GB。
+推理镜像（`comem:local-inference` = `core` + 推理运行时）：
 
-**体积的大头是推理 venv 与 Mesa。** 不需要本地推理的部署可以删掉 `inference` 阶段、
-`runtime` 里对应的 `COPY`、以及 Mesa / `vulkan-tools` 两个 apt 包，镜像会回到约
-650 MB；本文保留它们，是因为「别人按文档部署后能用」的默认形态包含本地推理。
+| 额外层 | 大小 | 来源 |
+|---|---:|---|
+| 运行期 apt：Mesa 25.0.7 + Vulkan loader + `vulkan-tools` + OpenMP / Python 动态库 | 257 MB | 本地推理的 GPU 设备枚举 |
+| 推理 venv（`llama-cpp-python` + fastapi / uvicorn + ggml 后端库） | 358 MB | 本地推理 |
+| Python 3.12 解释器（从 `python:3.12-slim` 复制） | 32.2 MB | 推理 venv 的解释器 |
+| `local-inference/` 源码 | 0.1 MB | 推理服务 |
+| core 之外的小计 | 647 MB | — |
+| **`comem:local-inference` 合计** | **932 MB** | `docker image ls` |
+
+各目标阶段的镜像大小（同一份代码）：`deps` 约 750 MB、`build` 约 770 MB、
+`test`（含 vitest / eslint）759 MB、`inference` 1.04 GB、`core` / `runtime` 285 MB、
+`inference-runtime` 932 MB、可移植的 `inference-runtime` 867 MB。**默认目标从 1.06 GB 降到 285 MB**：去掉全局 tsx（123 MB）、
+把推理从默认形态里拆出去（647 MB），再把 `src/` 换成 `dist/`（1.6 MB）。
+
+推理 venv 与 Mesa 是 932 MB 里的 615 MB。**只有需要容器内跑 embedding / rerank 时才
+构建这个镜像**；远程 API 的部署只付核心的 285 MB。
+
+还能再削的地方（都**没做**，按收益排序）：
+
+| 项 | 省 | 代价 |
+|---|---:|---|
+| venv 去重：`llama_cpp/lib/` 与 `site-packages/lib/` 是同一批 `.so` 的两份真实拷贝（`libggml-vulkan.so` 一个文件就有 6 份，每份 28 MB） | 约 150 MB | 必须逐个确认 loader 用的是哪一份；用硬链接最安全 |
+| CPU-only 推理镜像：不装 Mesa / Vulkan loader / `vulkan-tools` | 257 MB | 没有 GPU 加速，`--device gpu` 不可用 |
+| 删掉 core 里的 npm | 17 MB | 容器里不能再用 `npm`（当前运行时也不需要它） |
+| 删掉 venv 里的 pip | 13 MB | 容器里不能 `pip install` |
+| `dist/` 压缩、`node_modules` 去掉 `*.md` / `types` | 5–10 MB | 堆栈与类型跳转变差 |
+| 删掉 `vulkan-tools`（`vulkaninfo`） | 0.6 MB | 少一个 GPU 排查入口 |
+
+基础镜像换成 alpine 不在列表里：`sqlite-vec` 是 glibc 扩展，省下的约 100 MB 要换来
+整条工具链与 `node:sqlite` 行为差异。
 
 ### 踩过的坑
 
@@ -703,17 +765,20 @@ load_backend: loaded CPU backend from /usr/local/bin/libggml-cpu-alderlake.so
 ### 容器内验证
 
 ```bash
-# 全量测试（99 个文件 / 1925 个用例）
+# 全量测试（105 个文件 / 1969 个用例）
 docker run --rm comem:test-suite pnpm test
+
+# Hook 插件测试（110 个）
+docker run --rm comem:test-suite pnpm test:integrations
 
 # 类型检查
 docker run --rm comem:test-suite pnpm typecheck
 
 # 原生模块
-docker run --rm comem:0.1.0 node -e "require('node:sqlite'); require('sqlite-vec')"
+docker run --rm comem:local node -e "require('node:sqlite'); require('sqlite-vec')"
 ```
 
-**容器内外结果一致**（`1924 passed | 1 skipped`）。`resolveDataDir` 仍用
+**容器内外结果一致**（`1968 passed | 1 skipped`，105 个文件）。`resolveDataDir` 仍用
 `existsSync('/.dockerenv') || pid === 1` 判定容器，但 `loadConfig` 把 `container` /
 `isRoot` 做成可注入参数（`src/config/index.ts:270`），`tests/unit/config.test.ts` 的
 `dataDir` 用例显式传 `container: false`（`:132`）、`container: true`（`:156`）、
@@ -1713,8 +1778,9 @@ COMEM_SERVER_PORT=8080 pnpm dev
     overlayfs 与本地 ext4 / xfs 成立（`tests/integration/fs/lock.test.ts` 在
     `mkdtemp` 上跑）。数据根放网络文件系统时，先确认 `ln 目标 链接` 能成功。
 
-25. **镜像里跑 `pnpm test` 必须 `--target test`。** 生产镜像（`runtime`）从
-    `prod-deps` 拿依赖，`pnpm prune --prod` 之后没有 `vitest` 与 `eslint`：
-    `docker run --rm comem:0.1.0 pnpm test` 直接 `sh: 1: vitest: not found`、退出码
-    127；`pnpm lint` 同样 `eslint: not found`。全量测试与 lint 用
-    `docker build --target test -t comem:test-suite .` 构建出的镜像跑。
+25. **镜像里跑 `pnpm test` 必须 `--target test`。** 核心镜像（`runtime`）从
+    `prod-deps` 拿依赖，`pnpm prune --prod` 之后没有 `vitest` / `eslint`，而且运行
+    镜像里根本没有 pnpm：`docker run --rm comem:local pnpm test` 直接
+    `exec: "pnpm": executable file not found`。全量测试与 lint 用
+    `docker build --target test -t comem:test-suite .` 构建出的镜像跑（它的 `test`
+    阶段会自己先跑一遍 `pnpm lint && pnpm test && pnpm test:integrations`）。
