@@ -25,7 +25,7 @@ export const findTool: McpToolDefinition = {
   name: 'find',
   kind: 'read',
   description:
-    '不确定内容在哪个目录时用这个；如果你已经知道路径，用 read 更快。query 会先过滤掉斜杠命令、代码块和 URL；targetUri 传目录可以收窄范围，传文件没有意义。返回按相关度降序，分数是层级加权后的 bm25，0.5 以下通常不值得读。',
+    '不确定内容在哪个目录时用这个；如果你已经知道路径，用 read 更快。query 会先过滤掉斜杠命令、代码块和 URL；targetUri 传目录可以收窄范围，传文件没有意义。返回按相关度降序；分数只在同一次检索的同一引擎内可比（fts5 的 bm25、vector 的余弦、hybrid 的融合分量纲不同），不要拿它当跨引擎的绝对相关度阈值。',
   inputSchema: {
     type: 'object',
     properties: {

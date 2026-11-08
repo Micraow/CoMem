@@ -14,6 +14,7 @@ import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js'
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
+import { SqliteVectorIndex } from '../../../src/adapters/sqlite/vector-index.js';
 import type { McpToolContext } from '../../../src/api/mcp/context.js';
 import {
   ToolRegistry,
@@ -28,7 +29,7 @@ import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
-import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import type { IndexRecord, RetrievalEngine } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
   AllowAllAuthorizer,
@@ -38,6 +39,7 @@ import {
 } from '../../../src/services/authorizer.js';
 import { AclService } from '../../../src/services/acl.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
+import type { EmbedOutcome } from '../../../src/services/embedding.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 import { MemoryService } from '../../../src/services/memory.js';
 import {
@@ -149,6 +151,13 @@ interface HarnessOptions {
    * 恒真，测不出东西。
    */
   readonly realAcl?: boolean;
+  /**
+   * 检索引擎。默认 `fts5`（与接入向量前的回归基线一致）。
+   *
+   * 非 `fts5` 时注入一个**降级**的嵌入服务：混合检索仍然走 RRF 融合（分数约
+   * `1/61`），但不需要连供应商。rule_search 的阈值语义正是靠这条路径验证的。
+   */
+  readonly engine?: RetrievalEngine;
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -192,6 +201,16 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     logger,
     estimateTokens: (text) => text.length,
   });
+  const degradedEmbedding = {
+    available: false,
+    model: null,
+    embed: async (): Promise<EmbedOutcome> => ({
+      vectors: [],
+      degraded: true,
+      reason: '测试不连嵌入供应商',
+    }),
+  };
+  const engine = options.engine ?? 'fts5';
   const search = new SearchService({
     index,
     filesystem,
@@ -199,6 +218,14 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     assembler,
     logger,
     config: RETRIEVAL_SETTINGS,
+    ...(engine === 'fts5'
+      ? {}
+      : {
+          engine,
+          embedding: degradedEmbedding,
+          vectors: new SqliteVectorIndex({ db, logger }),
+          nodes,
+        }),
     // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
     hotnessWeight: 0,
     hotnessHalfLifeHours: 168,
@@ -709,7 +736,7 @@ describe('search / rule_search', () => {
     expect(text).toContain('sessionId: sess_1');
   });
 
-  it('rule_search 返回规则完整正文', async () => {
+  it('rule_search 返回规则完整正文（默认阈值）', async () => {
     const ruleUri = `${SCOPE}/memories/rules/license-review/rule.md`;
     await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。');
     await seed(ruleUri, '提交前必须检查许可证', {
@@ -717,13 +744,63 @@ describe('search / rule_search', () => {
       abstract: '许可证规则',
     });
 
-    const text = await callText('rule_search', {
-      taskContext: '提交前必须检查许可证',
-      threshold: 0,
-    });
+    // 不传 threshold：默认 0.65 是相对阈值，单条规则以自己为基准必然保留。
+    const text = await callText('rule_search', { taskContext: '提交前必须检查许可证' });
 
     expect(text).toContain(ruleUri);
     expect(text).toContain('提交前必须检查许可证。');
+  });
+
+  it('rule_search 在 engine: hybrid 下仍能召回（RRF 分远低于 0.65）', async () => {
+    // 换一个混合检索引擎的容器：FTS5 命中经 RRF 融合后分数约 1/61 ≈ 0.016，
+    // 旧实现把 0.65 下推给 `scoreThreshold` 时这里恒为 0 条。
+    await harness.close();
+    harness = await createHarness({ engine: 'hybrid' });
+
+    const ruleUri = `${SCOPE}/memories/rules/hybrid/rule.md`;
+    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。');
+    await seed(ruleUri, '提交前必须检查许可证', {
+      memoryType: 'rules',
+      abstract: '许可证规则',
+    });
+
+    // 先钉住「这条用例真的落在 RRF 量纲上」，否则删掉阈值也可能碰巧通过。
+    const hits = await harness.context.search.find('提交前必须检查许可证', {
+      scopes: [SCOPE],
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+      limit: 5,
+      contextTypes: ['memory'],
+    });
+    expect(hits[0]?.score).toBeLessThan(0.65);
+
+    const text = await callText('rule_search', { taskContext: '提交前必须检查许可证' });
+
+    expect(text).toContain(ruleUri);
+    expect(text).toContain('提交前必须检查许可证。');
+  });
+
+  it('rule_search 默认阈值只保留与最佳规则接近的（相对阈值）', async () => {
+    const strong = `${SCOPE}/memories/rules/strong/rule.md`;
+    const weak = `${SCOPE}/memories/rules/weak/rule.md`;
+    await harness.filesystem.write(Uri.parse(strong), '提交前必须检查许可证。');
+    await harness.filesystem.write(Uri.parse(weak), '提交前必须检查许可证，这条是弱相关。');
+    // 两条都含查询短语，但 weak 的文档长度把 bm25 拉到最佳规则的一半左右：
+    // 绝对阈值（0.65）下两条都会被丢，相对阈值（0.65 × 最高分）只留 strong。
+    await seed(strong, '提交前必须检查许可证', {
+      memoryType: 'rules',
+      abstract: '许可证规则',
+    });
+    await seed(weak, `提交前必须检查许可证${'无关内容'.repeat(50)}`, {
+      memoryType: 'rules',
+      abstract: null,
+    });
+
+    const text = await callText('rule_search', { taskContext: '提交前必须检查许可证' });
+
+    expect(text).toContain(strong);
+    expect(text).toContain('提交前必须检查许可证。');
+    expect(text).not.toContain(weak);
   });
 });
 

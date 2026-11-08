@@ -1968,7 +1968,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 |---|---|---|
 | `find` | `query`、`targetUri?`、`limit=10`、`level?`、`contextType?` | 文本：`Found N item(s):` + 每条 `- [类型 分数] uri` + 缩进摘要 |
 | `search` | 同上 + `sessionId?` | 同上，末尾附 `Query plan` |
-| `rule_search` | `taskContext`、`threshold=0.65` | 文本：适用规则的完整正文块 |
+| `rule_search` | `taskContext`、`threshold=0.65`（相对阈值） | 文本：适用规则的完整正文块 |
 | `read` | `uri` 或 `uris[]`、`offset=0`、`limit=-1` | 文本；图片/音频返回二进制块 |
 | `list` | `uri`、`recursive=false`、`offset`、`limit`、`sortBy` | 文本：`[dir] name` / `[file] name` |
 | `tree` | `uri`、`levelLimit=3`、`includeAbstract=false` | 文本树形，缩进表示层级 |
@@ -1984,6 +1984,8 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 | `add_skill` | `parentUri`、`name`、`files[]` | 文本：技能 URI + 文件数 |
 
 **为什么返回文本而不是 JSON。** MCP 的返回值直接进模型上下文。文本格式的信息密度更高，模型也更容易读。JSON 适合程序消费，不适合模型消费。
+
+**检索分数的可比范围。** `find` / `search` 返回的分数只在**同一次检索的同一个引擎内**可比：`fts5` 是取负的 bm25，`vector` 是余弦（`[-1, 1]`），`hybrid` 是 RRF 融合分（`Σ levelWeight / (60 + rank)`，上限约 `2/61 ≈ 0.033`）。三种量纲不同，任何绝对阈值跨引擎都不可比。`rule_search` 的 `threshold` 因此是**相对于本次最高分**的比例（`score >= topScore × threshold`），不是绝对分数下限；默认 `0.65` 表示「只保留与最佳规则差距不到 35% 的」。
 
 **`remember` 复用提交管线**：造一个合成会话再提交，不另写一条记忆写入路径。传 `sessionId`
 时用调用方给的稳定 ID 并跳过已有消息（`sha256(role + text + createdAt)`），批量上传本机

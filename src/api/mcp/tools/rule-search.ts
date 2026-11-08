@@ -1,8 +1,19 @@
 /**
  * `rule_search`：按任务上下文取适用规则（架构文档 §11.5、§13.2）。
  *
- * 与 `find` 的差别是返回**完整正文**而不是摘要：规则要被执行，摘要不够。阈值默认
- * 0.65（§13.2），低于它的规则宁可漏掉也不注入——错误的规则比没有规则更危险。
+ * 与 `find` 的差别是返回**完整正文**而不是摘要：规则要被执行，摘要不够。阈值
+ * 默认 0.65（§13.2），低于它的规则宁可漏掉也不注入——错误的规则比没有规则更危险。
+ *
+ * ## 为什么阈值是相对的
+ *
+ * 三种引擎的分数量纲不同（§18 的 `retrieval.engine`）：`fts5` 是取负的 bm25，
+ * `vector` 是余弦，`hybrid` 是 RRF 融合分（`Σ levelWeight / (60 + rank)`，上限
+ * 约 `2/61 ≈ 0.033`）。**同一个绝对阈值跨引擎必然不可比**——把 `0.65` 交给
+ * `search.find` 的 `scoreThreshold`，`hybrid` 下一条都留不下，工具静默返回 0 条。
+ *
+ * 规则要回答的是「这条规则和最佳规则差多少」，所以阈值按**本次最高分**的比例
+ * 计算：`score >= topScore × threshold`。这个语义与引擎无关（RRF / bm25 / 余弦
+ * 都成立），低分规则仍然进不来，默认 0.65 表示「只保留与最佳规则差距不到 35% 的」。
  */
 
 import { ComemError } from '../../../domain/errors.js';
@@ -19,14 +30,14 @@ import {
 /** 规则最多返回几条。经验值：注入超过 5 条规则时模型会开始挑，而不是遵守。 */
 const RULE_LIMIT = 5;
 
-/** §13.2 的默认阈值。 */
+/** §13.2 的默认阈值：相对于本次最高分的比例。 */
 const DEFAULT_THRESHOLD = 0.65;
 
 export const ruleSearchTool: McpToolDefinition = {
   name: 'rule_search',
   kind: 'read',
   description:
-    '开始一项任务、需要知道有哪些硬性规则时必须先调用这个，用任务描述去匹配规则库。taskContext 写「要做什么」而不是关键词，规则靠语义相关度匹配；threshold 低于 0.65 容易把无关规则带进来。返回的是规则完整正文，不是摘要，可以直接据此执行。',
+    '开始一项任务、需要知道有哪些硬性规则时必须先调用这个，用任务描述去匹配规则库。taskContext 写「要做什么」而不是关键词，规则靠语义相关度匹配；threshold 是相对阈值，只保留与最佳规则接近的规则（默认 0.65 表示差距不到 35%），判定与检索引擎无关。返回的是规则完整正文，不是摘要，可以直接据此执行。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -36,7 +47,8 @@ export const ruleSearchTool: McpToolDefinition = {
         minimum: 0,
         maximum: 1,
         default: DEFAULT_THRESHOLD,
-        description: '相关度下限；低于它的规则不返回',
+        description:
+          '相对阈值：只保留分数不低于本次最高分 × threshold 的规则；默认 0.65 表示只保留与最佳规则差距不到 35% 的规则',
       },
     },
     required: ['taskContext'],
@@ -47,21 +59,34 @@ export const ruleSearchTool: McpToolDefinition = {
     const threshold = unitInterval(args, 'threshold', DEFAULT_THRESHOLD, 'rule_search');
     const scopes = await readScopes(context);
 
+    // 先取够候选，**不把阈值下推给 `search.find`**：阈值作用在最终排序分上，
+    // `hybrid` 的 RRF 分（约 0.03）会被 0.65 全部丢掉，结果在过滤之前就被截成 0。
     const hits = await context.search.find(taskContext, {
       scopes,
       subject: context.subject,
       principals: context.principals,
       limit: RULE_LIMIT,
       contextTypes: ['memory'],
-      scoreThreshold: threshold,
     });
 
-    const rules: string[] = [];
+    // 先解析记忆类型再过滤：`SearchHit.memoryType` 由 `RetrievalIndex.search` 透传；
+    // 若索引实现没带这一列，用 `stat` 补一次（只查 SQL，不读文件）。少了它，规则会
+    // 退化成「所有记忆」。相对阈值的基准取**规则**里的最高分——非规则记忆不参与。
+    const ruleHits: { readonly uri: string; readonly score: number }[] = [];
     for (const hit of hits) {
-      // `SearchHit.memoryType` 由 `RetrievalIndex.search` 透传；若索引实现没带这一列，
-      // 用 `stat` 补一次（只查 SQL，不读文件）。少了它，规则会退化成「所有记忆」。
       const memoryType = hit.memoryType ?? (await context.index.stat(hit.uri))?.memoryType ?? null;
       if (memoryType !== 'rules') {
+        continue;
+      }
+      ruleHits.push({ uri: hit.uri, score: hit.score });
+    }
+
+    const topScore = Math.max(...ruleHits.map((hit) => hit.score));
+    const cutoff = topScore * threshold;
+
+    const rules: string[] = [];
+    for (const hit of ruleHits) {
+      if (hit.score < cutoff) {
         continue;
       }
       const uri = Uri.parse(hit.uri);
