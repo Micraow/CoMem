@@ -53,12 +53,17 @@ providers:
   # 重排模型看 (query, 摘要) 对，分数直接决定排序；relevance_score 未归一化，
   # 可以是负数，不要 clamp 到 [0, 1]。打开 retrieval.rerank.enabled 时这里必须
   # 配成 http，否则 loadConfig 抛 INVALID_ARGUMENT。
+  #
+  # 超时默认 30 秒来自实测：本地 Qwen3-Reranker-0.6B 重排 50 条候选 8.05 秒 p50 /
+  # 9.35 秒 p95（eval/README.md 的 105 条基线）。10 秒会让超过一半的查询在重排
+  # 返回前被中止、静默退回融合分。延迟敏感时把 topN 降到 20（本地约 3.6 秒）。
+  # 超时/失败会记 warn 并出现在 GET /health 的 rerank.degraded 里。
   rerank:
     type: disabled             # http | disabled
     baseUrl: ""                # 如 https://api.jina.ai/v1
     model: BAAI/bge-reranker-v2-m3
     apiKey: ""
-    timeoutSeconds: 10
+    timeoutSeconds: 30
     topN: 50                   # 送去重排的候选条数上限
 
 summary:

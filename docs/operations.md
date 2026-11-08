@@ -886,7 +886,7 @@ providers:
     baseUrl: http://127.0.0.1:8089/v1
     model: Qwen3-Reranker-0.6B
     apiKey: local
-    timeoutSeconds: 20
+    timeoutSeconds: 30
     topN: 50
 
 retrieval:
@@ -897,6 +897,40 @@ retrieval:
 
 `dimension` 必须是 1024（0.6B 的原生维度）。写错会在第一次嵌入时抛
 `PROVIDER_UNAVAILABLE`。
+
+### 重排：延迟 vs 质量
+
+重排默认关（`retrieval.rerank.enabled: false`），打开后它是检索路径上一次**串行**的
+模型调用，超时预算直接加在用户等待时间上。本地 0.6B 重排的实测（`eval/README.md`，
+105 条查询 / 52 篇语料，超时 30 秒）：
+
+| 变体 | Recall@10 | MRR | NDCG@10 | p50 | p95 |
+|---|---:|---:|---:|---:|---:|
+| hybrid | 0.904 | 0.852 | 0.829 | 1.6ms | 1.9ms |
+| hybrid+rerank（本地 0.6B，30s） | 0.913 | 0.874 | 0.845 | 8.03s | 8.23s |
+
+**105 条上重排略好，但差在置信区间内。** MRR +0.022、NDCG +0.016，而 105 条查询的
+95% 置信区间约 ±0.02（`eval/README.md`「已知限制」），这个差不能当成真实提升。代价
+是 p50 从 1.6ms 涨到 8.03s——**默认关的理由是延迟，不是质量回归**。
+
+34 条查询的冻结集（`basic-v1.yaml`）上方向相反：MRR 0.895 低于不重排的 0.923，
+召回从 0.985 提到 1.000。两份数据集的结论不一致，说明本地 0.6B 重排的净收益还测不
+出来；远程 8B 重排在同一份 34 条上是 MRR 0.956，方向一致且幅度更大。
+
+- **本地推理部署不建议打开重排。** 8 秒 p50 换一个落在噪声里的 MRR 差，不划算。
+- **默认 `timeoutSeconds: 30` 是为了让「打开之后」不静默降级。** 50 条候选要
+  8.05 秒 p50、9.35 秒 p95（含候选正文读取与查询嵌入），原来的 10 秒低于 p95：
+  105 条里超过一半的查询在重排返回前被中止、退回融合分，而用户看不到任何提示
+  （第一次跑出的 p50 恰好 10016.8ms 就是证据）。
+- **延迟敏感时把 `topN` 降到 20。** 本地约 3.6 秒（50 条 8.0 秒 → 20 条 3.6 秒），
+  30 秒超时对 20 条是 8 倍余量。**不要**反过来把 `timeoutSeconds` 压到 p95 以下：
+  那会让「配置了重排」和「实际用了重排」变成两件事。
+- **降级现在可见。** 超时/5xx/网络失败会在日志里记 `warn`（带 `reason`、`durationMs`、
+  `topN`），并把最近一次失败写进 `GET /health` 的 `rerank.degraded` /
+  `rerank.lastFailure`。排查「我的重排真的在跑吗」看这两个字段。
+
+远程供应商（`Qwen3-Reranker-8B`）50 条只要 1.8–2.7 秒，30 秒超时同样够用；它在 34
+条冻结集上 MRR 0.956，高于不重排的 0.923，是这组数据里唯一稳定的正收益。
 
 ### 已知限制
 
@@ -952,8 +986,8 @@ $COMEM_DATA_DIR/
 
 ## 备份与恢复
 
-**内容文件是真相，SQLite 是派生。** 判据是「这东西属于哪一类」（§7）。注意派生数据的
-「可重建」在 v1 只是设计承诺：`reindex` 与 `reconcile.log` 的重放都没有实现。
+**内容文件是真相，SQLite 是派生。** 判据是「这东西属于哪一类」（§7）。检索索引可以
+重建（`pnpm reindex`），`reconcile.log` 的重放还没有实现。
 
 | 能丢 | 不能丢 |
 |---|---|
@@ -962,10 +996,34 @@ $COMEM_DATA_DIR/
 | `_meta/recall/*.recall_log.json`（丢了只多投一次） | `.abstract.md` / `.overview.md`（重算要调模型，花钱） |
 | `request_log` 表（只是观测数据） | `_meta/comem.sqlite`（**见下面的警告**） |
 
-> **警告：v1 没有 `reindex` 命令。** 设计上「删库可重建」（§7、§21 的 backlog），但重建命令
-> 还没实现。所以**不要只备份内容文件**——现阶段删掉 `comem.sqlite` 等于让所有已索引的节点从
-> 检索结果里消失，`find` / `search` 会返回空，只能靠 `grep` / `read` 按路径硬找。备份时把
-> 数据根整个打包。
+> **警告：`reindex` 只重建检索索引与向量，不重建物化权限。** 它从磁盘重新遍历全部
+> 节点，重写 `node` / `node_fts` / `node_embedding`；物化权限（`node_permission`）
+> 由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径，不在这个命令的职责里
+> （`src/commands/reindex.ts` 的文件头）。所以**删掉 `comem.sqlite` 之后**：
+> `pnpm reindex` 能把 `find` / `search` 的索引修回来，但物化权限行随库一起没了——
+> 节点不可读，检索仍然返回空。ACL 回填没有命令。备份时把数据根整个打包。
+
+重建索引（索引损坏、换 `providers.embedding.dimension`、换嵌入模型之后）：
+
+```bash
+pnpm reindex --dry-run                                   # 只遍历磁盘报数，不打开数据库
+pnpm reindex --only=index                                # 只重建 node / node_fts
+pnpm reindex --only=embeddings                           # 只回填 node_embedding
+pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
+```
+
+- 参数：`--only=embeddings|index|all`（默认 `all`）、`--dry-run`、`--config <path>`、
+  `--data-dir <path>`。两个路径参数和环境变量 `COMEM_DATA_DIR` 走同一套
+  `loadCommandConfig`（`src/commands/config.ts`），不会静默回落到当前目录的
+  `config.yaml`。
+- **只从磁盘读，不信任 SQLite。** 索引坏了才是要重建的理由，拿 `node` 表当输入
+  等于假设「坏掉的东西还能用」。
+- **断点续跑。** 按 URI 升序幂等 upsert；嵌入按 `content_digest` 判定「没变」直接
+  跳过。中途被杀后重跑只处理剩下的。
+- **换维度会备份旧向量。** 旧 `node_embedding` 复制成普通表 `node_embedding_backup`
+  （`vec0` 的 shadow 表不跟 `ALTER TABLE RENAME` 改名，不能直接改名备份），回填
+  成功后删除；中途失败回滚到旧维度。
+- **进度写 stderr，stdout 只有最后一行结果**，可以直接 `reindex > report.txt`。
 
 停服后打包最稳（WAL 会被合并回主文件）：
 
@@ -1067,6 +1125,19 @@ $ curl -s http://127.0.0.1:1933/health | jq
     "index": { "nodes": 4 },
     "queue": { "pending": 0, "processing": 0 },
     "summary": { "degraded": false, "pendingDirs": 0, "degradedDirs": 3 },
+    "rerank": {
+      "configured": true,
+      "degraded": true,
+      "failures": 12,
+      "lastFailure": {
+        "at": "2026-11-08T11:20:31.442Z",
+        "reason": "timeout",
+        "durationMs": 30004,
+        "topN": 50,
+        "code": "PROVIDER_UNAVAILABLE",
+        "message": "重排调用超时（30000 毫秒），请检查供应商可用性或调大 timeoutSeconds。"
+      }
+    },
     "memory": {
       "pendingReview": 0,
       "orphanTasks": 0,
@@ -1079,13 +1150,17 @@ $ curl -s http://127.0.0.1:1933/health | jq
 
 | 字段 | 含义 | 什么时候要管 |
 |---|---|---|
-| `result.status` | `ok` / `degraded` | `degraded` = 摘要走的是规则降级，或存在降级摘要的目录。降级必须可见（§17.9） |
+| `result.status` | `ok` / `degraded` | `degraded` = 摘要走的是规则降级，或存在降级摘要的目录，或最近一次重排调用失败（已退回融合分）。降级必须可见（§17.9） |
 | `result.subject` | 服务图绑定的主体（`server.subject`） | 控制台用它拼 `x-comem-subject`。与期望的用户不符 = 配置没生效（见「控制台每个请求 401」） |
 | `result.scopes` | 该主体可寻址且可读的根（个人根在前） | 为空 = 主体没有任何可访问的命名空间，控制台会明确说明 |
 | `index.nodes` | 索引里的节点数 | 掉到 0 而磁盘上有文件 = 索引没写进去，看 `reconcile.log` |
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
 | `summary.pendingDirs` | 待刷新摘要的目录数 | 长期不降 = 摘要失效在堆积 |
 | `summary.degradedDirs` | 用规则摘要生成的目录数 | 模型不可用时会涨；恢复后需要重算 |
+| `rerank.configured` | 是否配了重排（`retrieval.rerank.enabled` + `providers.rerank.type: http`） | 配了重排但这里是 `false` = 装配没接上 |
+| `rerank.degraded` | 最近一次重排调用是否失败（已退回融合分） | 为真 = 这次检索用的是融合分。反复为真看 `lastFailure.reason`：「超时」调大 `timeoutSeconds` 或降低 `topN`，`http_5xx` 看供应商，`network` 看 `baseUrl` |
+| `rerank.failures` | 进程启动以来重排失败的累计次数 | 与 `degraded` 一起看：`degraded: false` + `failures > 0` = 间歇性失败过，最近一次已成功 |
+| `rerank.lastFailure` | 最近一次失败的 `reason` / `durationMs` / `topN` / `code` / `message` | 从未失败时为 `null`（「没有」不是全 0 对象） |
 | `memory.pendingReview` | 待复核的记忆条数（`node.status = 'pending'`） | 控制台「记忆复核」页该清了 |
 | `memory.orphanTasks` | 租约过期的 `running` 任务 | 有人认领却没续租 = 进程崩了。启动扫描会把它重置回 `pending` |
 | `memory.oldestPendingAgeSeconds` | 最老的待复核记忆距今多少秒 | 没有待复核时是 `null`（「没有」不是 0 秒） |
@@ -1461,8 +1536,10 @@ COMEM_SERVER_PORT=8080 pnpm dev
    保留、关标签页即清），顶栏提供退出。收到 401 时清掉本地会话并回登录页。可读根多于
    一个时顶栏出现作用域选择器，选择存 `sessionStorage`，刷新后恢复；组根不可读时不会
    列出来。
-4. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
-   索引坏了只能靠文件系统继续读写，检索能力等于没有。
+4. **`reindex` 不重建物化权限。** `pnpm reindex` 从磁盘重建检索索引（`node` /
+   `node_fts`）与向量（`node_embedding`），物化权限（`node_permission`）不在它的
+   职责里——它由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径。索引坏了
+   可以修；整库丢失时权限要另走 ACL 重建（目前没有命令）。参数见「备份与恢复」。
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
    日志，不落盘也不进数据库（`src/services/memory.ts`）。事后要复盘「为什么拒了」只能翻日志。
 6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的

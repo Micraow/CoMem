@@ -2505,7 +2505,15 @@ Prometheus 文本              分析型 JSON
 
 **为什么必须单独测进程启动**：hook 起一个新 Node 进程就是 30–50ms 纯开销。把它藏在「检索 20ms」后面会误导人，让人以为 CoMem 只花 20ms。
 
-**异步阶段里嵌入是最贵的一段，所以它必须批量、必须缓存。** 归档、抽取、合并、摘要、嵌入都在 `IndexObserver` 的排期里跑（内容落盘之后），不计入上面那 60–180ms。嵌入的单价随条数摊薄：远程供应商单条 1140ms，本地 GPU 单条 410ms 而 32 条只要 400ms（12.5ms/条）——差异几乎全在「每条一次 HTTP 往返」上。所以写路径把一次合并窗口里排队的记录按 `providers.embedding.maxBatchSize` 切片：N 条记录产生 `ceil(N / maxBatchSize)` 次请求；`(model, 正文摘要)` 命中 `embedding_cache`（§8.1）时一次都不产生。两件事都不改变 `drain()` 的契约——它返回时每个排队项要么已写入 `node_embedding`，要么已降级并记了日志。
+**异步阶段里嵌入是最贵的一段，所以它必须批量、必须缓存。** 归档、抽取、合并、摘要、嵌入都在 `IndexObserver` 的排期里跑（内容落盘之后），不计入上面那 60–180ms。**嵌入的单价不随条数摊薄**——它随 token 数线性增长，批量省下的是请求数，不是算力。本地 GPU（`Qwen3-Embedding-0.6B`，`local/bench/embedding-stage.ts`，走完整写路径 + `drain()`）实测：
+
+| 场景 | 逐条（`maxBatchSize: 1`） | 批量（`maxBatchSize: 128`） | 请求数 |
+|---|---:|---:|---:|
+| 32 条文档（约 170 字/条） | 3.89s（122ms/条） | 3.36s（105ms/条） | 32 → 2 |
+| 52 条文档 | 6.27s（121ms/条） | 5.86s（113ms/条） | 52 → 2 |
+| 单条短查询（关缓存，`eval/README.md`） | 69ms p50 / 101ms p95 | — | 1 |
+
+批量的收益是「省 6–14% 墙钟时间 + 把 N 次请求压成 `ceil(N / maxBatchSize)` 次」，不是「12.5ms/条」。单条文档 168ms 里约 63ms 是写路径与 `drain()` 的固定开销，边际计算约 105ms；HTTP 往返只占 17ms/条（122 − 105）。**所以批量仍然值得做**（请求数从 32 降到 2，供应商侧的连接与限流成本随之下降），但不要指望它把延迟摊薄一个数量级：供应商的算力是主要成本，不是网络。远程供应商的单条查询嵌入是 300–900ms（`eval/README.md` 的缓存关闭路径），量级差异来自模型大小与网络，不是「每条一次往返」。所以写路径把一次合并窗口里排队的记录按 `providers.embedding.maxBatchSize` 切片：N 条记录产生 `ceil(N / maxBatchSize)` 次请求；`(model, 正文摘要)` 命中 `embedding_cache`（§8.1）时一次都不产生。两件事都不改变 `drain()` 的契约——它返回时每个排队项要么已写入 `node_embedding`，要么已降级并记了日志。
 
 **一批失败只影响这一批。** 供应商整体不可用时这一批记录跳过（记 `warn`），其它批照常；单条坏输入（超长、非法字符，供应商回 400）则**二分重试**，把失败收敛到它自己，剩下的记录照常写入。二分不会放大请求数：供应商挂掉时熔断在 5 次连续失败后打开，`EmbeddingService.available` 转 `false`，后续子树直接跳过、不打网络。
 
@@ -2654,6 +2662,10 @@ comem_llm_errors_total{purpose, code}
 | `queue` | `{pending, processing}` |
 | `summary.degraded` | 是否降级到规则摘要 |
 | `summary.pendingDirs` | 待刷新目录数 |
+| `rerank.configured` | 是否配了重排（`retrieval.rerank.enabled` + `providers.rerank.type: http`） |
+| `rerank.degraded` | 最近一次重排调用是否失败（已退回融合分） |
+| `rerank.failures` | 进程启动以来重排失败的累计次数（间歇性失败看得出来） |
+| `rerank.lastFailure` | 最近一次失败的 `reason` / `durationMs` / `topN`；从未失败时为 `null` |
 | `overhead.p50Ms` | 最近 5 分钟阻塞开销中位数 |
 | `version` | 服务版本 |
 
@@ -2661,7 +2673,7 @@ comem_llm_errors_total{purpose, code}
 
 **`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。v1 没有认证，不带请求头的调用本来就被当成绑定主体，这个值不是秘密；多租户要换成真正的认证时，这个字段也要跟着重新设计。
 
-**`degraded` 的判定**：模型不可用且开了规则降级，或索引与文件系统对账不一致。降级必须可见——静默降级等于骗人。
+**`degraded` 的判定**：模型不可用且开了规则降级，或最近一次重排调用失败（已退回融合分）。降级必须可见——静默降级等于骗人。重排的降级状态与摘要走同一个模式，不另造一套：`rerank.degraded` 为真时 `status` 也是 `degraded`；`rerank.failures` 是累计值，`lastFailure` 在成功一次后清空，两者分别回答「历史上失败过几次」与「现在还在不在跑」。
 
 ### 17.10 控制台「监控」页
 
@@ -2707,7 +2719,7 @@ providers:
     baseUrl: ""               # 如 https://api.jina.ai/v1
     model: BAAI/bge-reranker-v2-m3
     apiKey: ""
-    timeoutSeconds: 10        # 检索路径上串行执行，超时直接加在用户等待时间上
+    timeoutSeconds: 30        # 本地 0.6B 重排 50 条 8.05s p50 / 9.35s p95，10s 会静默降级
     topN: 50                  # 送去重排的候选条数上限
 
 summary:
@@ -2821,7 +2833,7 @@ task:
 - **`retrieval.rerank.keepTopN` 在重排之后截断**（`0` = 只重排不截断）。
 - **分数未归一化、可以是负数。** `jina/jina-reranker-v3` 的 `relevance_score` 没有约定值域，不要 clamp 到 `[0, 1]`，直接按原值降序。
 - **顺序是「先重排、再按热度乘性加权」。** 重排是相关性判断，热度是相关性同档内的微调；反过来会让「最近访问过」压过「更相关」。
-- **失败全部兜底。** 模型调用抛错时整批退化成融合分，只记 `warn`——重排是质量增强，不能让检索失败。
+- **失败全部兜底，但降级可见。** 模型调用抛错时整批退化成融合分，只记 `warn`——重排是质量增强，不能让检索失败。warn 里带 `reason`（`timeout` / `http_5xx` / `network` / `other`）、`durationMs` 与 `topN`；最近一次失败同时写进 `GET /health` 的 `rerank.degraded`（成功一次即复位，`rerank.failures` 保留累计次数）。**默认 `timeoutSeconds: 30` 来自实测**：本地 0.6B 重排 50 条 8.05s p50 / 9.35s p95，10 秒会让超过一半的查询在返回前被中止、退回融合分，而用户以为用了重排。
 
 **`telemetry.metrics.enabled` 与 `includeAccountLabel` 真的生效。** 前者为 `false` 时 `GET /metrics` 返回 404 并说明「指标已关闭」；后者为 `true` 时 `comem_http_request_duration_seconds` 的样本带 `account` 标签（关闭时是全局汇总，两种形态不能混着输出）。
 
@@ -2934,7 +2946,6 @@ task:
 
 | 项 | 为什么先不做 |
 |---|---|
-| `reindex` 重建命令 | 索引损坏是运维场景，演示用不到。但「删库可重建」的承诺要留着，不能删 |
 | 快照与回滚 | 归档级回滚（按 `memory_diff.json` 反向应用）比 git 风格快照便宜，仍是 P2 之后 |
 | 检查点摘要 | 只在部分归档时需要，v1 全量归档 |
 | Prometheus + Grafana 部署 | `/metrics` 输出标准格式，接不接是运维的事 |
