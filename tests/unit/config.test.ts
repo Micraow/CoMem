@@ -126,15 +126,58 @@ function expectedDefaults(dataDir: string): unknown {
 
 describe('loadConfig', () => {
   it('配置文件不存在时使用 §18 的默认值，不报错', () => {
-    const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
+    const config = loadConfig({
+      path: join(tempDir, 'missing.yaml'),
+      env: testEnv(),
+      container: false,
+      isRoot: false,
+    });
 
     expect(config).toEqual(expectedDefaults(join(tempDir, 'xdg', 'comem')));
   });
 
   it('默认值里的 dataDir 非空：留空时按 §6.5 推导', () => {
-    const config = loadConfig({ path: writeConfig('dataDir: ""\n'), env: testEnv() });
+    const config = loadConfig({
+      path: writeConfig('dataDir: ""\n'),
+      env: testEnv(),
+      container: false,
+      isRoot: false,
+    });
 
     expect(config.dataDir).toBe(join(tempDir, 'xdg', 'comem'));
+  });
+
+  // §6.5 的四条规则。不注入 container / isRoot 时，宿主机上的真实判定会决定
+  // 结果（容器里恒为 /var/lib/comem），这两条分支就永远测不到。
+  it('容器里 dataDir 推导成 /var/lib/comem（§6.5）', () => {
+    const config = loadConfig({
+      path: writeConfig('dataDir: ""\n'),
+      env: testEnv(),
+      container: true,
+    });
+
+    expect(config.dataDir).toBe('/var/lib/comem');
+  });
+
+  it('以 root 运行时 dataDir 也推导成 /var/lib/comem（§6.5）', () => {
+    const config = loadConfig({
+      path: writeConfig('dataDir: ""\n'),
+      env: testEnv(),
+      isRoot: true,
+    });
+
+    expect(config.dataDir).toBe('/var/lib/comem');
+  });
+
+  it('显式 dataDir 优先于容器与 root 推导（§6.5 第 1 条）', () => {
+    const config = loadConfig({
+      path: writeConfig('dataDir: /explicit/path\n'),
+      env: testEnv(),
+      container: true,
+      isRoot: true,
+    });
+
+    expect(config.dataDir).toBe('/explicit/path');
   });
 
   it('YAML 覆盖默认值，未写的字段保留默认值', () => {
@@ -205,6 +248,8 @@ describe('loadConfig', () => {
     const config = loadConfig({
       path: EXAMPLE_CONFIG_PATH,
       env: testEnv({ COMEM_LLM_KEY: 'test-key', COMEM_EMBEDDING_KEY: 'test-embedding-key' }),
+      container: false,
+      isRoot: false,
     });
 
     expect(config).toEqual({

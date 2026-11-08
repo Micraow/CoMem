@@ -21,6 +21,10 @@ export interface LoadConfigOptions {
   env?: NodeJS.ProcessEnv;
   /** 进程参数，只识别 `--config` 与 `--data-dir` */
   argv?: string[];
+  /** 覆盖容器判定。默认按 `/.dockerenv` 或 pid 1（§6.5）；测试固定它 */
+  container?: boolean;
+  /** 覆盖 root 判定。默认 `process.getuid?.() === 0`（§6.5）；测试固定它 */
+  isRoot?: boolean;
 }
 
 const DEFAULT_CONFIG_FILE = 'config.yaml';
@@ -261,7 +265,10 @@ export function loadConfig(options: LoadConfigOptions = {}): ComemConfig {
   const parsed = validate(mergeConfig(mergeConfig(defaults, fileConfig), envOverrides), filePath);
   return {
     ...parsed,
-    dataDir: parsed.dataDir === '' ? resolveDataDir({ env }) : parsed.dataDir,
+    dataDir:
+      parsed.dataDir === ''
+        ? resolveDataDir({ env, container: options.container, isRoot: options.isRoot })
+        : parsed.dataDir,
   };
 }
 
