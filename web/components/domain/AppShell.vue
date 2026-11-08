@@ -8,8 +8,11 @@
  * 移动端（< 768px）侧栏收成抽屉：同一份 `SideNav` 放进 Dialog 的 left 形态，
  * 不复制一份导航结构。
  */
-import { Menu, Moon, Sun } from 'lucide-vue-next'
+import { LogOut, Menu, Moon, Sun } from 'lucide-vue-next'
 import { useMediaQuery } from '@vueuse/core'
+
+import { consoleIdentityState, consoleScopeLabel, logoutConsole } from '~/composables/consoleIdentity'
+import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
 
 import { navLabelOf } from './SideNav.vue'
 
@@ -26,15 +29,51 @@ const currentLabel = computed(() => navLabelOf(route.path))
  * 头像只显示当前主体的首字母。
  *
  * 主体名是部署配置里的内部标识，不进入可见区域；没有主体时显示 `?`，不显示一个
- * 假的占位人。
+ * 假的占位人。**取绑定主体而不是作用域**：切到组空间之后头像仍然是登录用户。
  */
+const identityState = consoleIdentityState()
+const identity = identityState.status === 'ready' ? identityState.identity : null
 const scopeRoot = useScopeRoot()
+const authEnabled = identity?.authEnabled === true
+
 const subjectInitial = computed(() => {
-  const root = scopeRoot.value.replace(/\/+$/u, '')
-  const id = root.slice(root.lastIndexOf('/') + 1)
+  const subject = identity?.subject ?? ''
+  const id = subject.startsWith('user:') ? subject.slice('user:'.length) : subject
   const first = id.charAt(0)
   return first === '' ? '?' : first.toUpperCase()
 })
+
+const scopeOptions = computed(() =>
+  (identity?.scopes ?? []).map((scope) => ({
+    value: scope,
+    label: consoleScopeLabel(scope, identity?.subject ?? ''),
+  })),
+)
+
+/** 只有一个作用域时不显示选择器：那是没有选择的状态，不是「统一」。 */
+const showScopePicker = computed(() => scopeOptions.value.length > 1)
+
+const scopeModel = computed({
+  get: () => scopeRoot.value,
+  set: (value: string) => {
+    selectScopeRoot(value)
+  },
+})
+
+const loggingOut = ref(false)
+const config = useRuntimeConfig()
+
+async function logout(): Promise<void> {
+  if (loggingOut.value) {
+    return
+  }
+  loggingOut.value = true
+  try {
+    await logoutConsole(String(config.public.apiBase), (url, init) => fetch(url, init))
+  } finally {
+    window.location.assign('/login')
+  }
+}
 
 function applyTheme(value: 'dark' | 'light'): void {
   document.documentElement.dataset.theme = value
@@ -105,6 +144,14 @@ watch(
         <span class="titlebar__spacer" />
 
         <div class="titlebar__group">
+          <UiSelect
+            v-if="showScopePicker"
+            v-model="scopeModel"
+            :options="scopeOptions"
+            size="sm"
+            aria-label="作用域"
+            class="scope-picker"
+          />
           <button
             type="button"
             class="iconbtn"
@@ -114,6 +161,16 @@ watch(
             <Sun v-if="theme === 'dark'" :size="16" :stroke-width="1.4" />
             <Moon v-else :size="16" :stroke-width="1.4" />
           </button>
+          <button
+            v-if="authEnabled"
+            type="button"
+            class="iconbtn"
+            aria-label="退出登录"
+            :disabled="loggingOut"
+            @click="logout"
+          >
+            <LogOut :size="16" :stroke-width="1.4" />
+          </button>
           <span class="avatar" aria-hidden="true">{{ subjectInitial }}</span>
         </div>
       </header>
@@ -122,3 +179,9 @@ watch(
     </div>
   </div>
 </template>
+
+<style scoped>
+.scope-picker {
+  width: 168px;
+}
+</style>

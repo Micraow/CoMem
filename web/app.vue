@@ -2,16 +2,20 @@
 /**
  * 控制台根组件。
  *
- * 身份由 `plugins/console-identity.ts` 在应用挂载前拉取（`await` 的插件），所以
- * 这里读到的已经是最终状态：要么有绑定主体，要么是一条明确的失败原因。**身份未知
- * 时不渲染任何页面**——服务端会按「请求头与绑定主体不一致」返回 401，让页面先渲染
- * 再报错只会把「配置没生效」变成一片「请求失败」。
+ * 身份由 `plugins/console-identity.ts` 在应用挂载前解析（`await` 的插件），所以
+ * 这里读到的已经是最终状态：要么有身份，要么明确失败，要么认证打开但没有会话。
+ * **身份未知时不渲染任何页面**——服务端会按 401 拒绝，让页面先渲染再报错只会把
+ * 「配置没生效」变成一片「请求失败」。
+ *
+ * 登录页不套外壳：没有身份时连侧栏都不该出现，否则用户会以为登录后还能用那些
+ * 导航。单用户模式（`auth.enabled: false`）永远不会进入这个分支。
  */
 import { consoleIdentityState } from '~/composables/consoleIdentity'
 
 const state = consoleIdentityState()
 
 const failureMessage = state.status === 'failed' ? state.message : null
+const unauthenticated = state.status === 'unauthenticated'
 const emptyScopesSubject =
   state.status === 'ready' && state.identity.scopes.length === 0 ? state.identity.subject : null
 
@@ -28,10 +32,14 @@ function retry(): void {
     <button type="button" class="btn btn--primary" @click="retry">重试</button>
   </div>
 
+  <NuxtPage v-else-if="unauthenticated" />
+
+  <div v-else-if="state.status === 'pending'" class="bootstrap" aria-busy="true" />
+
   <div v-else-if="emptyScopesSubject !== null" class="bootstrap">
     <h1 class="bootstrap__title">当前主体没有可访问的命名空间</h1>
     <p class="bootstrap__text">
-      服务端绑定的主体是 {{ emptyScopesSubject }}，但它没有任何可读的根。请检查该主体在用户目录里的状态，
+      当前主体是 {{ emptyScopesSubject }}，但它没有任何可读的根。请检查该主体在用户目录里的状态，
       以及根目录的权限。
     </p>
   </div>

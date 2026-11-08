@@ -28,6 +28,7 @@ const PENDING_PREVIEW_LIMIT = 100
 const TASK_PREVIEW_LIMIT = 8
 
 const api = useApi()
+const scopeRoot = useScopeRoot()
 
 const health = useState<HealthPayload | null>('comem-health', () => null)
 const pending = useState<PendingMemoriesPayload | null>('comem-pending', () => null)
@@ -111,7 +112,10 @@ async function load(): Promise<void> {
   try {
     const [healthPayload, pendingPayload, taskPayload] = await Promise.all([
       api.get<HealthPayload>('/health'),
-      api.get<PendingMemoriesPayload>('/memories/pending', { limit: PENDING_PREVIEW_LIMIT }),
+      api.get<PendingMemoriesPayload>('/memories/pending', {
+        limit: PENDING_PREVIEW_LIMIT,
+        scopeUri: scopeRoot.value,
+      }),
       api.get<{ tasks: readonly TaskPayload[]; total: number }>('/tasks', {
         limit: TASK_PREVIEW_LIMIT,
       }),
@@ -130,6 +134,11 @@ async function load(): Promise<void> {
 }
 
 onMounted(load)
+
+// 待复核计数按作用域统计；索引与任务队列是全局的，但一起刷新保持同一帧。
+watch(scopeRoot, () => {
+  void load()
+})
 </script>
 
 <template>

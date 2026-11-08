@@ -8,13 +8,15 @@ const model = defineModel<string>({ default: '' })
 
 const props = withDefaults(
   defineProps<{
-    type?: 'text' | 'search' | 'url'
+    type?: 'text' | 'search' | 'url' | 'password'
     placeholder?: string
     ariaLabel?: string
     size?: 'md' | 'sm'
     /** `ghost` 用于嵌在已填充容器里的输入（例如带图标的搜索框）。 */
     variant?: 'default' | 'ghost'
     disabled?: boolean
+    /** 浏览器密码管理器的提示（`username` / `current-password`）。 */
+    autocomplete?: string
   }>(),
   {
     type: 'text',
@@ -23,6 +25,7 @@ const props = withDefaults(
     size: 'md',
     variant: 'default',
     disabled: false,
+    autocomplete: undefined,
   },
 )
 </script>
@@ -33,6 +36,7 @@ const props = withDefaults(
     class="input"
     :class="{ 'input--sm': props.size === 'sm', 'input--ghost': props.variant === 'ghost' }"
     :type="props.type"
+    :autocomplete="props.autocomplete"
     :placeholder="props.placeholder"
     :aria-label="props.ariaLabel"
     :disabled="props.disabled"

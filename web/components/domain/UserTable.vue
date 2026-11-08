@@ -38,7 +38,7 @@ export function formatUserTime(iso: string): string {
 </script>
 
 <script setup lang="ts">
-import { Pencil, Trash2, Users } from 'lucide-vue-next'
+import { Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
 
 const props = defineProps<{
   users: readonly UserRowPayload[]
@@ -50,6 +50,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  detail: [user: UserRowPayload]
   edit: [user: UserRowPayload]
   delete: [user: UserRowPayload]
   page: [offset: number]
@@ -108,6 +109,15 @@ const canNext = computed(() => props.offset + props.limit < props.total)
             </td>
             <td class="num">
               <div class="rowflex rowflex--end">
+                <UiButton
+                  variant="plain"
+                  size="sm"
+                  :disabled="props.loading"
+                  @click="emit('detail', user)"
+                >
+                  <UserRound :size="13" :stroke-width="1.5" />
+                  详情
+                </UiButton>
                 <UiButton
                   variant="plain"
                   size="sm"

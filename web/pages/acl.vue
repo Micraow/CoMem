@@ -57,6 +57,15 @@ const loading = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
 
+// 作用域切换后旧节点不在新根下：清空编辑器，等用户从新树里重新选。
+watch(scopeRoot, () => {
+  selectedUri.value = null
+  selectedKind.value = null
+  acl.value = null
+  levels.value = []
+  error.value = null
+})
+
 /** 文件的有效权限来自最近的目录祖先。 */
 const aclUri = computed<string | null>(() => {
   const uri = selectedUri.value

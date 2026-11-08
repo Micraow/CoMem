@@ -16,7 +16,7 @@
  * 列表加载失败说明这一屏没有数据；创建、编辑、删除、加成员失败只说明**刚才那个
  * 动作**没生效。前者进页面内的提示条，后者走 toast，不把整页标成坏的。
  */
-import { AlertTriangle, Plus } from 'lucide-vue-next'
+import { AlertTriangle, Copy, Plus } from 'lucide-vue-next'
 
 import { errorMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
@@ -91,6 +91,29 @@ const groupsError = ref<string | null>(null)
 
 const userDialogOpen = ref(false)
 const editingUser = ref<UserRowPayload | null>(null)
+const detailUser = ref<UserRowPayload | null>(null)
+
+const detailUserOpen = computed({
+  get: () => detailUser.value !== null,
+  set: (open: boolean) => {
+    if (!open) {
+      detailUser.value = null
+    }
+  },
+})
+
+const ownerInfo = ref<GroupRowPayload | null>(null)
+const ownerOpen = computed({
+  get: () => ownerInfo.value !== null,
+  set: (open: boolean) => {
+    if (!open) {
+      ownerInfo.value = null
+    }
+  },
+})
+const ownerCommand = computed(() =>
+  ownerInfo.value === null ? '' : `pnpm group:owner ${ownerInfo.value.id} <用户 ID>`,
+)
 const userForm = reactive({ id: '', displayName: '', email: '', status: 'active' as UserStatus })
 const userSaving = ref(false)
 
@@ -188,6 +211,22 @@ async function loadGroups(): Promise<void> {
     groupsTotal.value = 0
   } finally {
     groupsLoading.value = false
+  }
+}
+
+function openUserDetail(user: UserRowPayload): void {
+  detailUser.value = user
+}
+
+async function copyOwnerCommand(): Promise<void> {
+  if (ownerInfo.value === null) {
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(ownerCommand.value)
+    toast.show('success', '已复制恢复命令')
+  } catch {
+    toast.show('error', '浏览器拒绝写入剪贴板，请手动选择复制。')
   }
 }
 
@@ -437,6 +476,7 @@ onMounted(() => {
           :offset="usersOffset"
           :loading="usersLoading"
           :error="usersError"
+          @detail="openUserDetail"
           @edit="openEditUser"
           @delete="requestDeleteUser"
           @page="pageUsers"
@@ -450,6 +490,7 @@ onMounted(() => {
           :offset="groupsOffset"
           :loading="groupsLoading"
           :error="groupsError"
+          @owner-info="ownerInfo = $event"
           @members="openMembers"
           @edit="openEditGroup"
           @delete="requestDeleteGroup"
@@ -497,6 +538,29 @@ onMounted(() => {
           </UiButton>
         </div>
       </form>
+    </UiDialog>
+
+    <DomainUserDetail v-model="detailUserOpen" :user="detailUser" />
+
+    <UiDialog v-model="ownerOpen" title="恢复组的所有者">
+      <div class="stack-16">
+        <p class="body-sm muted">
+          组 {{ ownerInfo?.id }} 没有所有者，控制台无法修改它的权限或成员。恢复需要在一台能访问本仓库的机器上执行：
+        </p>
+        <code class="command">{{ ownerCommand }}</code>
+        <p class="body-sm muted">
+          第一个参数是组 ID，第二个是要接手的用户 ID（必须已存在）。详细步骤见仓库文档
+          docs/operations.md 的「恢复组的 owner」。
+        </p>
+        <div class="rowflex">
+          <span class="spacer" />
+          <UiButton variant="secondary" @click="copyOwnerCommand">
+            <Copy :size="14" :stroke-width="1.5" />
+            复制命令
+          </UiButton>
+          <UiButton variant="primary" @click="ownerInfo = null">关闭</UiButton>
+        </div>
+      </div>
     </UiDialog>
 
     <UiDialog
@@ -638,5 +702,18 @@ onMounted(() => {
 /* 左侧抽屉的 `.dialog__body` 去掉了内边距（移动端导航复用同一套样式）。 */
 .drawer-body {
   padding: 20px;
+}
+
+.command {
+  display: block;
+  padding: 12px;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+  box-shadow: var(--inset-hair);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
 }
 </style>

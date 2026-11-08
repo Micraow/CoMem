@@ -46,6 +46,7 @@ const LAYER_NOTE: Readonly<Record<Layer, string>> = {
 const route = useRoute()
 const router = useRouter()
 const api = useApi()
+const scopeRoot = useScopeRoot()
 
 const segments = computed<readonly string[]>(() => {
   const raw = route.params.path
@@ -230,6 +231,16 @@ watch(
 
 watch(layer, () => {
   void loadLayer()
+})
+
+// 作用域切换后详情里的节点可能已经不在新根下：回文件树入口，不显示一个不属于
+// 当前作用域的地址。
+watch(scopeRoot, (root) => {
+  const uri = selectedUri.value
+  if (uri === null || uri === root || uri.startsWith(`${root}/`)) {
+    return
+  }
+  void router.replace('/files')
 })
 
 onBeforeUnmount(() => {

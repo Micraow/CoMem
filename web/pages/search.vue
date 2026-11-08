@@ -30,6 +30,7 @@ const DEFAULT_LIMIT = '20'
 const api = useApi()
 const route = useRoute()
 const router = useRouter()
+const scopeRoot = useScopeRoot()
 
 function firstValue(value: unknown): string {
   if (typeof value === 'string') {
@@ -58,7 +59,7 @@ function contextTypeOf(value: string): SearchContextType | '' {
 
 const query = ref(firstValue(route.query['q']))
 const mode = ref<SearchMode>(modeOf(firstValue(route.query['mode'])))
-const scope = ref(firstValue(route.query['scope']))
+const scope = ref(firstValue(route.query['scope']) || scopeRoot.value)
 const limit = ref(firstValue(route.query['limit']) || DEFAULT_LIMIT)
 const level = ref<SearchLevel | ''>(levelOf(firstValue(route.query['level'])))
 const contextType = ref<SearchContextType | ''>(contextTypeOf(firstValue(route.query['type'])))
@@ -163,6 +164,14 @@ const resultCaption = computed(() =>
 
 onMounted(() => {
   if (query.value.trim() !== '') {
+    void runSearch()
+  }
+})
+
+// 全局作用域切换后，检索条件里的范围跟着换；已经有结果就按新范围重跑。
+watch(scopeRoot, (root) => {
+  scope.value = root
+  if (searched.value) {
     void runSearch()
   }
 })

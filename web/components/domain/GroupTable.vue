@@ -55,6 +55,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  ownerInfo: [group: GroupRowPayload]
   members: [group: GroupRowPayload]
   edit: [group: GroupRowPayload]
   delete: [group: GroupRowPayload]
@@ -97,7 +98,15 @@ const canNext = computed(() => props.offset + props.limit < props.total)
           <tr v-for="group in props.groups" :key="group.id">
             <td class="mono strong">
               {{ group.id }}
-              <UiBadge v-if="group.ownerMissing" variant="red">无所有者</UiBadge>
+              <button
+                v-if="group.ownerMissing"
+                type="button"
+                class="owner-badge"
+                :aria-label="`查看恢复组 ${group.id} 所有者的方法`"
+                @click="emit('ownerInfo', group)"
+              >
+                <UiBadge variant="red">无所有者</UiBadge>
+              </button>
             </td>
             <td>{{ group.displayName }}</td>
             <td>
@@ -176,5 +185,25 @@ const canNext = computed(() => props.offset + props.limit < props.total)
 <style scoped>
 .rowflex--end {
   justify-content: flex-end;
+}
+
+.owner-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.owner-badge:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.owner-badge:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-tint);
 }
 </style>

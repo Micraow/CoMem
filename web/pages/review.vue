@@ -30,6 +30,7 @@ const CONTENT_HEADING = '## content'
 
 const api = useApi()
 const toast = useToast()
+const scopeRoot = useScopeRoot()
 
 const memories = ref<readonly PendingMemoryPayload[] | null>(null)
 const loading = ref(false)
@@ -106,7 +107,9 @@ async function load(): Promise<void> {
   error.value = null
 
   try {
-    const payload = await api.get<PendingListPayload>('/memories/pending')
+    const payload = await api.get<PendingListPayload>('/memories/pending', {
+      scopeUri: scopeRoot.value,
+    })
     memories.value = payload.memories
 
     const present = new Set(payload.memories.map((memory) => memory.uri))
@@ -251,6 +254,12 @@ function confirmBatchReject(): void {
 }
 
 onMounted(() => {
+  void load()
+})
+
+// 作用域切换后复核队列是另一批记忆：重新取，并让选中项跟随新列表。
+watch(scopeRoot, () => {
+  selectedUri.value = null
   void load()
 })
 </script>

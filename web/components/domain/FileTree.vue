@@ -30,6 +30,7 @@ const emit = defineEmits<{
 
 const { state, loading, error, filter, rows, load, refresh, toggle, expandAncestors, isExpanded } =
   useTree()
+const scopeRoot = useScopeRoot()
 
 const SKELETON_ROWS = 8
 const scrollArea = ref<HTMLElement | null>(null)
@@ -68,6 +69,13 @@ onMounted(() => {
   if (state.value === null && !loading.value) {
     void load()
   }
+})
+
+// 作用域切换后旧树整体失效：根变了，展开状态与筛选都没有意义。
+watch(scopeRoot, () => {
+  state.value = null
+  filter.value = ''
+  void load()
 })
 
 watch([() => props.selected, state], () => {

@@ -20,7 +20,12 @@
 
 import type { Ref } from 'vue'
 
-import { consoleIdentityOrThrow, identityHeaders } from './consoleIdentity'
+import { clearConsoleSession, readStoredScope, writeStoredScope } from './consoleAuth'
+import {
+  consoleIdentityOrThrow,
+  consoleIdentityState,
+  identityHeaders,
+} from './consoleIdentity'
 
 export interface ApiOk<T> {
   readonly status: 'ok'
@@ -108,6 +113,28 @@ interface RequestOptions {
   readonly body?: unknown
 }
 
+/**
+ * 认证打开时收到 401：会话已失效（过期 / 改过密码 / 账号被删）。
+ *
+ * 清掉本地会话再整页跳登录页。**不做前端重试**：token 无状态，重试只会再 401
+ * 一次；`redirect` 记住原地址，重新登录后回到这里。单用户模式的 401 是身份配置
+ * 问题，不是「没登录」，保持当前错误展示。
+ */
+function redirectToLoginOnUnauthenticated(): void {
+  const state = consoleIdentityState()
+  if (state.status !== 'ready' || state.identity.authEnabled !== true) {
+    return
+  }
+
+  clearConsoleSession()
+  if (typeof window === 'undefined' || window.location.pathname === '/login') {
+    return
+  }
+
+  const redirect = `${window.location.pathname}${window.location.search}`
+  window.location.assign(`/login?redirect=${encodeURIComponent(redirect)}`)
+}
+
 async function request<T>(
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
@@ -136,6 +163,10 @@ async function request<T>(
     })
 
     const payload = await readPayload(response)
+
+    if (response.status === 401) {
+      redirectToLoginOnUnauthenticated()
+    }
 
     if (isErrorEnvelope(payload)) {
       throw new ApiClientError(
@@ -205,15 +236,37 @@ export function useApi(): ApiClient {
 /**
  * 作用域根：跨页共享一份，切页不重取。
  *
- * 取服务端 `GET /health` 返回的第一个可读根（个人根）。它是「当前身份看到的世界」
- * 的入口，文件树、检索调试、权限管理都要用它，放在 `useState` 里比每页各写一个
- * 常量更容易在接入多作用域时统一改。
+ * 取服务端返回的第一个可读根（个人根）作为默认值；用户上次在顶栏选过的根如果
+ * 仍在可读范围里就恢复它。刷新不丢，作用域选择与「当前标签页登录的是谁」绑定在
+ * 一起（`sessionStorage`）。
  *
  * 身份还没引导时 `consoleIdentityOrThrow` 抛错——`app.vue` 在身份未知时不会渲染
  * 页面，所以调用方拿不到一个假根。
  */
 export function useScopeRoot(): Ref<string> {
-  return useState<string>('comem-scope-root', () => consoleIdentityOrThrow().scopes[0] ?? '')
+  return useState<string>('comem-scope-root', () => {
+    const identity = consoleIdentityOrThrow()
+    const stored = readStoredScope()
+    if (stored !== null && identity.scopes.includes(stored)) {
+      return stored
+    }
+    return identity.scopes[0] ?? ''
+  })
+}
+
+/**
+ * 切换作用域并记住。
+ *
+ * 所有页面监听 `useScopeRoot` 返回的 ref 重新加载自己的数据；这里只改状态，不做
+ * 路由跳转——文件树、检索、复核各自的「切过去之后选中什么」不同。
+ */
+export function selectScopeRoot(scope: string): void {
+  const root = useScopeRoot()
+  if (root.value === scope) {
+    return
+  }
+  root.value = scope
+  writeStoredScope(scope)
 }
 
 /** 把任意异常转成可显示的中文句子。 */

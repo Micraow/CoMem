@@ -78,7 +78,15 @@ export function navLabelOf(path: string): string {
 </script>
 
 <script setup lang="ts">
+import { consoleIdentityState, consoleScopeLabel } from '~/composables/consoleIdentity'
+import { useScopeRoot } from '~/composables/useApi'
+
+const state = consoleIdentityState()
+const identity = state.status === 'ready' ? state.identity : null
 const scopeRoot = useScopeRoot()
+const scopeLabel = computed(() =>
+  identity === null ? '—' : consoleScopeLabel(scopeRoot.value, identity.subject),
+)
 const route = useRoute()
 </script>
 
@@ -114,7 +122,7 @@ const route = useRoute()
     <div class="sidebar__foot">
       <div class="footstat">
         <span>命名空间</span>
-        <b class="mono">{{ scopeRoot }}</b>
+        <b>{{ scopeLabel }}</b>
       </div>
     </div>
   </aside>

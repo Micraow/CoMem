@@ -36,6 +36,7 @@ const TABS = [
 ] as const
 
 const api = useApi()
+const scopeRoot = useScopeRoot()
 
 const tab = ref<'sessions' | 'tasks'>('sessions')
 
@@ -59,7 +60,9 @@ async function loadSessions(): Promise<void> {
   loadingSessions.value = true
   sessionsError.value = null
   try {
-    const payload = await api.get<SessionListPayload>('/sessions')
+    const payload = await api.get<SessionListPayload>('/sessions', {
+      scopeUri: scopeRoot.value,
+    })
     sessions.value = payload.sessions
   } catch (caught) {
     sessionsError.value = errorMessageOf(caught)
@@ -98,6 +101,7 @@ async function commitSession(sessionId: string): Promise<void> {
   try {
     const result = await api.post<{ taskId: string }>(
       `/sessions/${encodeURIComponent(sessionId)}/commit`,
+      { scopeUri: scopeRoot.value },
     )
     committedTaskIds.value = { ...committedTaskIds.value, [sessionId]: result.taskId }
     highlightTaskId.value = result.taskId
@@ -165,6 +169,12 @@ async function refresh(): Promise<void> {
 
 onMounted(() => {
   void refresh()
+})
+
+// 会话按作用域隔离；任务队列是全局的，不需要重取。
+watch(scopeRoot, () => {
+  committedTaskIds.value = {}
+  void loadSessions()
 })
 </script>
 
