@@ -1,8 +1,17 @@
 /**
  * 记忆抽取提示词（架构文档 §11.3、§11.4）。
  *
- * 纯字符串拼接，不调模型：模板是确定的，测试只需要断言关键片段出现，不需要
- * 跑一次真实的 LLM。
+ * 提示词的静态骨架在 `prompts/extract-system.md` 与 `prompts/extract-user.md`，
+ * 可以在控制台查看和修改。本文件只负责把动态部分（记忆类型清单、已读记忆、会话
+ * 记录）渲染成字符串，再按 `{{name}}` 注入模板。
+ *
+ * 模板里没有控制流，所以「空列表要说一句明确的话」这类判断留在这里——它们是领域
+ * 规则，不是排版：
+ *
+ * - 没有预取到已读记忆时要说明，否则模型会自己编造编号；
+ * - 没有会话消息时同样说明；
+ * - 「上一次归档的概览」整段是**可选**的：没有时连同小标题一起去掉，而不是留一个
+ *   空的二级标题。
  *
  * 抽取采用**预取**（§11.3）：调用方先按 schema 做一次检索，把命中的记忆连同
  * `page_id` 一起塞进来。模型看不到原始 URI，只看到编号；输出里的操作引用
@@ -14,7 +23,9 @@
 import type { LlmMessage, LlmPrompt } from '../../domain/llm.js';
 import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 
-/** 新建记忆的起始编号（§11.4：≥ 100）。 */
+import { promptRenderer } from './registry.js';
+
+/** 新建记忆的起始编号（§11.4：≥ 100）。模板通过 `{{newPageIdStart}}` 引用。 */
 export const NEW_PAGE_ID_START = 100;
 
 /** 一条「已读过」的记忆。`pageId` 是给模型看的编号，不是 URI。 */
@@ -80,61 +91,41 @@ function renderMessages(messages: readonly LlmMessage[]): string {
   return messages.map((message) => `### ${message.role}\n${message.content}`).join('\n\n');
 }
 
-function buildSystemPrompt(memoryTypes: readonly MemoryTypeSchema[]): string {
-  return [
-    '你是 CoMem 的记忆抽取器。阅读一段会话记录，把值得长期保留的信息抽取成结构化操作。',
-    '',
-    '## 记忆类型',
-    renderMemoryTypes(memoryTypes),
-    '',
-    '## page_id 编号规则',
-    `- 「已读记忆」里的每条记忆有一个编号。修改或删除已有记忆时，引用它的 page_id。`,
-    `- 新建的记忆必须使用 ≥ ${NEW_PAGE_ID_START} 的编号（${NEW_PAGE_ID_START}、${NEW_PAGE_ID_START + 1}、${NEW_PAGE_ID_START + 2}……），按出现顺序递增。`,
-    '- 新建编号不能与已读记忆的 page_id 冲突。',
-    '',
-    '## 输出格式',
-    '只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或其它文本。结构：',
-    [
-      '{',
-      '  "operations": [',
-      '    {',
-      '      "kind": "upsert",',
-      '      "pageId": 100,',
-      '      "type": "preferences",',
-      '      "identity": { "topic": "code-style" },',
-      '      "operations": [',
-      '        { "kind": "replace", "field": "content", "value": "..." }',
-      '      ]',
-      '    },',
-      '    { "kind": "delete", "pageId": 3 }',
-      '  ]',
-      '}',
-    ].join('\n'),
-    '规则：',
-    '- `kind` 只能是 `upsert` 或 `delete`。',
-    '- `operations[].kind` 只能是 `patch` / `replace` / `sum` / `immutable`。',
-    '- `patch` 操作把块放在 `blocks` 键下，形如 `{ "kind": "patch", "field": "content", "blocks": [{ "search": "...", "replace": "..." }] }`。**SEARCH 必须在当前正文里唯一命中**：零命中或多处命中都会让整条操作被丢弃。',
-    '- `replace` 用 `value`，`sum` 用 `delta`，`immutable` 用 `value`。`patch` 不用 `value`。',
-    '- `identity` 必须覆盖该类型文件名模板里的全部占位符。',
-    '- 没有值得保留的信息时输出 `{"operations": []}`。',
-  ].join('\n');
-}
-
-function buildUserContent(input: ExtractPromptInput): string {
-  const sections = ['## 已读记忆', renderPages(input.pages)];
-
-  if (input.previousOverview !== undefined && input.previousOverview.trim() !== '') {
-    sections.push('## 上一次归档的概览', input.previousOverview);
+/**
+ * 「上一次归档的概览」整段，含小标题与两个空行；没有时是空串。
+ *
+ * 小标题留在这里而不是模板里：模板没有条件语法（见 `domain/prompt.ts` 的取舍），
+ * 而「没有概览就不要这一节」是领域判断——留一个空标题会让模型以为上次什么都没记。
+ */
+function renderPreviousOverviewSection(overview: string | undefined): string {
+  if (overview === undefined || overview.trim() === '') {
+    return '';
   }
-
-  sections.push('## 会话记录', renderMessages(input.messages));
-  sections.push('## 任务', '按上面的格式输出 JSON。');
-  return sections.join('\n\n');
+  return `## 上一次归档的概览\n\n${overview}\n\n`;
 }
 
 export function buildExtractPrompt(input: ExtractPromptInput): LlmPrompt {
+  const renderer = promptRenderer();
+
   return {
-    system: buildSystemPrompt(input.memoryTypes),
-    messages: [{ role: 'user', content: buildUserContent(input) }],
+    system: renderer.render('extract-system', {
+      memoryTypes: renderMemoryTypes(input.memoryTypes),
+      newPageIdStart: String(NEW_PAGE_ID_START),
+      newPageIdExamples: [
+        NEW_PAGE_ID_START,
+        NEW_PAGE_ID_START + 1,
+        NEW_PAGE_ID_START + 2,
+      ].join('、'),
+    }),
+    messages: [
+      {
+        role: 'user',
+        content: renderer.render('extract-user', {
+          pages: renderPages(input.pages),
+          previousOverviewSection: renderPreviousOverviewSection(input.previousOverview),
+          messages: renderMessages(input.messages),
+        }),
+      },
+    ],
   };
 }

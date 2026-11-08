@@ -1,0 +1,303 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`六条提示词的渲染快照 > 'extract-system' 1`] = `
+"你是 CoMem 的记忆抽取器。阅读一段会话记录，把值得长期保留的信息抽取成结构化操作。
+
+## 记忆类型
+### profile
+- 说明：用户画像：基本信息、职业与工作方式
+- 目录：memories
+- 写入模式：upsert
+- 字段：
+  - name (string，identity，必填)：用户的名字或常用称呼
+  - role (string，合并策略 patch)：职业、岗位或主要角色，如「后端工程师」
+  - content (string，合并策略 patch)：用户画像正文：基本信息、技术栈与工作方式
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### preferences
+- 说明：用户在某个话题上的偏好
+- 目录：memories/preferences
+- 写入模式：upsert
+- 字段：
+  - topic (string，identity，必填)：偏好所属话题，小写短横线，如 code-style
+  - content (string，合并策略 patch)：偏好内容，一句话说清「用户偏好什么」
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### entities
+- 说明：项目、组织、人物等实体的稳定描述
+- 目录：memories/entities
+- 写入模式：upsert
+- 字段：
+  - name (string，identity，必填)：实体名，小写短横线，如 comem-project
+  - kind (string，合并策略 replace)：实体类别：project / organization / person
+  - content (string，合并策略 patch)：实体说明：它是什么、和用户的关系、关键事实
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### events
+- 说明：决策、里程碑等一次性发生的事实
+- 目录：memories/events
+- 写入模式：addOnly
+- 字段：
+  - event (string，identity，必填)：事件标识，形如 2026-11-05-architecture-decision
+  - occurredAt (string，合并策略 immutable)：事件发生时间，ISO 8601 时间串
+  - content (string，合并策略 immutable)：事件正文：决策内容、里程碑与当时的依据
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### identity
+- 说明：代理的身份设定：名字、职责与能力边界
+- 目录：memories
+- 写入模式：upsert
+- 字段：
+  - name (string，identity，必填)：代理的名字或称呼
+  - purpose (string，合并策略 patch)：这个代理存在的目的与服务对象
+  - content (string，合并策略 patch)：身份设定正文：职责、语气与能力边界
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### soul
+- 说明：核心原则：不可违背的价值观与决策准则
+- 目录：memories
+- 写入模式：upsert
+- 字段：
+  - name (string，identity，必填)：记忆主体的名字，用来确认这条原则属于谁
+  - content (string，合并策略 patch)：核心原则正文：不可违背的价值观与决策准则
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### experiences
+- 说明：从执行结果蒸馏出的经验与教训
+- 目录：memories/experiences
+- 写入模式：upsert
+- 字段：
+  - topic (string，identity，必填)：经验归属的话题，小写短横线，如 monorepo-migration
+  - content (string，合并策略 patch)：经验正文：做对了什么、踩过什么坑、下次怎么做得更好
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+### rules
+- 说明：必须遵守的约束与触发条件
+- 目录：memories/rules
+- 写入模式：upsert
+- 字段：
+  - scenario (string，identity，必填)：规则所属场景，小写短横线，如 license-review
+  - rule (string，identity，必填)：规则标识，小写短横线，如 must-locate-license
+  - content (string，合并策略 patch)：规则正文：在什么场景下必须做什么，以及判断依据
+  - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
+
+## page_id 编号规则
+- 「已读记忆」里的每条记忆有一个编号。修改或删除已有记忆时，引用它的 page_id。
+- 新建的记忆必须使用 ≥ 100 的编号（100、101、102……），按出现顺序递增。
+- 新建编号不能与已读记忆的 page_id 冲突。
+
+## 输出格式
+只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或其它文本。结构：
+{
+  "operations": [
+    {
+      "kind": "upsert",
+      "pageId": 100,
+      "type": "preferences",
+      "identity": { "topic": "code-style" },
+      "operations": [
+        { "kind": "replace", "field": "content", "value": "..." }
+      ]
+    },
+    { "kind": "delete", "pageId": 3 }
+  ]
+}
+规则：
+- \`kind\` 只能是 \`upsert\` 或 \`delete\`。
+- \`operations[].kind\` 只能是 \`patch\` / \`replace\` / \`sum\` / \`immutable\`。
+- \`patch\` 操作把块放在 \`blocks\` 键下，形如 \`{ "kind": "patch", "field": "content", "blocks": [{ "search": "...", "replace": "..." }] }\`。**SEARCH 必须在当前正文里唯一命中**：零命中或多处命中都会让整条操作被丢弃。
+- \`replace\` 用 \`value\`，\`sum\` 用 \`delta\`，\`immutable\` 用 \`value\`。\`patch\` 不用 \`value\`。
+- \`identity\` 必须覆盖该类型文件名模板里的全部占位符。
+- 没有值得保留的信息时输出 \`{"operations": []}\`。"
+`;
+
+exports[`六条提示词的渲染快照 > 'extract-user' 1`] = `
+"## 已读记忆
+
+<page_id: 1>
+uri: comem://user/alice/memories/preferences/code-style.md
+正文：
+---
+type: preferences
+---
+
+## content
+
+两空格缩进。
+
+<page_id: 2>
+uri: comem://user/alice/memories/profile.md
+正文：
+alice
+
+## 上一次归档的概览
+
+上次聊到代码风格。
+
+## 会话记录
+
+### user
+我更喜欢 2 空格缩进。
+
+### assistant
+记住了。
+
+## 任务
+
+按上面的格式输出 JSON。"
+`;
+
+exports[`六条提示词的渲染快照 > 'extract-user-no-overview' 1`] = `
+"## 已读记忆
+
+（这次没有预取到已读记忆。）
+
+## 会话记录
+
+（这次没有会话消息。）
+
+## 任务
+
+按上面的格式输出 JSON。"
+`;
+
+exports[`六条提示词的渲染快照 > 'rewrite-system' 1`] = `
+"你是 CoMem 的查询重写器。CoMem 是一个记忆数据库：它保存用户与 agent 过去的偏好、事实、决定、事件与操作步骤。你的任务是把用户当前这句话改写成 0–5 条适合做全文检索的查询。
+
+## 什么时候返回空数组
+下面这些情况返回 \`{"queries": []}\`，一条都不要给：
+- 这句话是寒暄、客套、无信息量的应答（「你好」「谢谢」「继续」「好的」「嗯」）。
+- 这句话是纯指令，不依赖任何历史（「重新跑一遍测试」「把文件删了」）——它的答案在执行结果里，不在记忆里。
+- 这句话问的是与用户和历史无关的通用知识（「今天几号」「Python 怎么读文件」），记忆库里没有对应内容。
+检索不到比检索错更浪费上下文：一条错误的查询会把无关记忆投进上下文，模型还要为它分心。
+
+## 什么时候拆成多条
+- 这句话里有 2 个以上**互相独立**的意图：「我上次说的那个编码规范和提交信息格式，现在还在用吗」是两条（编码规范、提交信息格式）。
+- 这句话在问「之前那个 X 和 Y」：X 与 Y 各自成条，因为它们在记忆里极可能落在不同的节点上。
+每条查询只承载一个意图，用 \`intent\` 标明它是哪一类。
+
+## 什么时候不要拆
+- 同义改写的复合词不要拆。「代码风格约定」是一个词，不要拆成「代码」「风格」「约定」三条。
+- 一句话里的修饰成分不要单独成条：「我上周让你改的那个部署脚本」只有「部署脚本」一个检索对象。
+判断标准是「这两条查询会不会命中不同的记忆」：不会就合并成一条。
+
+## 指代与改写
+- 历史里出现的指代必须改写成完整查询：「那它呢」「上面那个方案」要看最近几轮对话里它指的是什么，用完整名词重写。
+- 重写只能改写措辞（补全省略的主语、把指代换成名词），**不能加入原 query 与历史里都没有的概念**。历史里没提到的东西不要猜。
+- 用 \`derivedFrom\` 填原 query 里对应的片段（**原文片段，不是重写后的文本**），这样调用方能在界面上解释「这条查询是从哪句话来的」。原 query 没有对应片段的，填 \`null\`。
+
+## 置信度
+\`confidence\` 是这条查询「值得跑」的把握，取 0–1 的小数：0.9 表示几乎肯定能命中，0.3 表示只是有可能。不要为了凑满 5 条而给低置信度的查询。
+
+## 输出格式
+只输出一个 JSON 对象，不要输出 Markdown 代码块、解释或其它文本。结构：
+{
+  "queries": [
+    {
+      "text": "用户的代码风格偏好",
+      "intent": "preference",
+      "confidence": 0.9,
+      "derivedFrom": "编码规范"
+    }
+  ]
+}
+\`queries\` 最多 5 条，可以为空数组。
+\`intent\` 只能是：preference（偏好、习惯、风格）/ fact（事实性知识）/ decision（做过的决定与理由）/ event（发生过的事）/ procedure（步骤、流程）/ other（其它）。"
+`;
+
+exports[`六条提示词的渲染快照 > 'rewrite-user' 1`] = `
+"## 当前查询
+
+我们组的代码风格约定还在吗
+
+## 最近消息（越靠后越新）
+
+### user
+我上次说的编码规范呢？
+
+### assistant
+两条：两空格缩进、提交信息用英文。
+
+## 可检索范围
+
+- comem://user/alice
+- comem://group/eng
+
+## 任务
+
+按上面的规则输出 JSON。"
+`;
+
+exports[`六条提示词的渲染快照 > 'rewrite-user-empty' 1`] = `
+"## 当前查询
+
+你好
+
+## 最近消息（越靠后越新）
+
+（这次没有历史消息。）
+
+## 可检索范围
+
+（没有指定范围。）
+
+## 任务
+
+按上面的规则输出 JSON。"
+`;
+
+exports[`六条提示词的渲染快照 > 'summarize-system' 1`] = `
+"你是 CoMem 的目录摘要生成器。根据一个目录的直接子节点，写出这个目录的完整概览（L1），让读者不用打开子文件就能判断该读哪一个。
+
+## 输出结构
+只输出 Markdown 正文，结构如下：
+# <标题：这个目录是什么>
+
+<简述：一到三句话，不超过 256 字符>
+
+## 快速导航
+
+- \`<子节点名>\` —— 一句话说明
+
+## 详细说明
+
+### <子节点名>
+
+<逐条详述，每个子节点一段>
+
+## 约束
+- 整篇正文不超过 4000 字符。
+- 标题是一级标题，只出现一次；「快速导航」「详细说明」是二级标题。
+- 不要输出 frontmatter：\`---\` 包起来的元数据由服务端生成。
+- 不要用代码块包裹整篇输出，也不要在正文前后加解释。
+- 每个子节点都要在「快速导航」与「详细说明」里各出现一次，顺序与输入一致。
+- 不要编造输入里没有的事实；信息不足时只描述子节点写了什么。"
+`;
+
+exports[`六条提示词的渲染快照 > 'summarize-user' 1`] = `
+"## 目录
+
+uri: comem://user/alice/memories
+
+## 直接子节点
+
+### profile.md（document）
+uri: comem://user/alice/memories/profile.md
+摘要：
+alice，后端工程师。
+
+### preferences（directory）
+uri: comem://user/alice/memories/preferences
+摘要：
+偏好清单。"
+`;
+
+exports[`六条提示词的渲染快照 > 'summarize-user-empty' 1`] = `
+"## 目录
+
+uri: comem://user/alice/memories
+
+## 直接子节点
+
+（这个目录是空的。）"
+`;

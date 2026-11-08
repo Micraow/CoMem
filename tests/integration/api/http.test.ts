@@ -272,6 +272,47 @@ describe('身份绑定可配置', () => {
     });
   });
 
+  it('GET /health 返回绑定主体与可寻址的根（控制台身份引导）', async () => {
+    await withContainer({ COMEM_SERVER_SUBJECT: 'user:alice' }, async (created) => {
+      const healthApp = await createHttpServer({
+        config: created.config,
+        logger: created.logger,
+        observability: created.observability,
+        routes: created.routes,
+        mcp: created.mcp,
+        resolveIdentity: created.resolveIdentity,
+      });
+      try {
+        const result = resultOf(await healthApp.inject({ method: 'GET', url: '/health' }));
+        // 控制台不再硬编码 `user:local`：主体与可寻址的根都来自这里（§18）。
+        expect(result['subject']).toBe('user:alice');
+        expect(result['scopes']).toEqual(['comem://user/alice']);
+      } finally {
+        await healthApp.close();
+      }
+    });
+  });
+
+  it('server.subject 是组主体时启动即拒绝（服务图只接受 user）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-http-subject-group-'));
+    try {
+      await expect(
+        createContainer({
+          configPath: join(dir, 'config.yaml'),
+          env: {
+            ...process.env,
+            COMEM_DATA_DIR: dir,
+            COMEM_SUMMARY_GENERATOR: 'rule',
+            COMEM_LOGGING_LEVEL: 'error',
+            COMEM_SERVER_SUBJECT: 'group:eng',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('server.subject 非法时启动即抛 INVALID_ARGUMENT', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'comem-http-subject-bad-'));
     try {

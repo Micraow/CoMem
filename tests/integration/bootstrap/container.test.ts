@@ -71,6 +71,7 @@ describe('createContainer', () => {
         'indexObserver',
         'ledger',
         'memory',
+        'prompts',
         'resource',
         'search',
         'session',

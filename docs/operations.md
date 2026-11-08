@@ -132,6 +132,56 @@ pnpm check:config
 **遗留债务**：`LEGACY_OPTIONAL_CONFIG_DEPS` 记录 17 处已经存在的「配置值进入可选属性」。
 清单只允许缩小，新增项直接报错。全部改必填要动 10 个接口与 62 处构造点，排在后续 wave。
 
+## 提示词
+
+六条提示词的静态骨架在仓库的 `prompts/` 下，随代码一起发布：
+
+| 文件 | 什么时候发给模型 |
+|---|---|
+| `extract-system.md` / `extract-user.md` | 记忆抽取（§11.3、§11.4） |
+| `summarize-system.md` / `summarize-user.md` | 目录摘要（§9.2） |
+| `rewrite-system.md` / `rewrite-user.md` | 查询重写（§8.4） |
+
+**优先级：仓库默认 < 数据库覆盖。** 控制台的「提示词」页改的是 SQLite 的 `prompt_override`
+表（`0012_prompt.sql`），「恢复默认」就是删掉那一行。不让服务端直接改仓库文件，是因为
+容器只读挂载、多副本部署、`git status` 被污染这三个场景下「改仓库文件」都不成立。
+
+**改 `.md` 不需要重启。** 默认模板每次渲染都读一次磁盘（几 KB，而一次模型调用是秒级），
+没有缓存要失效——改完发下一条请求就生效。
+
+### 校验会拦住什么
+
+| 情况 | 什么时候报 | 报什么 |
+|---|---|---|
+| 变量拼错（`{{pagess}}`） | 保存时、启动时 | `INVALID_ARGUMENT`，带提示词标识、行号与可用变量 |
+| `{{` 没有配对的变量名 | 保存时、启动时 | 同上，带行号 |
+| 模板需要的变量没有传 | 渲染时 | `INVALID_ARGUMENT`，带变量名 |
+
+**不会「尽量渲染」。** 一条渲染出 `{{pages}}` 字面量的提示词会让模型把占位符当成正文，
+而错误只会在模型的输出里出现。
+
+### 升级之后「我的覆盖落后了」
+
+保存覆盖时会记下当时默认模板的摘要（`prompt_override.base_digest`）。新版本改过默认值
+之后摘要对不上，控制台的「提示词」页会在这一条上显示「默认值已更新」——覆盖仍然生效，
+但它基于的是旧版本的默认值。点「恢复默认」回到新默认值，或者对照 `prompts/*.md` 重新改。
+
+**数据库里的覆盖不合法时服务起不来。** 一条引用了不存在变量的覆盖会让每一次模型调用
+失败，而失败只出现在后台任务里，所以启动时直接报错。处理方式：
+
+```bash
+sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" \
+  "DELETE FROM prompt_override WHERE prompt_id = 'extract-user';"
+```
+
+### 已知限制
+
+- **多副本部署不同步。** 覆盖在进程启动时读进内存，一个副本保存不影响另一个。多副本要给
+  每个副本各改一次。
+- **只支持 `{{name}}` 变量替换，没有条件与循环。** 动态部分（记忆类型清单、页面列表）
+  由代码渲染成字符串后注入。模板引擎表达不了「空列表要说一句明确的话」这类领域判断——
+  而那条判断决定了模型会不会自己编造 `page_id`。
+
 ## 启动
 
 ### 开发
@@ -445,6 +495,8 @@ $ curl -s http://127.0.0.1:1933/health | jq
   "status": "ok",
   "result": {
     "status": "degraded",
+    "subject": "user:local",
+    "scopes": ["comem://user/local"],
     "index": { "nodes": 4 },
     "queue": { "pending": 0, "processing": 0 },
     "summary": { "degraded": false, "pendingDirs": 0, "degradedDirs": 3 },
@@ -461,6 +513,8 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | 字段 | 含义 | 什么时候要管 |
 |---|---|---|
 | `result.status` | `ok` / `degraded` | `degraded` = 摘要走的是规则降级，或存在降级摘要的目录。降级必须可见（§17.9） |
+| `result.subject` | 服务图绑定的主体（`server.subject`） | 控制台用它拼 `x-comem-subject`。与期望的用户不符 = 配置没生效（见「控制台每个请求 401」） |
+| `result.scopes` | 该主体可寻址且可读的根（个人根在前） | 为空 = 主体没有任何可访问的命名空间，控制台会明确说明 |
 | `index.nodes` | 索引里的节点数 | 掉到 0 而磁盘上有文件 = 索引没写进去，看 `reconcile.log` |
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
 | `summary.pendingDirs` | 待刷新摘要的目录数 | 长期不降 = 摘要失效在堆积 |
@@ -704,6 +758,25 @@ Codex」，导出目录是一次性的。
 **处理**：`curl /health` 看服务是否正常；`GET /api/v1/acl?uri=...` 看物化结果（需要 `manage`）；
 `.acl.json` 改坏了就恢复备份，或者删掉整个 `_meta/comem.sqlite` 再启动（会重新物化根，但
 已索引节点会消失，见「备份与恢复」的警告）。
+
+### 控制台每个请求 401
+
+**症状**：控制台能打开，但每个请求都是 `UNAUTHENTICATED`；`curl` 不带请求头反而正常。
+
+**原因**：控制台发的 `x-comem-subject` 与服务图绑定的主体不一致。控制台不硬编码身份，
+它在启动时调 `GET /health` 拿 `result.subject`（`web/composables/consoleIdentity.ts`），
+所以只要服务端返回的是期望的主体，两边就一致。
+
+**处理**：
+
+1. `curl -s http://127.0.0.1:1933/health | jq .result.subject`。不是期望的主体，
+   说明 `server.subject` 没生效：检查 `COMEM_SERVER_SUBJECT` 环境变量与 `config.yaml`
+   的优先级（CLI > 环境变量 > 配置文件 > 默认值），改完要重启后端。
+2. 控制台整页显示「控制台无法确定当前身份」时，说明 `/health` 拉取失败或字段缺失。
+   错误页会写出原因（HTTP 状态、超时、不是 JSON），按它排查；此时控制台**不会**发
+   任何业务请求。
+3. 整页显示「当前主体没有可访问的命名空间」时，`result.scopes` 为空：该主体在用户
+   目录里不存在 / 被禁用，或根目录的权限行没物化（见上面「会话页 403」）。
 
 ### `pnpm dev` 起不来
 

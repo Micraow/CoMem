@@ -67,6 +67,7 @@ import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js'
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
+import { PromptRepository } from '../adapters/sqlite/prompt-repository.js';
 import { UserRepository } from '../adapters/sqlite/user-repository.js';
 import { RequestLogRepository } from '../adapters/sqlite/request-log-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
@@ -100,6 +101,8 @@ import { IndexObserver } from '../services/index-observer.js';
 import { LlmService } from '../services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../services/memory.js';
 import { ObservabilityService } from '../services/observability.js';
+import { PromptService } from '../services/prompt-service.js';
+import { bindPromptRenderer } from '../services/prompts/registry.js';
 import { RecallLedger, type LedgerStore } from '../services/recall-ledger.js';
 import {
   DEFAULT_MAX_FILE_BYTES,
@@ -202,6 +205,14 @@ export interface ContainerServices {
   readonly indexObserver: IndexObserver;
   /** 任务行的只读查询端口（`TaskRepository`）。路由用它查任务。 */
   readonly taskStore: TaskRepository;
+  /**
+   * 提示词（§9.2、§11.3、§11.4）。
+   *
+   * 它同时是 `prompts/registry.ts` 的**进程级渲染器**：容器构造时把默认实现
+   * （只读 `prompts/*.md`）换成「覆盖优先」的实现，三条提示词的调用点才能看到
+   * 控制台里的修改。推导写在 `services/prompts/registry.ts`。
+   */
+  readonly prompts: PromptService;
 }
 
 function fsErrorCode(error: unknown): string | null {
@@ -501,6 +512,13 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   });
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
+  // 提示词覆盖（§18）。构造期就把全部覆盖读进内存并校验——一条引用了不存在
+  // 变量的覆盖会让每一次模型调用失败，而失败只出现在后台任务里。
+  const prompts = new PromptService({ overrides: new PromptRepository({ db }) });
+  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：三条提示词的调用点
+  // （`search` / `summary` / `memory-extract`）不属于本 wave 的所有权，推导见
+  // `services/prompts/registry.ts`。
+  bindPromptRenderer(prompts);
   // 请求记录的保留策略在启动时执行一次（§17.6 的 7 天 / 10 万条）。
   //
   // **不做定时任务**：单机部署的「启动清理」已经能挡住无限增长，常驻定时器要多
@@ -1009,6 +1027,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     index,
     indexObserver,
     taskStore: taskRepository,
+    prompts,
   };
 
   const routes = createHttpRouteGroups({
@@ -1028,6 +1047,12 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     skill,
     search,
     identity: identityService,
+    prompts,
+    // `/health` 回给控制台的绑定身份（§16 的身份引导）。传装配后的值而不是
+    // `config.server.subject`：`options.subject` 覆盖时两者不同，回配置值会让
+    // 控制台发一个必然 401 的头。
+    subject,
+    groups,
     adminAccess: {
       permissionCounts: (principals) => permissionCountsOf(db, principals),
       memberCounts: (groupIds) => memberCountsOf(db, groupIds),

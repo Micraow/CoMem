@@ -1212,6 +1212,8 @@ L0 从 L1 正文提取（H1 标题之后、第一个 `##` 之前的段落），�
 
 两者实现同一个 `SummaryGenerator` 接口（`domain/summary.ts`），`services/summary.ts` 按配置选择。降级不是静默的：结果带 `degraded: true`，控制台显示，`health` 工具报告。
 
+**提示词不在代码里拼。** 静态骨架在仓库的 `prompts/summarize-system.md` 与 `prompts/summarize-user.md`，动态部分（目录地址、直接子节点、两个字数预算）由 `services/prompts/summarize.ts` 渲染成字符串后用 `{{name}}` 注入。模板可以在控制台修改（§18「提示词」），改完下一次摘要生成就生效，不需要重启。
+
 ### 9.3 失效
 
 **只增量失效，不全量重算。**
@@ -1508,11 +1510,13 @@ export const preferencesMemoryType = {
 
 v1 用预取。每个多文件类型的 schema 做一次检索，`limit = max(5, prefetchTopN)`；单文件类型（`profile` / `identity` / `soul`）直接读该文件。检索结果的 `page_id` 标注随正文一起给模型，不另建映射表。
 
+提示词的静态骨架在 `prompts/extract-system.md` 与 `prompts/extract-user.md`；记忆类型清单、页面列表与会话记录由 `services/prompts/extract.ts` 渲染后注入。**空列表必须渲染成一句明确的话**（「（这次没有预取到已读记忆。）」），否则模型会自己编造编号——这条判断留在代码里，模板没有条件语法（§18「提示词」）。
+
 ### 11.4 抽取与 page_id
 
 LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_id）。输出里的操作引用 page_id，服务端再映射回 URI。
 
-让模型直接输出 URI 会引入拼写错误和幻觉路径；page_id 是它刚刚亲眼读到的编号。新建项用 ≥ 100 的编号，避免和已读项冲突。
+让模型直接输出 URI 会引入拼写错误和幻觉路径；page_id 是它刚刚亲眼读到的编号。新建项用 ≥ 100 的编号，避免和已读项冲突。起始编号是代码里的常量（`NEW_PAGE_ID_START`），模板通过 `{{newPageIdStart}}` / `{{newPageIdExamples}}` 引用——写死在 `.md` 里会让「改常量」与「改提示词」漂移。
 
 **解析失败只重试一次。** 第二次还失败就抛错，`.done` 不写。截断（`finishReason === 'length'`）**不重试**——同样的上限只会再截断一次，必须报错让人调大 `maxTokens`。
 
@@ -2045,6 +2049,7 @@ interface AddResourceInput {
 | 记忆 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject` |
 | 资源/技能 | `POST /resources`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET|POST /admin/users`、`GET|POST /admin/groups`、`POST /admin/groups/{id}/members` |
+| 提示词 | `GET /prompts`、`GET /prompts/{id}`；`PUT /prompts/{id}`；`DELETE /prompts/{id}`；`POST /prompts/{id}/preview` |
 | 运维 | `GET /health`、`GET /metrics` |
 
 MCP 挂在 `/mcp`，Streamable HTTP 传输。
@@ -2186,7 +2191,7 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 ## 16. Web 控制台
 
-Nuxt 3 + shadcn-vue + Tailwind。七个页面：
+Nuxt 3 + shadcn-vue + Tailwind。八个页面：
 
 | 页面 | 内容 |
 |---|---|
@@ -2197,6 +2202,11 @@ Nuxt 3 + shadcn-vue + Tailwind。七个页面：
 | 用户与组 | 用户列表、组列表、组成员维护 |
 | 会话与任务 | 会话列表、归档列表、任务状态、重试、僵尸回收记录 |
 | 监控 | 开销归因、吞吐（TPS / TTFB）、模型用量与成本、记忆健康度（见 §17.10） |
+| 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
+
+**身份来自服务端。** 控制台不硬编码 `x-comem-subject`：`web/plugins/console-identity.ts` 在应用挂载前调一次 `GET /health`（§17.9），用返回的 `subject` 拼请求头，用 `scopes[0]` 作默认作用域根。插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的请求会带错主体。拉取失败时整页显示错误，**不回落 `user:local`**：回落会在运维把 `server.subject` 改成 `user:alice` 之后继续发旧身份，症状是每个请求 401，而界面上只有「请求失败」。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」区分开。
+
+**为什么不给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把硬编码换成第二处配置：运维改 `server.subject` 时还要记得改控制台。服务端已经是这个值的唯一真相，控制台问一次即可。
 
 ### 16.1 视觉方向：Apple
 
@@ -2402,12 +2412,18 @@ comem_llm_errors_total{purpose, code}
 | 字段 | 含义 |
 |---|---|
 | `status` | `ok` / `degraded` / `error` |
+| `subject` | 服务图绑定的主体（`server.subject`）。控制台用它拼 `x-comem-subject`（§16） |
+| `scopes` | 该主体可寻址且可读的根，个人根在前。为空 = 没有可访问的命名空间 |
 | `index.nodes` | 索引节点数 |
 | `queue` | `{pending, processing}` |
 | `summary.degraded` | 是否降级到规则摘要 |
 | `summary.pendingDirs` | 待刷新目录数 |
 | `overhead.p50Ms` | 最近 5 分钟阻塞开销中位数 |
 | `version` | 服务版本 |
+
+**`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
+
+**`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。v1 没有认证，不带请求头的调用本来就被当成绑定主体，这个值不是秘密；多租户要换成真正的认证时，这个字段也要跟着重新设计。
 
 **`degraded` 的判定**：模型不可用且开了规则降级，或索引与文件系统对账不一致。降级必须可见——静默降级等于骗人。
 
@@ -2548,6 +2564,8 @@ task:
 
 **`server.subject` 是服务图绑定的身份，不是认证配置。** 服务图只有一份（§12.4 的 `Authorizer` 没有 subject 参数），所以启动时把主体写进服务图，之后每个请求的 `x-comem-subject` 必须与它一致，否则 401。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`），否则所有请求都以 `local` 的身份求权。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但服务图只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组身份要的是每请求一份服务图，不在 v1。
 
+**控制台跟随这个值，不重复配置。** `GET /health` 返回 `subject` 与 `scopes`（§17.9），控制台启动时拉一次，用 `subject` 拼请求头。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改 `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
+
 **`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
 
 **`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。同理，`retrieval.rerank.enabled` 为 `true` 而 `providers.rerank.type` 仍是 `disabled` 时也抛错，不静默降级成「不重排」。
@@ -2574,6 +2592,42 @@ task:
 `search` 的意图分析承担（§8.4），没有独立的召回模式配置；需要更细的召回控制时再加配置。
 
 **并发控制。** SQLite 开 `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=5000`，允许并发读、单写者。写事务统一走一个 `withWriteTransaction()` 包装，超过 `busy_timeout` 抛 `CONFLICT` 由任务层重试。这是 SQLite 的标准用法，不需要额外的写队列。
+
+### 18.1 提示词
+
+六条提示词的静态骨架在仓库的 `prompts/*.md`，动态部分由 `services/prompts/*.ts` 渲染成
+字符串后用 `{{name}}` 注入。存储是两层：
+
+| 层 | 位置 | 谁改 | 优先级 |
+|---|---|---|---|
+| 默认 | `prompts/{id}.md` | 改代码（进 review、可 diff） | 低 |
+| 覆盖 | `prompt_override` 表（`0012_prompt.sql`） | 控制台 | 高 |
+
+**为什么默认值不放数据库。** 默认值是产品行为的一部分，要跟代码一起 review、一起 diff、
+一起回滚。
+
+**为什么覆盖不放仓库文件。** 容器只读挂载、多副本部署、`git status` 被污染——三种场景下
+「服务端改仓库文件」都不成立。数据库覆盖是标准做法，恢复默认 = 删掉那一行。
+
+**版本漂移。** 覆盖行记下保存时默认模板的摘要（`base_digest`）。新版本改过默认值之后
+摘要就对不上，接口返回 `stale: true`，控制台显示「默认值已更新」——覆盖仍然生效，但它
+基于的是旧版本的默认值。没有这个字段，用户的覆盖会**静默盖住**新的默认值，而唯一的
+证据是「模型表现变了」，那时已经无法归因。
+
+**校验在 `domain/prompt.ts`，三个条件都抛错**：模板语法错误（`{{` 没有配对的变量名）、
+引用了定义外的变量（拼写错误）、模板需要的变量没有传。第三条是「代码少传了」的失败——
+渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
+
+**渲染器是进程级绑定。** 三条提示词的调用点（`services/search.ts`、`services/summary.ts`、
+`services/commit/steps/memory-extract.ts`）不在本 wave 的文件所有权内，而
+`REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
+没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入
+渲染路径。**这是为「不改别人的文件」付的代价**：下一个 wave 把 `PromptService` 注入
+`SearchServiceDeps` / `MemoryExtractStepDeps` / `LlmSummarizer` 之后，这个文件应当删掉。
+
+**不做 ACL。** 提示词是进程级配置，不属于任何 `comem://` 命名空间；给一条提示词授
+「谁能改」需要先有「谁的配置」这个概念，而 v1 是单租户部署（§12.4）。和 `/telemetry`、
+`/health` 一样不鉴权——它们都不碰用户内容。
 
 ## 19. 错误模型
 

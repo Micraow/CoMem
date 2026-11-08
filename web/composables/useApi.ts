@@ -9,13 +9,18 @@
  *    「请求失败」。
  * 2. **URI 参数逐段编码。** `comem://` 里的 `:` 与 `/` 在查询串里必须转义，否则
  *    服务端只拿到第一段路径。
- * 3. **身份走请求头。** v1 是单租户，固定 `user:local`；租户切换是 v2 的事。
+ * 3. **身份走请求头，主体来自服务端。** 控制台在挂载前调 `GET /health` 拿绑定主体
+ *    （`plugins/console-identity.ts`），这里只负责把它写进 `x-comem-subject`。没有
+ *    身份时请求直接抛错——回落一个默认主体会在运维改了 `server.subject` 之后继续
+ *    发旧身份，症状是每个请求 401。
  *
  * 超时 30 秒：控制台是内部工具，慢请求多来自摘要生成或全量树，5 秒太短；
  * 30 秒内没有响应基本等于后端挂了，继续等没有意义。
  */
 
 import type { Ref } from 'vue'
+
+import { consoleIdentityOrThrow, identityHeaders } from './consoleIdentity'
 
 export interface ApiOk<T> {
   readonly status: 'ok'
@@ -30,12 +35,6 @@ export interface ApiError {
     readonly details?: unknown
   }
 }
-
-/** v1 的固定身份（单租户）。 */
-export const DEFAULT_SUBJECT = 'user:local'
-
-/** 默认作用域根（与 `DEFAULT_SUBJECT` 对应）。 */
-export const DEFAULT_SCOPE_ROOT = 'comem://user/local'
 
 /** 请求超时（毫秒）。 */
 const REQUEST_TIMEOUT_MS = 30_000
@@ -128,7 +127,8 @@ async function request<T>(
       method,
       headers: {
         accept: 'application/json',
-        'x-comem-subject': DEFAULT_SUBJECT,
+        // 身份未引导时这里抛错，fetch 不会被调用——见文件头第 3 条。
+        ...identityHeaders(consoleIdentityOrThrow()),
         ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
@@ -205,12 +205,15 @@ export function useApi(): ApiClient {
 /**
  * 作用域根：跨页共享一份，切页不重取。
  *
- * 现在只有一个根（`comem://user/local`），但它是「当前身份看到的世界」的入口，
- * 文件树、检索调试、权限管理都要用它，放在 `useState` 里比每页各写一个常量
- * 更容易在接入多作用域时统一改。
+ * 取服务端 `GET /health` 返回的第一个可读根（个人根）。它是「当前身份看到的世界」
+ * 的入口，文件树、检索调试、权限管理都要用它，放在 `useState` 里比每页各写一个
+ * 常量更容易在接入多作用域时统一改。
+ *
+ * 身份还没引导时 `consoleIdentityOrThrow` 抛错——`app.vue` 在身份未知时不会渲染
+ * 页面，所以调用方拿不到一个假根。
  */
 export function useScopeRoot(): Ref<string> {
-  return useState<string>('comem-scope-root', () => DEFAULT_SCOPE_ROOT)
+  return useState<string>('comem-scope-root', () => consoleIdentityOrThrow().scopes[0] ?? '')
 }
 
 /** 把任意异常转成可显示的中文句子。 */
@@ -257,6 +260,10 @@ export interface FsStatPayload {
 /** `GET /health`（架构文档 §17.9）。 */
 export interface HealthPayload {
   readonly status: 'ok' | 'degraded'
+  /** 服务图绑定的主体；控制台的身份引导也读它（`consoleIdentity.ts`）。 */
+  readonly subject: string
+  /** 该主体可寻址且可读的根。为空表示没有任何可访问的命名空间。 */
+  readonly scopes: readonly string[]
   readonly index: { readonly nodes: number }
   readonly queue: { readonly pending: number; readonly processing: number }
   readonly summary: {

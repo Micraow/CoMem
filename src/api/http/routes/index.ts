@@ -18,6 +18,7 @@ import type { FileSystemService } from '../../../services/filesystem.js';
 import type { IdentityService } from '../../../services/identity.js';
 import type { MemoryService } from '../../../services/memory.js';
 import type { ObservabilityService } from '../../../services/observability.js';
+import type { PromptService } from '../../../services/prompt-service.js';
 import type { ResourceService } from '../../../services/resource.js';
 import type { SearchService } from '../../../services/search.js';
 import type { SessionService } from '../../../services/session.js';
@@ -32,6 +33,7 @@ import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
 import { createMemoryRoutes } from './memories.js';
 import { createOpsRoutes } from './ops.js';
+import { createPromptRoutes } from './prompts.js';
 import { createResourceRoutes } from './resources.js';
 import { createSearchRoutes } from './search.js';
 import { createSessionRoutes } from './sessions.js';
@@ -77,6 +79,27 @@ export interface HttpRouteServices {
   readonly identity: IdentityService;
   /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
   readonly adminAccess: AdminAccess;
+  /**
+   * 服务图绑定的主体（`config.server.subject`，`createContainer` 的 `subject`
+   * 可覆盖）。
+   *
+   * `GET /health` 回给控制台，让控制台不必硬编码身份（§16 的身份引导、§18 的
+   * `server.subject`）。传**绑定值**而不是 `config.server.subject`：`subject`
+   * 参数覆盖时两者不同，回配置值会让控制台发一个必然 401 的头。
+   */
+  readonly subject: string;
+  /**
+   * 服务图绑定的组（`group:{gid}`）。`/health` 用它算可寻址的根，语义与 MCP
+   * `health` 的 `scopes` 一致（§13.2）。
+   */
+  readonly groups: readonly string[];
+  /**
+   * 提示词（§9.2、§11.3、§11.4）。
+   *
+   * 进程级配置，不属于任何 `comem://` 命名空间——所以它不经过 `authorizer`，
+   * 与 `/telemetry`、`/health` 同一类。
+   */
+  readonly prompts: PromptService;
 }
 
 /** 按 §14 表格的顺序拼出全部路由分组。 */
@@ -94,6 +117,7 @@ export function createHttpRouteGroups(
     createResourceRoutes(services),
     createSkillRoutes(services),
     createAdminRoutes(services),
+    createPromptRoutes(services),
     createOpsRoutes(services),
     createTelemetryRoutes(services),
   ];

@@ -8,6 +8,7 @@
 import {
   Activity,
   ClipboardCheck,
+  FileText,
   FolderTree,
   History,
   LayoutDashboard,
@@ -43,6 +44,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       { to: '/acl', label: '权限管理', icon: Shield },
       { to: '/admin', label: '用户与组', icon: Users },
+      { to: '/prompts', label: '提示词', icon: FileText },
     ],
   },
   {
