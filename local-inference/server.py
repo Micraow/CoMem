@@ -95,6 +95,21 @@ DEFAULT_QUERY_INSTRUCTION = (
     "Given a web search query, retrieve relevant passages that answer the query"
 )
 
+#: rerank 的 instruction（模型卡与 GGUF 模板里的原文）。它替换模板里的
+#: `<Instruct>:` 行，**只影响服务端 prompt**，不是请求字段——CoMem 的
+#: `HttpRerankProvider` 与 `config.yaml` 都不需要知道它存在。
+#:
+#: 默认值保持原文而不是改成「记忆专用」：模型卡说 instruction-aware，公开基准上
+#: 有 instruction 比没有高 1%–5%，但没有 CoMem 语料上的测量。改默认值属于没有
+#: 证据的场景适配。
+DEFAULT_RERANK_INSTRUCTION = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+
+#: `/health` 回显 instruction 的长度上限。运维要能核对「实际用的是哪句」，不需要
+#: 完整回显——prompt 细节不进入客户端契约。
+RERANK_INSTRUCTION_ECHO_CHARS = 80
+
 
 # --------------------------------------------------------------------------- 配置
 
@@ -114,6 +129,7 @@ class ServerConfig:
     rerank_device: Device
     rerank_model_path: str
     rerank_model_id: str
+    rerank_instruction: str
     query_instruction: str
     host: str
     port: int
@@ -184,10 +200,9 @@ class EmbeddingResponse(BaseModel):
 class RerankResultItem(BaseModel):
     """单条重排结果。
 
-    `relevance_score` 的尺度由 `/health` 的 `rerank.score_semantics` 说明：RANK
-    池化的分类头输出，取 `logit(yes) - logit(no)`，**未归一化、可正可负**。CoMem 的
-    `applyRerank` 按原值降序、不做 clamp——把 -0.15 clamp 成 0 会把「明确不相关」
-    和「中性」挤在一起。
+    `relevance_score` 是分类头 softmax 后的 `P(yes)`，值域 `[0, 1]`——不是可
+    排序的绝对相关性。CoMem 的 `applyRerank` 按原值降序、不做 clamp：分数已在
+    `[0, 1]` 内，clamp 没有意义，而截断只会丢掉「这一个明显优于那一个」的量级。
     """
 
     index: int
@@ -211,9 +226,13 @@ class RerankHealth(BaseModel):
     backend: str
     device: str
     model: str
-    #: 分数语义。`logit` 未归一化（可正可负）、`probability` 在 [0, 1]。换模型或换
-    #: 量化档位会改变尺度，做了阈值过滤的部署必须重新校准。
-    score_semantics: Literal["logit", "probability"] | None = None
+    #: 分数语义。`llama-cpp` 后端报 `probability`：分类头 softmax 后的 `P(yes)`，
+    #: 值域 `[0, 1]`。换模型或换量化档位会改变分数分布，做了阈值过滤的部署必须
+    #: 重新标定。
+    score_semantics: Literal["probability"] | None = None
+    #: 实际拼进 prompt 的 rerank instruction（最多 80 字符）。`null` 表示模板里
+    #: 没有 `<Instruct>:` 行，`--rerank-instruction` 没有生效。
+    rerank_instruction: str | None = None
     error: str | None = None
 
 
@@ -266,7 +285,8 @@ class ServiceState:
                 backend=self.rerank.backend,
                 device=self.rerank.device,
                 model=self.rerank.model,
-                score_semantics=self.rerank.score_semantics,  # type: ignore[arg-type]
+                score_semantics=self.rerank.score_semantics,
+                rerank_instruction=_echo_instruction(self.rerank.instruction),
             )
         elif self.rerank_error is not None:
             rerank_health = RerankHealth(
@@ -275,6 +295,7 @@ class ServiceState:
                 device=self.config.rerank_device,
                 model=self.config.rerank_model_id,
                 score_semantics=None,
+                rerank_instruction=None,
                 error=self.rerank_error,
             )
         else:
@@ -429,6 +450,17 @@ def _apply_query_prefix(texts: Sequence[str], instruction: str) -> list[str]:
     return [f"{prefix}{text}" for text in texts]
 
 
+def _echo_instruction(instruction: str | None) -> str | None:
+    """`/health` 回显的 instruction，最多 `RERANK_INSTRUCTION_ECHO_CHARS` 个字符。
+
+    `None` 原样返回：模板里没有 `<Instruct>:` 行时，指令没有生效，报一个配置值
+    会让运维以为它在起作用。
+    """
+    if instruction is None:
+        return None
+    return instruction[:RERANK_INSTRUCTION_ECHO_CHARS]
+
+
 def create_app(config: ServerConfig) -> FastAPI:
     """构造应用。模型加载在 lifespan 里发生（`--list-devices` 不需要）。"""
 
@@ -462,6 +494,7 @@ def create_app(config: ServerConfig) -> FastAPI:
                     threads=config.threads,
                     max_seq_len=config.max_seq_len,
                     n_batch=config.n_batch,
+                    instruction=config.rerank_instruction,
                 )
             except BackendUnavailableError as error:
                 # 重排不是主路径：起不来就退化成「只有嵌入」。但**必须可见**——
@@ -796,6 +829,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> tuple[ServerConfig, bool]:
     )
     parser.add_argument("--rerank-model-id", default=DEFAULT_RERANK_MODEL)
     parser.add_argument(
+        "--rerank-instruction",
+        default=DEFAULT_RERANK_INSTRUCTION,
+        help=(
+            "替换 rerank 模板里的 <Instruct>: 行。服务端 prompt 细节，"
+            "不是请求字段（CoMem 的适配器不需要知道它）"
+        ),
+    )
+    parser.add_argument(
         "--query-instruction",
         default=DEFAULT_QUERY_INSTRUCTION,
         help="input_type=query 时加在输入前面的 instruction",
@@ -814,6 +855,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> tuple[ServerConfig, bool]:
             parser.error(f"--{name.replace('_', '-')} 必须是正整数，收到 {value}")
     if args.rerank_device is not None and args.no_rerank:
         parser.error("--rerank-device 与 --no-rerank 不能同时给")
+    # instruction 是模板里的一行字面文本，不是独立的消息：换行会把它拆成两行，
+    # 破坏 system / user 的边界。空串与只有空白的值同样没有意义。
+    if "\n" in args.rerank_instruction or "\r" in args.rerank_instruction:
+        parser.error("--rerank-instruction 不能包含换行：它会破坏 rerank 模板的结构")
+    if args.rerank_instruction.strip() == "":
+        parser.error("--rerank-instruction 不能为空")
 
     config = ServerConfig(
         device=args.device,
@@ -828,6 +875,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> tuple[ServerConfig, bool]:
         rerank_device=args.rerank_device or args.device,
         rerank_model_path=args.rerank_model or str(MODELS_DIR / RERANK_MODEL_FILE),
         rerank_model_id=args.rerank_model_id,
+        rerank_instruction=args.rerank_instruction,
         query_instruction=args.query_instruction,
         host=args.host,
         port=args.port,

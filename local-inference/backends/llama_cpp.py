@@ -29,10 +29,11 @@ import ctypes
 import logging
 import math
 import os
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 from .base import (
     BackendUnavailableError,
@@ -142,6 +143,44 @@ def _rerank_template(metadata: dict[str, str]) -> str | None:
         if key.endswith("chat_template.rerank"):
             return value
     return None
+
+
+#: rerank 模板里的 instruction 行。Qwen3 的模板把 instruction 写成字面文本
+#: （`<Instruct>: ...`），不是 `{instruction}` 占位符——llama.cpp 的
+#: `format_rerank_template()` 只认 `{query}` / `{document}`（上游 PR #20009 仍未合并）。
+_RERANK_INSTRUCTION_LINE = re.compile(r"<Instruct>:[^\n]*")
+
+#: rerank 模板里的两个占位符。
+_RERANK_PLACEHOLDER = re.compile(r"\{(query|document)\}")
+
+
+def render_rerank_prompt(template: str, query: str, document: str) -> str:
+    """把模板里的 `{query}` / `{document}` 换成实际文本，**单遍扫描**。
+
+    单遍是安全要求，不是性能优化：顺序两次 `str.replace` 时，如果 query 里恰好
+    有字面量 `{document}`，第二次替换会把它换成文档正文——query 被注入文档内容，
+    而检索结果看起来完全正常（llama.cpp issue #30816）。`re.sub` 只扫描模板本身，
+    替换进去的文本不再参与匹配。
+    """
+    return _RERANK_PLACEHOLDER.sub(
+        lambda match: query if match.group(1) == "query" else document,
+        template,
+    )
+
+
+def replace_rerank_instruction(template: str, instruction: str) -> str | None:
+    """把模板里的 `<Instruct>:` 行替换成 `instruction`。
+
+    返回 `None` 表示模板里没有这一行，instruction 没有生效。调用方必须把
+    「没生效」传到 `/health`，而不是把配置值当成实际值报出去。
+    """
+    if _RERANK_INSTRUCTION_LINE.search(template) is None:
+        return None
+    # 用 lambda 而不是替换字符串：`\1`、`\g<0>` 这类反斜杠序列在替换字符串里
+    # 有特殊含义，instruction 是用户输入的任意文本，不能拿来当转义语法解析。
+    return _RERANK_INSTRUCTION_LINE.sub(
+        lambda _match: f"<Instruct>: {instruction}", template, count=1
+    )
 
 
 def hide_vulkan_devices() -> None:
@@ -393,8 +432,8 @@ class LlamaCppRerank:
     """
 
     backend: str = "llama-cpp"
-    #: 分类头 softmax 后 `P(yes)`
-    score_semantics: str = "probability"
+    #: 分类头 softmax 后 `P(yes)`，值域 `[0, 1]`
+    score_semantics: Literal["probability"] = "probability"
 
     def __init__(
         self,
@@ -405,6 +444,7 @@ class LlamaCppRerank:
         threads: int,
         max_seq_len: int,
         n_batch: int,
+        instruction: str,
     ) -> None:
         _require_device(device)
         path = _require_gguf(model_path, "重排")
@@ -447,7 +487,19 @@ class LlamaCppRerank:
         template = _rerank_template(metadata)
         if template is None:  # pragma: no cover - _validate_reranker 已经挡过
             raise BackendUnavailableError("rerank 模板缺失")
-        self._template = template
+        replaced = replace_rerank_instruction(template, instruction)
+        self._template = template if replaced is None else replaced
+        if replaced is None:
+            # 模板里没有 `<Instruct>:` 行：instruction 无处可放。**不假装生效**——
+            # `/health` 报 null，运维能看到「配了但没用上」；检索本身仍然可用。
+            self.instruction: str | None = None
+            LOGGER.warning(
+                "%s 的 rerank 模板没有 <Instruct>: 行，--rerank-instruction 未生效"
+                "（/health 的 rerank_instruction 为 null）。",
+                path.name,
+            )
+        else:
+            self.instruction = instruction
         # 分类头输出个数（yes / no 两个 logit）。用它而不是 `n_embd()`：后者是
         # hidden size（1024），按它切片会读到数组边界之外。
         self._n_cls = llama_cpp.llama_model_n_cls_out(self._llm.model)
@@ -496,11 +548,11 @@ class LlamaCppRerank:
     def _format(self, query: str, document: str) -> str:
         """按 GGUF 里的 rerank 模板拼 prompt。
 
-        用 `str.replace` 而不是 `str.format`：模板里的 `{query}` 是字面占位符，
-        而 `format` 会把任何其它花括号当格式说明符（Jinja 模板里很常见），遇到就
-        抛 `KeyError`。
+        **单遍替换**（`render_rerank_prompt`）：不用 `str.format`，因为模板里的
+        `{query}` 是字面占位符，而 `format` 会把任何其它花括号当格式说明符；也
+        不能顺序两次 `replace`，那会让 query 里的字面量 `{document}` 被换成正文。
         """
-        return self._template.replace("{query}", query).replace("{document}", document)
+        return render_rerank_prompt(self._template, query, document)
 
     def _yes_probability(self, ids: list[int]) -> float:
         """跑一次 decode，取池化层的 `P(yes)`。

@@ -118,6 +118,7 @@ nice -n 10 taskset -c 0-5 .venv/bin/python server.py --device cpu --threads 6
 | `--n-batch` | `8192` | llama.cpp 的 `-ub`（micro batch）。小于输入长度时吞吐掉一半 |
 | `--no-rerank` | 关 | 只加载 embedding 模型 |
 | `--rerank-device` | 同 `--device` | 重排可以单独选设备 |
+| `--rerank-instruction` | 模板原文 | 替换 rerank 模板里的 `<Instruct>:` 行（服务端，不是请求字段） |
 | `--port` | `8089` | 监听端口 |
 | `--list-devices` | — | 打印设备探测结果后退出 |
 
@@ -208,7 +209,8 @@ retrieval:
     "backend": "llama-cpp",
     "device": "cpu",
     "model": "Qwen3-Reranker-0.6B",
-    "score_semantics": "logit",
+    "score_semantics": "probability",
+    "rerank_instruction": "Given a web search query, retrieve relevant passages that answer the query",
     "error": null
   }
 }
@@ -241,13 +243,55 @@ OpenAI 形状。只列实际加载成功的模型。
 ```
 
 ```json
-{"model": "Qwen3-Reranker-0.6B", "results": [{"index": 0, "relevance_score": 12.75}],
+{"model": "Qwen3-Reranker-0.6B", "results": [{"index": 0, "relevance_score": 0.987}],
  "usage": {"prompt_tokens": 213, "total_tokens": 213}}
 ```
 
-`relevance_score` 是 `logit(yes) - logit(no)`：**未归一化、可以是负数**，不做
-clamp。结果按分数降序，只返回 `top_n` 条。空文档（`""`）不送模型，也不会出现在
-`results` 里。
+`relevance_score` 是分类头 softmax 后的 `P(yes)`，值域 `[0, 1]`（实测形如
+`[0.987, 0.013]`，两个概率和为 1）。它**不是可排序的绝对相关性**：不同模型、
+不同量化档位下的同一串数字不可比，只能在同一份模型内部比较。结果按分数降序，
+只返回 `top_n` 条。空文档（`""`）不送模型，也不会出现在 `results` 里。
+
+### 阈值怎么标定
+
+`relevance_score` 是 `P(yes)`，不是跨模型可比的绝对相关性。做过滤时先分清两个阈值：
+
+- **请求里的 `scoreThreshold`** 作用在重排**之前**的引擎排序分上（FTS5 的 BM25
+  取负、余弦、RRF 融合分），与 `P(yes)` 不是一个量纲。
+- **重排之后的过滤**（Hook 用 `COMEM_RECALL_SCORE_THRESHOLD` 比较 `hit.score`）
+  比较的才是 `P(yes)`。这个阈值必须：
+
+  - **在选定的量化档位上重新标定。** Q8_0 与 Q4_K_M 的概率分布不同，同一个阈值
+    不能跨档位复用。
+  - **换 rerank 模型（0.6B → 4B）时同样要重标。** 输出分布没有可继承的关系。
+  - **不要跨模型复用绝对阈值。** 阈值是「这份模型 + 这份语料」的联合性质，不是
+    模型属性。
+
+Hook 的默认值 `0.5` 是 `P(yes) == P(no)` 的中性点，不是 CoMem 语料上的测量结果。
+上线前用 `pnpm eval` 的 `hybrid+rerank` 变体跑一遍，看阈值移动对 Recall@10 的影响。
+
+### rerank instruction
+
+模型卡里的 instruction 是模板的一部分，不是请求字段。本服务用
+`--rerank-instruction` 在**服务端**替换模板里的 `<Instruct>:` 行，所以 CoMem 的
+`HttpRerankProvider` 与 `config.yaml` 一行都不用改：
+
+```bash
+.venv/bin/python server.py --rerank-instruction "Given a query, retrieve the passages that answer the query"
+```
+
+- **默认值保持模板原文**（`Given a web search query, retrieve relevant passages that
+  answer the query`）。模型卡明确说它是 instruction-aware 的，公开基准上有
+  instruction 比没有高 1%–5%；但 CoMem 的语料上没有测量，没有测量就改默认值，是
+  没有证据支撑的场景适配。
+- **没有 `{instruction}` 占位符。** 上游 llama.cpp 的 `/v1/rerank` 只认 `{query}` /
+  `{document}`，未知字段静默忽略；这里是我们自己的端点，直接改模板。
+- **不改 GGUF。** 改元数据要重写整个 639MB 文件，换一个 GGUF 就丢；模板在加载时
+  已经进内存。
+- **`/health` 的 `rerank_instruction` 是实际生效的文本**（最多 80 字符）。模板里没有
+  `<Instruct>:` 行时它报 `null`，表示参数没有生效。
+- **query 里的字面量 `{document}` 不会被替换。** 拼 prompt 是单遍扫描，取代了会
+  互相覆盖的顺序两次 `str.replace`（对应上游 issue #30816）。
 
 ## 性能
 
@@ -325,9 +369,9 @@ CPU 占用：`--threads 6` 时推理期间稳定 6 个核（`taskset -c 0-5` 全
   的产物，服务启动时会校验 `tensor_count == 311`、`pooling_type == RANK(4)`、
   `classifier.output_labels` 含 `yes`/`no`、`tokenizer.chat_template.rerank` 存在，
   任何一条不过就拒绝启动。
-- **分数尺度依赖量化档位。** Q8_0 与 Q4_K_M 的排序基本一致，但绝对分数会漂。
-  如果 CoMem 将来做阈值过滤（`scoreThreshold`），必须在**选定的档位**上重新标定，
-  不能跨档位复用。
+- **分数尺度依赖量化档位。** 不同量化档位的 `P(yes)` 分布不同：排序可能相近，
+  绝对分数会漂。做阈值过滤时按「阈值怎么标定」重新标定，不要跨档位、跨模型复用
+  同一个绝对阈值。
 - **不要给 embedding / rerank 开 KV cache 量化**（`-ctk q4_0 -ctv q4_0`）。上游
   issue #16407 明确不建议：KV 量化会给池化后的向量引入与输入长度相关的偏差。
 - **单进程、单线程池。** 模型实例不是线程安全的，所有推理请求串行执行。并发请求
