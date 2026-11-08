@@ -2277,9 +2277,24 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 宿主没有统一的会话 ID 格式，插件按宿主加前缀：`cc-`（Claude Code）、`dsh-`（DSH）。
 
-### 15.6 MCP 代理
+### 15.6 MCP 接入
 
-宿主的 MCP 客户端只认 stdio。`integrations/servers/mcp-proxy.mjs` 做一层薄代理：读配置里的 URL 和 key，转发到服务端的 Streamable HTTP 端点。这样 key 存在一个文件里，不散落在宿主的配置中；换 key 只改一处，不用重装插件。
+Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，两条通道互补。装完 Hook 不等于接上了 MCP 工具。
+
+服务端在 `/mcp` 暴露 **Streamable HTTP**，运行在无状态模式（`sessionIdGenerator: undefined`，不返回 `Mcp-Session-Id`，每个请求独立）。**不提供 stdio 服务器，也不需要代理进程**：两个宿主都原生支持这个传输。
+
+| 宿主 | 配置位置 | 传输写法 |
+|---|---|---|
+| Claude Code | 项目 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `"type": "http"`（`"streamable-http"` 是别名） |
+| DSH | `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里的 `dsh-mcp-client` 条目 | `transport: streamable-http` |
+
+**`type` / `transport` 不能省。** Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器并跳过；DSH 的 `transport` 是必填字段。
+
+认证走请求头（§12.7）：`auth.enabled: false`（v1 单用户）时身份取 `server.subject`，不需要头，`x-comem-subject` 与它不一致会 401；`auth.enabled: true` 时带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。
+
+**为什么不做 stdio 代理。** 早期草稿写过一个 `integrations/servers/mcp-proxy.mjs`（从未实现）：读配置里的 URL 和 key，把 stdio 转发到 HTTP。两个宿主都支持 Streamable HTTP 之后，这层代理只剩下成本——多一个常驻进程、多一份配置、多一处认证实现，而它转发的东西宿主本来就会做。直接用宿主的 HTTP 配置，换 key 只改宿主的配置条目，不需要重装 Hook。
+
+工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证与验证步骤见 `integrations/README.md` 的「MCP 接入」。
 
 ### 15.7 支持哪些宿主
 

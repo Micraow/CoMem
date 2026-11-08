@@ -182,7 +182,7 @@ ACL 求值就没法用内存数据穷举测试。
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | 架构与设计的唯一真相（21 节：分层、数据布局、六条链路、错误模型、里程碑） |
 | [`docs/operations.md`](docs/operations.md) | 部署、配置、数据布局、备份、监控、排障、已知限制 |
-| [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、六个 hook、bypass、去重、HTTP 契约 |
+| [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、六个 hook、MCP 接入、bypass、去重、HTTP 契约 |
 
 ## 开发
 

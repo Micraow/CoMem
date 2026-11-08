@@ -3,6 +3,10 @@
 装进宿主的会话召回与采集插件。它是**独立于服务端的交付物**：纯 JavaScript（`.mjs`），
 只依赖 Node 内置模块，不声明任何 `dependencies`。
 
+这个目录只包含 Hook。**MCP 工具不经过这里**：CoMem 在 `/mcp` 暴露 Streamable HTTP，
+宿主直接配置 URL 即可，不需要代理进程。两条通道的分工与配置片段见下面的
+「[MCP 接入](#mcp-接入)」。
+
 ```
 integrations/
 ├── package.json          # type: module；bin: co-mem
@@ -73,6 +77,121 @@ co-mem uninstall --host claude-code
 
 只有 `PreCompact` / `SessionEnd` 等提交完成：这两个时机之后对话就没了，后台 worker
 会被宿主杀掉。
+
+## MCP 接入
+
+Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工具**。
+
+| 通道 | 谁发起 | 负责什么 |
+|---|---|---|
+| Hook | 宿主在固定生命周期点自动调用 | 召回注入（`SessionStart` / `UserPromptSubmit`）、采集（`PostToolUse` / `Stop` / `PreCompact`） |
+| MCP | 模型主动调用 | 16 个工具：`find` / `search` / `read` / `write` / `remember` / `forget` / `add_resource` 等 |
+
+两者互补：**只装 Hook** 时，agent 能拿到自动注入的记忆，但不能主动 `remember` /
+`write`；**只配 MCP** 时，agent 能主动读写，但没有任何自动召回与采集。两个都配，
+记忆才会「该出现时自己出现，需要时能查能写」。
+
+服务端在 `POST /mcp` 暴露 **Streamable HTTP**，无状态模式：不返回
+`Mcp-Session-Id`，每个请求独立。**不提供 stdio 服务器，也不需要代理**：Claude Code
+和 DSH 都原生支持这个传输。
+
+### Claude Code
+
+项目根目录的 `.mcp.json`（可提交，团队共享）或 `~/.claude.json`（个人）：
+
+```json
+{
+  "mcpServers": {
+    "comem": {
+      "type": "http",
+      "url": "http://127.0.0.1:1933/mcp"
+    }
+  }
+}
+```
+
+`type` **不能省**：Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器
+并跳过，报告 `MCP server "comem" has a "url" but no "type"`。`"streamable-http"` 是
+`"http"` 的别名，两种写法都认。
+
+`auth.enabled: true` 的部署要带 API Key。`${VAR}` 会在 Claude Code 读取配置时展开，
+key 不用写进仓库：
+
+```json
+{
+  "mcpServers": {
+    "comem": {
+      "type": "http",
+      "url": "http://127.0.0.1:1933/mcp",
+      "headers": {
+        "Authorization": "Bearer ${COMEM_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+等价的 CLI 写法：
+
+```bash
+export COMEM_API_KEY=comem_...
+claude mcp add --transport http comem http://127.0.0.1:1933/mcp \
+  --header "Authorization: Bearer $COMEM_API_KEY"
+```
+
+### DSH
+
+编辑 `$DSH_HOME/profiles/<name>/cordis.patch.yml`，加一个 `dsh-mcp-client` 条目
+（插件本身用 `dsh plugin --profile <name> add @deepseek-ai/dsh-mcp-client` 装进 profile）：
+
+```yaml
+- id: mcp-comem
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: comem
+    transport: streamable-http
+    url: http://127.0.0.1:1933/mcp
+    # auth.enabled: true 时才有意义；false 时可以整段删掉
+    headers:
+      Authorization: !!js '`Bearer ${process.env.COMEM_API_KEY}`'
+```
+
+`serverName` 决定模型看到的工具前缀：`mcp__comem__find`、`mcp__comem__health`。
+`transport` 是必填字段，没有「默认 stdio」这回事。
+
+### 认证
+
+| 部署 | 请求头 | 行为 |
+|---|---|---|
+| `auth.enabled: false`（默认，v1 单用户） | 不需要 | 身份取 `server.subject`；带 `x-comem-subject` 且与它不一致会 401 |
+| `auth.enabled: true` | `Authorization: Bearer <凭据>` | 凭据是 `comem_` 开头的 API Key，或 `POST /api/v1/auth/login` 换来的 session token；缺失或非法一律 401 `UNAUTHENTICATED` |
+
+API Key 从管理端点签发（明文只在创建响应里出现一次）：
+
+```bash
+curl -sS http://127.0.0.1:1933/api/v1/admin/users/alice/api-keys \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"claude-code"}'
+```
+
+Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭据：一个服务端、
+一套认证。**凭据会同时出现在 Hook 配置和宿主 MCP 配置里**；想让换 key 只改一处，
+两边都引用同一个环境变量（Claude Code 用 `${COMEM_API_KEY}`，DSH 用
+`process.env.COMEM_API_KEY`）。不要提交进仓库。
+
+### 验证
+
+1. 服务端：`curl -sS http://127.0.0.1:1933/health` 返回 `{"status":"ok",...}`。
+2. Claude Code：`claude mcp list` 显示 `comem: http://127.0.0.1:1933/mcp (HTTP) - ✔ Connected`；
+   会话里 `/mcp` 能看到 16 个工具。
+3. DSH：启动日志里 `mcp-client(comem)` 没有连接错误；模型工具列表出现 `mcp__comem__*`。
+4. 让 agent 调一次 `health`：返回内容与 `GET /health` 相同（`status: ok`、`subject`、
+   `index.nodes`）。调用失败时错误进服务端日志的「MCP 工具拒绝」/「MCP 工具执行失败」，
+   带工具名与 `requestId`（取自 `x-request-id`，没有就生成）。
+
+**没有 `✔ Connected` 时先看三处**：`url` 有没有带 `/mcp`；`type` / `transport` 是不是
+写成了 HTTP 而不是默认的 stdio；`auth.enabled: true` 时 `Authorization` 头有没有真的发出去
+（Claude Code 的 `claude mcp get <name>` 会列出发送的头，DSH 看启动日志里的连接失败原因）。
 
 ## 关掉记忆（bypass）
 

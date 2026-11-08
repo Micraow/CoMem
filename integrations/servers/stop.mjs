@@ -236,8 +236,8 @@ async function sweepWorkerPayloads(dir) {
  * @returns {Promise<string>}
  */
 export async function writeWorkerPayload(dir, payload) {
-  // 清理放在 worker 侧：`Stop` 的阻塞预算只有 50ms（§15.9），一次目录扫描不值得
-  // 放在这条路径上。worker 是分离进程，它扫多久都不影响用户。
+  // 清理放在 worker 侧：`Stop` 不等待采集完成就退出（§15.3），一次目录扫描不该
+  // 出现在这条路径上。worker 是分离进程，它扫多久都不影响用户。
   const file = join(dir, `${WORKER_PAYLOAD_PREFIX}${process.pid}-${randomUUID()}.json`);
   await writeFile(file, JSON.stringify(payload), 'utf8');
   return file;
