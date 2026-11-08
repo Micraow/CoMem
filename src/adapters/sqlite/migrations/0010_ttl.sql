@@ -1,0 +1,21 @@
+-- 0010_ttl.sql —— 记忆的过期时间（架构文档 §8.1 的 `node` 表、§11.7 的 TTL 清扫）
+--
+-- 节点的过期时间（§12 数据布局里 `node` 的读模型）。
+--
+-- **为什么是绝对时间而不是相对时长**：相对时长在写入时算成绝对时间，语义才稳定。
+-- 存「30 天后过期」这种相对值，每次读都要重新算，而「从什么时候开始算」会漂。
+--
+-- **为什么可空**：NULL 表示「没有单独的过期时间」，与「过期时间在很久以前」是两件
+-- 事。`TtlService.setExpiry(uris, null)` 写回的就是 NULL——显式取消过期。把两者
+-- 混成一个哨兵值（`'1970-01-01'`）会让「从没设过」和「已经过期」在 `WHERE` 里不可
+-- 区分。
+--
+-- **为什么是部分索引**：清扫的查询固定带 `expires_at IS NOT NULL AND expires_at < ?`
+-- （见 `TtlService.sweep`）。部分索引只收录有值的行，默认配置（`memory.ttl.defaultDays
+-- = 0`）下整张索引是空的，不需要为「没人用 TTL」的部署付索引维护成本。
+--
+-- 幂等：迁移框架按 `schema_version` 跳过已应用的版本；`CREATE INDEX IF NOT EXISTS`
+-- 让脚本本身也能重放（本地删库重建、并行分支合并后重跑）。`ALTER TABLE ... ADD
+-- COLUMN` 没有 `IF NOT EXISTS` 形式，与 0009 同一处取舍。
+ALTER TABLE node ADD COLUMN expires_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_node_expires ON node(expires_at) WHERE expires_at IS NOT NULL;

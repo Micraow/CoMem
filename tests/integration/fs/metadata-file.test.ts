@@ -432,9 +432,19 @@ describe('.meta.json 读写', () => {
   });
 
   it('status 不是合法会话状态时抛 INTERNAL', async () => {
-    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, status: 'archived' }));
+    // `archived` 是合法状态（空闲过期的终态），拿它当反例会让这条测试在实现补上
+    // 归档之后通过——测的就不再是「非法状态被拒绝」。
+    await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, status: 'deleted' }));
 
     await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('archived 是合法状态：归档后的会话能原样读回', async () => {
+    const meta: SessionMeta = { ...SESSION_META, status: 'archived' };
+
+    await store.writeSession(SESSION_URI, meta);
+
+    await expect(store.readSession(SESSION_URI)).resolves.toEqual(meta);
   });
 
   it('createdAt 不是字符串时抛 INTERNAL', async () => {

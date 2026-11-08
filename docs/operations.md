@@ -9,7 +9,7 @@
 |---|---|---|
 | Node | ≥ 22.5 | `package.json` 的 `engines`。低版本没有 `node:sqlite`，服务起不来 |
 | 包管理器 | pnpm | 仓库根与 `web/` 各有一份 `pnpm-lock.yaml`；本文在 pnpm 12.17.0 上验证 |
-| 磁盘 | 内容文件 + SQLite 索引 | 没有实测上限。**会自己长的是 `request_log` 表**——保留策略（`retainDays` / `retainRows`）已实现但没有调用点，见「已知限制」 |
+| 磁盘 | 内容文件 + SQLite 索引 | 没有实测上限。`request_log` 表在启动时按 `retainDays` / `retainRows` 清理一次 |
 | 内存 | 未测量 | 没有常驻缓存，每次请求现读。FTS5 的索引在 SQLite 里，不占 Node 堆 |
 | 网络 | 只有摘要生成与记忆抽取需要出网 | `summary.generator: rule` 与 `find` / `grep` 全程离线 |
 
@@ -59,41 +59,42 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `summary.generator` | `llm` | `llm` 走模型；`rule` 断网降级（子节点名字 + 摘要首句拼接）。**`rule` 的结果恒带 `degraded: true`**，`/health` 会把它报成 `degraded` |
 | `summary.abstractMaxChars` | `256` | L0 摘要的字符预算（§9.1）。超了截断，不重试 |
 | `summary.overviewMaxChars` | `4000` | L1 概览的字符预算 |
-| `retrieval.engine` | `fts5` | 检索后端。v1 只有 `fts5`，写 `vector` 也不会切（见「已知限制」） |
+| `retrieval.engine` | `fts5` | 检索后端：`fts5` / `vector` / `hybrid`。后两者需要 `providers.embedding`，没配时 `loadConfig` 直接报错 |
 | `retrieval.candidateMultiplier` | `4` | 先取 `limit × N` 候选再按权限过滤，避免过滤后不足数（§8.2）。候选被拦得多时调大 |
 | `retrieval.levelWeights.l0` / `.l1` / `.l2` | `1.15` / `1.05` / `1.00` | 层级加权（§8.5）。只用来在 BM25 接近时打破平局 |
 | `retrieval.queryFilters` | `[]` | sed 风格正则数组，作用在 prompt 上，产物才是查询（§8.8）。Hook 侧也有默认五条 |
 | `retrieval.assembly.maxTokens` | `1600` | 注入模型的 token 预算（§8.6）。模型上下文窄时调小 |
 | `retrieval.assembly.dedupTurns` | `3` | 这么多轮内投过的 URI 不再投（召回账本，§8.7） |
 | `retrieval.assembly.quotaPreset` | `coding` | `chat`（记忆 5 / 资料 3 / 技能 2）或 `coding`（3 / 5 / 2） |
-| `retrieval.recall.mode` | `balanced` | `fast`（0 次模型）/ `balanced`（1 次查询扩展）/ `deep`（+ 摘要重写）。**截至 2026-11-08 未接线**，见「已知限制」 |
-| `retrieval.recall.*` | 见模板 | 同上，未接线 |
 | `session.autoCommit.enabled` | `true` | 自动提交开关。关掉就只能手动 `commit` |
 | `session.autoCommit.pendingTokenThreshold` | `150000` | 未提交 token **严格大于**该值才提交（§10.2.1） |
 | `session.autoCommit.messageCountThreshold` | `100` | 未提交消息数严格大于该值才提交 |
-| `session.autoCommit.minCommitIntervalSeconds` | `0` | 两次自动提交的最小间隔 |
-| `session.autoCommit.idleTimeoutSeconds` | `0` | 空闲提交。0 = 关；开了需要常驻扫描器，v1 没有 |
+| `session.autoCommit.minCommitIntervalSeconds` | `0` | 两次自动提交的最小间隔（全局闸门）。调小会让归档碎片变多 |
+| `session.autoCommit.idleTimeoutSeconds` | `0` | 空闲多久后**提交**。0 = 关。由后台调度器执行（§10.7） |
 | `session.autoCommit.keepRecentCount` | `0` | 归档时保留最近 N 条在 live 会话里 |
-| `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。**v1 是写死的常量**，改配置不生效 |
+| `session.expiry.idleTimeoutSeconds` | `0` | 空闲多久后**归档**（或删除）。0 = 关。与上面那个是两个独立开关 |
+| `session.expiry.action` | `archive` | `archive`（只改 `status`，可逆）或 `delete`（物理删除会话目录，不可逆） |
+| `memory.ttl.defaultDays` | `0` | 记忆默认存活天数。0 = 永不过期。只影响之后写入的记忆 |
+| `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
+| `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得 |
-| `acl.enabled` | `true` | **未接线**：关掉也不会跳过鉴权 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
 | `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
 | `logging.level` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
 | `logging.file` | `""` | 填路径则在 stdout 之外**额外**写一份 `error` 及以上级别的日志。10MB 轮转到 `<path>.1`（§17.8） |
-| `telemetry.metrics.enabled` | `true` | **未接线**：`/metrics` 总是输出 |
+| `telemetry.metrics.enabled` | `true` | 关掉时 `GET /metrics` 返回 404 并说明「指标已关闭」（空文本会被抓成「指标全为 0」） |
 | `telemetry.metrics.includeAccountLabel` | `false` | 单账号部署没必要，开了会放大标签基数 |
 | `telemetry.requestLog.enabled` | `true` | 是否写 `request_log` 表（控制台的请求记录） |
-| `telemetry.requestLog.retainDays` | `7` | 请求记录保留天数。**未接线**：`RequestLogRepository.prune` 没有调用点 |
-| `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。**同上**，表会一直长 |
+| `telemetry.requestLog.retainDays` | `7` | 请求记录保留天数。启动时执行一次清理（不做定时任务） |
+| `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。同上 |
 | `telemetry.requestLog.sampleRate` | `1.0` | 采样率。**错误请求永远全量记录** |
-| `telemetry.hookOverhead.enabled` | `true` | **未接线**：`/telemetry/hook` 总是记录 |
+| `telemetry.hookOverhead.enabled` | `true` | 关掉时 Hook 阻塞开销直接丢弃，不累加指标 |
 | `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 只做冷热标记，不参与排序；非 0 时 `find` 会多查一次访问统计，并把本次命中累加进 `node.access_count`（fire-and-forget，不等它完成） |
 | `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。调小让热度掉得更快 |
 | `task.leaseSeconds` | `60` | 任务租约。到期未续租会被启动扫描回收（§10.4） |
 | `task.maxAttempts` | `3` | 单个任务最多执行 3 次，超限置 `failed` |
-| `task.concurrency` | `4` | **未接线**：v1 没有常驻任务执行器 |
+| `task.concurrency` | `4` | 阶段二执行器同时跑几个任务。每个任务会调模型，调太高会把供应商的速率限制打满 |
 
 ## 启动
 
@@ -130,9 +131,74 @@ tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyn
 
 ### 退出
 
-`SIGINT` / `SIGTERM` 走优雅退出：先 `app.close()` 停收新请求，再等后台摘要失效跑完
-（`indexObserver.drain()`），最后关数据库。10 秒没退完就强退（`process.exit(1)`）——
-「优雅但可能挂住」不如「确定会结束」（`src/bootstrap/main.ts` 的 `SHUTDOWN_TIMEOUT_MS`）。
+`SIGINT` / `SIGTERM` 走优雅退出：先 `app.close()` 停收新请求，再停后台调度器
+（会等在途的一轮跑完），再等后台摘要失效跑完（`indexObserver.drain()`），最后关数据库。
+10 秒没退完就强退（`process.exit(1)`）——「优雅但可能挂住」不如「确定会结束」
+（`src/bootstrap/main.ts` 的 `SHUTDOWN_TIMEOUT_MS`）。
+
+## 后台调度器
+
+`src/bootstrap/scheduler.ts` 每 30 秒跑一轮，做三件事（架构文档 §10.7、§11.7）：
+
+| 职责 | 打开它的配置 | 动作 |
+|---|---|---|
+| 自动提交 | `session.autoCommit.enabled`（默认开） | 走阶段一，产出 `sessions/<id>/history/archive_NNN/` |
+| 会话过期 | `session.expiry.idleTimeoutSeconds > 0` | `archive`（默认，只改 `status`）或 `delete`（物理删除） |
+| 记忆 TTL 清扫 | `memory.ttl.defaultDays > 0` | 过期记忆的 `status` 置 `archived` |
+
+**三个开关全关时不起定时器**，启动日志是 `调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。`；
+否则有一行 `调度器已启动。` 带间隔与三个开关的状态。**改了配置要重启**：开关在
+`createContainer` 里读一次。
+
+### 怎么开自动提交
+
+默认就开（`enabled: true`），阈值是 150000 token / 100 条消息。想更早归档就调小阈值：
+
+```yaml
+session:
+  autoCommit:
+    pendingTokenThreshold: 5000
+    keepRecentCount: 20      # 归档后 live 里留最近 20 条
+```
+
+`minCommitIntervalSeconds` 别设成 0 以下（schema 拒绝），也别设得太小：它是「两次自动
+提交的最小间隔」，设成 0 意味着每 30 秒一轮都可能提交一次，`history/` 会被刷成一堆
+只含一两条消息的归档，而每个归档都要跑一遍阶段二（模型调用，花钱）。
+
+**怎么确认生效**：聊到超过阈值之后最多等 30 秒，看 `sessions/<id>/history/archive_001/`
+是否出现；`GET /api/v1/sessions` 的 `pendingTokens` 会降回阈值以下，`.meta.json` 的
+`commitCount` 加一。
+
+### 怎么开会话过期
+
+```yaml
+session:
+  expiry:
+    idleTimeoutSeconds: 86400   # 一天没消息
+    action: archive             # 默认；改成 delete 才是物理删除
+```
+
+- **`archive` 只改 `.meta.json` 的 `status`**，消息、归档、`memory_diff.json` 全在。
+  想恢复就把 `status` 改回 `open`。
+- **`delete` 是真的 `rm -rf`**，日志里有 `会话已删除（空闲过期）。`，带 `messages` /
+  `archives` / `removedEntries` 三个计数——删了什么必须能从日志回答。
+- **有 `pending` 记忆来源的会话不会被删**。检查方式是读它每个归档的
+  `memory_diff.json`，看里面提到的记忆现在还是不是 `pending`。命中时记
+  `warn`（`…但产出的记忆仍在待复核，跳过删除。`）并跳过；`memory_diff.json` 读不出来
+  时同样跳过——证明不了安全就不删。
+
+### 怎么开记忆 TTL
+
+```yaml
+memory:
+  ttl:
+    defaultDays: 30       # 新写入的记忆 30 天后归档
+    sweepBatchSize: 100   # 每轮最多清 100 条
+```
+
+**只影响之后写入的记忆**：过期时间在写入时算成绝对时刻（`updated_at + defaultDays`），
+已有的记忆保持原值。要追平存量，只有显式设过期时间（v1 没有对应的 HTTP 接口，见
+「已知限制」）。
 
 ## 数据布局
 
@@ -380,61 +446,102 @@ COMEM_SERVER_PORT=8080 pnpm dev
 **症状**：`POST /sessions/{id}/commit` 返回了 `taskId`，`GET /tasks/{id}` 一直是 `pending`，
 `history/archive_NNN/` 里没有 `.done`，也没有记忆被抽取出来。
 
-**原因**：v1 没有常驻的任务执行器。阶段一（落盘 + 建任务）在请求里同步完成，阶段二
-（归档摘要 → 记忆抽取 → 补丁合并 → 摘要失效）需要有人认领任务并跑
-`CommitPipeline`，而 `src/bootstrap/main.ts` 没有启动这个循环——四个步骤的实现和测试都在
-（`src/services/commit/`），只是没接进进程。
+**原因**（按可能性排序）：
 
-**处理**：这是已知缺口，不是配置问题。见「已知限制」第一条。
+1. **执行器没启动。** 阶段二执行器（`src/bootstrap/commit-runner.ts`）由
+   `src/bootstrap/main.ts` 启动，每 1 秒轮询一次 `claimable`。手工用
+   `createContainer()` 起的脚本不会自动跑它——要么自己 `commitRunner.start()`，要么在
+   测试里 `await commitRunner.tick()`。
+2. **任务载荷坏了。** `payload` 缺 `sessionUri` / `archiveUri` / `archiveId`，或 URI 解析
+   失败时任务会被直接标 `failed`（不重试）。看 `task.error` 字段。
+3. **租约卡住。** `running` 且 `lease_until` 在未来：上一个执行器进程崩了。等租约过期
+   （默认 60 秒）或重启（启动扫描会把过期的 `running` 重置回 `pending`）。
+
+**处理**：先 `GET /tasks/{id}` 看 `status` / `error` / `attempts`，再确认 `main.ts` 起过
+执行器。见「已知限制」第一条。
+
+### TTL 配错了，记忆全查不到
+
+**症状**：`find` / `search` 查不到某批记忆，`GET /content/read` 按路径还能读到；
+`node.status` 是 `archived`。
+
+**原因**：`memory.ttl.defaultDays` 设小了（比如想写 365 天，写成了 1），调度器把过期
+的记忆软过期了。**不会丢文件**——`sweep` 只改 `status`，不删内容、不动
+`node_permission`。
+
+**处理**：
+
+1. 把 `defaultDays` 改回 `0`（或正确的天数）并重启：已经归档的行不会自动恢复。
+2. 用 SQL 把它们改回来（`read` / `download` 一直可用，检索只认 `status = 'active'`）：
+
+   ```sql
+   -- 先看影响面
+   SELECT uri, expires_at FROM node WHERE status = 'archived' AND expires_at IS NOT NULL;
+   -- 再按需收窄、恢复
+   UPDATE node SET status = 'active' WHERE status = 'archived' AND expires_at IS NOT NULL;
+   ```
+
+   不要指望「重写一遍文件」恢复：观察者会按记忆文件的 frontmatter 重写 `status`，而
+   `experiences` / `rules` 因此会回到 `pending`（复核闸门），需要再复核一次。
+
+**想彻底清掉过期时间**（让这些记忆永不过期）再加一句
+`UPDATE node SET expires_at = NULL WHERE expires_at IS NOT NULL;`。
+
+### 会话被自动删除了
+
+**症状**：`sessions/` 下少了目录，日志里有 `会话已删除（空闲过期）。`
+
+**原因**：`session.expiry.idleTimeoutSeconds > 0` 且 `session.expiry.action: delete`。
+删除前已经检查过「归档产出的记忆是否仍待复核」，跳过的情况会记
+`…但产出的记忆仍在待复核，跳过删除。`。
+
+**处理**：没有回滚（`rm -rf` 不可逆）。从备份恢复整个数据根（见「备份与恢复」），
+或者把 `action` 改回 `archive`——归档只改 `status`，可以改回来。
 
 ## 已知限制
 
 按对使用的影响排序。**这些都是真的没做，不是「以后优化」。**
 
-1. **阶段二没有常驻执行器。** 提交只完成阶段一：归档目录、`messages.jsonl`、`.meta.json`、
-   任务行都对，任务停在 `pending`。记忆抽取 / 补丁合并 / 摘要失效四个步骤有实现、有测试，
-   但没有进程去 `claim` 任务。所以「聊完自动产出记忆」这条链路目前跑不通。
-2. **单用户部署。** 服务图在启动时绑定一个身份（默认 `user:local`），
+1. **只有 `main.ts` 起的进程会跑阶段二。** 提交的阶段一（归档目录、`messages.jsonl`、
+   `.meta.json`、任务行）在请求里同步完成，阶段二（归档摘要 → 记忆抽取 → 补丁合并 →
+   摘要失效）由 `CommitRunner` 认领任务执行，而它只在 `src/bootstrap/main.ts` 里启动。
+   用 `createContainer()` 自己写脚本时不会自动跑，任务会停在 `pending`。
+2. **TTL 没有「给已有记忆批量设过期时间」的接口。** `memory.ttl.defaultDays` 只影响之后
+   写入的记忆；存量要追平得直接改库（见「TTL 配错了」一节的 SQL）。`TtlService.setExpiry`
+   是服务层方法，没有对应的 HTTP 路由。
+3. **单用户部署。** 服务图在启动时绑定一个身份（默认 `user:local`），
    `Authorizer` 的三个方法没有 subject 参数（§12.4）。请求头 `x-comem-subject` 与它不一致
    时直接 401，不静默降级——但也没有「多用户」这一档。多租户要的是每请求一份服务图。
-3. **ACL 的过滤效果无法用第二个身份验证。** 因为上一条：个人空间里 owner 恒 `manage`，
+4. **ACL 的过滤效果无法用第二个身份验证。** 因为上一条：个人空间里 owner 恒 `manage`，
    `deny` 收不回去；组空间在 v1 没有成员关系（`groups` 只能由装配方传入，`main.ts` 传的是
    空数组），所以 HTTP 层建不出组空间。ACL 求值本身由 `tests/unit/domain/acl.test.ts`
    （41 个用例）与 `tests/integration/services/acl.test.ts` 覆盖，演示脚本只能演到「管理面 +
    被拒绝的组空间写入」。
-4. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
+5. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
    索引坏了只能靠文件系统继续读写，检索能力等于没有。
-5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
+6. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
    日志，不落盘也不进数据库（`src/services/memory.ts`）。事后要复盘「为什么拒了」只能翻日志。
-6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
+7. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
    description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模摘要三字段，
    `ContentStore.readText` 不暴露任意键。Hook 注入的 `<available-skills>` 因此只有名字，
    这是 §15.2 允许的最低一档，不是静默丢失。
-7. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
+8. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
    `services/` 不能 `import node:fs`、`ContentStore` 也没有 chmod 入口，所以脚本装进去之后
    不可执行。要补需要给 `ContentStore` 加一个 chmod 方法，现在没有。
-8. **`stop.mjs` 的 50ms 断言余量很薄。** 它测的是进程总耗时（含 ~20ms Node 启动），
+9. **`stop.mjs` 的 50ms 断言余量很薄。** 它测的是进程总耗时（含 ~20ms Node 启动），
    当前机器 40–48ms。更慢的门禁机上这条会先红——那是环境问题，不是实现问题。
-9. **`retrieval.recall.*` 未接线。** 自适应升级（先 `find`，top1 低于阈值再走查询扩展）
-   的配置项在，`SearchService` 还没读它。改这几个值不会有任何效果。
-10. **`acl.enabled`、`task.concurrency`、`telemetry.metrics.enabled`、
-    `telemetry.hookOverhead.enabled`、`memory.reviewRequired`
-    未接线。** 校验通过，但代码里是常量或没有分支。改配置前先看「配置项」表里的标注。
-11. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
+10. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
     去重放它。所以「索引双写补偿」只做了「记下来」这一半。处理办法见排障一节。
-12. **`request_log` 不会被清理。** `RequestLogRepository.prune` 实现了「按天数 + 按行数保留」，
-    但没有任何调用点（没有定时任务）。`telemetry.requestLog.retainDays` / `retainRows` 改了
-    不生效，这张表会一直长。手工清理：`DELETE FROM request_log WHERE at < ...`。
-13. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
+11. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
     `node:fs` 构造不出来。为一条几乎走不到的分支给生产类加可注入接缝，成本大于收益。
-14. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
+12. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
     多实例要共享密钥，那时再加配置项。
-15. **向量检索是暴力检索，没有 ANN 索引。** `sqlite-vec` 的 `vec0` 虚拟表是 C + SIMD
+13. **向量检索是暴力检索，没有 ANN 索引。** `sqlite-vec` 的 `vec0` 虚拟表是 C + SIMD
     的暴力检索。实测 1 万条 × 1024 维：不带候选集 8–10ms，带 1 万条 URI 候选集 78ms。
     **十万节点会先撞上「候选集全量」这个假设**（按线性外推约 800ms）。届时要么把 scope
     过滤下推到 `vec0`（给 `uri` 加分区列），要么换 ANN——这是架构决策，不是调参能解决的。
 
-16. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
+14. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
     整条 KNN 查询就返回空。而「权限候选集里的 URI 刚被并发删除」是正常竞态，静默返回
     空等于语义检索偶尔查不出东西。当前做法是先用全表主键扫描求交（1 万行 5.8ms）。
     **不要换成按候选集点查**：`vec0` 主键点查约 7µs/条，1 万条 70ms，比全表扫贵一个

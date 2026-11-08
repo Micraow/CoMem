@@ -43,6 +43,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
+import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { ArchiveMeta, ArchiveTaskPayload } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
@@ -121,6 +122,17 @@ export interface SessionServiceOptions {
    * 注入。
    */
   readonly authorizer?: Authorizer;
+  /**
+   * 物化权限的清理端口（删除会话时用）。
+   *
+   * 会话 `create` 物化了 `node_permission` 行（见 `#materialize`），而
+   * `node_permission` 没有指向 `node` 的外键级联。删除会话目录之后这些行会留下来
+   * ——会话 ID 可以由调用方指定（`POST /sessions` 的 `sessionId`），重建同名会话会
+   * 继承上一轮的授权行。删除必须显式清。
+   *
+   * 可选：不注入时跳过清理（只关心提交管线的调用方，例如单测）。
+   */
+  readonly permissions?: Pick<PermissionRepository, 'deleteSubtree'>;
 }
 
 export interface CommitPhase1Result {
@@ -128,6 +140,23 @@ export interface CommitPhase1Result {
   readonly archiveUri: Uri;
   /** 归档了多少条消息 */
   readonly archivedCount: number;
+}
+
+/**
+ * 物理删除一个会话之后「删了什么」的审计记录（架构文档 §11.7 的
+ * `session.expiry.action: delete`）。
+ *
+ * 删除是不可逆的，日志必须能回答「删掉的会话里有什么」：只有 URI 的话，事后无法判断
+ * 那次删除是否误伤（丢的是不是一段有内容的对话）。
+ */
+export interface SessionRemoval {
+  readonly sessionUri: Uri;
+  /** 没归档的消息数（`messages.jsonl` 里的行数） */
+  readonly messages: number;
+  /** `history/` 下的归档目录数 */
+  readonly archives: number;
+  /** 磁盘上实际删除的条目数（`rm -rf` 的计数） */
+  readonly removedEntries: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -223,6 +252,7 @@ export class SessionService {
   readonly #autoCommit: AutoCommitPolicy;
   readonly #archiveDirectoryName: string;
   readonly #authorizer: Authorizer | undefined;
+  readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'> | undefined;
 
   constructor(options: SessionServiceOptions) {
     this.#store = options.store;
@@ -233,6 +263,7 @@ export class SessionService {
     this.#autoCommit = options.config.autoCommit;
     this.#archiveDirectoryName = options.config.archiveDirectoryName ?? DEFAULT_ARCHIVE_DIRECTORY_NAME;
     this.#authorizer = options.authorizer;
+    this.#permissions = options.permissions;
   }
 
   /** 建会话。目录 `sessions/sess_xxx/`，写 `messages.jsonl`（空）与 `.meta.json`。 */
@@ -321,6 +352,60 @@ export class SessionService {
   /** 自动提交判定（§10.2.1）。纯判定，不提交。 */
   shouldAutoCommit(session: Session, now: Date): boolean {
     return shouldAutoCommitPolicy(session, this.#autoCommit, now);
+  }
+
+  /** `history/` 下的归档目录，按序号升序。过期判定与审计日志要用它。 */
+  async listArchives(sessionUri: Uri): Promise<readonly Uri[]> {
+    return this.#listArchives(this.#historyUri(sessionUri));
+  }
+
+  /**
+   * 空闲过期：把会话标记为 `archived`，**不删文件**（§11.7 的
+   * `session.expiry.action: archive`）。
+   *
+   * 只改 `.meta.json` 的 `status`：消息、归档、`memory_diff.json` 全部原样保留。
+   * 归档是可逆的（把 `status` 改回 `open` 就恢复），所以它可以是默认动作——删除
+   * 不是。
+   *
+   * 已经是 `archived` 时是空操作（幂等）：调度器每轮都会看到这个会话，重复写一次
+   * `.meta.json` 只会多一次磁盘往返与一条假日志。
+   */
+  async archive(sessionUri: Uri): Promise<void> {
+    const meta = await this.#requireSession(sessionUri);
+    if (meta.status === 'archived') {
+      return;
+    }
+    await this.#meta.writeSession(sessionUri, { ...meta, status: 'archived' });
+    this.#logger.info('会话已归档（空闲过期）。', {
+      uri: sessionUri.toString(),
+      commitCount: meta.commitCount,
+      pendingTokens: meta.pendingTokens,
+    });
+  }
+
+  /**
+   * 物理删除整个会话目录（§11.7 的 `session.expiry.action: delete`）。
+   *
+   * **调用方必须先确认没有待复核记忆的来源指向这个会话**——`memory_diff.json` 只存在
+   * 归档目录里，删掉之后「这条待复核记忆是哪个会话产出的」就再也追不回来。这条闸门
+   * 在 `Scheduler` 里，因为只有它知道该去查哪些记忆。
+   *
+   * 返回删了什么，供调用方写审计日志；`.meta.json` 缺失（建了一半的会话）不是错误。
+   */
+  async remove(sessionUri: Uri): Promise<SessionRemoval> {
+    const meta = await this.#meta.readSession(sessionUri);
+    const messages = await this.#countMessages(sessionUri);
+    const archives = (await this.#listArchives(this.#historyUri(sessionUri))).length;
+    const removedEntries = await this.#store.remove(sessionUri, { recursive: true });
+    await this.#deletePermissions(sessionUri);
+    this.#logger.info('会话已删除（空闲过期）。', {
+      uri: sessionUri.toString(),
+      sessionId: meta?.sessionId ?? null,
+      messages,
+      archives,
+      removedEntries,
+    });
+    return { sessionUri, messages, archives, removedEntries };
   }
 
   async #commitPhase1(sessionUri: Uri): Promise<CommitPhase1Result> {
@@ -541,6 +626,39 @@ export class SessionService {
       });
     }
     return meta;
+  }
+
+  /** 未归档的消息数；`messages.jsonl` 缺失按 0（建了一半的会话）。 */
+  async #countMessages(sessionUri: Uri): Promise<number> {
+    try {
+      return (await this.#readMessages(this.#messagesUri(sessionUri))).length;
+    } catch (error) {
+      if (error instanceof ComemError && error.code === 'NOT_FOUND') {
+        return 0;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 清掉被删会话的物化权限行。
+   *
+   * 失败只记日志：目录已经删掉了，回滚不回来；残留的权限行是派生数据，靠对账修复
+   * （§7）。抛出去只会让「删除成功」变成一个错误响应，而删除其实已经完成。
+   */
+  async #deletePermissions(sessionUri: Uri): Promise<void> {
+    const permissions = this.#permissions;
+    if (permissions === undefined) {
+      return;
+    }
+    try {
+      permissions.deleteSubtree(sessionUri.toString());
+    } catch (error) {
+      this.#logger.error('删除会话后清理物化权限失败，已忽略。', {
+        uri: sessionUri.toString(),
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async #readMessages(messagesUri: Uri): Promise<readonly SessionMessage[]> {

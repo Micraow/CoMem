@@ -44,6 +44,19 @@ export interface SqliteFtsIndexOptions {
   readonly logger: Logger;
   /** §18 的 `retrieval.candidateMultiplier`，默认 4 */
   readonly candidateMultiplier?: number;
+  /**
+   * §18 的 `memory.ttl.defaultDays`：记忆节点的默认存活天数。`0`（默认）= 不设过期
+   * 时间。
+   *
+   * **为什么默认值放在这一层**：`node` 行的生产写入点只有这里的 `upsert`（观察者与
+   * `reindex` 都走它），而「新写入的记忆默认活多久」必须在写入时算成一个绝对时刻
+   * （`0010_ttl.sql` 的文件头）。放到 `TtlService` 里只能做到「清扫时再算」，那时
+   * 「从什么时候开始算」已经漂了。
+   *
+   * **基准是 `record.updatedAt` 而不是 `new Date()`**：索引层的写入时间就是节点的
+   * 更新时间，用它在测试里可复现，`reindex` 重建同一份文件也得到同一个值。
+   */
+  readonly defaultTtlDays?: number;
 }
 
 /**
@@ -60,6 +73,12 @@ const READ_LEVEL = 1;
  * 支撑，调参时应该用真实查询对比「返回条数」与「查询成本」。
  */
 const DEFAULT_CANDIDATE_MULTIPLIER = 4;
+
+/**
+ * 一天的毫秒数。`memory.ttl.defaultDays` 是「天」，`node.expires_at` 是 ISO 8601
+ * 时间串，换算只发生在这里。不是魔法数字：24 × 60 × 60 × 1000 是单位的定义。
+ */
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 const URI_SCHEME = 'comem://';
 
@@ -254,11 +273,35 @@ export class SqliteFtsIndex implements RetrievalIndex {
   readonly #db: DatabaseSync;
   readonly #logger: Logger;
   readonly #candidateMultiplier: number;
+  readonly #defaultTtlDays: number;
 
   constructor(options: SqliteFtsIndexOptions) {
     this.#db = options.db;
     this.#logger = options.logger;
     this.#candidateMultiplier = options.candidateMultiplier ?? DEFAULT_CANDIDATE_MULTIPLIER;
+    this.#defaultTtlDays = options.defaultTtlDays ?? 0;
+  }
+
+  /**
+   * 新记忆行的默认过期时间（`memory.ttl.defaultDays` 换算成的绝对时刻）。
+   *
+   * 只对 `context_type = 'memory'` 生效：`memory.ttl` 描述的是记忆的存活时间，把
+   * `resources` / `skills` 一起套上会让「我设了记忆 30 天」变成「上传的附件 30 天后
+   * 从检索里消失」，那不是这个配置的名字。
+   *
+   * 时间串坏掉时返回 `null`（不过期）而不是抛错：`record.updatedAt` 由写入方生成，
+   * 它坏掉说明索引被改坏了，而 `upsert` 的职责是写索引，不是校验时钟。抛错会让一次
+   * 正常的写操作因为一个派生字段失败。
+   */
+  #defaultExpiresAt(record: IndexRecord): string | null {
+    if (this.#defaultTtlDays <= 0 || record.contextType !== 'memory') {
+      return null;
+    }
+    const updatedAt = Date.parse(record.updatedAt);
+    if (!Number.isFinite(updatedAt)) {
+      return null;
+    }
+    return new Date(updatedAt + this.#defaultTtlDays * MILLISECONDS_PER_DAY).toISOString();
   }
 
   /**
@@ -279,8 +322,8 @@ export class SqliteFtsIndex implements RetrievalIndex {
       const upsertNode = this.#db.prepare(
         `INSERT INTO node (
            uri, parent_uri, scope, kind, context_type, memory_type, level,
-           abstract, body_digest, size, updated_at, status
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           abstract, body_digest, size, updated_at, status, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uri) DO UPDATE SET
            parent_uri = excluded.parent_uri,
            scope = excluded.scope,
@@ -313,6 +356,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
           record.size,
           record.updatedAt,
           record.status,
+          this.#defaultExpiresAt(record),
         );
         deleteFts.run(record.uri);
         insertFts.run(record.uri, segmentCjk(record.abstract ?? ''), segmentCjk(record.content));

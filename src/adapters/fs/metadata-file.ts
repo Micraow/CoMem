@@ -209,6 +209,9 @@ const SESSION_STATUSES: ReadonlySet<string> = new Set<SessionStatus>([
   'open',
   'committing',
   'committed',
+  // 空闲过期的终态（`session.expiry.action: archive`）。漏掉它时归档写盘成功、读回
+  // 却抛 INTERNAL——「归档了一个会话，之后它从列表里消失」。
+  'archived',
   'failed',
 ]);
 

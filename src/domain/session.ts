@@ -8,8 +8,14 @@
 import type { Uri } from './uri.js';
 import { ComemError } from './errors.js';
 
-/** 提交管线的阶段（架构文档 §10.1）。 */
-export type SessionStatus = 'open' | 'committing' | 'committed' | 'failed';
+/**
+ * 提交管线的阶段（架构文档 §10.1）。
+ *
+ * `archived` 是**空闲过期**的终态（§11.7、`session.expiry.action: archive`）：会话不再
+ * 接收自动提交，内容保持原样。它与 `committed` 不同——`committed` 说的是「这次归档
+ * 提交完成了」，`archived` 说的是「这个会话不会再有新消息」。两者可以先后出现。
+ */
+export type SessionStatus = 'open' | 'committing' | 'committed' | 'archived' | 'failed';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 

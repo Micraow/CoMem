@@ -202,6 +202,25 @@ const configObjectSchema = z.object({
           keepRecentCount: z.number().int().nonnegative().default(0),
         })
         .prefault({}),
+      /**
+       * 会话过期（架构文档 §11.7）。与 `autoCommit.idleTimeoutSeconds` 是两件事：
+       * 那个是「空闲多久该**提交**」，这个是「空闲多久该**归档 / 删除**」。
+       *
+       * 默认全关：删数据必须是显式选择，「没人管就会话消失」不是可以默认接受的行为。
+       */
+      expiry: z
+        .object({
+          /** 空闲多久后归档。0 = 关。 */
+          idleTimeoutSeconds: z.number().int().nonnegative().default(0),
+          /**
+           * 过期后是归档还是删除。
+           *
+           * 默认 `archive`：归档只改 `.meta.json` 的 `status`，可以改回来；删除是不可
+           * 逆的，不该是默认行为。
+           */
+          action: z.enum(['archive', 'delete']).default('archive'),
+        })
+        .prefault({}),
     })
     .prefault({}),
 
@@ -212,6 +231,18 @@ const configObjectSchema = z.object({
       workingMemory: z
         .object({
           enabled: z.boolean().default(false),
+        })
+        .prefault({}),
+      /**
+       * 记忆的 TTL（架构文档 §11.7、`0010_ttl.sql`）。清扫只做**软过期**
+       * （`status = 'archived'`），物理删除由运维显式做。
+       */
+      ttl: z
+        .object({
+          /** 记忆默认存活天数。0 = 永不过期（默认）。只影响之后写入的记忆。 */
+          defaultDays: z.number().int().nonnegative().default(0),
+          /** 每轮最多清扫多少条，防止一次清太多把库锁住 */
+          sweepBatchSize: z.number().int().positive().default(100),
         })
         .prefault({}),
     })

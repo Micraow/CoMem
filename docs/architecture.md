@@ -711,6 +711,9 @@ CREATE TABLE node (
   size           INTEGER NOT NULL,
   updated_at     TEXT NOT NULL,
   status         TEXT NOT NULL,      -- active | pending | archived
+  -- 记忆的过期时间（0010）。NULL = 永不过期；存**绝对时刻**而不是「N 天后」，
+  -- 因为相对时长每次读都要重算「从什么时候开始算」（§11.7）
+  expires_at     TEXT,
   -- 目录摘要的新鲜度（§9.3）。只在 kind = 'directory' 的行上有意义
   summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
   summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
@@ -718,6 +721,9 @@ CREATE TABLE node (
 );
 CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
+-- 部分索引：只收录有过期时间的行。默认配置（memory.ttl.defaultDays = 0）下整张
+-- 索引是空的，不为「没人用 TTL」的部署付索引维护成本（§11.7）
+CREATE INDEX idx_node_expires ON node(expires_at) WHERE expires_at IS NOT NULL;
 
 -- 全文检索
 -- 注意 content / abstract 存的是「切分后」的文本，不是原文（见下面的中文切分）
@@ -815,6 +821,7 @@ CREATE TABLE group_member (
 | 0007 | `0007_embedding.sql` | `embedding_model` 元数据（虚拟表 `node_embedding` 由 `reindex` 按配置维度建） |
 | 0008 | `0008_identity.sql` | `app_user` / `app_group` / `group_member` |
 | 0009 | `0009_access_tracking.sql` | `node.access_count` / `node.last_accessed_at`（热度衰减的输入） |
+| 0010 | `0010_ttl.sql` | `node.expires_at` + 部分索引 `idx_node_expires`（记忆 TTL，§11.7） |
 
 **中文必须单字切分，否则检索整段失效。** 实测（SQLite 3.54.1，Node 26 的 `node:sqlite`）：
 
@@ -1185,21 +1192,23 @@ commit(sessionId, options)
 
 **记忆延迟最大的来源不是抽取慢，是根本没人触发提交。** agent 不会主动调 `commit`，用户聊两小时，记忆一条没进库。
 
-五个阈值，前三个是客户端判断，后两个是服务端扫描：
+五个阈值，判定在 `domain/session.ts` 的 `shouldAutoCommit`，触发者是服务端的后台调度器（§10.7）：
 
-| 参数 | 默认 | 触发条件 | 谁判断 |
-|---|---|---|---|
-| `pendingTokenThreshold` | 150000 | 未提交 token **严格大于**该值 | 客户端（`add_message` 后） |
-| `messageCountThreshold` | 100 | 未提交消息数 **严格大于**该值 | 客户端（`add_message` 后） |
-| `minCommitIntervalSeconds` | 0 | 两次自动提交的最小间隔 | 客户端 |
-| `idleTimeoutSeconds` | 0（关） | 空闲这么久且有未提交内容 | 服务端扫描器 |
-| `keepRecentCount` | 0 | 自动提交时保留最近 N 条 | 客户端 |
+| 参数 | 默认 | 触发条件 |
+|---|---|---|
+| `pendingTokenThreshold` | 150000 | 未提交 token **严格大于**该值 |
+| `messageCountThreshold` | 100 | 未提交消息数 **严格大于**该值 |
+| `minCommitIntervalSeconds` | 0 | 两次自动提交的最小间隔（全局闸门） |
+| `idleTimeoutSeconds` | 0（关） | 空闲这么久且有未提交内容 |
+| `keepRecentCount` | 0 | 自动提交时保留最近 N 条 |
 
 **为什么阈值是「严格大于」**：默认 100 条，用户发第 100 条时不该提交，第 101 条才提交。这样「阈值 100」和「每 100 条提交一次」是同一个意思。
 
-**为什么 `idleTimeout` 默认关**：它需要一个服务端定时扫描器，是额外的常驻开销。长会话场景才开，开了要同时开 `memory.sessionAutoCommit.enabled`——单独设 `idleTimeoutSeconds` 不启动扫描器。
+**`minCommitIntervalSeconds` 是全局闸门**：任何触发条件都要先过它。没有它，调度器每 30 秒提交一次，`history/archive_NNN` 会被刷成一堆碎片，而每个碎片都要跑一遍阶段二（模型调用）。
 
-**空闲提交忽略 `keepRecentCount`**：空闲意味着对话结束了，没有「最近几条要留着」的概念，全部归档。
+**为什么 `idleTimeout` 默认关**：它是「长会话」场景的旋钮，不是默认路径的一部分。打开它需要服务端常驻扫描器（§10.7 的调度器），单机部署多一个每 30 秒空转的定时器。
+
+**空闲提交与其它触发走同一条阶段一，`keepRecentCount` 一视同仁。** 早期草图写的是「空闲提交忽略 `keepRecentCount`，全部归档」，没有实现：那需要在阶段一加一个「这一次不看保留条数」的参数，而「保留最近几条」在用户回来接着聊时恰好是有用的上下文。`keepRecentCount = 0`（默认）时两种语义是同一个结果。
 
 **提交是幂等的**：自动提交和手动提交走同一条管线，重复触发不会产生重复归档（Phase 1 的路径锁 + 归档序号单调保证）。
 
@@ -1330,6 +1339,32 @@ Template Method 固定「跳过已完成 → 执行 → 记录」的骨架，变
 
 **为什么不能只做「循环调 write」再优化**：摘要失效是 Observer 驱动的，每个文件写入都会走到祖先标记。100 个文件就是 200 次标记，其中 190 次是重复的。批量路径必须在**入口处**就去重，不能事后合并。
 
+### 10.7 后台调度器
+
+`src/bootstrap/scheduler.ts`。三个职责共用一条 30 秒的轮询：
+
+| 职责 | 判定 | 动作 | 幂等依据 |
+|---|---|---|---|
+| 自动提交 | `SessionService.shouldAutoCommit`（§10.2.1） | 走现有的阶段一 `commitPhase1` | 路径锁 + 归档序号单调 |
+| 会话过期 | `now - 最后活动 >= session.expiry.idleTimeoutSeconds` | `archive`（默认）或 `delete` | 已归档的会话跳过 |
+| TTL 清扫 | `node.expires_at < now`（§11.7） | `status = 'archived'` | `status <> 'archived'` |
+
+**间隔 30 秒。** 来源未知（经验假设）：自动提交的判定是量级判断（15 万 token / 100 条消息），30 秒延迟相对对话时长可以忽略；更短的间隔只会让每条会话每 30 秒被 `load` 一次，而没有新消息时那次读不会有任何变化。
+
+**会话从磁盘扫出来。** 会话不是 SQLite 行：`sessions/sess_xxx/` 是目录，`.meta.json` 是真相（§7），`GET /sessions` 也是列目录再逐个 `load`。所以遍历的是数据根下的 `{user,group}/<rootId>/sessions/<sessionId>/`。**不建 `session` 表**：那会造出第二个真相来源。
+
+**半成品会话跳过。** 有目录、没有 `.meta.json` 的会话（`create` 崩在两步之间）按 `NOT_FOUND` 跳过，不记错误——它不是故障，是「建了一半」。
+
+**失败隔离。** 每个会话的异常各自 `try/catch` 并记日志，TTL 清扫也单独兜底。`tick()` 本身**不抛错**：轮询失败只记日志，下一轮再试。抛出去会让定时器停在一个没人接的 rejection 上。
+
+**重叠保护。** 上一轮没跑完时这一轮直接返回（`skipped: true`），不排队、不重叠。`stop()` 等在途的一轮跑完再返回，且**不打断**它：一次自动提交可能停在「归档消息已写、live 还没重写」的 `preparing` 状态，中断只会把「等一下」换成「下次补」。
+
+**定时器 `unref`。** 与 §10.4 的执行器相反：调度器是周期性维护，不是「服务在跑」的证据；真正让进程活着的是 HTTP 服务。测试与一次性脚本不该为了一个每 30 秒空转一圈的定时器卡住不退出。
+
+**配置全关时不起定时器。** `session.autoCommit.enabled === false`、`session.expiry.idleTimeoutSeconds === 0`、`memory.ttl.defaultDays === 0` 三者同时成立时，`createContainer` 不调 `start()`，只记一行「调度器未启动」。空转的定时器是纯浪费。
+
+**删除会话前必须确认没有待复核记忆。** 关联只有一条：`archive_NNN/memory_diff.json` 记下了每次归档写入了哪些记忆（§6.6）。它就在会话目录里，所以删掉会话等于删掉「这条待复核记忆是哪个会话产出的」这唯一线索。只要归档产出里有一条记忆仍是 `pending`，就跳过删除并记 `warn`；清单读不出来时同样跳过（无法证明安全）。
+
 ## 11. 记忆模型与合并
 
 ### 11.1 记忆类型
@@ -1416,6 +1451,36 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 - 控制台「记忆复核」页展示 diff（before/after）
 - 人工通过 → `active`；拒绝 → 删除并记录原因
 - 其余类型直接 `active`
+
+### 11.7 记忆 TTL 与过期清扫
+
+记忆可以有过期时间：`node.expires_at`（`0010_ttl.sql`，见 §8.1）。清扫由后台调度器
+（§10.7）周期性执行，**只做软过期**。
+
+| 概念 | 语义 |
+|---|---|
+| `memory.ttl.defaultDays` | 记忆默认存活天数。`0`（默认）= 永不过期。写入时算成绝对时刻 |
+| `memory.ttl.sweepBatchSize` | 每轮最多清扫多少条（默认 100），给一次 UPDATE 一个上界 |
+| `TtlService.setExpiry(uris, at)` | 显式设过期时间；`null` = 取消过期 |
+| `TtlService.sweep()` | `expires_at < now` 的节点 `status` 置 `archived` |
+
+**为什么存绝对时间而不是相对时长。** 相对时长在写入时算成绝对时间，语义才稳定；存
+「30 天后过期」这种相对值，每次读都要重新算，而「从什么时候开始算」会漂。
+
+**为什么是软过期。** 清扫只改 `status`，不删文件、不动 `node_permission`。TTL 配错
+（把 7 天写成 7 秒）时归档状态还能改回来，物理删除没有回滚。归档只影响检索
+（`status = 'active'` 过滤），`read` / `download` 按路径仍然拿得到内容。物理删除是
+运维的显式动作（`forget` / `rm`），不是定时任务的默认行为。
+
+**幂等。** `sweep` 的 `WHERE status <> 'archived'` 让同一条过期记忆只被计数一次；
+重复调用返回 0，不会把「已经归档」重复写一遍。
+
+**不清 `updated_at`。** 设置过期时间是运维动作，不是内容修改。把读 / 治理动作当成
+写入会让热度衰减（§17.5）把一条从没改过的老记忆算成「刚更新过」。
+
+**默认值只影响之后写入的记忆。** `defaultDays` 在 `node` 行的写入点（`SqliteFtsIndex.upsert`）
+算成绝对时刻，且只对 `context_type = 'memory'` 生效。已有的记忆保持原值（包括 NULL）；
+要追平存量用 `TtlService.setExpiry` 批量设。
 
 ## 12. 权限模型
 
@@ -2076,6 +2141,11 @@ session:
     minCommitIntervalSeconds: 0
     idleTimeoutSeconds: 0     # 0 = 关；开了需要服务端扫描器
     keepRecentCount: 0
+  # 会话过期（与 autoCommit.idleTimeoutSeconds 是两件事：那个是「空闲多久该提交」，
+  # 这个是「空闲多久该归档 / 删除」）。默认全关：删数据必须是显式选择。
+  expiry:
+    idleTimeoutSeconds: 0     # 空闲多久后归档。0 = 关
+    action: archive           # archive | delete。默认归档——删除是不可逆的
 
 memory:
   reviewRequired:
@@ -2083,6 +2153,10 @@ memory:
     - rules
   workingMemory:
     enabled: false        # 开它会多一次 LLM 调用
+  # 记忆的 TTL。清扫只做软过期（status = archived），物理删除由运维显式做。
+  ttl:
+    defaultDays: 0        # 记忆默认存活天数。0 = 永不过期（默认）
+    sweepBatchSize: 100   # 每轮最多清扫多少条，防止一次清太多把库锁住
 
 acl:
   groupDefaultLevel: write   # write | read
@@ -2133,6 +2207,8 @@ task:
 **`telemetry.metrics.enabled` 与 `includeAccountLabel` 真的生效。** 前者为 `false` 时 `GET /metrics` 返回 404 并说明「指标已关闭」；后者为 `true` 时 `comem_http_request_duration_seconds` 的样本带 `account` 标签（关闭时是全局汇总，两种形态不能混着输出）。
 
 **`telemetry.requestLog.retainDays` / `retainRows` 在启动时执行一次。** 不做定时任务：单机部署的启动清理已经能挡住无限增长，常驻定时器要多一个生命周期与并发问题。
+
+**`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**三个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0`。`memory.ttl.defaultDays` 在 `node` 行的写入点算成绝对时刻，只对 `context_type = 'memory'` 生效——`resources` / `skills` 不会被套上记忆的存活时间。
 
 **`acl.enabled` 与 `retrieval.recall.*` 已删除。** 前者没有实现（关掉仍然走 ACL），后者没有调用点（自适应升级从未执行）。`context` 模式取代 `recall.*` 的职责；等真正需要自适应升级时再加配置。
 

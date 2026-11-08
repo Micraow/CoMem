@@ -300,6 +300,82 @@ export class NodeRepository {
   }
 
   /**
+   * 批量设置过期时间（`0010_ttl.sql`、架构文档 §11.7）。返回实际命中的行数。
+   *
+   * `expiresAt === null` 是**显式取消过期**，与「从没设过」在列上都是 NULL——这是
+   * 有意的：`expires_at` 只有「一个绝对时刻」和「没有」两种取值，不引入第三个哨兵
+   * 值（`'1970-01-01'` 会让「从没设过」和「已经过期」在 `WHERE` 里不可区分）。
+   *
+   * **不动 `updated_at`**：设置过期时间不是内容修改。与 `recordAccess` 同一条理由
+   * ——热度衰减按 `updated_at` 算「这条记忆有多新」，把运维动作当成内容写入会让一条
+   * 从没改过的老记忆看起来刚被更新过。
+   *
+   * 不存在的 URI 静默跳过（索引与磁盘不同步是正常状态，见 `recordAccess`）。
+   */
+  setExpiry(uris: readonly string[], expiresAt: Date | null): number {
+    if (uris.length === 0) {
+      return 0;
+    }
+    if (expiresAt !== null && Number.isNaN(expiresAt.getTime())) {
+      throw new ComemError('INVALID_ARGUMENT', '过期时间不是合法的 Date。', {
+        at: expiresAt.toString(),
+      });
+    }
+
+    const timestamp = expiresAt === null ? null : expiresAt.toISOString();
+    const updated = withWriteTransaction(this.#db, () =>
+      this.#db
+        .prepare(`UPDATE node SET expires_at = ? WHERE uri IN (${placeholders(uris.length)})`)
+        .run(timestamp, ...uris).changes,
+    );
+    this.#logger.debug('节点的过期时间已设置', { uris: uris.length, updated, expiresAt: timestamp });
+    return Number(updated);
+  }
+
+  /**
+   * 清扫已过期的节点：`status` 置 `archived`，**不删文件**（软过期，架构文档 §11.7）。
+   *
+   * 为什么是软过期：TTL 配错（把 7 天写成 7 秒）时，`archived` 还能改回来；物理删除
+   * 没有回滚。物理删除是运维的显式动作，不是定时任务的默认行为。归档只影响检索
+   * （`status = 'active'` 过滤），`read` / `download` 按路径仍然拿得到内容。
+   *
+   * **不动 `node_permission`**：归档节点仍要能按权限查到——「这条记忆归档了」是内容
+   * 状态，不是「这个人失去了访问权」。删权限行会让「归档」变成「对所有人消失」。
+   *
+   * **幂等**：`status <> 'archived'` 让重复调用不重复计数（第二次返回空）。
+   *
+   * `ORDER BY expires_at ASC LIMIT ?` 让「积压很多」时先清最老的，同时给每轮一个上界
+   * （`memory.ttl.sweepBatchSize`）——一次更新整表会长时间持有写锁，把并发请求卡在
+   * `busy_timeout` 上。
+   */
+  sweepExpired(now: Date, limit: number): readonly string[] {
+    const nowIso = now.toISOString();
+    const expired = withWriteTransaction(this.#db, () => {
+      const rows = this.#db
+        .prepare(
+          `SELECT uri FROM node
+            WHERE expires_at IS NOT NULL AND expires_at < ? AND status <> 'archived'
+            ORDER BY expires_at ASC
+            LIMIT ?`,
+        )
+        .all(nowIso, limit);
+      const uris = rows.map((row) => text(row['uri']));
+      if (uris.length === 0) {
+        return uris;
+      }
+      const statement = this.#db.prepare(`UPDATE node SET status = 'archived' WHERE uri = ?`);
+      for (const uri of uris) {
+        statement.run(uri);
+      }
+      return uris;
+    });
+    if (expired.length > 0) {
+      this.#logger.info('TTL 清扫：过期节点已归档。', { count: expired.length, uris: expired });
+    }
+    return expired;
+  }
+
+  /**
    * 读热度所需的两个字段，**按入参顺序**返回。
    *
    * 不在索引里的 URI 不返回（不是补一条 `accessCount: 0`）：补零会让「这条记忆

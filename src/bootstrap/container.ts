@@ -118,9 +118,11 @@ import {
   SummaryService,
 } from '../services/summary.js';
 import { TaskService } from '../services/task.js';
+import { TtlService } from '../services/ttl.js';
 
 import { createArchivePorts, createArchiveWriter } from './archive-ports.js';
 import { CommitRunner } from './commit-runner.js';
+import { DEFAULT_INTERVAL_MS, Scheduler } from './scheduler.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
@@ -161,6 +163,13 @@ export interface Container {
    * 永远停在 `pending`——`POST /sessions/{id}/commit` 只做阶段一。
    */
   readonly commitRunner: CommitRunner;
+  /**
+   * 后台调度器（§10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL）。
+   *
+   * 三个配置全关时**不启动定时器**（`createContainer` 里判断）——空转的 30 秒定时器
+   * 是纯浪费。`close()` 里先停它再关数据库：它会写 `.meta.json`、建任务。
+   */
+  readonly scheduler: Scheduler;
   readonly services: ContainerServices;
   readonly mcpRegistry: ToolRegistry;
   /** MCP Streamable HTTP 服务端；`main` 挂到 HTTP 上。 */
@@ -475,6 +484,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     db,
     logger,
     candidateMultiplier: config.retrieval.candidateMultiplier,
+    // `memory.ttl.defaultDays` 在**写入时**算成绝对时刻（`0010_ttl.sql` 的文件头）。
+    // 装配层是唯一能把它接到索引写入点的位置。
+    defaultTtlDays: config.memory.ttl.defaultDays,
   });
   const nodes = new NodeRepository({ db, logger });
   const permissions = new PermissionRepository({ db, logger });
@@ -726,6 +738,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     config: { autoCommit: config.session.autoCommit },
     // 写后物化权限：服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
     authorizer,
+    // 删除会话时清物化权限行：那张表没有外键级联，而会话 ID 可以由调用方指定
+    // （重建同名会话会继承上一轮的行）。
+    permissions,
   });
 
   const search = new SearchService({
@@ -877,6 +892,50 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     concurrency: config.task.concurrency,
   });
 
+  /**
+   * 记忆 TTL 与会话过期（§11.7）。
+   *
+   * 装配位置在 `MemoryService` 之后：删除会话前要读「它产出的记忆是否还在待复核」。
+   */
+  const ttl = new TtlService({ nodes, logger });
+
+  const scheduler = new Scheduler({
+    logger,
+    dataDir,
+    sessions: session,
+    ttl,
+    memories: { read: (uri) => memory.read(uri) },
+    expiry: {
+      idleTimeoutSeconds: config.session.expiry.idleTimeoutSeconds,
+      action: config.session.expiry.action,
+    },
+    ttlSweepBatchSize: config.memory.ttl.sweepBatchSize,
+  });
+
+  // 三个开关全关时不起定时器：空转的 30 秒定时器是纯浪费，而且会让「调度器在跑」
+  // 这条日志失去信息量。
+  const schedulerEnabled =
+    config.session.autoCommit.enabled ||
+    config.session.expiry.idleTimeoutSeconds > 0 ||
+    config.memory.ttl.defaultDays > 0;
+  if (schedulerEnabled) {
+    scheduler.start();
+    logger.info('调度器已启动。', {
+      intervalSeconds: DEFAULT_INTERVAL_MS / MILLISECONDS_PER_SECOND,
+      autoCommit: config.session.autoCommit.enabled ? '开' : '关',
+      expiry:
+        config.session.expiry.idleTimeoutSeconds > 0
+          ? `开（${String(config.session.expiry.idleTimeoutSeconds)} 秒空闲后 ${config.session.expiry.action}）`
+          : '关',
+      ttl:
+        config.memory.ttl.defaultDays > 0
+          ? `开（默认 ${String(config.memory.ttl.defaultDays)} 天）`
+          : '关',
+    });
+  } else {
+    logger.info('调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。', {});
+  }
+
   const observability = new ObservabilityService({
     requestLog,
     db,
@@ -964,6 +1023,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     db,
     observability,
     commitRunner,
+    scheduler,
     services,
     mcpRegistry,
     mcp,
@@ -974,7 +1034,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
         return;
       }
       closed = true;
-      // 先停在途提交任务：它们调模型、写归档与记忆，`db.close()` 之后写库会抛。
+      // 先停调度器：它会写 `.meta.json`（归档）、删会话目录、建归档任务。
+      await scheduler.stop();
+      // 再停在途提交任务：它们调模型、写归档与记忆，`db.close()` 之后写库会抛。
       // 与 `main.ts` 的退出路径都调 `stop()`，所以它必须幂等（它确实幂等）。
       await commitRunner.stop();
       // 再等后台的摘要失效跑完：`db.close()` 之后它们写库会抛。

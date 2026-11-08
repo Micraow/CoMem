@@ -79,6 +79,11 @@ session:
     minCommitIntervalSeconds: 0
     idleTimeoutSeconds: 0     # 0 = 关；开了需要服务端扫描器
     keepRecentCount: 0
+  # 会话过期（与 autoCommit.idleTimeoutSeconds 是两件事：那个是「空闲多久该提交」，
+  # 这个是「空闲多久该归档 / 删除」）。默认全关：删数据必须是显式选择。
+  expiry:
+    idleTimeoutSeconds: 0     # 空闲多久后归档。0 = 关
+    action: archive           # archive | delete。默认归档——删除是不可逆的
 
 memory:
   reviewRequired:
@@ -86,6 +91,10 @@ memory:
     - rules
   workingMemory:
     enabled: false        # 开它会多一次 LLM 调用
+  # 记忆的 TTL。清扫只做软过期（status = archived），物理删除由运维显式做。
+  ttl:
+    defaultDays: 0         # 记忆默认存活天数。0 = 永不过期（默认）
+    sweepBatchSize: 100    # 每轮最多清扫多少条，防止一次清太多把库锁住
 
 acl:
   groupDefaultLevel: write   # write | read
