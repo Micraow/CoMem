@@ -23,6 +23,12 @@ pnpm install              # 后端 + Hook 插件的开发依赖（tsx、vitest�
 cd web && pnpm install    # 控制台单独装：web/ 有自己的 lockfile，不在根 workspace 里
 ```
 
+第二行会跑 `web/package.json` 的 `postinstall`（`nuxt prepare`），在 `web/.nuxt/` 下生成
+Nuxt 类型。**这一步不是可选的**：`web/tsconfig.json` 的 `extends` 指向
+`.nuxt/tsconfig.json`，`pnpm test` 里的 `tests/unit/web/` 走 Vite 转译时会读它——没有
+这个文件，`pnpm test` 在第一个控制台用例上就报 `Cannot find module './.nuxt/tsconfig.json'`。
+`nuxt prepare` 只做类型生成，不产出 `.output/`，耗时约 1 秒。
+
 `integrations/` 不需要安装：它是纯 `.mjs`，只依赖 Node 内置模块，`dependencies` 为空。
 
 ## 配置
@@ -1514,3 +1520,32 @@ COMEM_SERVER_PORT=8080 pnpm dev
     （求权阶段就 403），只能用 `pnpm group:owner <groupId> <userId>` 恢复。控制台的组列表
     用「无所有者」标出来；没有「在界面上直接认领」的入口——那等于给任何组员一条不需要
     manage 的授权通道。
+
+23. **`sqlite-vec` 只有预编译二进制。** `sqlite-vec@0.1.9` 通过平台包
+    `sqlite-vec-<os>-<arch>` 提供 `vec0.so`（本机是 `sqlite-vec-linux-x64`，ELF x86-64，
+    动态链接 `libc.so.6` 的 `GLIBC_2.14` 以上）。Debian bookworm（glibc 2.36）成立。
+    换到 **Alpine / musl** 上实测（`node:24-alpine`）：`db.loadExtension` 抛
+    `ERR_LOAD_SQLITE_EXTENSION: Error loading shared library /app/node_modules/sqlite-vec-linux-x64/vec0.so.so: No such file or directory`
+    ——musl 的动态加载器找不到 glibc 的 `libc.so.6`，报的是 ENOENT 而不是「架构不符」。
+    `src/adapters/sqlite/database.ts` 把它包成 `INTERNAL`「加载 sqlite-vec 扩展失败，
+    向量检索不可用。」，HTTP 侧是 500；之后任何 `vec0` 语句报
+    `ERR_SQLITE_ERROR: no such module: vec0`。平台包没装（可选依赖被跳过）时是
+    `Cannot find module 'sqlite-vec-linux-x64/vec0.so'`；不支持的平台 / 架构
+    （linux-ppc64、win32-arm64 等）是 `Unsupported platform for sqlite-vec, on a
+    linux-ppc64 machine. Supported platforms are (darwin-x64,linux-x64,darwin-arm64,
+    win32-x64,linux-arm64).`。三条都没有降级路径：向量检索是 `retrieval.engine =
+    vector | hybrid` 的唯一实现，加载失败直接抛错，不会静默退回 FTS。
+
+24. **锁文件依赖硬链接。** `src/adapters/fs/lock.ts:268` 用 `link()` 原子创建
+    `.comem-lock`，只有 `EEXIST` 被当成「锁被占用」；其它 errno 原样抛出，不重试、
+    不降级。**NFS / CIFS** 上 `link` 可能返回
+    `EPERM: operation not permitted, link '...comem-lock.tmp' -> '...comem-lock'`
+    （服务器不允许硬链接），写操作因此以 HTTP 500 `发生未预期的内部错误。` 失败。
+    overlayfs 与本地 ext4 / xfs 成立（`tests/integration/fs/lock.test.ts` 在
+    `mkdtemp` 上跑）。数据根放网络文件系统时，先确认 `ln 目标 链接` 能成功。
+
+25. **镜像里跑 `pnpm test` 必须 `--target test`。** 生产镜像（`runtime`）从
+    `prod-deps` 拿依赖，`pnpm prune --prod` 之后没有 `vitest` 与 `eslint`：
+    `docker run --rm comem:0.1.0 pnpm test` 直接 `sh: 1: vitest: not found`、退出码
+    127；`pnpm lint` 同样 `eslint: not found`。全量测试与 lint 用
+    `docker build --target test -t comem:test-suite .` 构建出的镜像跑。

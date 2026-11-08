@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "nuxt dev --port 3081",
     "build": "nuxt build",
+    "postinstall": "nuxt prepare",
     "preview": "nuxt preview",
     "typecheck": "nuxt typecheck"
   },

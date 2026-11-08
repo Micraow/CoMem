@@ -97,6 +97,12 @@ cd web && pnpm install && cd ..   # 控制台是独立包，有自己的 lockfil
 pnpm dev
 ```
 
+`cd web && pnpm install` 会触发 `web/package.json` 的 `postinstall`（`nuxt prepare`），在
+`web/.nuxt/` 下生成 Nuxt 类型。这一步不能省：`web/tsconfig.json` 的 `extends` 指向
+`.nuxt/tsconfig.json`，`pnpm test` 里的 `tests/unit/web/` 走 Vite 转译时会读它，缺了
+直接报 `Cannot find module './.nuxt/tsconfig.json'`。`nuxt prepare` 只生成类型，不构建
+产物（约 1 秒）。
+
 `pnpm dev` 同时起后端（`http://127.0.0.1:1933`）与控制台（`http://127.0.0.1:3081`），
 关掉任意一个两个都会停。后端启动输出（实测，`logging.level = info`）：
 
