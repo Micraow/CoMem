@@ -407,8 +407,47 @@ describe('find', () => {
     const text = await callText('find', { query: '记忆' });
 
     expect(text).toMatch(/^Found 1 item\(s\):/);
-    expect(text).toMatch(/^- \[memory \d+\.\d{2}\] comem:\/\/user\/alice\/mem\/design\.md$/m);
+    expect(text).toMatch(/^- \[memory\] comem:\/\/user\/alice\/mem\/design\.md$/m);
     expect(text).toContain('\n  上下文记忆数据库');
+  });
+
+  it('hybrid 引擎的分数不会渲染成 0.00', async () => {
+    // 缺陷现场：RRF 融合分是 `Σ 1/(60 + rank)`，最多 `2/61 ≈ 0.0328`，`toFixed(2)`
+    // 会把每一条都渲成 `0.00`。那不是「没显示分数」，是一个错误的分数——调用方会
+    // 据此把相关结果当成不相关丢掉。
+    await harness.close();
+    harness = await createHarness({ engine: 'hybrid' });
+
+    const uris = ['一', '二', '三', '四'].map((name) => `${MEM}/hybrid/${name}.md`);
+    for (const [index, uri] of uris.entries()) {
+      const content = `上下文记忆数据库 第 ${index + 1} 条`;
+      await harness.filesystem.write(Uri.parse(uri), content, PRINCIPALS);
+      await seed(uri, content, { abstract: `第 ${index + 1} 条` });
+    }
+
+    const hits = await harness.context.search.find('上下文记忆数据库', {
+      scopes: [SCOPE],
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+      limit: 10,
+    });
+    // 先钉住「这条用例真的落在 RRF 量纲上」：分数大到 `toFixed(2)` 能显示出来，
+    // 这个缺陷就不会被复现。
+    expect(hits.length).toBe(4);
+    expect(hits[0]?.score).toBeLessThan(0.05);
+
+    const text = await callText('find', { query: '上下文记忆数据库', limit: 10 });
+
+    expect(text).not.toContain('0.00');
+    expect(text).not.toMatch(/\d+\.\d{2}/);
+
+    // 4 条结果互相可区分，且顺序就是服务端给的相关度降序。
+    const lines = text.split('\n').filter((line) => line.startsWith('- ['));
+    expect(lines).toHaveLength(4);
+    expect(new Set(lines).size).toBe(4);
+    for (const [index, line] of lines.entries()) {
+      expect(line).toBe(`- [memory] ${hits[index]?.uri}`);
+    }
   });
 
   it('limit 生效', async () => {
@@ -651,7 +690,7 @@ describe('health', () => {
     const text = await callText('health', {});
 
     expect(text).toContain('status: ok');
-    expect(text).toContain('index.nodes: 2');
+    expect(text).toContain('index.visibleNodes: 2');
     expect(text).toContain('summary.degraded: false');
     // 重排没配时不是降级：`degraded` 为 false，计数器为 0。
     expect(text).toContain('rerank.degraded: false');

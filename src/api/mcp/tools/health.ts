@@ -6,7 +6,9 @@
  * 也来自这里。没有 `subject` / `scopes` 时，空库上的 Agent 只能猜一个默认根。
  *
  * 索引条数按「当前身份可见的根」统计：`RetrievalIndex` 没有全库计数方法，而 MCP
- * 工具不应该绕过权限去数别人的节点。
+ * 工具不应该绕过权限去数别人的节点。字段名因此是 `index.visibleNodes`，与
+ * `GET /health` 的 `index.totalNodes`（`node` 表全量）区分开——两个数回答的是两个
+ * 问题，同名会让排查索引问题时把「库有多大」误判成「索引少了一半」。
  */
 
 import {
@@ -26,7 +28,7 @@ export const healthTool: McpToolDefinition = {
   name: 'health',
   kind: 'read',
   description:
-    '服务与身份自检，不读内容也不改状态。要拼绝对 URI 时先调它拿 subject（形如 user:alice）与 scopes；怀疑检索不对、或想知道后台任务是否堆积时也用它。index.nodes 是当前身份可见的条数，不是全库总量。summary.degraded / rerank.degraded 为 true 表示对应环节降级，结果质量会下降。',
+    '服务与身份自检，不读内容也不改状态。要拼绝对 URI 时先调它拿 subject（形如 user:alice）与 scopes；怀疑检索不对、或想知道后台任务是否堆积时也用它。index.visibleNodes 是当前身份可见的条数，全库总量看 GET /health 的 index.totalNodes。summary.degraded / rerank.degraded 为 true 表示对应环节降级，结果质量会下降。',
   inputSchema: {
     type: 'object',
     properties: {},
@@ -67,7 +69,7 @@ export const healthTool: McpToolDefinition = {
         `status: ${status}`,
         `subject: ${context.subject}`,
         `scopes: ${scopes.join(', ')}`,
-        `index.nodes: ${nodes}`,
+        `index.visibleNodes: ${nodes}`,
         `queue: pending=${pending} running=${running}`,
         `summary.degraded: ${String(degraded)}`,
         `rerank.degraded: ${String(rerank.degraded)}`,

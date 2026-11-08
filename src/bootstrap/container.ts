@@ -1200,6 +1200,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     // 控制台发一个必然 401 的头。
     subject,
     groups,
+    // 控制台的「工具」页读它（`GET /mcp/tools`）。传注册表而不是一份名字快照：
+    // 工具说明的真相在 `api/mcp/registry.ts`，硬编码一份就会出现两份文本。
+    registry: mcpRegistry,
     adminAccess: {
       permissionCounts: (principals) => permissionCountsOf(db, principals),
       memberCounts: (groupIds) => memberCountsOf(db, groupIds),

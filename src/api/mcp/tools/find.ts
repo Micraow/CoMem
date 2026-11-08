@@ -13,7 +13,7 @@ import {
   readScopes,
   requiredString,
   asRecord,
-  formatScoredHits,
+  formatHits,
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
@@ -25,7 +25,7 @@ export const findTool: McpToolDefinition = {
   name: 'find',
   kind: 'read',
   description:
-    '语义召回：按相关度返回摘要列表。不知道内容在哪、或要按「意思」找时用；已知路径用 read，正则匹配用 grep，要规则的完整正文用 rule_search。targetUri 传目录收窄范围，传文件只会命中它自己。分数只在同一次检索的同一引擎内可比，别当绝对阈值。',
+    '语义召回：按相关度降序返回摘要列表。不知道内容在哪、或要按「意思」找时用；已知路径用 read，正则匹配用 grep，要规则的完整正文用 rule_search。targetUri 传目录收窄范围，传文件只会命中它自己。返回不带分数：FTS5 / 向量 / 融合 / 重排四种引擎的分数量纲互不相同，跨引擎比数字没有意义，只有顺序可用。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -61,6 +61,6 @@ export const findTool: McpToolDefinition = {
       levels: level === undefined ? undefined : [level],
       contextTypes: contextType === undefined ? undefined : [contextType],
     });
-    return textResult(formatScoredHits(hits));
+    return textResult(formatHits(hits));
   },
 };

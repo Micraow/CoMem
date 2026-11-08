@@ -102,7 +102,11 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
           // 控制台的身份引导读这两个字段（§16）；与 MCP `health` 的字段同名同义。
           subject,
           scopes: await readableScopes(acl, acl.resolvePrincipals(subject, groups)),
-          index: { nodes: health.indexNodes },
+          // `totalNodes` 是**全库**条数（`node` 表全量），不是当前身份可见的条数。
+          // MCP `health` 的 `index.visibleNodes` 是权限过滤后的那个数——两者不同名，
+          // 因为它们是两个不同的问题：「库有多大」与「我能看到多少」。同名会让排查
+          // 索引问题时把 19 和 12 当成同一个数在漂移。
+          index: { totalNodes: health.indexNodes },
           queue: {
             pending: tasks.countByStatus('pending'),
             processing: tasks.countByStatus('running'),

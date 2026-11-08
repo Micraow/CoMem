@@ -12,9 +12,28 @@
  *
  * | 方法 | 模式 | 理由 |
  * |---|---|---|
- * | `read` / `readBytes` / `stat` / `list` / `write` / `edit` | `EXACT` | 只涉及单路径 |
- * | `tree` / `mkdir` / `remove` | `TREE` | 涉及整棵子树 |
+ * | `write` / `edit` | `EXACT` | 只涉及单路径 |
+ * | `mkdir` / `remove` | `TREE` | 涉及整棵子树 |
  * | `move` | `TREE`（源与目标各一把） | 两端都要独占 |
+ * | `read` / `readBytes` / `stat` / `list` / `tree` | **不拿锁** | 读快照，见下 |
+ *
+ * ## 为什么只读操作不拿锁
+ *
+ * 路径锁是**写者之间**的互斥（§10.6）：它的存在是为了让「读正文 → 应用补丁 →
+ * 写回」不被插进来。只读操作不参与这个不变量，所以不该排队。
+ *
+ * 内容写入本身就是原子的（`ContentStore.writeText`：同目录临时文件 → `fsync` →
+ * `rename`），任何时刻被读到的都是完整的旧版本或完整的新版本。锁对读**不提供**
+ * 额外的一致性，只提供阻塞：后台摘要重建在持有根目录锁的那 9.4 秒里调了一次模型，
+ * 这段时间内 `GET /fs/tree` 会一直等到 `acquire` 超时，然后返回 409——读请求被
+ * 一个与它无关的 LLM 调用打断，是纯粹的可用性损失。
+ *
+ * 代价是遍历期间子树可能被并发删除。这不是错误：节点真的没了，正确的回答是
+ * 「它不存在」，而不是把它当成服务端故障。所以 `tree` 把**后代**目录的
+ * `NOT_FOUND` 当成「这棵子树已经消失」跳过（根不存在仍然抛 `NOT_FOUND`），
+ * `ContentStore.list` 跳过读到一半消失的子项。读到的是一份**快照**，不是加锁的
+ * 一致视图——这两者的区别在于「可能少几个刚被删掉的条目」，而不在于「可能读到
+ * 写了一半的文件」。
  */
 
 // 架构文档 §4.4 明确「没有 ContentStore 接口」：内容存储就是适配层里的一个具体类，
@@ -145,19 +164,20 @@ export class FileSystemService {
     this.#observers = deps.observers ?? [];
   }
 
+  /** 读正文。**不拿路径锁**：写入是原子的，锁只会让读等后台写者（见文件头）。 */
   async read(uri: Uri, principals: readonly string[]): Promise<TextDocument> {
     await this.#authorizer.assert(uri, READ, principals);
-    return this.#locks.withLock(uri, 'exact', () => this.#store.readText(uri));
+    return this.#store.readText(uri);
   }
 
   async readBytes(uri: Uri, principals: readonly string[]): Promise<Uint8Array> {
     await this.#authorizer.assert(uri, READ, principals);
-    return this.#locks.withLock(uri, 'exact', () => this.#store.readBytes(uri));
+    return this.#store.readBytes(uri);
   }
 
   async stat(uri: Uri, principals: readonly string[]): Promise<StoredStat | null> {
     await this.#authorizer.assert(uri, READ, principals);
-    return this.#locks.withLock(uri, 'exact', () => this.#store.stat(uri));
+    return this.#store.stat(uri);
   }
 
   /**
@@ -168,7 +188,7 @@ export class FileSystemService {
    */
   async list(uri: Uri, principals: readonly string[]): Promise<readonly TreeEntry[]> {
     await this.#authorizer.assert(uri, READ, principals);
-    return this.#locks.withLock(uri, 'exact', () => this.#listChildren(uri, principals));
+    return this.#listChildren(uri, principals);
   }
 
   /**
@@ -176,6 +196,9 @@ export class FileSystemService {
    *
    * 超 `depth` 或 `limit` 时置 `truncated: true` 并停止。`depth` 边界上的目录
    * 只有「有可读子项」才算截断——空目录没有省略任何东西。
+   *
+   * **不拿路径锁**（见文件头）：遍历读的是一份快照，并发 `rm -r` 删掉的子树直接
+   * 跳过；根自己不存在时仍然抛 `NOT_FOUND`。
    */
   async tree(
     uri: Uri,
@@ -186,39 +209,54 @@ export class FileSystemService {
     const limit = options.limit ?? DEFAULT_TREE_LIMIT;
     await this.#authorizer.assert(uri, READ, principals);
 
-    return this.#locks.withLock(uri, 'tree', async () => {
-      const entries: TreeEntry[] = [];
-      let truncated = false;
+    const entries: TreeEntry[] = [];
+    let truncated = false;
 
-      const visit = async (directory: Uri, remainingDepth: number): Promise<void> => {
-        if (truncated) {
-          return;
-        }
-        const visible = await this.#visibleChildren(directory, principals);
-        if (remainingDepth <= 0) {
-          if (visible.length > 0) {
-            truncated = true;
-          }
-          return;
-        }
-        for (const child of visible) {
-          if (entries.length >= limit) {
-            truncated = true;
-            return;
-          }
-          entries.push(toTreeEntry(child));
-          if (child.kind === 'directory') {
-            await visit(child.uri, remainingDepth - 1);
-          }
-        }
-      };
-
-      await visit(uri, depth);
+    const visit = async (directory: Uri, remainingDepth: number): Promise<void> => {
       if (truncated) {
-        this.#logger.debug('目录树被截断。', { root: uri.toString(), depth, limit });
+        return;
       }
-      return { root: uri, entries, truncated };
-    });
+      let visible: readonly StoredStat[];
+      try {
+        visible = await this.#visibleChildren(directory, principals);
+      } catch (error) {
+        // 根不存在 = 404；后代目录在遍历期间被删掉 = 这棵子树已经没了，跳过。
+        if (
+          error instanceof ComemError &&
+          error.code === 'NOT_FOUND' &&
+          !directory.equals(uri)
+        ) {
+          this.#logger.debug('遍历期间子树已消失，跳过。', {
+            root: uri.toString(),
+            directory: directory.toString(),
+          });
+          return;
+        }
+        throw error;
+      }
+      if (remainingDepth <= 0) {
+        if (visible.length > 0) {
+          truncated = true;
+        }
+        return;
+      }
+      for (const child of visible) {
+        if (entries.length >= limit) {
+          truncated = true;
+          return;
+        }
+        entries.push(toTreeEntry(child));
+        if (child.kind === 'directory') {
+          await visit(child.uri, remainingDepth - 1);
+        }
+      }
+    };
+
+    await visit(uri, depth);
+    if (truncated) {
+      this.#logger.debug('目录树被截断。', { root: uri.toString(), depth, limit });
+    }
+    return { root: uri, entries, truncated };
   }
 
   /**

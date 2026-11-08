@@ -2206,7 +2206,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 
 | 工具 | 参数 | 返回格式 |
 |---|---|---|
-| `find` | `query`、`targetUri?`、`limit=10`、`level?`、`contextType?` | 文本：`Found N item(s):` + 每条 `- [类型 分数] uri` + 缩进摘要 |
+| `find` | `query`、`targetUri?`、`limit=10`、`level?`、`contextType?` | 文本：`Found N item(s):` + 每条 `- [类型] uri` + 缩进摘要（**降序排列，不带分数**：四种引擎的分数量纲不可比，见 §8.4） |
 | `search` | 同上 + `sessionId?` | 同上，末尾附 `Query plan` |
 | `rule_search` | `taskContext`、`threshold=0.65`（相对阈值） | 文本：适用规则的完整正文块 |
 | `read` | `uri` 或 `uris[]`、`offset=0`、`limit=-1` | 文本；图片/音频返回二进制块 |
@@ -2292,6 +2292,7 @@ interface AddResourceInput {
 | 资源/技能 | `POST /resources`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET|POST /admin/users`、`GET|POST /admin/groups`、`POST /admin/groups/{id}/members` |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`；`PUT /prompts/{id}`；`DELETE /prompts/{id}`；`POST /prompts/{id}/preview` |
+| MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
 **`POST /sessions` 只创建，不重置。** 已存在的 `sessionId` 返回 **409**（`ALREADY_EXISTS`），
@@ -2486,20 +2487,21 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 ## 16. Web 控制台
 
-Nuxt 3 + shadcn-vue + Tailwind。九个业务页面，外加一个只在多用户部署下出现的登录页：
+Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用户部署下出现的登录页：
 
 | 页面 | 内容 |
 |---|---|
 | 登录 | 认证打开且浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
 | 概览 | 四个指标 + 最近任务；指标来自 `GET /health` 与 `GET /memories/pending` |
-| 文件树 | 左树右详情；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度 |
-| 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的分数、层级、命中原因 |
+| 文件树 | 左树右详情；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度 |
+| 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4） |
 | 记忆复核 | `pending` 列表 + diff 视图（before/after）；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
 | 会话与任务 | 会话列表、归档列表、任务状态、重试、僵尸回收记录 |
 | 监控 | 开销归因、吞吐（TPS / TTFB）、模型用量与成本、记忆健康度（见 §17.10） |
 | 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
+| 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
 
 **身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
 `web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`GET /auth/config`
@@ -2746,7 +2748,7 @@ comem_llm_errors_total{purpose, code}
 | `status` | `ok` / `degraded` / `error` |
 | `subject` | 服务图绑定的主体（`server.subject`）。控制台用它拼 `x-comem-subject`（§16） |
 | `scopes` | 该主体可寻址且可读的根，个人根在前。为空 = 没有可访问的命名空间 |
-| `index.nodes` | 索引节点数 |
+| `index.totalNodes` | `node` 表全量条数（`GET /health`），不是当前身份可见的条数 |
 | `queue` | `{pending, processing}` |
 | `summary.degraded` | 是否降级到规则摘要 |
 | `summary.pendingDirs` | 待刷新目录数 |
@@ -2757,7 +2759,7 @@ comem_llm_errors_total{purpose, code}
 | `overhead.p50Ms` | 最近 5 分钟阻塞开销中位数 |
 | `version` | 服务版本 |
 
-**`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
+**`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。**索引条数是唯一的例外**：`GET /health` 的 `index.totalNodes` 是 `node` 表全量（运维要知道库有多大），MCP `health` 的 `index.visibleNodes` 是权限过滤后当前身份可见的条数（工具不能绕过权限数别人的节点）。两者**不同名**，因为它们是两个不同的问题；同名会让「库有 19 条、我能看到 12 条」被误读成同一个数在漂移。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
 
 **`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。v1 没有认证，不带请求头的调用本来就被当成绑定主体，这个值不是秘密；多租户要换成真正的认证时，这个字段也要跟着重新设计。
 

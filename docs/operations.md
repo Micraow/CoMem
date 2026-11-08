@@ -1248,7 +1248,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | `result.status` | `ok` / `degraded` | `degraded` = 摘要走的是规则降级，或存在降级摘要的目录，或最近一次重排调用失败（已退回融合分）。降级必须可见（§17.9） |
 | `result.subject` | 服务图绑定的主体（`server.subject`） | 控制台用它拼 `x-comem-subject`。与期望的用户不符 = 配置没生效（见「控制台每个请求 401」） |
 | `result.scopes` | 该主体可寻址且可读的根（个人根在前） | 为空 = 主体没有任何可访问的命名空间，控制台会明确说明 |
-| `index.nodes` | 索引里的节点数 | 掉到 0 而磁盘上有文件 = 索引没写进去，看 `reconcile.log` |
+| `index.totalNodes` | 索引里的节点数（`node` 表全量，不是当前身份可见的条数——那个看 MCP `health` 的 `index.visibleNodes`） | 掉到 0 而磁盘上有文件 = 索引没写进去，看 `reconcile.log` |
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
 | `summary.pendingDirs` | 待刷新摘要的目录数 | 长期不降 = 摘要失效在堆积 |
 | `summary.degradedDirs` | 用规则摘要生成的目录数 | 模型不可用时会涨；恢复后需要重算 |

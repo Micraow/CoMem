@@ -14,7 +14,7 @@ import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
 import {
   asRecord,
-  formatScoredHits,
+  formatHits,
   optionalContextType,
   optionalLevel,
   optionalString,
@@ -175,7 +175,7 @@ export const searchTool: McpToolDefinition = {
     });
 
     return textResult(
-      `${formatScoredHits(result.hits)}\n${formatQueryPlan(result.plan, {
+      `${formatHits(result.hits)}\n${formatQueryPlan(result.plan, {
         scopes,
         limit,
         level,

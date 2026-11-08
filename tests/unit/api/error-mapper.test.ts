@@ -86,6 +86,87 @@ describe('toErrorEnvelope', () => {
   });
 });
 
+/**
+ * 构造 Fastify 在进路由之前抛出的客户端错误。
+ *
+ * 真实的抛出物是 `createError(CODE, message, statusCode)` 的产物：一个带 `code` 与
+ * `statusCode` 的 `Error`。这里只复刻这两个字段——映射只读它们。
+ */
+function fastifyClientError(code: string, statusCode: number, message: string): Error {
+  return Object.assign(new Error(message), { code, statusCode });
+}
+
+describe('toErrorEnvelope 的 Fastify 客户端错误', () => {
+  it('空 JSON body → 400 INVALID_ARGUMENT，不是 500', () => {
+    // 缺陷现场：`POST /sessions/{id}/commit` 带 `content-type: application/json`
+    // 且 body 为空时，Fastify 抛这条。归成 500 等于告诉调用方「服务端坏了」，
+    // 而正确处置是「补一个」。
+    const mapped = toErrorEnvelope(
+      fastifyClientError(
+        'FST_ERR_CTP_EMPTY_JSON_BODY',
+        400,
+        "Body cannot be empty when content-type is set to 'application/json'",
+      ),
+    );
+
+    expect(mapped.statusCode).toBe(400);
+    expect(mapped.body.error.code).toBe('INVALID_ARGUMENT');
+    expect(mapped.body.error.details).toEqual({ fastifyCode: 'FST_ERR_CTP_EMPTY_JSON_BODY' });
+    expect(mapped.body.error.message).toBe('请求体无法解析：请检查 content-type 与请求体格式。');
+  });
+
+  it('JSON 语法错、媒体类型不支持、body 过大同样归 INVALID_ARGUMENT', () => {
+    const codes: readonly (readonly [string, number])[] = [
+      ['FST_ERR_CTP_INVALID_JSON_BODY', 400],
+      ['FST_ERR_CTP_INVALID_MEDIA_TYPE', 415],
+      ['FST_ERR_CTP_BODY_TOO_LARGE', 413],
+      ['FST_ERR_CTP_INVALID_CONTENT_LENGTH', 400],
+    ];
+
+    for (const [code, statusCode] of codes) {
+      const mapped = toErrorEnvelope(fastifyClientError(code, statusCode, 'detail'));
+
+      expect(mapped.statusCode).toBe(400);
+      expect(mapped.body.error.code).toBe('INVALID_ARGUMENT');
+    }
+  });
+
+  it('FST_ERR_* 的 5xx 仍然是 INTERNAL（插件加载失败不是调用方的问题）', () => {
+    const mapped = toErrorEnvelope(
+      fastifyClientError('FST_ERR_PLUGIN_VERSION_MISMATCH', 500, 'plugin mismatch'),
+    );
+
+    expect(mapped.statusCode).toBe(500);
+    expect(mapped.body.error.code).toBe('INTERNAL');
+  });
+
+  it('4xx 但没有 FST_ERR_ 前缀仍然是 INTERNAL（只认 Fastify 自己的错误码）', () => {
+    for (const error of [
+      fastifyClientError('SOME_CLIENT_ERROR', 400, 'detail'),
+      fastifyClientError('FST_ERR_CTP_EMPTY_JSON_BODY', 200, 'detail'),
+      Object.assign(new Error('no code'), { statusCode: 400 }),
+    ]) {
+      const mapped = toErrorEnvelope(error);
+
+      expect(mapped.statusCode).toBe(500);
+      expect(mapped.body.error.code).toBe('INTERNAL');
+    }
+  });
+
+  it('不透出 Fastify 的原始消息', () => {
+    const original = fastifyClientError(
+      'FST_ERR_CTP_EMPTY_JSON_BODY',
+      400,
+      '/home/alice/secret.sql SELECT * FROM users',
+    );
+
+    const serialized = JSON.stringify(toErrorEnvelope(original).body);
+
+    expect(serialized).not.toContain('secret.sql');
+    expect(serialized).not.toContain('SELECT');
+  });
+});
+
 describe('envelope', () => {
   it('ok 包住任意结果', () => {
     expect(ok({ memories: [] })).toEqual({ status: 'ok', result: { memories: [] } });

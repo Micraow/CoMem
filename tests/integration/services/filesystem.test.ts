@@ -290,6 +290,51 @@ describe('tree', () => {
   });
 });
 
+describe('只读操作不拿路径锁（缺陷 4）', () => {
+  beforeEach(async () => {
+    await service.write(uri('a.md'), 'a', AUTH_PRINCIPALS);
+    await service.write(uri('sub/b.md'), 'b', AUTH_PRINCIPALS);
+  });
+
+  it('后台摘要持有根目录锁时 tree / list / stat 仍然立刻返回', async () => {
+    // 缺陷现场：摘要重建在持有根目录锁的那 9.4 秒里调了一次模型，这段时间内
+    // `GET /fs/tree` 会排队到 `acquire` 超时然后 409。这里用一把长租约的 TREE
+    // 锁等价复现「写者长期持有」，只读操作必须直接读快照。
+    const release = await locks.acquire(Uri.parse(BASE), 'tree', { timeoutMs: 50 });
+    try {
+      const startedAt = Date.now();
+      const tree = await service.tree(Uri.parse(BASE), AUTH_PRINCIPALS);
+      const listed = await service.list(Uri.parse(BASE), AUTH_PRINCIPALS);
+      const stat = await service.stat(Uri.parse(BASE), AUTH_PRINCIPALS);
+      const document = await service.read(uri('a.md'), AUTH_PRINCIPALS);
+
+      expect(tree.entries.map((entry) => entry.uri.name)).toEqual(['a.md', 'sub', 'b.md']);
+      expect(listed.map((entry) => entry.uri.name)).toEqual(['a.md', 'sub']);
+      expect(stat?.kind).toBe('directory');
+      expect(document.text).toBe('a');
+      // 锁还在持有者手里，读没有排队（旧实现会等满超时再抛 CONFLICT）。
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+    } finally {
+      release();
+    }
+  });
+
+  it('写操作仍然排队：读不拿锁不改变写者之间的互斥', async () => {
+    const release = await locks.acquire(uri('a.md'), 'exact', { timeoutMs: 200 });
+    let settled = false;
+    const pending = service.write(uri('a.md'), 'blocked', AUTH_PRINCIPALS).finally(() => {
+      settled = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(settled).toBe(false);
+
+    release();
+    await pending;
+    expect((await service.read(uri('a.md'), AUTH_PRINCIPALS)).text).toBe('blocked');
+  });
+});
+
 describe('edit', () => {
   it('唯一命中时应用补丁并写回', async () => {
     const target = uri('a.md');

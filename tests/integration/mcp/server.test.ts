@@ -211,7 +211,7 @@ describe('McpHttpServer', () => {
     const first = result.content[0];
     expect(first).toMatchObject({ type: 'text' });
     if (first !== undefined && first.type === 'text') {
-      expect(first.text).toContain('index.nodes: 0');
+      expect(first.text).toContain('index.visibleNodes: 0');
       expect(first.text).toContain('status: ok');
     }
   });

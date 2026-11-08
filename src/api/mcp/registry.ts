@@ -222,12 +222,25 @@ export function textResult(text: string): McpToolResult {
   return { type: 'text', text };
 }
 
-/** `- [类型 分数] uri` + 缩进摘要。分数保留两位小数（§13.2）。 */
-export function formatScoredHits(hits: readonly ScoredHit[]): string {
+/**
+ * `- [类型] uri` + 缩进摘要（§13.2）。
+ *
+ * **不打分数。** 四种引擎的分数量纲互不相同（`search.ts` 的 `find` 注释里有完整
+ * 表格：FTS5 是无界的 `bm25` 取负、向量是 `[-1, 1]` 的余弦、`hybrid` 是
+ * `1/(60+rank)` 量级的 RRF 融合分、重排是 `0..1` 的概率），同一个
+ * `toFixed(2)` 会让 hybrid 的 0.0328 全部渲成 `0.00`——那不是「没有分数」，而是
+ * 一个**错误的**分数，调用方会据此把相关结果当成不相关丢掉。
+ *
+ * 换精度救不了：`toFixed(4)` 只是让 0.0328 显示成 0.0328，跨引擎仍然不可比。
+ * 唯一跨引擎成立的不变量是**顺序**（返回前已按分数降序排好），所以只输出顺序。
+ * 需要原始分数做归因的调用方走 HTTP `/search/find` 的 `score` 字段，那里由调用方
+ * 自己知道当前引擎。
+ */
+export function formatHits(hits: readonly ScoredHit[]): string {
   const lines = [`Found ${hits.length} item(s):`];
   for (const hit of hits) {
     const type = hit.memoryType ?? hit.contextType;
-    lines.push(`- [${type} ${hit.score.toFixed(2)}] ${hit.uri}`);
+    lines.push(`- [${type}] ${hit.uri}`);
     const abstract = hit.abstract?.trim() ?? '';
     if (abstract !== '') {
       lines.push(`  ${abstract.replaceAll('\n', '\n  ')}`);

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MCP_TOOL_NAMES } from '../../../src/api/mcp/registry.js';
 import { createDownloadUrl } from '../../../src/api/mcp/tools/download.js';
 import { createHttpServer, PROMETHEUS_CONTENT_TYPE } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
@@ -129,6 +130,37 @@ describe('封套与请求 ID', () => {
     expect(json(response)['status']).toBe('ok');
   });
 
+  it('空 JSON body 返回 400 INVALID_ARGUMENT，不是 500', async () => {
+    // 缺陷现场：`content-type: application/json` + 空 body 时 Fastify 在进路由
+    // 之前就抛 `FST_ERR_CTP_EMPTY_JSON_BODY`。归成 500 的后果是 Hook 侧必须显式
+    // 发 `{}` 才能提交，而 500 把「补一个空对象」和「服务端坏了」混成同一件事。
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/sessions/defect-2/commit',
+      headers: { 'content-type': 'application/json' },
+      payload: '',
+    });
+
+    expect(response.statusCode).toBe(400);
+    const error = errorOf(response);
+    expect(error['code']).toBe('INVALID_ARGUMENT');
+    expect((error['details'] as Record<string, unknown>)['fastifyCode']).toBe(
+      'FST_ERR_CTP_EMPTY_JSON_BODY',
+    );
+  });
+
+  it('非 JSON 的 content-type 带 body 时也是 400，不是 500', async () => {
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/search/find',
+      headers: { 'content-type': 'application/x-comem-unknown' },
+      payload: 'not parsed',
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
+  });
+
   it('回显入站 x-request-id', async () => {
     const response = await inject({
       method: 'GET',
@@ -183,7 +215,8 @@ describe('运维端点不需要认证', () => {
     // 按 §17.9 的判定必须是 `degraded`——静默降级等于骗人。
     const result = resultOf(await inject({ method: 'GET', url: '/health' }));
     expect(result['status']).toBe('degraded');
-    expect(result['index']).toEqual({ nodes: 0 });
+    // HTTP 侧是全库条数（`node` 表全量）；MCP `health` 才是权限过滤后的 `visibleNodes`。
+    expect(result['index']).toEqual({ totalNodes: 0 });
     expect(result['queue']).toEqual({ pending: 0, processing: 0 });
     expect((result['summary'] as Record<string, unknown>)['degraded']).toBe(true);
     expect(result['version']).toBe('0.1.0');
@@ -778,7 +811,8 @@ describe('会话与任务', () => {
     );
     expect(loaded['messageCount']).toBe(2);
     expect((loaded['messages'] as unknown[]).length).toBe(2);
-  });});
+  });
+});
 
 describe('ACL 与记忆复核', () => {
   it('get → grant → get → revoke', async () => {
@@ -1052,6 +1086,23 @@ describe('指标开关', () => {
       // 同一指标族不能混着有无标签的样本，否则 Prometheus 抓取整段失败。
       expect(metrics.body).not.toContain('comem_http_request_duration_seconds_count 1');
     });
+  });
+});
+
+describe('GET /mcp/tools', () => {
+  it('列出 16 个工具，名字与顺序都来自注册表', async () => {
+    const result = resultOf(await inject({ method: 'GET', url: '/api/v1/mcp/tools' }));
+    const tools = result['tools'] as readonly Record<string, unknown>[];
+
+    // 16 是硬约束（AGENTS.md）。这里是同一份注册表的只读视图，不是第 17 个工具。
+    expect(tools).toHaveLength(16);
+    expect(tools.map((tool) => tool['name'])).toEqual([...MCP_TOOL_NAMES]);
+
+    for (const tool of tools) {
+      expect(String(tool['description']).length).toBeGreaterThan(0);
+      expect(tool['kind']).toMatch(/^(read|write|ingest)$/);
+      expect(typeof tool['inputSchema']).toBe('object');
+    }
   });
 });
 

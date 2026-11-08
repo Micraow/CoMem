@@ -346,19 +346,34 @@ export class ContentStore {
     };
   }
 
-  /** 直接子项，按 name 升序。跳过临时文件、锁文件与 `Uri` 表示不了的条目。 */
+  /**
+   * 直接子项，按 name 升序。跳过临时文件、锁文件与 `Uri` 表示不了的条目。
+   *
+   * **读到一半消失的子项也跳过**（`NOT_FOUND`）：`list` 不加路径锁（见
+   * `FileSystemService` 文件头），并发 `rm -r` 可以在 `readdir` 与 `stat` 之间删掉
+   * 一个子目录。把它往上抛会让一次正常的目录列举变成「文件不存在」——目录还在，
+   * 只是少了一个刚被删掉的子项。返回的是一份**快照**：可能比磁盘少几个刚消失的
+   * 条目，不会多出任何条目。
+   */
   async list(uri: Uri): Promise<readonly StoredStat[]> {
     const absolute = toDiskPath(this.#dataDir, uri);
     const children = await this.#listChildren(absolute, uri);
 
     const stats = await Promise.all(
-      children.map(async (child): Promise<StoredStat> => {
-        const childStats = await this.#statOrThrow(child.absolute, child.uri);
+      children.map(async (child): Promise<StoredStat | null> => {
+        const childStats = await this.#statOrNull(child.absolute, child.uri);
+        if (childStats === null) {
+          return null;
+        }
         if (childStats.isDirectory()) {
+          const grandchildren = await this.#listChildrenOrNull(child.absolute, child.uri);
+          if (grandchildren === null) {
+            return null;
+          }
           return {
             uri: child.uri,
             kind: 'directory',
-            size: (await this.#listChildren(child.absolute, child.uri)).length,
+            size: grandchildren.length,
             updatedAt: childStats.mtime.toISOString(),
           };
         }
@@ -371,7 +386,9 @@ export class ContentStore {
       }),
     );
 
-    return stats.sort((left, right) => compareNames(left.uri.name, right.uri.name));
+    return stats
+      .filter((entry): entry is StoredStat => entry !== null)
+      .sort((left, right) => compareNames(left.uri.name, right.uri.name));
   }
 
   /** 已存在抛 ALREADY_EXISTS（`recursive: true` 时不算错误，与 `fs.mkdir` 一致）。 */
@@ -505,6 +522,18 @@ export class ContentStore {
       throw new ComemError('NOT_FOUND', `文件不存在：${uri.toString()}`, { uri: uri.toString() });
     }
     return stats;
+  }
+
+  /** `#listChildren` 的「不存在就返回 null」版本，用于并发删除下的快照读取。 */
+  async #listChildrenOrNull(absolute: string, uri: Uri): Promise<readonly ListedChild[] | null> {
+    try {
+      return await this.#listChildren(absolute, uri);
+    } catch (error) {
+      if (error instanceof ComemError && error.code === 'NOT_FOUND') {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async #listChildren(absolute: string, uri: Uri): Promise<readonly ListedChild[]> {

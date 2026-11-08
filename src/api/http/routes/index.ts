@@ -9,6 +9,7 @@
  * 单例会把「谁把服务塞进来」变成隐式的全局状态。
  */
 
+import type { ToolRegistry } from '../../mcp/registry.js';
 import type { ComemConfig } from '../../../config/index.js';
 import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AuthService } from '../../../services/auth.js';
@@ -34,6 +35,7 @@ import { createAdminRoutes, type AdminAccess } from './admin.js';
 import { createAuthRoutes } from './auth.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
+import { createMcpRoutes } from './mcp.js';
 import { createMemoryRoutes } from './memories.js';
 import { createOpsRoutes } from './ops.js';
 import { createPromptRoutes } from './prompts.js';
@@ -107,6 +109,13 @@ export interface HttpRouteServices {
    * 与 `/telemetry`、`/health` 同一类。
    */
   readonly prompts: PromptService;
+  /**
+   * MCP 工具注册表（§13.2）。
+   *
+   * 只给 `GET /mcp/tools` 读：控制台展示 16 个工具的名字与说明，文本来源必须是
+   * 模型看到的那一份，硬编码一份等于给「界面说的」与「模型读到的」制造漂移。
+   */
+  readonly registry: ToolRegistry;
 }
 
 /** 按 §14 表格的顺序拼出全部路由分组。 */
@@ -126,6 +135,7 @@ export function createHttpRouteGroups(
     createAdminRoutes(services),
     createAuthRoutes(services),
     createPromptRoutes(services),
+    createMcpRoutes(services),
     createOpsRoutes(services),
     createTelemetryRoutes(services),
   ];
