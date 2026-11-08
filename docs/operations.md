@@ -23,12 +23,6 @@ pnpm install              # 后端 + Hook 插件的开发依赖（tsx、vitest�
 cd web && pnpm install    # 控制台单独装：web/ 有自己的 lockfile，不在根 workspace 里
 ```
 
-第二行会跑 `web/package.json` 的 `postinstall`（`nuxt prepare`），在 `web/.nuxt/` 下生成
-Nuxt 类型。**这一步不是可选的**：`web/tsconfig.json` 的 `extends` 指向
-`.nuxt/tsconfig.json`，`pnpm test` 里的 `tests/unit/web/` 走 Vite 转译时会读它——没有
-这个文件，`pnpm test` 在第一个控制台用例上就报 `Cannot find module './.nuxt/tsconfig.json'`。
-`nuxt prepare` 只做类型生成，不产出 `.output/`，耗时约 1 秒。
-
 `integrations/` 不需要安装：它是纯 `.mjs`，只依赖 Node 内置模块，`dependencies` 为空。
 
 ## 配置
@@ -253,6 +247,13 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   而失效。
 - **`request_log.subject` 的历史行保留。** 审计日志本来就该保留：删账号是「以后不能
   用」，不是「历史没发生过」。按主体查历史请求仍会看到被删的 ID。
+- **删账号不取消已入队的后台任务。** 归档任务（`task` 表）的 payload 只有
+  `sessionUri` / `archiveUri` / `archiveId`，不记录入队者的主体；阶段二执行时按装配
+  层的服务图身份跑，**不做二次求权**。这是设计：任务是对「入队时已经授权过的写入」
+  做延迟执行。执行期重新求权会引入另一类问题——入队后撤销权限会让归档停在
+  `phase1.status = ready` 且永远没有 `.done`，消息已经移出 live、记忆永远不会被抽取。
+  删账号不删数据（见上一条），任务写回的是同一个保留的数据树，不构成新的越权。要阻止
+  某个作用域的后台写入，停服后删 `task` 表里对应 `sessionUri` 的行。
 
 ## 提示词
 
