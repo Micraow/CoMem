@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,8 +13,18 @@ const ROOT = 'comem://user/local';
 const SUBJECT = 'user:local';
 const PRINCIPALS = [SUBJECT, 'user:*'];
 
-/** 架构文档 §8.1 的迁移版本数（`0001`–`0006`）。 */
-const LATEST_SCHEMA_VERSION = 6;
+/**
+ * 最新迁移版本。
+ *
+ * **不要写成字面量。** 每加一个迁移，写死的数字就会红一次——那不是回归，是测试在
+ * 替我们数文件。这里扫目录，断言的是「容器启动时把迁移跑到了最新的那个版本」。
+ */
+const LATEST_SCHEMA_VERSION = Math.max(
+  ...readdirSync(new URL('../../../src/adapters/sqlite/migrations', import.meta.url))
+    .map((name) => /^(\d{4})_/.exec(name)?.[1])
+    .filter((version): version is string => version !== undefined)
+    .map(Number),
+);
 
 let dataDir: string;
 let container: Container;
