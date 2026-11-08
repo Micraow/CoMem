@@ -70,7 +70,7 @@ const stats = computed<readonly { key: string; label: string; value: string; ton
     {
       key: 'nodes',
       label: '索引节点数',
-      value: health.value === null ? '—' : String(health.value.index.nodes),
+      value: health.value === null ? '—' : String(health.value.index.totalNodes),
     },
     {
       key: 'queue',

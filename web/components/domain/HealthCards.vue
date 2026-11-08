@@ -67,7 +67,7 @@ const stats = computed<readonly StatCard[]>(() => {
     {
       key: 'nodes',
       label: '索引节点数',
-      value: health === null ? '—' : String(health.index.nodes),
+      value: health === null ? '—' : String(health.index.totalNodes),
       sub: health === null ? null : `服务版本 ${health.version}`,
     },
     {

@@ -293,11 +293,16 @@ export interface TreeEntryPayload {
   readonly abstract: string | null
 }
 
-/** `GET /fs/tree`。 */
-export interface TreePayload {
-  readonly root: string
+/**
+ * `GET /fs/ls` 的直接子项。
+ *
+ * 文件树按需展开走这个端点而不是 `/fs/tree`：一次只拉一层，`truncated` 与
+ * `depth` 这两件事都不需要，而 `depth` 边界上的目录只要还有子项就算「截断」——
+ * 按需展开时那会变成恒为真。
+ */
+export interface FsListPayload {
+  readonly uri: string
   readonly entries: readonly TreeEntryPayload[]
-  readonly truncated: boolean
 }
 
 /** `GET /fs/stat`。`stat` 为 null 表示节点不存在。 */
@@ -317,7 +322,7 @@ export interface HealthPayload {
   readonly subject: string
   /** 该主体可寻址且可读的根。为空表示没有任何可访问的命名空间。 */
   readonly scopes: readonly string[]
-  readonly index: { readonly nodes: number }
+  readonly index: { readonly totalNodes: number }
   readonly queue: { readonly pending: number; readonly processing: number }
   readonly summary: {
     readonly degraded: boolean
@@ -373,4 +378,18 @@ export interface PendingMemoriesPayload {
     readonly status: string
     readonly updatedAt: string
   }[]
+}
+
+/** `GET /mcp/tools` 的一个工具。说明文本来自服务端注册表，界面不重写。 */
+export interface McpToolPayload {
+  readonly name: string
+  /** `read` / `write` / `ingest`。只用于分组展示，不参与权限判定。 */
+  readonly kind: string
+  readonly description: string
+  /** JSON Schema；界面只读 `properties` 的键名与 `required`。 */
+  readonly inputSchema: Record<string, unknown>
+}
+
+export interface McpToolsPayload {
+  readonly tools: readonly McpToolPayload[]
 }

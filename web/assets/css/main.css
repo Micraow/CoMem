@@ -1221,6 +1221,12 @@ svg {
   visibility: hidden;
 }
 
+/* 正在拉下一层：箭头置灰，连点不会发出重复请求（`isPending` 里也有闸门）。 */
+.trow__caret.is-pending {
+  opacity: 0.4;
+  cursor: progress;
+}
+
 .trow__icon {
   color: var(--label-2);
   flex: none;

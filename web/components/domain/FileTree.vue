@@ -5,6 +5,10 @@
  * 点击行选中并同步 URL；点箭头只展开/收起，不改变选中——展开和选择是两个动作，
  * 合并成一个会让「只想看下一层」变成「跳走了」。
  *
+ * **按需展开**：目录的子项在第一次展开时才拉（`GET /fs/ls`），所以首屏只有根的第
+ * 一层。归档目录在第四层（`sessions/{id}/history/archive_001`），用固定深度 3 的
+ * 一次性拉取永远看不到它；把深度调到 4 又会每次进页面都拉整棵树。
+ *
  * 加载中用骨架屏，错误用服务端返回的中文句子（`ApiClientError.message`），
  * 空目录给空状态。
  */
@@ -28,8 +32,19 @@ const emit = defineEmits<{
   select: [uri: string]
 }>()
 
-const { state, loading, error, filter, rows, load, refresh, toggle, expandAncestors, isExpanded } =
-  useTree()
+const {
+  state,
+  loading,
+  error,
+  filter,
+  rows,
+  load,
+  refresh,
+  toggle,
+  expandAncestors,
+  isExpanded,
+  isPending,
+} = useTree()
 const scopeRoot = useScopeRoot()
 
 const SKELETON_ROWS = 8
@@ -45,7 +60,7 @@ function metaOf(node: TreeNode): string {
 
 function activate(node: TreeNode): void {
   if (node.kind === 'directory') {
-    toggle(node.uri)
+    void toggle(node.uri)
   }
   emit('select', node.uri)
 }
@@ -54,7 +69,7 @@ async function revealSelection(uri: string | null): Promise<void> {
   if (uri === null) {
     return
   }
-  expandAncestors(uri)
+  await expandAncestors(uri)
   await nextTick()
   const candidates = scrollArea.value?.querySelectorAll<HTMLElement>('[data-uri]')
   for (const row of candidates ?? []) {
@@ -132,7 +147,7 @@ watch([() => props.selected, state], () => {
           <Folder :size="20" :stroke-width="1.4" />
         </span>
         <span class="empty__title">
-          {{ filter.trim() === '' ? '这个命名空间还没有内容' : '没有匹配的路径' }}
+          {{ filter.trim() === '' ? '这个命名空间还没有内容' : '已展开的路径里没有匹配项' }}
         </span>
       </div>
 
@@ -159,9 +174,10 @@ watch([() => props.selected, state], () => {
             v-if="node.kind === 'directory'"
             type="button"
             class="trow__caret"
-            :class="{ 'is-open': isExpanded(node.uri) }"
+            :class="{ 'is-open': isExpanded(node.uri), 'is-pending': isPending(node.uri) }"
             :aria-label="isExpanded(node.uri) ? '收起目录' : '展开目录'"
-            @click.stop="toggle(node.uri)"
+            :aria-busy="isPending(node.uri)"
+            @click.stop="void toggle(node.uri)"
           >
             <ChevronRight :size="13" :stroke-width="1.7" />
           </button>
@@ -182,10 +198,6 @@ watch([() => props.selected, state], () => {
           <span class="trow__meta">{{ metaOf(node) }}</span>
         </div>
       </div>
-
-      <p v-if="state?.truncated" class="caption" style="padding: 8px 16px 0">
-        目录树按 3 层深度截断，更深的节点未列出。
-      </p>
     </div>
 
     <div class="tree-legend">

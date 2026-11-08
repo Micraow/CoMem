@@ -1,6 +1,6 @@
 <script lang="ts">
 /**
- * 主导航（架构文档 §16 的七个业务页 + 概览）。
+ * 主导航（架构文档 §16 的十个业务页）。
  *
  * 入口清单放在普通 `<script>` 块里导出：标题栏的面包屑要用同一份标签，
  * 两处各写一份迟早会出现「侧栏叫记忆复核、标题叫待复核」的漂移。
@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   Search,
   Shield,
+  Terminal,
   Users,
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
@@ -37,6 +38,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { to: '/files', label: '文件树', icon: FolderTree },
       { to: '/search', label: '检索调试', icon: Search },
       { to: '/review', label: '记忆复核', icon: ClipboardCheck },
+      { to: '/tools', label: '工具', icon: Terminal },
     ],
   },
   {

@@ -26,7 +26,14 @@ export interface SearchHitPayload {
   readonly memoryType: string | null
   readonly level: SearchLevel
   readonly abstract: string | null
-  /** 排序分：`bm25 × levelWeight[level]`（§8.5）。 */
+  /**
+   * 排序分：`bm25 × levelWeight[level]`（§8.5）。
+   *
+   * **不参与渲染。** 量纲随 `retrieval.engine` 变（`fts5` 无界、`vector` 是
+   * `[-1, 1]` 的余弦、`hybrid` 是≈0.03 的 RRF 融合分、重排是 `0..1` 的概率），
+   * 能跨引擎显示的只有名次。字段保留是因为接口契约里它还在，删掉会让「服务端
+   * 有、界面没声明」变成静默兼容。
+   */
   readonly score: number
   /** 哪条重写查询命中的；`find` 没有这一列。 */
   readonly matchedQuery?: string
@@ -141,7 +148,11 @@ function filePathOf(uri: string): string {
     </div>
 
     <ul v-else class="hitrows">
-      <li v-for="hit in props.hits" :key="`${hit.uri}#${hit.level}`" class="hit">
+      <li
+        v-for="(hit, index) in props.hits"
+        :key="`${hit.uri}#${hit.level}`"
+        class="hit"
+      >
         <span class="hit__level" :data-level="hit.level">{{ hit.level }}</span>
 
         <div class="hit__body">
@@ -165,7 +176,12 @@ function filePathOf(uri: string): string {
           </div>
         </div>
 
-        <span class="hit__score tnum mono">{{ hit.score.toFixed(2) }}</span>
+        <!--
+          显示名次而不是分数：FTS5 / 向量 / 融合 / 重排四种引擎的分数量纲互不相同
+          （见 `src/services/search.ts` 的 `find` 注释），跨引擎比数字没有意义，
+          而且 hybrid 的融合分（≈0.03）用任何两位小数都渲成 0.00。
+        -->
+        <span class="hit__rank tnum mono">{{ index + 1 }}</span>
       </li>
     </ul>
   </div>
@@ -285,11 +301,11 @@ function filePathOf(uri: string): string {
   color: var(--label-3);
 }
 
-.hit__score {
+.hit__rank {
   padding-top: 2px;
   font-size: 14px;
   font-weight: 600;
-  color: var(--label);
+  color: var(--label-3);
   text-align: right;
 }
 </style>
