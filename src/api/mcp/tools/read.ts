@@ -60,15 +60,15 @@ export const readTool: McpToolDefinition = {
   name: 'read',
   kind: 'read',
   description:
-    '已经知道确切路径时用这个，比 find 快且没有相关度误差。看长文件时用 offset / limit 分段读，limit 默认 -1 会读到末尾；二进制只支持单个 uri。返回是去掉 frontmatter 的正文，摘要不在里面，要摘要用 find。',
+    '按 URI 读正文。已知路径时用它，比 find 准且没有相关度误差；要找路径用 find / glob。长文件用 offset / limit 按码点分段，limit=-1 读到末尾；二进制（图片 / 音频）只能单个 uri。返回去掉 frontmatter 的正文，摘要不在里面。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '单个节点 URI' },
+      uri: { type: 'string', description: '单个节点 URI；~ 是当前身份的根' },
       uris: {
         type: 'array',
         items: { type: 'string' },
-        description: '多个节点 URI；与 uri 二选一',
+        description: '多个节点 URI（只能读文本）；与 uri 二选一，~ 同样有效',
       },
       offset: { type: 'integer', minimum: 0, default: 0, description: '起始码点偏移' },
       limit: {

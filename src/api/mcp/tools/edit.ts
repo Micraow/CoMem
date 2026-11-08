@@ -24,11 +24,11 @@ export const editTool: McpToolDefinition = {
   name: 'edit',
   kind: 'write',
   description:
-    '改一小段正文时用这个，比 write 安全——write 会覆盖整个文件。oldString 必须与磁盘上的正文完全一致（含空白），默认只能命中一处；明确要改多处的才传 replaceAll=true。返回替换次数；命中零处或多处时不会写文件。',
+    '在已有文件里做精确字符串替换。只改一小段时用，比 write 安全。oldString 必须与磁盘正文完全一致（含空白），默认只能命中一处，零处或多处命中都不写文件；明确要改多处才传 replaceAll=true。newString 可以是空串（删除）。返回替换次数。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '文件 URI' },
+      uri: { type: 'string', description: '文件 URI；~ 是当前身份的根' },
       oldString: { type: 'string', description: '要替换的原文，必须精确匹配' },
       newString: { type: 'string', description: '替换后的文本，允许空串' },
       replaceAll: { type: 'boolean', default: false },

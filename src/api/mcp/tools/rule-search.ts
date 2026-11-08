@@ -37,11 +37,14 @@ export const ruleSearchTool: McpToolDefinition = {
   name: 'rule_search',
   kind: 'read',
   description:
-    '开始一项任务、需要知道有哪些硬性规则时必须先调用这个，用任务描述去匹配规则库。taskContext 写「要做什么」而不是关键词，规则靠语义相关度匹配；threshold 是相对阈值，只保留与最佳规则接近的规则（默认 0.65 表示差距不到 35%），判定与检索引擎无关。返回的是规则完整正文，不是摘要，可以直接据此执行。',
+    '取「必须遵守的规则」的完整正文，不是摘要。动手做一件事之前用，taskContext 写「要做什么」而不是关键词；find 命中规则时只给摘要，判断依据得靠这里。threshold 是相对本次最高分的比例（默认 0.65），与检索引擎无关。没有规则时返回 Found 0，不是错误。',
   inputSchema: {
     type: 'object',
     properties: {
-      taskContext: { type: 'string', description: '任务描述，用于语义匹配规则' },
+      taskContext: {
+        type: 'string',
+        description: '任务描述：要做什么、涉及哪些对象、有哪些已知约束',
+      },
       threshold: {
         type: 'number',
         minimum: 0,

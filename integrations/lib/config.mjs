@@ -60,6 +60,16 @@ export const DEFAULT_CONFIG = Object.freeze({
   timeoutMs: 5000,
   /** `PreCompact` 等提交的超时：§17.2 的单步 LLM 上限 30000ms（`rewriteTimeoutMs`） */
   commitTimeoutMs: 30000,
+  /**
+   * stdio 代理等 MCP 工具响应的超时（`servers/mcp-proxy.mjs`）。
+   *
+   * **不能复用 `timeoutMs`。** 那个 5 秒是 hook 的阻塞预算（§15.9），而 MCP 工具
+   * 是模型主动调用的、不占用户输入延迟：`find` 开了重排时 p95 就有 9.35 秒
+   * （`config.example.yaml` 的 `retrieval.rerank.timeoutSeconds` 一节），
+   * `add_resource` 还要同步跑一次摘要重算。30000 与提交超时取同一个数，因为
+   * 它们是同一条「单步可能很慢」的上限（§17.2）。
+   */
+  mcpTimeoutMs: 30000,
   recallLimit: 10,
   /**
    * 相对阈值：只保留分数不低于**本次最高分 × 该值**的命中（§15.9 的「三条前提」
@@ -79,6 +89,7 @@ const ENV_OVERRIDES = Object.freeze({
   COMEM_TOKEN: 'token',
   COMEM_TIMEOUT_MS: 'timeoutMs',
   COMEM_COMMIT_TIMEOUT_MS: 'commitTimeoutMs',
+  COMEM_MCP_TIMEOUT_MS: 'mcpTimeoutMs',
   COMEM_RECALL_LIMIT: 'recallLimit',
   COMEM_RECALL_SCORE_THRESHOLD: 'recallScoreThreshold',
   COMEM_SKILL_BUDGET_TOKENS: 'skillBudgetTokens',
@@ -88,6 +99,7 @@ const ENV_OVERRIDES = Object.freeze({
 const NUMERIC_KEYS = new Set([
   'timeoutMs',
   'commitTimeoutMs',
+  'mcpTimeoutMs',
   'recallLimit',
   'recallScoreThreshold',
   'skillBudgetTokens',
@@ -230,7 +242,8 @@ function coerce(key, value) {
  * @param {{ env?: NodeJS.ProcessEnv }} [options]
  * @returns {Promise<{
  *   baseUrl: string, userId: string, token: string, timeoutMs: number,
- *   commitTimeoutMs: number, recallLimit: number, recallScoreThreshold: number,
+ *   commitTimeoutMs: number, mcpTimeoutMs: number, recallLimit: number,
+ *   recallScoreThreshold: number,
  *   skillBudgetTokens: number, queryFilters: readonly string[],
  *   configFile: string, tmpDir: string,
  * }>}

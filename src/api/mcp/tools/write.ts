@@ -43,11 +43,11 @@ export const writeTool: McpToolDefinition = {
   name: 'write',
   kind: 'write',
   description:
-    '需要新建文件或整段替换正文时用这个；只改一小段用 edit 更安全，它不会覆盖没读到的内容。mode=create 在目标已存在时报错，append 只追加正文、保留 frontmatter。返回写入字节数、是否新建与索引状态；索引状态是 pending 时说明检索暂时看不到这个文件。',
+    '写整个文件正文。新建文件或整段替换时用；只改一小段用 edit，它不会覆盖没读到的内容。mode=replace 覆盖（保留 frontmatter）、append 追加、create 在目标已存在时报 ALREADY_EXISTS。返回字节数、是否新建与索引状态；pending 表示检索暂时看不到这个文件。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '文件 URI' },
+      uri: { type: 'string', description: '文件 URI；~ 是当前身份的根' },
       content: { type: 'string', description: '正文；空串表示写空文件' },
       mode: { type: 'string', enum: MODES, default: 'replace' },
       wait: { type: 'boolean', default: false, description: '写后是否等待索引更新' },

@@ -52,11 +52,11 @@ export const listTool: McpToolDefinition = {
   name: 'list',
   kind: 'read',
   description:
-    '想看某个目录下有什么时用这个，只看一层；要整棵子树用 tree。recursive=true 会展开子树但只返回扁平列表，路径是相对列目录根的名字。sortBy 支持 name / size 及对应的 _desc 变体，offset 与 limit 在排序之后生效。',
+    '列目录的直接子项，只看一层。想知道某目录里有什么时用；要整棵子树用 tree，要按名字模式找用 glob。recursive=true 会展开但仍是扁平列表。sortBy 支持 name / size 及 _desc 变体，offset 与 limit 在排序之后生效。返回 [dir] / [file] 加相对名字。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '目录 URI' },
+      uri: { type: 'string', description: '目录 URI；~ 是当前身份的根' },
       recursive: { type: 'boolean', default: false, description: '是否展开子树' },
       offset: { type: 'integer', minimum: 0, default: 0 },
       limit: { type: 'integer', description: '最多返回条数；-1 表示全部', default: -1 },

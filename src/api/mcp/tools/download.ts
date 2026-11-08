@@ -66,11 +66,11 @@ export const downloadTool: McpToolDefinition = {
   name: 'download',
   kind: 'read',
   description:
-    '需要把原始文件交给用户或外部工具时用这个；只是自己要看内容用 read 更直接。uri 必须指向文件，目录会报 NOT_FOUND。返回的 URL 10 分钟后失效，拿到就立刻用，不要写进长期配置或分享给别人。',
+    '签发一个 10 分钟有效的下载 URL。要把原始文件交给用户或外部工具时用；自己看内容用 read 更直接。uri 必须指向文件，目录会报 NOT_FOUND。链接不要写进长期配置，也不要转给别人。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '要下载的文件 URI' },
+      uri: { type: 'string', description: '要下载的文件 URI；~ 是当前身份的根' },
     },
     required: ['uri'],
   },

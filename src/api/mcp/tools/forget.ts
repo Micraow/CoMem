@@ -20,11 +20,11 @@ export const forgetTool: McpToolDefinition = {
   name: 'forget',
   kind: 'write',
   description:
-    '确定某条记忆已经过时、且不应该再被检索到时才用这个，删除不可恢复。uri 指向目录时默认只允许删空目录，删整棵子树必须显式传 recursive=true。返回删除的文件数与索引状态；索引 pending 表示后台还没清理完。',
+    '删除节点，不可恢复。某条记忆确定过时、且不该再被检索到时才用；只是内容变旧用 write / edit。目录非空时必须显式传 recursive=true，这是防误删的最后一道。返回删除的文件数与索引状态。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '要删除的节点 URI' },
+      uri: { type: 'string', description: '要删除的节点 URI；~ 是当前身份的根' },
       recursive: { type: 'boolean', default: false, description: '是否删除整棵子树' },
     },
     required: ['uri'],

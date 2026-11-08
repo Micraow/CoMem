@@ -39,11 +39,11 @@ export const addSkillTool: McpToolDefinition = {
   name: 'add_skill',
   kind: 'ingest',
   description:
-    '要把一组可执行文件注册成可复用技能时用这个；只是存文档用 add_resource。name 会成为技能目录名，重复安装同名技能会覆盖。files 里每项必须有 path 与 content（UTF-8 文本），executable=true 会给文件加执行位。返回安装结果与索引状态。',
+    '把一组文件安装成可复用技能（skills/{name}/）。要沉淀「怎么做一件事」的可执行包时用；只是存文档用 add_resource。name 是目录名，重名会覆盖。files 每项必须有 path 与 content（UTF-8 文本），二进制不在支持范围内；executable=true 给文件加执行位。',
   inputSchema: {
     type: 'object',
     properties: {
-      parentUri: { type: 'string', description: '技能目录的父 URI' },
+      parentUri: { type: 'string', description: '技能目录的父 URI；~ 是当前身份的根' },
       name: { type: 'string', description: '技能名，作为目录名' },
       files: {
         type: 'array',

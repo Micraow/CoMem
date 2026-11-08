@@ -26,7 +26,7 @@ export const healthTool: McpToolDefinition = {
   name: 'health',
   kind: 'read',
   description:
-    '怀疑检索结果不对、或想知道后台任务是否堆积时先调这个，它不读内容也不改状态。返回里的 subject 是当前身份（拼绝对 URI 用），scopes 是它能看到的根（`~` 展开的目标）。它统计的是当前身份可见的索引条数，不是全库总量。summary.degraded 为 true 表示摘要走的是规则降级，此时摘要质量会下降。rerank.degraded 为 true 表示最近一次重排调用失败、这次检索用的是融合分；rerank.failures 是进程启动以来的累计失败次数。',
+    '服务与身份自检，不读内容也不改状态。要拼绝对 URI 时先调它拿 subject（形如 user:alice）与 scopes；怀疑检索不对、或想知道后台任务是否堆积时也用它。index.nodes 是当前身份可见的条数，不是全库总量。summary.degraded / rerank.degraded 为 true 表示对应环节降级，结果质量会下降。',
   inputSchema: {
     type: 'object',
     properties: {},

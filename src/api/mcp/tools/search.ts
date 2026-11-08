@@ -97,12 +97,15 @@ export const searchTool: McpToolDefinition = {
   name: 'search',
   kind: 'read',
   description:
-    '需要意图分析时用这个：query 会被重写成 0–5 条带意图的查询，逐条检索后合并去重。传 sessionId 让它读到最近几轮对话，把「那它呢」这类指代补全；不传也能检索，只是历史为空。返回格式与 find 相同，末尾多一段 Query plan，显示这次重写了几条查询、每条是什么意图、是否降级。',
+    '与 find 同一份索引，但先把 query 重写成 0–5 条带意图的查询再合并去重，代价是一次模型调用。find 没命中、或 prompt 里有「它 / 继续 / 上面那个」这类指代时用；传 sessionId 才有对话历史可解析。返回格式同 find，末尾多一段 Query plan（几条查询、是否降级）。',
   inputSchema: {
     type: 'object',
     properties: {
       query: { type: 'string', description: '自然语言查询；会被 queryFilters 清洗' },
-      targetUri: { type: 'string', description: '可选的路径范围，通常是目录 URI' },
+      targetUri: {
+        type: 'string',
+        description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
+      },
       limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT },
       level: { type: 'string', enum: ['L0', 'L1', 'L2'] },
       contextType: { type: 'string', enum: ['memory', 'resource', 'skill', 'session'] },

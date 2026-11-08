@@ -182,7 +182,7 @@ export const rememberTool: McpToolDefinition = {
   name: 'remember',
   kind: 'write',
   description:
-    '需要把一段重要对话主动存进记忆时用这个；它返回的是 taskId，抽取在后台进行，不要立刻去 find 查结果。messages 里每条都要 role 与 content，role 只能是 user / assistant / system / tool。批量导入本机历史会话时传 sessionId（并给每条消息带源日志的 createdAt），同一份日志重跑会落回同一个会话、相同消息不会重复；不传 sessionId 时每次新建随机会话。默认写进当前用户的个人空间，不能指定别人的根。',
+    '把一段对话交给提交管线，抽取在后台跑，立刻返回 taskId——不要马上 find 查结果。用户说「记住这个」、或出现跨会话的持久偏好 / 决定 / 踩坑结论时用；闲聊与临时状态不要存。每条消息必须有 role（user / assistant / system / tool）与非空 content。批量导入历史会话时传 sessionId 并给每条带源 createdAt，重跑幂等；不传则每次新建随机会话。只能写当前用户个人根。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -191,8 +191,8 @@ export const rememberTool: McpToolDefinition = {
         items: {
           type: 'object',
           properties: {
-            role: { type: 'string', enum: ROLES },
-            content: { type: 'string' },
+            role: { type: 'string', enum: ROLES, description: '消息角色；只能是 user / assistant / system / tool' },
+            content: { type: 'string', description: '消息正文，不能为空串' },
             createdAt: {
               type: 'string',
               description: '源日志里的 ISO 8601 时间串；它是幂等键的一部分，重跑要去重就传',
@@ -200,7 +200,7 @@ export const rememberTool: McpToolDefinition = {
           },
           required: ['role', 'content'],
         },
-        description: '按时间顺序排列的消息',
+        description: '按时间顺序排列的消息；至少一条，不能是空数组',
       },
       sessionId: {
         type: 'string',

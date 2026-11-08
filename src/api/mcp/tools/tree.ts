@@ -28,11 +28,11 @@ export const treeTool: McpToolDefinition = {
   name: 'tree',
   kind: 'read',
   description:
-    '想看清一个目录的层级结构时用这个，比 list 多次调用便宜；只要一层用 list 更快。levelLimit 是相对传入 uri 的层数，默认 3，调大前先确认目录不会大到返回上千行。includeAbstract=true 会在目录行后附 L0 摘要，用于决定读哪一个分支。',
+    '带层级的目录树，缩进表示层级，目录带 / 后缀。要一次看清结构时用，比多次 list 便宜；只要一层用 list。levelLimit 是相对传入 uri 的层数（默认 3），目录很大时先调小。includeAbstract=true 在目录行后附 L0 摘要，用来决定读哪个分支。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '目录 URI' },
+      uri: { type: 'string', description: '目录 URI；~ 是当前身份的根' },
       levelLimit: { type: 'integer', minimum: 0, default: DEFAULT_LEVEL_LIMIT },
       includeAbstract: { type: 'boolean', default: false },
     },

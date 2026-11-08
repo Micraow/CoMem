@@ -2308,26 +2308,36 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，两条通道互补。装完 Hook 不等于接上了 MCP 工具。
 
-服务端在 `/mcp` 暴露 **Streamable HTTP**，运行在无状态模式（`sessionIdGenerator: undefined`，不返回 `Mcp-Session-Id`，每个请求独立）。**不提供 stdio 服务器，也不需要代理进程**：两个宿主都原生支持这个传输。
+服务端在 `/mcp` 暴露 **Streamable HTTP**，运行在无状态模式（`sessionIdGenerator: undefined`，不返回 `Mcp-Session-Id`，每个请求独立）。
 
-| 宿主 | 配置位置 | 传输写法 |
+**接入与宿主无关，两条路按「宿主能不能填一个 URL」选。**
+
+| 宿主 | 走哪条 | 配置里写什么 |
 |---|---|---|
-| Claude Code | 项目 `.mcp.json` 或 `~/.claude.json` 的 `mcpServers` | `"type": "http"`（`"streamable-http"` 是别名） |
-| DSH | `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里的 `dsh-mcp-client` 条目 | `transport: streamable-http` |
+| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL；`auth.enabled: true` 时再一个 `Authorization` 头 |
+| 只支持本地 stdio 服务器 | **stdio 代理**（`integrations/servers/mcp-proxy.mjs`） | `command: node` + `args: [<仓库>/integrations/servers/mcp-proxy.mjs]` |
 
-**`type` / `transport` 不能省。** Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器并跳过；DSH 的 `transport` 是必填字段。
+最小配置只有两样：`url`（`http://127.0.0.1:1933/mcp`）与可选认证头。**`type` / `transport` 不能省**——Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器并跳过（报 `has a "url" but no "type"`），DSH 的 `transport` 是必填字段。
 
-认证走请求头（§12.7）：`auth.enabled: false`（v1 单用户）时身份取 `server.subject`，不需要头，`x-comem-subject` 与它不一致会 401；`auth.enabled: true` 时带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。
+认证走请求头（§12.7）：`auth.enabled: false`（v1 单用户）时身份取 `server.subject`，不需要头，`x-comem-subject` 与它不一致会 401；`auth.enabled: true` 时带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。**凭据的三种传法**：直连时写进宿主的 MCP 配置（用宿主自己的变量展开，如 `${COMEM_API_KEY}`）；用代理时由代理读 `COMEM_TOKEN` / 配置文件，宿主配置里不出现密钥；只认 `--header` 的宿主用命令行参数（`claude mcp add --header "Authorization: Bearer …"`）。
 
-**为什么不做 stdio 代理。** 早期草稿写过一个 `integrations/servers/mcp-proxy.mjs`（从未实现）：读配置里的 URL 和 key，把 stdio 转发到 HTTP。两个宿主都支持 Streamable HTTP 之后，这层代理只剩下成本——多一个常驻进程、多一份配置、多一处认证实现，而它转发的东西宿主本来就会做。直接用宿主的 HTTP 配置，换 key 只改宿主的配置条目，不需要重装 Hook。
+**为什么还是做 stdio 代理。** 早先的判断是「Claude Code 和 DSH 都原生支持 Streamable HTTP，代理是多余的常驻进程」。**这个判断把「我验证过的两个宿主」当成了「所有宿主」**：MCP 规范里 `stdio` 是一等公民，只支持本地 stdio 服务器的宿主不会因为另外两个支持 HTTP 就不再存在。代理约 200 行，不引依赖、不重写认证——它复用 hook 的配置链（`integrations/lib/config.mjs`），把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`。**服务端无状态省掉了三块**：没有 `Mcp-Session-Id` 可缓存、没有 `DELETE` 可发、没有会话过期要重放 `initialize`。这是它比通用代理短的那部分。
 
-工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证与验证步骤见 `integrations/README.md` 的「MCP 接入」。
+**生态里已有的通用代理不替代它。** `mcp-remote` 这类工具能把 stdio 转到远程 MCP，CoMem 的端点它能直接连（`--transport http-only`）。不把它当默认路径的理由只有一条：它要求把凭据写进宿主的 MCP 配置，而 CoMem 自己的代理复用 Hook 的配置链，`~/.config/comem/config.yaml` 改一次两边都生效。已经用它的部署不需要迁移。
+
+**工具发现靠描述自解释。** `initialize` → `tools/list` 的 `description` 是 agent 唯一能看到的用法说明，所以 16 条各自必须回答「什么时候用 / 什么时候不用」，`find` / `search` / `rule_search` 三个必须能互相分辨（`find` 是语义召回、`search` 多一次意图重写、`rule_search` 取规则完整正文）。URI 参数的描述统一写上 `~` 别名——agent 不该为了拼一个绝对 URI 去猜 uid。
+
+**提示词与注入格式必须一致。** Hook 往对话里塞四个块：`<comem-profile>` / `<comem-preferences>`（`SessionStart`，一次性）与 `<comem-recall>`（`UserPromptSubmit`，每轮），另有 `<available-skills>`（技能目录）。`integrations/skills/` 的提示词按这四个块写「已经有什么」，否则 agent 会把档案当召回结果、把技能目录当记忆去 `find`。`<comem-recall>` 的条目是 `1. [类型] comem://…` 加缩进摘要，**不带分数**（§15.9 的「注入块里不写绝对分数」），所以提示词只能说「顺序即相关度」。提示词拆两份：`comem-memory` 靠「用户提到记忆」触发，`comem-rules` 必须在「用户没提记忆、但你即将动手」时触发——一份 description 覆盖不了两个触发器。
+
+工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证、提示词与验证步骤见 `integrations/README.md` 的「MCP 接入」。
 
 ### 15.7 支持哪些宿主
 
 v1 做两个：**Claude Code**（hooks + MCP，最常用）和 **DSH**（plugin + MCP）。
 
 不做 Cursor、Codex、TRAE。它们的 hook 事件名和 payload 各不相同，每个都要单独适配并对着真实宿主验证。适配器接口留好即可。
+
+**这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
 
 ### 15.8 目录
 
@@ -2336,13 +2346,14 @@ integrations/
 ├── package.json
 ├── README.md
 ├── cli.mjs                    # co-mem install / doctor / uninstall
-├── servers/                   # 六个可执行入口，stdin JSON → stdout JSON
-│   ├── session-start.mjs
-│   ├── user-prompt-submit.mjs
-│   ├── pre-tool-use.mjs
-│   ├── post-tool-use.mjs
-│   ├── stop.mjs
-│   └── pre-compact.mjs
+├── servers/                   # 七个可执行入口
+│   ├── session-start.mjs      # ┐
+│   ├── user-prompt-submit.mjs # │
+│   ├── pre-tool-use.mjs       # │ 六个 Hook：stdin JSON → stdout JSON
+│   ├── post-tool-use.mjs      # │
+│   ├── stop.mjs               # │
+│   ├── pre-compact.mjs        # ┘
+│   └── mcp-proxy.mjs          # stdio → POST /mcp（§15.6）
 ├── hosts/                     # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
 │   └── dsh.mjs
@@ -2354,6 +2365,9 @@ integrations/
 │   ├── cursor.mjs             # 消息游标
 │   ├── filter.mjs             # sed 风格查询过滤
 │   └── telemetry.mjs          # 四阶段开销上报
+├── skills/                    # 提示词：装进宿主的技能目录
+│   ├── comem-memory/SKILL.md  # 召回 + 写入 + 合规
+│   └── comem-rules/SKILL.md   # 动手之前取规则
 └── tests/                     # node:test
 ```
 

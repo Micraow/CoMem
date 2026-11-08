@@ -55,11 +55,11 @@ export const addResourceTool: McpToolDefinition = {
   name: 'add_resource',
   kind: 'ingest',
   description:
-    '要把一批外部文件（文档、图片、代码）作为资料存进记忆库时用这个，不要逐个 write——批量入口只触发一次摘要重算。files 里每项必须有 path，并至少带 uploadId（先上传）或 content（agent 已转好的文本）。返回 taskId，索引与摘要在后台进行。',
+    '把外部文件（文档 / 图片 / 代码）作为资料导入记忆库。要建可检索、可下载的资料节点时用它；逐个 write 会触发多次摘要重算，也会丢掉原始附件。files 每项必须有 path，并至少带 uploadId（先用 HTTP temp-upload 上传）或 content（agent 已转好的文本）——后端不解析 PDF / Office。',
   inputSchema: {
     type: 'object',
     properties: {
-      parentUri: { type: 'string', description: '资源目录的父 URI' },
+      parentUri: { type: 'string', description: '资料目录的父 URI；~ 是当前身份的根' },
       files: {
         type: 'array',
         items: {

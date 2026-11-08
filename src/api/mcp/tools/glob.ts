@@ -21,12 +21,12 @@ export const globTool: McpToolDefinition = {
   name: 'glob',
   kind: 'read',
   description:
-    '只想按文件名模式列举文件时用这个，不读内容，所以比 grep 快；* 不跨目录，跨层要写 **。pattern 是相对 uri 的路径，uri 决定根。返回按 URI 升序，nodeLimit 截断时不会另行提示，取满就该收窄 pattern。',
+    '按路径通配列文件，不读内容，所以比 grep 快。pattern 相对 uri，* 不跨 /，跨层写 **。要列举有哪些文件、或给 read / grep 找准确路径时用；找内容用 grep，找语义用 find。nodeLimit 截断时不另行提示，取满就收窄 pattern。',
   inputSchema: {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: '相对路径通配模式，如 **/*.md' },
-      uri: { type: 'string', description: '搜索范围的目录 URI' },
+      uri: { type: 'string', description: '搜索范围的目录 URI；~ 是当前身份的根' },
       nodeLimit: { type: 'integer', minimum: 1, default: DEFAULT_NODE_LIMIT },
     },
     required: ['pattern', 'uri'],

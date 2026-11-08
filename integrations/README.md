@@ -3,9 +3,10 @@
 装进宿主的会话召回与采集插件。它是**独立于服务端的交付物**：纯 JavaScript（`.mjs`），
 只依赖 Node 内置模块，不声明任何 `dependencies`。
 
-这个目录只包含 Hook。**MCP 工具不经过这里**：CoMem 在 `/mcp` 暴露 Streamable HTTP，
-宿主直接配置 URL 即可，不需要代理进程。两条通道的分工与配置片段见下面的
-「[MCP 接入](#mcp-接入)」。
+这个目录交付三样东西：**六个 Hook**（自动召回与采集）、**一个 stdio MCP 代理**（给
+只支持本地 stdio 服务器的宿主），以及**两份提示词**（教 agent 什么时候用 MCP 工具）。
+MCP 工具本身不经过这里：CoMem 在 `/mcp` 暴露 Streamable HTTP，能直连的宿主直接配
+URL 即可。分工与配置片段见下面的「[MCP 接入](#mcp-接入)」。
 
 ```
 integrations/
@@ -19,16 +20,20 @@ integrations/
 │   ├── cursor.mjs        # 消息游标
 │   ├── filter.mjs        # sed 风格查询过滤
 │   └── telemetry.mjs     # 四阶段开销上报
-├── servers/              # 六个可执行入口，stdin JSON → stdout JSON
-│   ├── session-start.mjs
-│   ├── user-prompt-submit.mjs
-│   ├── pre-tool-use.mjs
-│   ├── post-tool-use.mjs
-│   ├── stop.mjs
-│   └── pre-compact.mjs
+├── servers/              # 七个可执行入口
+│   ├── session-start.mjs      # ┐
+│   ├── user-prompt-submit.mjs # │
+│   ├── pre-tool-use.mjs       # │ 六个 Hook：stdin JSON → stdout JSON
+│   ├── post-tool-use.mjs      # │
+│   ├── stop.mjs               # │
+│   ├── pre-compact.mjs        # ┘
+│   └── mcp-proxy.mjs     # stdio → POST /mcp 的 MCP 代理
 ├── hosts/                # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
 │   └── dsh.mjs
+├── skills/               # 提示词（装进宿主的技能目录）
+│   ├── comem-memory/SKILL.md
+│   └── comem-rules/SKILL.md
 └── tests/                # node:test
 ```
 
@@ -92,8 +97,55 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 记忆才会「该出现时自己出现，需要时能查能写」。
 
 服务端在 `POST /mcp` 暴露 **Streamable HTTP**，无状态模式：不返回
-`Mcp-Session-Id`，每个请求独立。**不提供 stdio 服务器，也不需要代理**：Claude Code
-和 DSH 都原生支持这个传输。
+`Mcp-Session-Id`，每个请求独立。
+
+### 两条路
+
+| 宿主 | 用哪条 | 配置里写什么 |
+|---|---|---|
+| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL |
+| 只支持本地 stdio 服务器（只给 `command` + `args` 配置位） | **stdio 代理** | `command: node` + `args: [integrations/servers/mcp-proxy.mjs]` |
+
+判据只有一个：**宿主能不能填一个 URL**。能就直连——少一个常驻进程、少一份配置。不能
+就起代理：`servers/mcp-proxy.mjs` 把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`，再把
+响应写回 stdout。两条路走同一个端点、同一套凭据、同一份 16 个工具。
+
+**与宿主无关的最小配置**只有两样——一个 URL，和（`auth.enabled: true` 时）一个认证头：
+
+```json
+{ "url": "http://127.0.0.1:1933/mcp", "headers": { "Authorization": "Bearer <凭据>" } }
+```
+
+`auth.enabled: false`（v1 默认）时 `headers` 整段可以省掉。下面两节是两个具体宿主的
+写法；其它宿主按它的文档把这两样映射过去即可。
+
+#### stdio 代理
+
+```json
+{
+  "mcpServers": {
+    "comem": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["<仓库绝对路径>/integrations/servers/mcp-proxy.mjs"]
+    }
+  }
+}
+```
+
+代理**不需要参数**，宿主的 MCP 配置里**也不需要出现密钥**：它按 Hook 的同一套顺序读
+环境变量与配置文件，换 key 只改一处。
+
+| 环境变量 | 说明 |
+|---|---|
+| `COMEM_BASE_URL` | 服务端地址；代理拼成 `<baseUrl>/mcp` |
+| `COMEM_TOKEN` | `Authorization: Bearer` 的值；`auth.enabled: false` 时留空 |
+| `COMEM_MCP_TIMEOUT_MS` | 等 MCP 响应的超时，默认 `30000`。**别照 hook 的 5 秒配**：`find` 开了重排时 p95 就有 9.35 秒 |
+| `COMEM_DEBUG` | `1` 时把转发日志写到 **stderr**（stdout 只走协议） |
+
+**为什么不是「两个宿主都支持 HTTP，所以不需要代理」。** 那只看过两个宿主。MCP 规范里
+`stdio` 是一等公民，只支持本地 stdio 服务器的宿主不会因为另外两个支持 HTTP 就不再存在；
+而代理顺带把凭据从宿主配置里挪走了。
 
 ### Claude Code
 
@@ -193,6 +245,40 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 写成了 HTTP 而不是默认的 stdio；`auth.enabled: true` 时 `Authorization` 头有没有真的发出去
 （Claude Code 的 `claude mcp get <name>` 会列出发送的头，DSH 看启动日志里的连接失败原因）。
 
+### 提示词
+
+`integrations/skills/` 下有两份 `SKILL.md`，装进宿主的技能目录（Claude Code：
+`~/.claude/skills/`；DSH：profile 的 skills 目录）：
+
+| 技能 | 什么时候加载 | 讲什么 |
+|---|---|---|
+| `comem-memory` | 用户提到以前的会话、让你记住什么、给你文件或链接 | 上下文里已经有哪些注入块、什么时候主动 `find`、什么时候**不要**召回、`remember` 的参数格式 |
+| `comem-rules` | 动手之前 | `rule_search` 的 `taskContext` 怎么构造、`threshold` 是相对值、返回值是规则正文 |
+
+分成两份不是按工具数，是按**触发条件**：主技能靠「用户提到记忆」触发，`rule_search`
+必须在「用户压根没提记忆、但你即将动手」时触发——一份 description 覆盖不了两个触发器。
+
+**提示词必须和 Hook 注入的格式对得上**，否则 agent 会重复召回或误解内容：
+
+| 注入块 | 来源 | 格式 | 提示词里的定位 |
+|---|---|---|---|
+| `<comem-profile>` | `SessionStart` | 纯文本 | 一次性档案，不用再查 |
+| `<comem-preferences>` | `SessionStart` | 纯文本 | 历史默认，与当前请求冲突时以当前请求为准 |
+| `<available-skills>` | `SessionStart` | `- 名字: 描述` | 技能目录，不是记忆 |
+| `<comem-recall>` | `UserPromptSubmit` | `1. [类型] comem://…` + 缩进摘要 | 本轮召回结果，直接 `read` |
+
+**`<comem-recall>` 里没有分数。** 分数只在同一次检索的同一引擎内可比（§13.2），写进
+注入块会暗示一个不存在的精度；顺序是这里唯一稳定的信息，所以只编号。
+
+### 为什么不用 `mcp-remote` 这类现成代理
+
+生态里已经有一个成熟的 stdio → 远程 MCP 代理（`npx mcp-remote <url>`，支持
+`--header` / `--header-file` / `--transport http-only`），CoMem 的这个端点它能直接连。
+不推荐它做默认路径的理由只有一条：**它要求把凭据写进宿主的 MCP 配置**（`--header
+"Authorization: Bearer …"`），而 CoMem 自己的代理复用 Hook 的配置链，`~/.config/comem/config.yaml`
+改一次两边都生效。已经用 `mcp-remote` 的部署不需要迁移——`mcp-remote <url> --transport
+http-only` 是等价物，只是多一处 key 副本。
+
 ## 关掉记忆（bypass）
 
 生效位置在 hook 层：注入与采集都跳过，服务端不知道有这回事（它只是没收到请求）。
@@ -244,6 +330,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
 | `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
+| `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
 | `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 相对阈值：只保留分数不低于本次最高分 × 该值的命中（§15.9 的「三条前提」之二） |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
@@ -355,6 +442,17 @@ SQLite 的写锁。
 **hook 报「未支持的 hook 事件」**：宿主发了一个插件不认识的事件名。到
 `hosts/<host>.mjs` 的 `EVENT_NAMES` 里补一项；补之前它会被写进 stderr 并放行，
 不会打断对话。
+
+**接的是 stdio 代理，宿主报 `JSON-RPC parse error`**：stdout 被非协议内容污染了。
+设 `COMEM_DEBUG=1` 重跑，日志会写到 stderr；如果 stdout 里出现了 `{"stage":…}`，
+是代理的 bug（`integrations/tests/mcp-proxy.test.mjs` 的「stdout 只走协议」用例
+会先挂）。
+
+**stdio 代理报「连不上」**：`curl $COMEM_BASE_URL/health`。代理只读环境变量与
+`~/.config/comem/config.yaml`，不读仓库根的 `config.yaml`——那是服务端的配置。
+
+**stdio 代理报「拒绝了凭据（HTTP 401）」**：`COMEM_TOKEN` 没设或已失效。`auth.enabled:
+false` 的部署不要设它（设了也不比对，但别让一个过期的 key 留在环境里误导排查）。
 
 ## 测试
 

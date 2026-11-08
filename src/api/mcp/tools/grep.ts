@@ -31,11 +31,11 @@ export const grepTool: McpToolDefinition = {
   name: 'grep',
   kind: 'read',
   description:
-    '已经知道大概目录、要找某个符号或报错原文时用这个；不知道在哪用 find。pattern 是正则不是通配符，特殊字符要转义；uri 传得越窄越快，因为它会逐个读文件。返回带行号与命中行，nodeLimit 是命中条数上限，不是文件数。',
+    '按正则逐行匹配文件内容。知道大概目录、要找符号或报错原文时用；不知道在哪用 find，只找文件名用 glob。pattern 是正则不是通配符，特殊字符要转义。uri 越窄越快，因为它逐个读文件。nodeLimit 是命中条数上限，不是文件数；返回 uri + 行号 + 命中行。',
   inputSchema: {
     type: 'object',
     properties: {
-      uri: { type: 'string', description: '搜索范围的目录 URI' },
+      uri: { type: 'string', description: '搜索范围的目录 URI；~ 是当前身份的根' },
       pattern: { type: 'string', description: '正则表达式' },
       caseInsensitive: { type: 'boolean', default: false },
       nodeLimit: { type: 'integer', minimum: 1, default: DEFAULT_NODE_LIMIT },
