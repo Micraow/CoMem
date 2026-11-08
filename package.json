@@ -27,6 +27,7 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "ai": "^7.0.163",
     "fastify": "^5.12.8",
+    "sqlite-vec": "^0.1.9",
     "yaml": "^2.8.1",
     "zod": "^4.1.12"
   },

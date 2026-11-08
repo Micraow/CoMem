@@ -20,6 +20,14 @@ let app: FastifyInstance;
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-http-'));
   container = await createContainer({
+    // **配置从临时目录读，不是仓库根。**
+    //
+    // 缺省时 `loadConfig` 读 cwd 的 `config.yaml`——那是开发者本机的配置，
+    // 可能指向真实远程网关。测试一旦读它就不再是孤立的：网络抖动、配额、
+    // 甚至「今天没开代理」都会让测试红，而红的原因与代码无关。
+    //
+    // 临时目录里没有这个文件，所以走内置默认值。
+    configPath: join(dataDir, 'config.yaml'),
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,

@@ -378,6 +378,27 @@ describe('权限过滤', () => {
   });
 });
 
+describe('引擎差异', () => {
+  const LEXICAL = 'comem://user/alice/mem/lexical.md';
+  const SEMANTIC = 'comem://user/alice/mem/semantic.md';
+
+  it('同一个 query 在 fts5 与 vector 下返回不同命中（配置真的生效）', async () => {
+    // LEXICAL 含查询词、没有向量；SEMANTIC 语义相关、但不含查询词。
+    await seed(LEXICAL, '语义 记忆');
+    await seed(SEMANTIC, '完全无关的正文');
+    storeVector(SEMANTIC, [1, 0]);
+
+    const fts5Hits = await createService({ engine: 'fts5' }).find('语义', findOptions());
+    const vectorHits = await createService({
+      engine: 'vector',
+      embedding: semanticEmbedding(),
+    }).find('语义', findOptions());
+
+    expect(fts5Hits.map((hit) => hit.uri)).toEqual([LEXICAL]);
+    expect(vectorHits.map((hit) => hit.uri)).toEqual([SEMANTIC]);
+  });
+});
+
 describe('SearchService 构造', () => {
   it('engine 非 fts5 时缺向量依赖在装配期抛 INVALID_ARGUMENT', () => {
     const assembler = new ContextAssembler({

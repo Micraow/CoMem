@@ -453,7 +453,6 @@ export class SearchService {
     this.#logger.info('检索完成', {
       subject: options.subject,
       queryLength: filtered.length,
-      engine: this.#engine,
       returned: outcome.hits.length,
       durationMs: elapsedMs(startedAt),
     });
