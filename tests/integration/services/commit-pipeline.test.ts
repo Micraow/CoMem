@@ -181,18 +181,22 @@ describe('CommitPipeline 骨架（§10.3）', () => {
     expect(harness.writeDone).toHaveBeenCalledTimes(1);
   });
 
-  it('终态错误（INVALID_ARGUMENT）不重试', async () => {
-    const failing = new FakeStep('memory_extract', async () => {
-      throw new ComemError('INVALID_ARGUMENT', '模型输出解析失败。');
-    });
-    const harness = createHarness({ steps: [failing], stepAttempts: 1 });
+  it.each(['INVALID_URI', 'INVALID_ARGUMENT', 'PERMISSION_DENIED', 'UNAUTHENTICATED'] as const)(
+    '终态错误（%s）不重试',
+    async (code) => {
+      const failing = new FakeStep('memory_extract', async () => {
+        throw new ComemError(code, '确定性失败。');
+      });
+      const harness = createHarness({ steps: [failing], stepAttempts: 1 });
 
-    await expect(
-      harness.pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE)),
-    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      await expect(
+        harness.pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE)),
+      ).rejects.toMatchObject({ code });
 
-    expect(failing.run).toHaveBeenCalledTimes(1);
-  });
+      // `stepAttempts = 1` 等于「最多两次」：确定性失败第二次也只会再失败一次。
+      expect(failing.run).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('重试超限后抛出，后续步骤不执行', async () => {
     const steps = [

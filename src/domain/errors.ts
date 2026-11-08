@@ -37,6 +37,33 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ComemErrorCode, number>> = Obj
 /**
  * 可重试的错误码（架构文档 §18「并发控制」：超过 busy_timeout 抛 CONFLICT 由任务层重试）。
  * 只有「同样的请求再来一次可能成功」的 code 才在里面——INVALID_ARGUMENT 重试多少次都一样。
+ *
+ * ## 与 `domain/archive.ts` 的 `isTerminalStepError` 的关系
+ *
+ * 两个名字都像在回答「要不要重试」，判据却相反。它们是**互补，不是重复**，因为
+ * 作用层不同：
+ *
+ * - 本集合回答「**一次模型调用**失败后，紧接着再发一次会不会成功」——瞬态失败
+ *   （限流 429、供应商 5xx、SQLite 写冲突）。消费者是 `services/llm.ts`。
+ * - `isTerminalStepError` 回答「**一步提交**重放一次会不会成功」——确定性失败
+ *   （URI / 参数 / 身份 / 权限 / API Key 无效，同一份输入再来一次结果一样）。
+ *   消费者是 `services/commit/pipeline.ts` 与 `services/task.ts`。
+ *
+ * 两边都**不在**的 code 会被两个消费者当成「可重试」。这正是 `UNAUTHENTICATED`
+ * （API Key 错）曾经白等 `(stepAttempts + 1) × taskAttempts` 次超时的原因：它
+ * 既不在本集合（LLM 内部正确地不重试），也不在终态集合（步骤层与任务层误以为
+ * 可重试）。
+ *
+ * **新增错误码时必须同时判断两个集合。** 检查方法：`ComemErrorCode` 的每个成员
+ * 都必须在 {@link HTTP_STATUS_BY_CODE} 里有一行，新增 code 会先在 `typecheck`
+ * 上红，把你带回这个文件；然后回答两个问题：
+ *
+ * 1. 它由模型调用抛出吗？会 → 决定是否进本集合；
+ * 2. 同样的输入重放一次，结果会不会变？不会 → 必须进 `archive.ts` 的终态集合。
+ *
+ * 不把 `isTerminalStepError` 写成 `!isRetryable(code)` 的推导：`INTERNAL` 在步骤
+ * 级必须重试（`ComemError.from` 把所有未知异常收敛成 `INTERNAL`，写盘失败、连接
+ * 断开都走这里），而它不在本集合——推导会把「兜底重试」变成「直接失败」。
  */
 const RETRYABLE_CODES: ReadonlySet<ComemErrorCode> = new Set<ComemErrorCode>([
   'CONFLICT',

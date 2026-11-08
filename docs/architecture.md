@@ -2927,6 +2927,10 @@ task:
 | `PROVIDER_UNAVAILABLE` | 503 | 模型不可用 |
 | `INTERNAL` | 500 | 未预期错误 |
 
+**重放语义分两套集合，互补而不是重复。** `domain/errors.ts` 的 `RETRYABLE_CODES`（`CONFLICT` / `RESOURCE_EXHAUSTED` / `PROVIDER_UNAVAILABLE`）回答「一次模型调用再发一次会不会成功」，由 `services/llm.ts` 消费；`domain/archive.ts` 的 `isTerminalStepError`（`INVALID_URI` / `INVALID_ARGUMENT` / `PERMISSION_DENIED` / `UNAUTHENTICATED`）回答「一步提交重放一次会不会成功」，由 `services/commit/pipeline.ts` 与 `services/task.ts` 消费。**两边都不在的 code 会被当成可重试**——`UNAUTHENTICATED` 曾经因此白重试 `(stepAttempts + 1) × taskAttempts` 次（默认 2 × 3 = 6 次）：一把错的 API Key 在模型调用层正确地不重试，到了步骤层却被当成瞬态失败。
+
+`INTERNAL` 是未知异常的兜底，步骤级重试；`NOT_FOUND` / `ALREADY_EXISTS` 是确定性失败，当前仍按可重试处理——已知缺口：前者只在步骤循环之外抛出，后者的正解是把冲突操作记进 `skippedOperations`（§11.5），而不是让整批归档失败。新增错误码时两套集合都要判断，检查方法见 `domain/errors.ts` 的 `RETRYABLE_CODES` 注释。
+
 **错误必须可解释**：写进 `error.log`，带请求 ID、URI、操作。不抛只有开发者能读的堆栈，也不静默吞掉。
 
 ## 20. 质量闸门

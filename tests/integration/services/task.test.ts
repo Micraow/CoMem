@@ -211,7 +211,12 @@ describe('失败重试', () => {
     expect(attemptsOf(task.id)).toBe(1);
   });
 
-  it.each(['INVALID_URI', 'INVALID_ARGUMENT', 'PERMISSION_DENIED'] as const)(
+  it.each([
+    'INVALID_URI',
+    'INVALID_ARGUMENT',
+    'PERMISSION_DENIED',
+    'UNAUTHENTICATED',
+  ] as const)(
     '终态错误 %s 直接 failed，不重试',
     async (code) => {
       const task = service.create('archive', {});

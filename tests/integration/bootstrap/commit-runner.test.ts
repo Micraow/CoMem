@@ -30,6 +30,7 @@ import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js'
 import { createArchivePorts, createArchiveWriter } from '../../../src/bootstrap/archive-ports.js';
 import { CommitRunner } from '../../../src/bootstrap/commit-runner.js';
 import type { ArchiveTaskPayload } from '../../../src/domain/archive.js';
+import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { AutoCommitPolicy, SessionMessage } from '../../../src/domain/session.js';
 import { ABSTRACT_MAX_CHARS, OVERVIEW_MAX_CHARS } from '../../../src/domain/summary.js';
@@ -533,6 +534,46 @@ describe('CommitRunner 的失败与收尾', () => {
 
     expect(taskStore.get(task.id)?.status).toBe('failed');
     expect(createPipeline).not.toHaveBeenCalled();
+
+    await runner.stop();
+  });
+
+  it('API Key 无效时步骤不重试，任务直接失败', async () => {
+    // 回归：`UNAUTHENTICATED` 曾经两个重试分类都不在——模型调用层正确地不重试，
+    // 步骤层却把它当成瞬态失败、任务层再重新排队。一把错的 API Key 因此要等满
+    // `stepAttempts × taskAttempts` 次超时（LLM 默认 120 秒，共 8 分钟）。
+    const stepRun = vi.fn(async (): Promise<void> => {
+      throw new ComemError(
+        'UNAUTHENTICATED',
+        '模型供应商拒绝了这次请求：API Key 无效，或没有访问该模型的权限。',
+      );
+    });
+
+    class UnauthenticatedStep extends CommitStep {
+      readonly name = 'archive_summary' as const;
+      readonly run = stepRun;
+    }
+
+    const createPipeline = vi.fn(
+      (): CommitPipeline =>
+        new CommitPipeline({ steps: [new UnauthenticatedStep()], ports: createFakePorts(), logger }),
+    );
+    const runner = new CommitRunner({ tasks, createPipeline, logger });
+    const task = tasks.create('archive', payload());
+
+    await runner.tick();
+
+    // 只跑一次。`stepAttempts` 默认 1 等于「最多两次」，第二次纯属白重试。
+    expect(stepRun).toHaveBeenCalledTimes(1);
+    // 任务直接进终态：`attempts` 是 1，不是 `maxAttempts`。
+    const failed = taskStore.get(task.id);
+    expect(failed).toMatchObject({ status: 'failed', attempts: 1 });
+    // 错误必须能定位到 API Key，而不是一句「任务失败」。
+    expect(failed?.error).toContain('API Key');
+
+    // 进死信后不会再被认领。
+    await runner.tick();
+    expect(stepRun).toHaveBeenCalledTimes(1);
 
     await runner.stop();
   });

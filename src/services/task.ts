@@ -19,8 +19,9 @@
  *
  * ## 哪些错误不重试
  *
- * `isTerminalStepError`（URI 非法、参数非法、权限不足）重试三次结果一样，直接
- * 置 `failed`（`domain/archive.ts`）。重试它们只会把任务队列拖长。
+ * `isTerminalStepError`（URI 非法、参数非法、权限不足、未认证）重试三次结果一样，
+ * 直接置 `failed`（`domain/archive.ts`）。重试它们只会把任务队列拖长——API Key
+ * 错的时候每次都要等满 LLM 超时，一条坏配置能拖出几分钟。
  */
 
 import { randomUUID } from 'node:crypto';

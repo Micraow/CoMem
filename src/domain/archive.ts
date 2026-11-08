@@ -145,7 +145,28 @@ export function summarizeMemoryDiff(
  * 正确的做法是在装配期把对应步骤登记进 `CommitPipelineOptions.skippedSteps`，
  * 让它根本不执行——`INVALID_ARGUMENT` 第一次就会把任务置 `failed`，归档永远停在
  * 上一步。
+ *
+ * ## 与 `domain/errors.ts` 的 `RETRYABLE_CODES` 的关系
+ *
+ * 两者**互补，不是重复**：本函数回答「同一步重放一次会不会成功」，`RETRYABLE_CODES`
+ * 回答「一次模型调用再发一次会不会成功」。确定性失败（URI 非法、参数非法、身份 /
+ * 权限、API Key 无效）进本函数；瞬态失败（限流 429、供应商 5xx、SQLite 写冲突）
+ * 留给步骤层与任务层重试。
+ *
+ * **两边都不在的 code 会被当成可重试。** 这就是 `UNAUTHENTICATED` 曾经白重试的
+ * 原因：一把错的 API Key 在模型调用层正确地不重试，到了步骤层却被当成瞬态失败，
+ * 等满 `(stepAttempts + 1) × taskAttempts` 次超时（默认 2 × 3 = 6 次，每次上限
+ * 120 秒，见 `config.example.yaml` 的 `providers.llm.default.timeoutSeconds`）。
+ *
+ * 新增错误码时两个集合都要判断，检查方法见 `errors.ts` 的 `RETRYABLE_CODES` 注释。
+ * 不写成 `!isRetryable(code)` 推导：`INTERNAL` 在步骤级必须重试（未知异常兜底），
+ * 却不在 `RETRYABLE_CODES` 里。
  */
 export function isTerminalStepError(code: ComemErrorCode): boolean {
-  return code === 'INVALID_URI' || code === 'INVALID_ARGUMENT' || code === 'PERMISSION_DENIED';
+  return (
+    code === 'INVALID_URI' ||
+    code === 'INVALID_ARGUMENT' ||
+    code === 'PERMISSION_DENIED' ||
+    code === 'UNAUTHENTICATED'
+  );
 }

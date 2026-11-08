@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { isTerminalStepError } from '../../src/domain/archive.js';
 import {
   ComemError,
   HTTP_STATUS_BY_CODE,
@@ -99,4 +100,20 @@ describe('isRetryable', () => {
       }
     }
   });
+});
+
+describe('isTerminalStepError', () => {
+  it.each(['INVALID_URI', 'INVALID_ARGUMENT', 'PERMISSION_DENIED', 'UNAUTHENTICATED'] as const)(
+    '%s 是确定性失败：步骤层与任务层不重试',
+    (code) => {
+      expect(isTerminalStepError(code)).toBe(true);
+    },
+  );
+
+  it.each(['CONFLICT', 'RESOURCE_EXHAUSTED', 'PROVIDER_UNAVAILABLE', 'INTERNAL'] as const)(
+    '%s 重放可能成功：步骤层与任务层重试',
+    (code) => {
+      expect(isTerminalStepError(code)).toBe(false);
+    },
+  );
 });
