@@ -849,6 +849,7 @@ CREATE TABLE group_member (
 | 0014 | `0014_group_owner.sql` | `app_group.owner_user_id`（§12.6） |
 | 0015 | `0015_embedding_cache.sql` | `embedding_cache`（嵌入结果缓存） |
 | 0016 | `0016_session_epoch.sql` | `app_user.session_epoch`（session token 的身份版本，§12.7） |
+| 0017 | `0017_identity_foreign_keys.sql` | `group_member` / `api_key` 的外键（§12.7 的防御纵深） |
 
 **`node_embedding` 与 `embedding_cache` 的职责边界。** 两张表都不是真相（文件是真相，§7），但它们回答的问题不同：
 
@@ -2076,6 +2077,13 @@ type Credential =
 **组关系每请求查库，不缓存。** `resolve(credential)` 每次都调
 `GroupRepository.listGroupIdsOfUser`。SQLite 单机是微秒级；缓存只会把「退组立即
 生效」变成「重启后生效」——§12.5 的那条承诺就是靠这里兑现的。
+
+**孤儿行由外键兜底。** `group_member` / `api_key` 的 `user_id` / `group_id` 带
+`ON DELETE CASCADE`（迁移 0017）。正常路径由 `IdentityService.deleteUser` 显式
+清理（删除日志要计数），外键保证**绕过用例直接删行**时不留孤儿行——仓储是公开
+入口，孤儿成员关系会让同 ID 重建的用户立刻拿到 `group:{gid}` 主体。连接级
+`PRAGMA foreign_keys = ON` 在 `openDatabase` 里设置（SQLite 默认关闭，且 PRAGMA
+在事务里是 no-op，所以必须在迁移之前设）。
 
 **Session token 是无状态 HMAC。** 形如 `v1.<base64url(payload)>.<签名>`，服务端
 不存 session 行。载荷是 `{sub, iat, exp, epoch}`：`sub` 是用户 ID，`epoch` 是账号

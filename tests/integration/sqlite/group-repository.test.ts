@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
+import { UserRepository } from '../../../src/adapters/sqlite/user-repository.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Group } from '../../../src/domain/identity.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -15,6 +16,7 @@ type GroupInput = Omit<Group, 'createdAt' | 'updatedAt'>;
 
 let db: DatabaseSync;
 let repository: GroupRepository;
+let users: UserRepository;
 
 function createLogger(): Logger {
   const logger: Logger = {
@@ -43,10 +45,20 @@ function createGroup(id: string): void {
   repository.create(input({ id, displayName: id }), NOW);
 }
 
+/**
+ * 建用户的简写。迁移 0017 之后 `group_member.user_id` 有外键，成员关系不能指向
+ * 不存在的用户——那正是迁移要挡住的孤儿行。
+ */
+function createUser(id: string): void {
+  users.create({ id, displayName: id, email: null, status: 'active' }, NOW);
+}
+
 beforeEach(() => {
   db = openDatabase(':memory:');
   runMigrations(db);
-  repository = new GroupRepository({ db, logger: createLogger() });
+  const logger = createLogger();
+  repository = new GroupRepository({ db, logger });
+  users = new UserRepository({ db, logger });
 });
 
 afterEach(() => {
@@ -136,6 +148,9 @@ describe('addMember', () => {
   beforeEach(() => {
     createGroup('eng');
     createGroup('ops');
+    createUser('alice');
+    createUser('bob');
+    createUser('carol');
   });
 
   it('写入成员关系', () => {
@@ -192,6 +207,8 @@ describe('批量删除成员关系', () => {
   beforeEach(() => {
     createGroup('eng');
     createGroup('ops');
+    createUser('alice');
+    createUser('bob');
     repository.addMember('eng', 'alice', 'member', NOW);
     repository.addMember('ops', 'alice', 'member', NOW);
     repository.addMember('ops', 'bob', 'member', NOW);
@@ -211,10 +228,11 @@ describe('批量删除成员关系', () => {
     expect(repository.listGroupIdsOfUser('alice')).toEqual(['eng']);
   });
 
-  it('delete 不级联删成员关系（由服务层显式清理）', () => {
+  it('delete 级联删成员关系（迁移 0017 的外键）', () => {
     expect(repository.delete('eng')).toBe(1);
 
-    // 迁移 0008 不建外键：删组只删组本身，孤儿行由 IdentityService.deleteGroup 清。
-    expect(repository.listMembers('eng')).toHaveLength(1);
+    // 外键 ON DELETE CASCADE：绕过 IdentityService.deleteGroup 直接删组行，
+    // 也不能留下孤儿成员关系（同 ID 重建的组会继承它们）。
+    expect(repository.listMembers('eng')).toHaveLength(0);
   });
 });

@@ -26,11 +26,16 @@
 -- 是「这把 key 是哪一把」的标识，不是秘密；secret 才是。明文存 prefix 也让
 -- 「列出 key」只返回 prefix 时不会泄露任何可用的东西。
 --
--- ## 为什么 `user_id` 不建外键
+-- ## 为什么 `user_id` 最初不建外键
 --
 -- 与 0008 的判据相同：删用户是账号管理，删 key 是凭据管理，两者的审计语义
 -- 不同。「哪些行跟着删」由应用层显式决定（`IdentityService.deleteUser` 会清
 -- key），DDL 里的级联删除是看不见的副作用。
+--
+-- **迁移 0017 补上了 `api_key.user_id -> app_user(id) ON DELETE CASCADE`**：绕过
+-- `IdentityService.deleteUser` 直接删用户行时，key 不能留下——孤儿 key 在重建
+-- 同 ID 用户后立刻可用，而它本来属于一个已经被撤销的账号。应用层的
+-- `removeByUser` 保留（删除日志要计数）。
 --
 -- ## 幂等
 --

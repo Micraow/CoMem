@@ -10,10 +10,10 @@
 -- 写 SQL 都要记得加，漏一次就是语法错误——而且这类错误在演示前最后一次改 SQL 时
 -- 最不容易被发现。统一加 `app_` 前缀，SQL 里不需要任何引号。
 --
--- ## 为什么不加外键
+-- ## 为什么最初不加外键（0017 补上了）
 --
--- `group_member` 的 `group_id` / `user_id` 引用 `app_group` / `app_user`，但这里
--- 刻意**不**建 `FOREIGN KEY ... ON DELETE CASCADE`：
+-- `group_member` 的 `group_id` / `user_id` 引用 `app_group` / `app_user`，但这份
+-- 迁移刻意**不**建 `FOREIGN KEY ... ON DELETE CASCADE`：
 --
 -- 1. **删用户不等于级联删一切。** 成员关系要显式清（否则 `listMembers` 会返回
 --    不存在的用户，孤儿行没有任何查询方还能解释它）；ACL 里的 `user:{uid}` 条目
@@ -24,6 +24,11 @@
 --
 -- 所以成员关系由 `services/identity.ts` 显式删除（`GroupRepository` 的两个批量
 -- 删除方法），不靠 DDL。
+--
+-- **迁移 0017 给这两张表补上了外键**：仓储是公开入口，任何调用方都能绕过
+-- `IdentityService.deleteUser` 直接删用户行，留下孤儿行——而同 ID 重建的用户会
+-- 立刻获得 `group:{gid}` 主体，继承那个组的全部 ACL。外键是防御纵深，上面第 2 条
+-- 的应用层清理（日志、计数）保留。
 --
 -- ## 幂等
 --

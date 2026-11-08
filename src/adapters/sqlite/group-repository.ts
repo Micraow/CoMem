@@ -7,10 +7,14 @@
  *
  * ## 成员关系为什么在应用层维护
  *
- * 迁移 0008 不建外键：删用户时不能级联删 ACL 里的 `user:{uid}` 条目（删账号与
- * 撤权是两件事），「哪些行跟着删」必须由调用方显式决定。这里提供两个批量删除
- * 方法（`removeMembershipsOfUser` / `removeMembershipsOfGroup`），
- * `services/identity.ts` 的 `deleteUser` / `deleteGroup` 在同一个用例里调用。
+ * 迁移 0008 最初不建外键：删用户时不能级联删 ACL 里的 `user:{uid}` 条目（删账号
+ * 与撤权是两件事），「哪些行跟着删」必须由调用方显式决定。迁移 0017 给
+ * `group_member` 补了 `ON DELETE CASCADE`，那是**防御纵深**——仓储是公开入口，
+ * 绕过用例直接删用户行时不能留下孤儿行（孤儿行会让同 ID 重建的用户立刻拿到
+ * `group:{gid}` 主体）。这里仍然提供两个批量删除方法
+ * （`removeMembershipsOfUser` / `removeMembershipsOfGroup`），
+ * `services/identity.ts` 的 `deleteUser` / `deleteGroup` 在同一个用例里调用：
+ * 删除日志要计数，级联删除没有这个插入点。
  *
  * ## `listGroupIdsOfUser` 是热路径
  *
@@ -249,8 +253,8 @@ export class GroupRepository {
   /**
    * 硬删组，返回被删的行数（0 = 不存在）。
    *
-   * 不碰 `group_member`：成员关系由 `IdentityService.deleteGroup` 显式清理
-   * （迁移 0008 的注释）。
+   * `group_member` 由迁移 0017 的外键 `ON DELETE CASCADE` 级联清掉；
+   * `IdentityService.deleteGroup` 仍然先显式调用批量删除——删除日志要计数。
    */
   delete(id: string): number {
     const deleted = Number(

@@ -294,8 +294,9 @@ export class UserRepository {
   /**
    * 硬删，返回被删的行数（0 = 不存在）。
    *
-   * 不碰 `group_member`：成员关系的清理是应用层决策（迁移 0008 的注释），
-   * `IdentityService.deleteUser` 显式调用 `GroupRepository` 的批量删除。
+   * `group_member` / `api_key` 由迁移 0017 的外键 `ON DELETE CASCADE` 级联清掉；
+   * `IdentityService.deleteUser` 仍然先显式调用三个批量删除——删除日志要计数，
+   * 而级联删除是看不见的。外键保证「绕过用例直接删行」时不留孤儿行。
    */
   delete(id: string): number {
     const deleted = Number(

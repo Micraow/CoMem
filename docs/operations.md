@@ -597,6 +597,29 @@ curl -X POST http://127.0.0.1:1933/api/v1/admin/groups/eng/owner \
 （`userId` 填自己）即可把预置补齐；这个端点对「当前 owner」放行，不要求先有 manage
 条目。没有成员的存量组没有可回填的 owner，删掉重建即可——重建时会写新的 owner 预置。
 
+### 升到「身份表有外键」之后
+
+迁移 0017 把 `group_member` / `api_key` 重建成带 `ON DELETE CASCADE` 外键的表
+（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 + `INSERT INTO ... SELECT`
++ `DROP` + `RENAME`）。重建时**只复制两端都存在的行**：引用已不存在的用户或组的
+孤儿行会被丢掉——它们正是这次要清掉的东西，旧库里能存在只是因为没约束。
+
+升级前可以先数一下会丢多少：
+
+```bash
+sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" "
+  SELECT 'group_member', COUNT(*) FROM group_member
+   WHERE user_id NOT IN (SELECT id FROM app_user)
+      OR group_id NOT IN (SELECT id FROM app_group)
+  UNION ALL
+  SELECT 'api_key', COUNT(*) FROM api_key
+   WHERE user_id NOT IN (SELECT id FROM app_user);"
+```
+
+非零说明有历史残留（孤儿成员关系会让同 ID 重建的用户立刻拿到 `group:{gid}` 主体）。
+丢掉不需要额外操作。之后直接 `DELETE FROM app_user` 也会级联清理——外键是应用层
+清理之外的防御纵深。
+
 ## 监控
 
 两个端点都不认证：探活系统没有 CoMem 身份，要求 `x-comem-subject` 只会让 `curl /health`
