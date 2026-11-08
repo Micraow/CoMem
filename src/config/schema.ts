@@ -575,6 +575,29 @@ const configSchema = configObjectSchema.transform((config) => {
   }
 
   /**
+   * 交叉校验：开了工作记忆就必须有真的模型。
+   *
+   * **这里和 `ingest` 的判据不同，不能降级。** 导入的阶段一（归档 + 建任务 +
+   * 游标）不依赖模型，跳过后面的阶段二仍然留下「会话已经进库」这个独立产物；工作
+   * 记忆没有对应的「一半」——它在 `archive_summary` 步骤里，前面是规则生成器也能
+   * 做的目录摘要，后面只有工作记忆本身。开了它却没有模型，这一步就只剩「跳过一个
+   * 空步骤」，配置项等于在撒谎。所以启动时失败，而不是每次归档都投递一个注定失败
+   * 的任务。
+   *
+   * 与上面几条同一条理由、同一个写法（`transform` 而不是 `superRefine`）。
+   */
+  if (config.memory.workingMemory.enabled && !llmEnabled) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      'memory.workingMemory.enabled 需要可用的 LLM：providers.llm.default.type 是 disabled。工作记忆没有规则生成器——摘要可以降级成 rule，它不能，开了就必须能调模型。关掉它，或配置 providers.llm。',
+      {
+        field: 'memory.workingMemory.enabled',
+        llmType: config.providers.llm.default.type,
+      },
+    );
+  }
+
+  /**
    * 交叉校验：摘要生成器是 `llm` 就必须有可用的 LLM 提供者。
    *
    * 默认生成器是 `llm`，而 `providers.llm.default.type` 的占位默认值指不到任何

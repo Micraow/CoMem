@@ -111,7 +111,10 @@ memory:
     - experiences
     - rules
   workingMemory:
-    enabled: false        # 开它会多一次 LLM 调用
+    # 开它会多一次 LLM 调用（7 段工作记忆，架构文档 §10.5）。
+    # 没有可用 LLM（providers.llm.default.type: disabled）时启动失败：工作记忆没有
+    # 规则生成器，不像摘要可以降级成 rule。关掉它，或配置 providers.llm。
+    enabled: false
   # 记忆的 TTL。清扫只做软过期（status = archived），物理删除由运维显式做。
   ttl:
     defaultDays: 0         # 记忆默认存活天数。0 = 永不过期（默认）

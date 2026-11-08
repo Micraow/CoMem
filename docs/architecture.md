@@ -1416,7 +1416,7 @@ Template Method 固定「跳过已完成 → 执行 → 记录」的骨架，变
 
 **怎么用**：下一次提交时，上一个归档的 `.overview.md` 作为 `latestArchiveOverview` 喂进抽取 prompt。第一次提交没有前序，这一段为空。
 
-**默认关闭**（`memory.workingMemory.enabled = false`）。开它会多一次 LLM 调用，只在长会话场景有价值。
+**默认关闭**（`memory.workingMemory.enabled = false`）。开它会多一次 LLM 调用，只在长会话场景有价值。**开启就必须有可用的 LLM**：工作记忆没有规则生成器，`providers.llm.default.type: disabled` 时 `loadConfig` 抛 `INVALID_ARGUMENT`（与 `ingest` 的降级不同——导入的阶段一有独立产物，工作记忆没有）。
 
 ### 10.6 并发与一致性
 
@@ -1742,6 +1742,11 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 一行终端输出——否则用户以为跑完 1,076 个会话就抽好了记忆，实际 `find` 一条都搜不到。
 与 `rerank.enabled` 的差别在这里：开了重排却不重排没有任何用处，开了导入却不抽取
 还有一半用处（原始对话落盘、可检索）。
+
+**注意「停在 `pending`」只对导入进程成立。** 同机若有服务端在跑，它的
+`CommitRunner`（默认启动、每秒轮询）会认领这些任务，然后因为调不到模型而停在
+`memory_extract` 并置 `failed`——`INVALID_ARGUMENT` 是终态错误，不会重试。所以
+「先归档、以后再抽取」要求导入时没有服务端共用同一个数据目录。
 
 #### 两条路，同一段管线
 
@@ -2778,7 +2783,7 @@ memory:
     - experiences
     - rules
   workingMemory:
-    enabled: false        # 开它会多一次 LLM 调用
+    enabled: false        # 开它会多一次 LLM 调用。没有可用 LLM 时启动失败（没有规则生成器，不能降级）
   # 记忆的 TTL。清扫只做软过期（status = archived），物理删除由运维显式做。
   ttl:
     defaultDays: 0        # 记忆默认存活天数。0 = 永不过期（默认）

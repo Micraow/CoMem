@@ -56,7 +56,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | 键 | 默认值 | 是什么 / 什么时候改 |
 |---|---|---|
 | `dataDir` | `""` | 数据根。空串表示按运行形态推导（§6.5）：容器里 `/var/lib/comem`、root 运行 `/var/lib/comem`、其余 `$XDG_DATA_HOME/comem`。挂卷或备份到别处时显式写 |
-| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule` 且 `memory.consolidation.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
+| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule`、`memory.consolidation.enabled` 与 `memory.workingMemory.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
 | `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。**默认值是 IANA 保留域名（RFC 2606），永远不可达**；保持它启动时会打一条 `warn`，说明摘要、记忆抽取、合并与检索改写都不会工作。换成自建网关或真实供应商地址 |
 | `providers.llm.default.model` | `gpt-4o-mini` | 模型名。摘要质量与成本由它决定 |
 | `providers.llm.default.apiKey` | `""` | 密钥。模板里是 `${COMEM_LLM_KEY}`；空串时调用会失败，但没有密钥也能启动 |
@@ -85,7 +85,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.ttl.defaultDays` | `0` | 记忆默认存活天数。0 = 永不过期。只影响之后写入的记忆 |
 | `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
-| `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得 |
+| `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
@@ -111,6 +111,33 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `ingest.extractionBatchSize` | `20` | 阶段二每批等多少个会话。20 的来源见 `src/config/schema.ts` 的注释 |
 | `ingest.extractionTimeoutMs` | `1800000` | 每批阶段二的最长等待（30 分钟）。`0` = 不等。超时按批算，不是按总量 |
 | `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
+
+### 没有可用 LLM 时
+
+`providers.llm.default.type: disabled` 表示这次部署里没有模型。各功能的处理**不完全
+相同**，这是有意为之，不是漏了校验：
+
+| 功能 | 没有 LLM 时 | 为什么 |
+|---|---|---|
+| 目录摘要 | 降级成 `summary.generator: rule`，结果标 `degraded: true` | 规则生成器能直接产出可用的 L0 / L1，只是质量差 |
+| 记忆合并 | 启动失败（`INVALID_ARGUMENT`） | 合并是 agentic 循环，规则生成器产不出操作列表 |
+| 工作记忆 | 启动失败（`INVALID_ARGUMENT`） | 工作记忆没有规则生成器 |
+| 本机对话导入（阶段二） | 降级：只归档，报告的 `extraction` 是 `{ skipped: true, reason: "llm_disabled" }` | 阶段一（归档 + 建任务 + 游标）不依赖模型，先导进来本身有价值 |
+
+**为什么导入能降级、工作记忆不能。** 导入有两个独立的产物：阶段一（会话进库、能按
+内容检索）和阶段二（生成摘要、抽取记忆）。缺少模型只让第二个产物消失，第一个仍在，
+所以拒绝启动等于为了第二阶段的缺失丢掉第一阶段。工作记忆没有这个「阶段一」——它在
+`archive_summary` 步骤的末尾，前面只有目录摘要（规则生成器也能做），后面只有工作记忆
+本身。开了它却没有模型，这一步就只剩下「跳过一个空步骤」，配置项等于在撒谎。所以
+`memory.workingMemory.enabled` 与 `providers.llm.default.type: disabled` 同时出现时
+启动期失败，错误消息里带 `field: memory.workingMemory.enabled`。
+
+**已知限制：** 没有 LLM 时**普通的归档提交**仍然会在 `memory_extract` 步骤失败（任务
+置 `failed`，归档停在 `stepsDone: ["archive_summary"]`）。导入路径靠「跳过阶段二」避开
+了这一点，但任何被 `CommitRunner` 认领的任务都会撞上它。这不是配置项之间的不一致
+（`memory_extract` 没有开关，它是提交管线的固定一步），目前的处理是让任务显式失败
+而不是静默完成；要让「先归档、以后再抽取」成立，需要让执行器在没有模型时保留任务为
+`pending`。
 
 ### 配置自检
 
@@ -1305,6 +1332,12 @@ pnpm ingest --source all --json           # 机器可读
   命令，只降级。阶段一不依赖模型：原始对话落盘、能按内容检索，本身就有价值。但
   报告与终端输出都会说明「记忆还没抽取，`find` 暂时搜不到内容」；配好
   `providers.llm` 后重跑 `pnpm ingest`，积压的任务会被执行器认领。
+
+  **注意：同机有服务端在跑时，任务不会一直 `pending`。** 服务端的 `CommitRunner`
+  默认启动并每秒轮询，它会认领这些任务，然后因为调不到模型而停在 `memory_extract`
+  并置 `failed`（`INVALID_ARGUMENT` 是终态错误，不重试）。所以「先归档、以后再
+  抽取」只在导入进程独占数据目录时成立；否则需要先停服务端再导入。见「没有可用
+  LLM 时」一节的已知限制。
 - `--no-wait` 与降级是两件事：显式 `--no-wait` 时 `extraction` 仍是 `null`（「没
   等」），不会写成「跳过」。
 

@@ -580,6 +580,22 @@ describe('loadConfig', () => {
 
       expect(config.memory.consolidation).toEqual({ enabled: false, maxIterations: 10 });
     });
+
+    it('workingMemory.enabled 在有 LLM 时合法（默认 provider 不是 disabled）', () => {
+      const config = loadConfig({
+        path: writeConfig('memory:\n  workingMemory:\n    enabled: true\n'),
+        env: testEnv(),
+      });
+
+      expect(config.memory.workingMemory.enabled).toBe(true);
+      expect(config.providers.llm.default.type).toBe('openai-compatible');
+    });
+
+    it('workingMemory 默认关：不写配置时 enabled 是 false', () => {
+      const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
+
+      expect(config.memory.workingMemory).toEqual({ enabled: false });
+    });
   });
 
   /**
@@ -654,6 +670,34 @@ describe('loadConfig', () => {
           llmType: 'disabled',
         });
       }
+    });
+
+    it('workingMemory.enabled 但没有 LLM 时启动失败（工作记忆不能降级）', () => {
+      const error = loadError({
+        path: writeConfig(
+          [
+            'providers:',
+            '  llm:',
+            '    default:',
+            '      type: disabled',
+            'summary:',
+            '  generator: rule',
+            'memory:',
+            '  workingMemory:',
+            '    enabled: true',
+          ].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(error.code).toBe('INVALID_ARGUMENT');
+      expect(error.message).toContain('memory.workingMemory.enabled');
+      // 消息要说清「为什么不像 ingest 那样降级」：工作记忆没有规则生成器。
+      expect(error.message).toContain('没有规则生成器');
+      expect(error.details).toMatchObject({
+        field: 'memory.workingMemory.enabled',
+        llmType: 'disabled',
+      });
     });
 
     it('没有配置 providers.llm 时保持 openai-compatible 默认值（默认部署不变）', () => {
