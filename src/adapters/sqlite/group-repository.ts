@@ -234,6 +234,10 @@ export class GroupRepository {
    * 话，同 ID 重建的账号会被 `POST /admin/groups/{id}/owner` 当成当前 owner，跳过
    * 组根求权，等于拿到组的管理权。
    *
+   * 迁移 0018 给 `owner_user_id` 补了 `ON DELETE SET NULL` 外键：绕过
+   * `IdentityService.deleteUser` 直接删用户行时，这条清理也会生效。应用层保留它是
+   * 因为删除日志要计数（外键是防御纵深，不是替代）。
+   *
    * 置 `NULL` 的组只有 `group:{gid} = write`，没有主体能求 manage，**只能通过
    * `pnpm group:owner` 恢复**（§12.6）——所以要返回受影响的组数，让删除用户的那条
    * 日志能指出哪些组需要人工接管。

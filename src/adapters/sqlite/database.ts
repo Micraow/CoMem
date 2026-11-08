@@ -120,6 +120,23 @@ function listMigrations(): MigrationFile[] {
  * 幂等：已经记录在 `schema_version` 里的版本跳过。
  * 每个迁移单独一个事务——某个脚本失败时，前面成功的版本保持已应用状态，
  * 版本表与库结构始终一致。
+ *
+ * ## 迁移期间关掉外键强制
+ *
+ * 重建被引用的表（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 +
+ * `INSERT ... SELECT` + `DROP` + `RENAME`）时，`DROP TABLE` 在
+ * `PRAGMA foreign_keys = ON` 下会先做隐式 `DELETE FROM`，把子表的行按
+ * `ON DELETE CASCADE` 一起删掉。迁移 0018 重建 `app_group` 时，`group_member`
+ * 的成员关系会被整张清空——一次升级把数据删了。
+ *
+ * `PRAGMA foreign_keys` 在事务里是 no-op，开关只能在 `BEGIN` 之前。标准做法
+ * （SQLite 官方文档「Making Other Kinds Of Table Schema Changes」）是：关掉
+ * 外键强制 → 执行重建 → `PRAGMA foreign_key_check` 确认没有悬空引用 → 恢复原值。
+ * 检查放在事务里、提交之前，失败时整份迁移回滚，不会留下「新表建好、引用坏了」
+ * 的中间状态。
+ *
+ * 恢复的是**连接原来的值**，不是强制打开：测试里可能用裸 `DatabaseSync`
+ * （默认关闭）调本函数，把它改成打开会改变调用方对连接的预期。
  */
 export function runMigrations(db: DatabaseSync): number {
   db.exec(
@@ -132,16 +149,59 @@ export function runMigrations(db: DatabaseSync): number {
       continue;
     }
     const sql = readFileSync(migration.path, 'utf8');
-    withWriteTransaction(db, () => {
-      db.exec(sql);
-      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
-        migration.version,
-        new Date().toISOString(),
-      );
+    withForeignKeysDisabled(db, () => {
+      withWriteTransaction(db, () => {
+        db.exec(sql);
+        assertNoForeignKeyViolations(db, migration.version);
+        db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+          migration.version,
+          new Date().toISOString(),
+        );
+      });
     });
     applied = migration.version;
   }
   return applied;
+}
+
+/**
+ * 在关闭外键强制的状态下执行 `fn`，结束后恢复原值。
+ *
+ * 调用方必须保证 `fn` 里的 `BEGIN` / `COMMIT` 都发生在回调内部——`PRAGMA
+ * foreign_keys` 在事务里是 no-op，事务开着时关不掉。
+ */
+function withForeignKeysDisabled<T>(db: DatabaseSync, fn: () => T): T {
+  const enabled = Number(db.prepare('PRAGMA foreign_keys').get()?.['foreign_keys'] ?? 0) === 1;
+  if (enabled) {
+    db.exec('PRAGMA foreign_keys = OFF');
+  }
+  try {
+    return fn();
+  } finally {
+    if (enabled) {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+}
+
+/**
+ * 迁移执行后确认没有悬空外键。`foreign_key_check` 在 `foreign_keys = OFF` 时
+ * 仍然可查，所以检查可以放在重建与提交之间。
+ *
+ * 有冲突时抛 `INTERNAL` 而不是静默提交：一份「表结构没问题、引用坏了」的库
+ * 会在下一次删除或写入时以 `FOREIGN KEY constraint failed` 的形式炸在无关的
+ * 请求上。宁可升级失败、让人看见是哪一份迁移。
+ */
+function assertNoForeignKeyViolations(db: DatabaseSync, version: number): void {
+  const violations = db.prepare('PRAGMA foreign_key_check').all();
+  if (violations.length === 0) {
+    return;
+  }
+  throw new ComemError('INTERNAL', `迁移 ${String(version)} 留下了悬空外键引用。`, {
+    version,
+    violations: violations.length,
+    tables: violations.map((row) => String(row['table'] ?? '')),
+  });
 }
 
 /**

@@ -1097,6 +1097,49 @@ describe('删账号清空命名空间里的直接授权', () => {
  * 「元数据」当成「当前 owner」跳过组根求权，`setGroupOwner` 直接把
  * `user:alice = manage` 写进组根——新账号拿到组管理权。
  */
+describe('app_group.owner_user_id 的外键', () => {
+  it('绕过用例直接删账号时组 owner 被置 NULL，重建同 ID 拿不到组管理权', async () => {
+    await createUser('alice');
+    // 不走 HTTP 建组：路由会写根预置，这里要留下「只有 owner 元数据、没有 manage
+    // 条目」的组，才能观察到快速路径本身的影响。
+    container.services.identity.createGroup({
+      id: 'eng',
+      displayName: 'eng',
+      ownerUserId: 'alice',
+    });
+    expect(container.services.identity.getGroup('eng')?.ownerUserId).toBe('alice');
+
+    // 绕过 `IdentityService.deleteUser` 的 `clearOwnerOfUser`，直接用仓储删行。
+    new UserRepository({ db: container.db, logger: container.logger }).delete('alice');
+
+    // 外键 `ON DELETE SET NULL`：组的目录行保留，owner 元数据清空。
+    expect(container.services.identity.getGroup('eng')?.ownerUserId).toBeNull();
+
+    await createUser('alice');
+    const aliceApp = await createAdminAppAs('user:alice');
+    try {
+      const denied = await aliceApp.inject({
+        method: 'POST',
+        url: '/admin/groups/eng/owner',
+        payload: { userId: 'alice' },
+      });
+      // 不是当前 owner（NULL），组根也没有 manage：求权阶段就拦住。
+      expect(denied.statusCode).toBe(403);
+      expect(errorOf(denied)['code']).toBe('PERMISSION_DENIED');
+    } finally {
+      await aliceApp.close();
+    }
+
+    // 授权没有落盘。
+    expect(container.services.identity.getGroup('eng')?.ownerUserId).toBeNull();
+  });
+});
+
+/**
+ * 回归：召回账本按作用域分片（`_meta/recall/{scopeKey}.recall_log.json`），
+ * 删账号 / 组时不清，同 ID 重建后 `recentlyDelivered` 会认为已经交付过——
+ * 第一次召回被静默压制（§8.7）。
+ */
 describe('删账号 / 组清掉召回账本', () => {
   it('删账号后账本文件消失，重建同 ID 不再继承去重状态', async () => {
     await createUser('alice');

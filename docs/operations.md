@@ -23,6 +23,12 @@ pnpm install              # 后端 + Hook 插件的开发依赖（tsx、vitest�
 cd web && pnpm install    # 控制台单独装：web/ 有自己的 lockfile，不在根 workspace 里
 ```
 
+第二行会跑 `web/package.json` 的 `postinstall`（`nuxt prepare`），在 `web/.nuxt/` 下生成
+Nuxt 类型。**这一步不是可选的**：`web/tsconfig.json` 的 `extends` 指向
+`.nuxt/tsconfig.json`，`pnpm test` 里的 `tests/unit/web/` 走 Vite 转译时会读它——没有
+这个文件，`pnpm test` 在第一个控制台用例上就报 `Cannot find module './.nuxt/tsconfig.json'`。
+`nuxt prepare` 只做类型生成，不产出 `.output/`，耗时约 1 秒。
+
 `integrations/` 不需要安装：它是纯 `.mjs`，只依赖 Node 内置模块，`dependencies` 为空。
 
 ## 配置
@@ -1006,6 +1012,29 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" "
 非零说明有历史残留（孤儿成员关系会让同 ID 重建的用户立刻拿到 `group:{gid}` 主体）。
 丢掉不需要额外操作。之后直接 `DELETE FROM app_user` 也会级联清理——外键是应用层
 清理之外的防御纵深。
+
+### 升到「组 owner 有外键」之后
+
+迁移 0018 重建 `app_group`，给 `owner_user_id` 补 `REFERENCES app_user(id) ON DELETE
+SET NULL`（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 + `INSERT INTO ...
+SELECT` + `DROP` + `RENAME`）。孤儿 owner（指向不存在的用户）在重建时被置 `NULL`：
+组的目录行、成员关系与数据都保留，只是暂时没有 owner。升级前可以数一下有多少组会被
+置空：
+
+```bash
+sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" "
+  SELECT COUNT(*) FROM app_group
+   WHERE owner_user_id IS NOT NULL
+     AND owner_user_id NOT IN (SELECT id FROM app_user);"
+```
+
+非零说明有历史残留，恢复走 `pnpm group:owner`（见「恢复组的 owner」）。
+
+**迁移期间外键强制是关的。** 重建 `app_group` 要 `DROP TABLE`，它在
+`foreign_keys = ON` 下会先做隐式 `DELETE FROM`，把 `group_member` 的成员关系按
+`ON DELETE CASCADE` 一起删掉。迁移框架（`runMigrations`）在每个迁移外面关掉外键
+强制、提交前用 `PRAGMA foreign_key_check` 确认没有悬空引用、再恢复原值。有冲突时
+整份迁移回滚并报 `INTERNAL`。
 
 ## 监控
 
