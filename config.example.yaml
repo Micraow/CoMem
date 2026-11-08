@@ -127,6 +127,7 @@ telemetry:
     enabled: true            # Hook 上报阻塞开销，控制台「监控」页用
   hotness:
     halfLifeHours: 168       # 一周
+    weight: 0                # 热度对最终排序的影响：0 = 只做冷热标记；1 = 与检索分同权
 
 task:
   leaseSeconds: 60

@@ -65,6 +65,7 @@ local/             # 本地产物，不进版本控制
 pnpm install
 pnpm typecheck       # 必须通过
 pnpm lint            # 必须通过
+pnpm check:config    # 配置项必须有消费方（L1–L3，见 docs/operations.md「配置自检」）
 pnpm test            # unit + integration
 pnpm test:e2e        # 六条链路
 pnpm dev             # 后端 + 控制台

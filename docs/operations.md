@@ -101,6 +101,37 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `ingest.extractionTimeoutMs` | `1800000` | 每批阶段二的最长等待（30 分钟）。`0` = 不等。超时按批算，不是按总量 |
 | `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
 
+### 配置自检
+
+```bash
+pnpm check:config
+```
+
+三层静态检查，退出码非 0 表示有问题：
+
+| 层 | 检查 | 抓什么 |
+|---|---|---|
+| L1 | `src/config/schema.ts` 的每个叶子都必须在 `src/**/*.ts` 里被读 | 加了配置项没接线 |
+| L2 | `createContainer` 里 `new X({ ... config.a.b ... })` 的目标属性不能是可选 | 可选 = 忘了传也能编译 = 静默失效 |
+| L3 | `config.example.yaml` 与 `configSchema` 的叶子集合双向一致 | 文档漂移 |
+
+**L4（变体读取差集）在 `pnpm test` 里**：`tests/integration/config-coverage.test.ts` 按
+`retrieval.engine` 的 `fts5` / `vector` / `hybrid` 各启动一次容器、各跑
+`find` / `search` / `context` / `grep` / `glob`，差集非空即失败。它抓的是「只在某个
+引擎分支被读」——L1 只能看到「有人读」，看不到「某个分支不读」。
+
+四层都只证明「配置到达了代码」，不能证明「配置到达了行为」。「重排候选文本恒为空」
+那一类（整条路径空转、模型一次都没被调用）只有人写的行为契约测试能抓。**`check:config`
+全绿不代表配置生效。**
+
+脚本会打印「歧义匹配」：手写的配置切片（`RetrievalSettings` 之类）与配置树是两份声明，
+只能靠「属性名子集」的形状对上。当前 3 处（`workingMemory` 与 `telemetry.hookOverhead`
+等都是 `{ enabled: boolean }`，静态不可区分），需要人工核对。改成 `z.infer` 派生类型
+之后才能归零。
+
+**遗留债务**：`LEGACY_OPTIONAL_CONFIG_DEPS` 记录 17 处已经存在的「配置值进入可选属性」。
+清单只允许缩小，新增项直接报错。全部改必填要动 10 个接口与 62 处构造点，排在后续 wave。
+
 ## 启动
 
 ### 开发

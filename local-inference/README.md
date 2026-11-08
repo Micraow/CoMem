@@ -139,9 +139,15 @@ nice -n 10 taskset -c 0-5 .venv/bin/python server.py --device cpu --threads 6
 
 | 后端 | `--device` | 能不能跑 | 证据 |
 |---|---|---|---|
-| llama.cpp | `cpu` | ✅ | ggml CPU 后端 + AVX-512（`avx_vnni` / `avx512` 由 CPU 标志确认） |
-| llama.cpp | `gpu` | ✅ | Vulkan 1.4，`ggml_vulkan: 0 = Intel(R) Graphics (ARL)`，Mesa 26.2.6 |
-| llama.cpp | `npu` | ❌ | **启动期拒绝**：llama.cpp 上游没有 Intel NPU 的 ggml backend |
+| llama.cpp | `cpu` | ✅ | ggml CPU 后端，`AVX = 1 \| AVX_VNNI = 1 \| AVX2 = 1 \| F16C = 1 \| FMA = 1 \| REPACK = 1`（**没有 AVX-512**：Arrow Lake 的 P 核不支持） |
+| llama.cpp | `gpu` | ✅ | Vulkan 1.4.363，`ggml_vulkan: 0 = Intel(R) Graphics (ARL) \| uma: 1 \| fp16: 1`，Mesa 26.2.6 |
+| llama.cpp | `npu` | ❌ | **启动期拒绝（退出码 2）**：llama.cpp 上游没有 Intel NPU 的 ggml backend |
+
+**NPU 的硬件是存在的**：`lspci` 报 `00:0b.0 Processing accelerators: Intel Corporation
+Core Ultra 200H/200V Series Processors NPU`，`intel_vpu` 模块已加载，字符设备
+`/dev/accel/accel0`（`crw-rw----  root:render`）可打开（`micraow` 在 `render` 组里）。
+缺的是 llama.cpp 的 backend，不是驱动。**要用 NPU 只能换 OpenVINO**，而那是另一套
+运行时与另一套分数语义——不在本服务的范围内。
 
 `--device gpu` 在构建没有 Vulkan 时会**拒绝启动**而不是静默跑 CPU：
 
@@ -245,11 +251,70 @@ clamp。结果按分数降序，只返回 `top_n` 条。空文档（`""`）不�
 
 ## 性能
 
-<!-- BENCH_TABLE -->
+**测法**：`nice -n 10 taskset -c 0-5 .venv/bin/python bench.py --devices cpu,gpu,npu
+--batch-sizes 1,8,32 --lengths 32,128 --repeat 5`。每个设备跑在独立子进程里（两份权重
+不同时驻留内存），测量期间机器负载约 5（同机有其它服务在跑）。
+
+| 设备 | 批大小 | 目标 token | 实测 token/条 | 吞吐（条/秒） | P50 (ms) | P95 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| cpu | 1 | 32 | 61 | 3.21 | 302.2 | 373.7 |
+| cpu | 1 | 128 | 151 | 1.44 | 621.5 | 956.1 |
+| cpu | 8 | 32 | 61 | 3.76 | 2163.9 | 2512.3 |
+| cpu | 8 | 128 | 151 | 1.46 | 5563.7 | 5778.2 |
+| cpu | 32 | 32 | 61 | 3.15 | 10311.6 | 10893.6 |
+| cpu | 32 | 128 | 151 | 1.09 | 29100.6 | 31841.7 |
+| gpu | 1 | 32 | 61 | 5.99 | 166.8 | 174.1 |
+| gpu | 1 | 128 | 151 | 3.05 | 322.6 | 365.2 |
+| gpu | 8 | 32 | 61 | 17.52 | 445.9 | 500.8 |
+| gpu | 8 | 128 | 151 | 6.70 | 1160.4 | 1251.6 |
+| gpu | 32 | 32 | 61 | 14.97 | 2102.9 | 2271.9 |
+| gpu | 32 | 128 | 151 | 4.24 | 7422.6 | 7995.2 |
+| npu | — | — | — | **不可用**（见「设备矩阵」） | — | — |
+
+**怎么读**：
+
+- **GPU 在批大小 ≥ 8 时明显更快**（14.97 vs 3.15 条/秒，4.7 倍）。核显有独立的
+  EU 阵列，批量 GEMM 能喂满；CPU 在 6 核上已经是单次预填的吞吐上限。
+- **CPU 的批大小收益几乎为零**（3.21 → 3.15）。Q8_0 的 GEMV 在 CPU 上是内存带宽
+  受限的，增大批大小不改变要读的权重体积。
+- **回填 900 条会话（按每条 151 token 算）**：GPU 约 10 分钟，CPU 约 25 分钟。
+  两者都远好于「远程供应商配额」这个约束，但 GPU 是默认推荐。
+- **P50 与 P95 的差距小**（< 10%），说明延迟稳定，没有 GC 或线程调度的抖动。
+
+### 一个必须知道的坑：Vulkan 设备可见时 CPU 会退化成单线程
+
+这个构建同时带 CPU 与 Vulkan 后端。`n_gpu_layers=0` 只表示「不把层放到显存」，
+ggml 的调度器仍然把 KV cache 与计算缓冲区分配成 Vulkan 的 host 缓冲，而 Vulkan
+后端的 host 侧 `graph_compute` 是单线程的。
+
+| 配置 | 并行度（CPU 时间 / 墙钟） | 177 token 预填 |
+|---|---:|---:|
+| Vulkan 设备可见 | 0.98x | 67 tok/s |
+| `GGML_VK_VISIBLE_DEVICES=""` | **4.42x** | **248 tok/s** |
+
+`server.py` 在 `--device cpu` 且重排也在 CPU 时自动设这个环境变量（见
+`backends/llama_cpp.py` 的 `hide_vulkan_devices`）。**混合部署（嵌入 CPU + 重排 GPU）
+不能这么做**，启动日志会打一条 `warn`。
+
 
 ## 内存与磁盘
 
-<!-- MEMORY_TABLE -->
+| 项 | 体积 | 说明 |
+|---|---:|---|
+| 两个 GGUF Q8_0 | **1.28 GB** | 639,150,592 B + 639,153,184 B |
+| `.venv/` | **470 MB** | 含 `libllama.so` 与 `libggml-cpu.so` / `libggml-vulkan.so` |
+| 常驻内存（`--max-seq-len 8192`） | **3.93 GB** | 1.28 GB 权重 + 2×1.5 GB KV cache |
+| 常驻内存（`--max-seq-len 2048`） | **2.22 GB** | 同上，KV cache 缩到 1/4 |
+| 峰值内存（bench，batch 32） | **4.85 GB** | 一次 4832 token 的预填 |
+
+**KV cache 是大头**：28 层 × 8192 ctx × 8 KV 头 × 128 维 × 2（K+V）× 2 字节
+≈ 1.5 GB/模型。**本机只有 9–14GB 可用**，两个模型默认就要 3.9GB——如果同机还有
+别的服务，用 `--max-seq-len 2048` 降到 2.2GB。
+
+CPU 占用：`--threads 6` 时推理期间稳定 6 个核（`taskset -c 0-5` 全占满），空闲时
+接近 0（没有轮询）。**不要**把 `--threads` 设成 16：那会占满整机，而同机的其它服务
+会明显卡顿（这是上一次的事故）。
+
 
 ## 已知限制
 

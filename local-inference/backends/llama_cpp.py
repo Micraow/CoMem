@@ -28,6 +28,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +142,29 @@ def _rerank_template(metadata: dict[str, str]) -> str | None:
         if key.endswith("chat_template.rerank"):
             return value
     return None
+
+
+def hide_vulkan_devices() -> None:
+    """让 ggml 完全看不到 Vulkan 设备（**必须在加载模型之前调用**）。
+
+    这个构建同时带 CPU 与 Vulkan 后端。`n_gpu_layers=0` 只表示「不把层放到
+    显存」，ggml 的调度器仍然把 KV cache 与计算缓冲区分配成 Vulkan 的 host 缓冲，
+    而 Vulkan 后端的 host 侧 `graph_compute` 是**单线程**的。
+
+    实测（6 P 核，Qwen3-Embedding-0.6B Q8_0，177 token 预填）：
+
+    | 配置 | 并行度 | 吞吐 |
+    |---|---|---|
+    | Vulkan 设备可见 | 0.98x | 67 tok/s |
+    | `GGML_VK_VISIBLE_DEVICES=""` | **4.42x** | **248 tok/s** |
+
+    语义不变（三组文本的余弦与隐藏前一致到小数点后三位），所以纯 CPU 部署没有
+    理由付这个代价。
+
+    依赖的是 llama.cpp 的 `GGML_VK_VISIBLE_DEVICES` 环境变量；如果上游改名，
+    这里会静默失效（只是回到 1 倍速，不会算错）。
+    """
+    os.environ["GGML_VK_VISIBLE_DEVICES"] = ""
 
 
 def _require_gguf(path: str, what: str) -> Path:

@@ -10,10 +10,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "check:config": "tsx scripts/check-config.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integrations": "node --test integrations/tests/",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:integrations",
+    "verify": "pnpm typecheck && pnpm lint && pnpm check:config && pnpm test && pnpm test:integrations",
     "dev": "bash scripts/dev.sh",
     "dev:server": "tsx src/bootstrap/main.ts",
     "start": "tsx src/bootstrap/main.ts",

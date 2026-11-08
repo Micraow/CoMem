@@ -46,7 +46,11 @@ from backends.base import (
     l2_normalize,
     truncate_matryoshka,
 )
-from backends.llama_cpp import LlamaCppEmbedding, LlamaCppRerank
+from backends.llama_cpp import (
+    LlamaCppEmbedding,
+    LlamaCppRerank,
+    hide_vulkan_devices,
+)
 
 LOGGER = logging.getLogger("comem.local-inference")
 
@@ -707,7 +711,9 @@ def _probe_devices() -> dict[str, object]:
     不自动 fallback：`--device gpu` 但构建没有 Vulkan 时拒绝启动，而不是静默跑
     CPU——「以为跑在核显上、实际跑 CPU」是这类服务最常见的坑。
     """
-    accel = sorted(str(path) for path in Path("/dev").glob("accel*"))
+    # NPU 的字符设备在 `/dev/accel/accel0`（不是 `/dev/accel0`——`accel` 是一个类
+    # 目录，与 `/dev/dri/renderD128` 同构）。
+    accel = sorted(str(path) for path in Path("/dev/accel").glob("*"))
     dri = sorted(str(path) for path in Path("/dev/dri").glob("render*"))
 
     vulkan_devices: list[str] = []
@@ -839,6 +845,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if list_devices:
         print(json.dumps(_probe_devices(), indent=2, ensure_ascii=False))
         return 0
+
+    # 纯 CPU 部署必须让 ggml 看不到 Vulkan 设备，否则 CPU 推理会退化到单线程
+    # （见 `hide_vulkan_devices` 的实测表格）。混合部署（嵌入 CPU + 重排 GPU）
+    # 不能这么做，只能付这个代价——启动日志里说清楚。
+    if config.device == "cpu" and config.rerank_device == "cpu":
+        hide_vulkan_devices()
+        LOGGER.info("纯 CPU 部署：已隐藏 Vulkan 设备（否则 CPU 推理会退化成单线程）")
+    elif "cpu" in (config.device, config.rerank_device):
+        LOGGER.warning(
+            "混合设备部署（嵌入=%s，重排=%s）：无法隐藏 Vulkan 设备，"
+            "跑在 CPU 上的那个模型会退化成单线程。",
+            config.device,
+            config.rerank_device,
+        )
 
     # 设备矩阵的预检：在起 uvicorn 之前拒绝，而不是让 lifespan 抛异常。后者会打出
     # 一棵 traceback，而真正有用的只有最后一行——用户会以为服务本身坏了。

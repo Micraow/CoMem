@@ -142,10 +142,14 @@ def _run_combo(device: str, args: argparse.Namespace) -> ComboResult:
     调用方保证这是 worker 子进程，所以模型只加载一份。
     """
     from backends.base import BackendUnavailableError
-    from backends.llama_cpp import LlamaCppEmbedding
+    from backends.llama_cpp import LlamaCppEmbedding, hide_vulkan_devices
     from server import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODEL_FILE, MODELS_DIR
 
     _limit_resources(args.threads)
+    # 纯 CPU 组合要让 ggml 看不到 Vulkan，否则测出来的是单线程的数字
+    # （见 backends/llama_cpp.py 的 `hide_vulkan_devices`）。
+    if device == "cpu":
+        hide_vulkan_devices()
     baseline = _rss_mb()
 
     model_path = args.embedding_model or str(MODELS_DIR / EMBEDDING_MODEL_FILE)
