@@ -207,7 +207,12 @@ describe('会话过期（container → tick）', () => {
     await session.addMessage(sessionUri, message('m0'));
 
     await expect(started.scheduler.tick()).resolves.toMatchObject({ deleted: 1 });
-    await expect(readdir(join(dataDir, 'user', 'local', 'sessions'))).resolves.toEqual([]);
+    // 删除会投递一次父目录（`sessions/`）的摘要失效：等它跑完再看磁盘，否则读到
+    // 的是一份「正在被重算」的快照（`.abstract.md` / `.overview.md` / 临时锁文件
+    // 都可能正好出现）。断言的是「会话目录没了」，不是「`sessions/` 是空目录」。
+    await started.services.indexObserver.drain();
+    const entries = await readdir(join(dataDir, 'user', 'local', 'sessions'));
+    expect(entries).not.toContain(sessionUri.name);
   });
 });
 

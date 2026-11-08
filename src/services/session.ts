@@ -64,6 +64,7 @@ import {
 import type { Uri } from '../domain/uri.js';
 
 import type { TaskService } from './task.js';
+import type { NodeWriteObserver } from './filesystem.js';
 import type { AclAction, Authorizer } from './authorizer.js';
 
 // 类型上移到领域层（§4.2：`services/` 与 `adapters/` 都要用它，而它是纯数据）。
@@ -142,6 +143,20 @@ export interface SessionServiceOptions {
    * 可选：不注入时跳过清理（只关心提交管线的调用方，例如单测）。
    */
   readonly permissions?: Pick<PermissionRepository, 'deleteSubtree'>;
+  /**
+   * 节点写入 / 删除的派生数据维护（§12.4 的「写时算」、§9.3 的索引维护）。
+   *
+   * `messages.jsonl` 是本服务直接写 `ContentStore` 的：它不经过
+   * `FileSystemService` 的观察者，`node` / `node_fts` / `node_permission` 里都没有
+   * 这一行。`list` / `tree` / `glob` 的权限过滤是**纯 SQL 查询**——文件在磁盘上，
+   * 归档目录里却只剩元数据，用户点开归档看不到「原始对话」。
+   *
+   * 注入的是 `IndexObserver`（不是整个 `FileSystemService`）：它从磁盘读回内容再
+   * 建记录，与普通写路径同一份实现，摘要失效与嵌入也一并排期。
+   *
+   * 可选：不注入时整体跳过（只关心提交管线的单测不造一个观察者）。
+   */
+  readonly observer?: Pick<NodeWriteObserver, 'onNodeWritten' | 'onNodeRemoved'>;
 }
 
 export interface CommitPhase1Result {
@@ -286,6 +301,7 @@ export class SessionService {
   readonly #archiveDirectoryName: string;
   readonly #authorizer: Authorizer | undefined;
   readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'> | undefined;
+  readonly #observer: Pick<NodeWriteObserver, 'onNodeWritten' | 'onNodeRemoved'> | undefined;
 
   constructor(options: SessionServiceOptions) {
     this.#store = options.store;
@@ -297,6 +313,7 @@ export class SessionService {
     this.#archiveDirectoryName = options.config.archiveDirectoryName ?? DEFAULT_ARCHIVE_DIRECTORY_NAME;
     this.#authorizer = options.authorizer;
     this.#permissions = options.permissions;
+    this.#observer = options.observer;
   }
 
   /**
@@ -345,10 +362,14 @@ export class SessionService {
         lastCommitAt: null,
         pendingTokens: 0,
       });
+      // 空文件也是节点：不写索引行 / 不物化权限，`list` / `tree` / `glob` 就看不到
+      // live 会话的 `messages.jsonl`（见 `SessionServiceOptions.observer`）。
+      await this.#notifyWritten(this.#messagesUri(sessionUri));
     });
-    // §12.4 的「写时算」：会话目录与 `messages.jsonl` 都没有经过观察者。不物化的话
-    // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空。
-    // 放在锁外：它要查 ACL 表，失败只记日志，不需要与创建互斥。
+    // §12.4 的「写时算」：`GET /sessions` 的 `list(sessions/)` 会因为缺
+    // `node_permission` 行返回空。观察者（上面的 `#notifyWritten`）已经物化了会话
+    // 目录，这里保留是因为观察者可省略（单测），而「会话目录可列」是 `create`
+    // 自己的契约。放在锁外：它要查 ACL 表，失败只记日志，不需要与创建互斥。
     await this.#materialize(sessionUri, principals);
     this.#logger.info('会话已创建', { uri: sessionUri.toString() });
     return sessionUri;
@@ -415,6 +436,7 @@ export class SessionService {
       const next = [...messages, appended];
       await this.#store.writeText(this.#messagesUri(sessionUri), serializeMessages(next));
       await this.#meta.writeSession(sessionUri, { ...meta, pendingTokens: sumTokens(next) });
+      await this.#notifyWritten(this.#messagesUri(sessionUri));
       return appended;
     });
   }
@@ -495,6 +517,9 @@ export class SessionService {
     const messages = await this.#countMessages(sessionUri);
     const archives = (await this.#listArchives(this.#historyUri(sessionUri))).length;
     const removedEntries = await this.#store.remove(sessionUri, { recursive: true });
+    // `messages.jsonl` 有索引行（见 `SessionServiceOptions.observer`）：目录删掉之后
+    // 不清理的话，`find` / `glob` 会返回一条打不开的记录。
+    await this.#notifyRemoved(sessionUri);
     await this.#deletePermissions(sessionUri);
     this.#logger.info('会话已删除（空闲过期）。', {
       uri: sessionUri.toString(),
@@ -541,6 +566,9 @@ export class SessionService {
     // 步骤 2：写归档消息（原子写）。
     await this.#store.writeText(this.#messagesUri(archiveUri), serializeMessages(archived));
     const messagesSha256 = await this.#sha256(this.#messagesUri(archiveUri));
+    // 归档目录里的「原始对话」也要是一个可寻址的节点：不建索引行 / 不物化权限，
+    // 用户点开归档只看得到元数据（见 `SessionServiceOptions.observer`）。
+    await this.#notifyWritten(this.#messagesUri(archiveUri));
 
     // 步骤 3：`.meta.json` 先写 `preparing`。到这里为止，归档消息已经完整落盘。
     const preparing: ArchiveMeta = {
@@ -560,6 +588,7 @@ export class SessionService {
 
     // 步骤 4：重写 live 消息，只保留 keepRecentCount 条。
     await this.#store.writeText(this.#messagesUri(sessionUri), serializeMessages(retained));
+    await this.#notifyWritten(this.#messagesUri(sessionUri));
 
     // 步骤 5：`phase1` 置 `ready`。**不写 `.done`**——那是阶段二的最后一步。
     const ready: ArchiveMeta = { ...preparing, phase1: { ...preparing.phase1, status: 'ready' } };
@@ -594,12 +623,15 @@ export class SessionService {
     const archiveId = archiveUri.name;
     const archived = await this.#readMessages(this.#messagesUri(archiveUri));
     const messagesSha256 = await this.#sha256(this.#messagesUri(archiveUri));
+    // 崩溃可能停在「归档消息写完、索引行没写」之间：补完时把归档节点补上。
+    await this.#notifyWritten(this.#messagesUri(archiveUri));
     const live = await this.#readMessages(this.#messagesUri(sessionUri));
     const archivedMessageIds = new Set(archived.map((message) => message.id));
     const retained = live.filter((message) => !archivedMessageIds.has(message.id));
 
     // 步骤 4 重放：已经归档的消息从 live 里去掉。
     await this.#store.writeText(this.#messagesUri(sessionUri), serializeMessages(retained));
+    await this.#notifyWritten(this.#messagesUri(sessionUri));
 
     // 步骤 5 重放。
     const existing = await this.#meta.readArchive(archiveUri);
@@ -716,6 +748,43 @@ export class SessionService {
       this.#logger.error('会话目录权限物化失败，已忽略。', {
         uri: sessionUri.toString(),
         reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * 通知「`messages.jsonl` 已写入」。
+   *
+   * 与 `FileSystemService.#notifyWritten` 同一时序：先落盘、再通知。观察者失败只记
+   * 日志——文件已经是真相，回滚反而丢数据；索引与权限是派生数据，靠对账修复（§7）。
+   */
+  async #notifyWritten(messagesUri: Uri): Promise<void> {
+    const observer = this.#observer;
+    if (observer === undefined) {
+      return;
+    }
+    try {
+      await observer.onNodeWritten(messagesUri, 'file');
+    } catch (error) {
+      this.#logger.error('会话消息写入后维护索引失败，已忽略。', {
+        uri: messagesUri.toString(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** 通知「会话目录已删除」。失败语义与 {@link #notifyWritten} 相同。 */
+  async #notifyRemoved(sessionUri: Uri): Promise<void> {
+    const observer = this.#observer;
+    if (observer === undefined) {
+      return;
+    }
+    try {
+      await observer.onNodeRemoved(sessionUri);
+    } catch (error) {
+      this.#logger.error('会话删除后清理索引失败，已忽略。', {
+        uri: sessionUri.toString(),
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }

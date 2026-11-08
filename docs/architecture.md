@@ -457,6 +457,15 @@ docker run -d \
         └── skills/
 ```
 
+**归档目录里哪些文件可见。** `archive_NNN/` 下的 `.meta.json`、`.abstract.md`、
+`.overview.md`、`.done`、`memory_diff.json`、`memory_operations.json` 是保留名
+（§6.2 规则 6）：它们是归档的元数据，`Uri` 构造不出普通路径段，`list` / `tree`
+也不返回。**`messages.jsonl` 是唯一的非保留名文件**，也是用户唯一能读的归档内容
+——它和普通文档一样有 `node` / `node_fts` / `node_permission` 行，`list` /
+`tree` / `glob` / `read` 都能到达；live 会话目录里的 `messages.jsonl` 同理。阶段
+一写完之后由 `SessionService` 通知 `IndexObserver`（见 §8.2），不依赖阶段二的摘要
+生成。
+
 ### 6.6 文件内容示例
 
 **`user/alice/memories/preferences/code-style.md`** —— 一条记忆
@@ -951,7 +960,7 @@ LIMIT ?;
 
 **`acl_entry` 是反查索引，不是求权来源。** 求权只读 `node_permission`；`acl_entry` 回答「哪些目录直接写了这个主体」。两者由同一个 `#writeAcl` 一起替换。节点被移动时 `acl_entry` 必须按新 URI 从 `.acl.json` 重建（否则删账号的反查会漏），这条重建在 `IndexObserver.onNodeMoved` 里逐目录执行；没有 `.acl.json` 的节点直接跳过。
 
-**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。`SummaryService` 是归档子树（`sessions/{id}/history/archive_NNN/`）唯一的写后钩子：阶段一的落盘由 `SessionService` 直接写 `ContentStore`，观察者收不到通知，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
+**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。`SessionService` 在每次写 `messages.jsonl`（`create` / `addMessage` / 阶段一步骤 2、4 / 补完中断归档）之后调 `IndexObserver.onNodeWritten`：索引行与逐级物化权限一起补上，归档目录里的「原始对话」本身才可寻址。归档目录（`history/`、`archive_NNN/`）的摘要仍由 `SummaryService` 写索引行与物化权限——阶段一的落盘由 `SessionService` 直接写 `ContentStore`，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 
 ### 8.3 检索接口
 
@@ -1983,11 +1992,12 @@ ingest:
   因此不是合法 JSON。解析器先按「`密码保护` → `0`」修复再试一次；仍然失败才跳过该
   文件并记进 `report.errors`，**不中断同一来源的其它文件**。被抹掉的是计数与时间戳
   的高位，会话结构与正文都在。
-- **会话消息不进检索索引。** `messages.jsonl` 由 `SessionService` 直接写
-  `ContentStore`，不经过 `IndexObserver`（§7 的取舍：`GET /sessions` 从磁盘列目录）。
-  `find` 要搜到导入的内容，得等阶段二把它抽取成记忆；`pnpm ingest` 默认等阶段二
-  （见「导入后的处理」），`--no-wait` 时报告会明确说明「`find` 暂时搜不到」。没有
-  可用模型时阶段二被跳过，报告里的 `extraction.skipped` 为 `true`。
+- **会话消息是文档节点，但抽取出的记忆仍要等阶段二。** `messages.jsonl` 写完
+  `ContentStore` 之后同样走 `IndexObserver`，所以 `find` / `glob` / `read` 都能
+  到达它（live 会话与归档目录一致，见 §6.5）；阶段二的 `memory_extract` 产出的
+  记忆不在这个文件里。`pnpm ingest` 默认等阶段二（见「导入后的处理」），
+  `--no-wait` 时报告会明确说明「`find` 暂时搜不到抽取出的记忆」。没有可用模型时
+  阶段二被跳过，报告里的 `extraction.skipped` 为 `true`。
 - **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
   且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。
 - **Qwen 的损坏导出不可用。** 未转义的引号（`Expecting ',' delimiter`）不是脱敏

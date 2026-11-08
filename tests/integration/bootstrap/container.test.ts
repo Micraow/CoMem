@@ -166,6 +166,8 @@ describe('createContainer', () => {
     expect(tree.entries.map((entry) => entry.uri.toString())).toEqual([
       historyUri.toString(),
       archiveUri,
+      `${archiveUri}/messages.jsonl`,
+      `${sessionUri.toString()}/messages.jsonl`,
     ]);
     expect(tree.truncated).toBe(false);
 
@@ -181,6 +183,85 @@ describe('createContainer', () => {
       principals: PRINCIPALS,
     });
     expect(globbed).toContain(archiveUri);
+  });
+
+  /**
+   * 回归（P1）：归档目录里能看到「原始对话」。
+   *
+   * `archive_NNN/` 里除 `messages.jsonl` 之外都是保留名（`.meta.json` /
+   * `.abstract.md` / `.overview.md` / `.done` / `memory_diff.json` /
+   * `memory_operations.json`）：`Uri` 构造不出，`list` 也不返回，它们本来就是
+   * 元数据。`messages.jsonl` 是唯一的非保留名文件，也是用户唯一能读的归档内容。
+   *
+   * 文件在磁盘上、归档目录在树里却是个空壳，是「写成功了，树里什么都没有」的另一
+   * 种形态——阶段一的落盘走 `ContentStore`，观察者收不到通知。本用例先 `list` /
+   * `tree` 再 `read`：读路径的 `InheritingAuthorizer` 会补物化，先读会把缺陷掩盖
+   * 成通过。
+   */
+  it('归档目录里能看到原始对话', async () => {
+    const { filesystem, session, acl } = container.services;
+    const root = Uri.parse(ROOT);
+    await acl.ensureRootPreset(root);
+
+    const sessionUri = await session.create(root, PRINCIPALS, { sessionId: 'archive-content' });
+    for (const id of ['m1', 'm2']) {
+      await session.addMessage(sessionUri, {
+        id,
+        role: 'user',
+        parts: [{ kind: 'text', text: `归档消息 ${id}` }],
+        createdAt: '2026-11-08T00:00:00.000Z',
+      });
+    }
+    const phase1 = await session.commitPhase1(sessionUri);
+    const archiveUri = phase1.archiveUri;
+    const messagesUri = archiveUri.child('messages.jsonl');
+
+    const listed = await filesystem.list(archiveUri, PRINCIPALS);
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['messages.jsonl']);
+
+    const tree = await filesystem.tree(sessionUri, PRINCIPALS, { depth: 5 });
+    expect(tree.entries.map((entry) => entry.uri.toString())).toContain(messagesUri.toString());
+
+    const archived = await filesystem.read(messagesUri, PRINCIPALS);
+    const messages = archived.text
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { id: string });
+    expect(messages.map((message) => message.id)).toEqual(['m1', 'm2']);
+
+    // 保留名是元数据，永远不可见：既构造不出 `Uri`，也不该出现在 `list` 里。
+    for (const reserved of [
+      '.meta.json',
+      '.abstract.md',
+      '.overview.md',
+      '.done',
+      'memory_diff.json',
+      'memory_operations.json',
+    ]) {
+      expect(Uri.tryParse(`${archiveUri.toString()}/${reserved}`)).toBeNull();
+      expect(listed.map((entry) => entry.uri.name)).not.toContain(reserved);
+    }
+  });
+
+  it('live 会话的 messages.jsonl 也能列出来', async () => {
+    const { filesystem, session, acl } = container.services;
+    const root = Uri.parse(ROOT);
+    await acl.ensureRootPreset(root);
+
+    const sessionUri = await session.create(root, PRINCIPALS, { sessionId: 'live-content' });
+    await session.addMessage(sessionUri, {
+      id: 'live-1',
+      role: 'user',
+      parts: [{ kind: 'text', text: '还没归档的消息' }],
+      createdAt: '2026-11-08T00:00:00.000Z',
+    });
+
+    const listed = await filesystem.list(sessionUri, PRINCIPALS);
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['messages.jsonl']);
+
+    const messagesUri = sessionUri.child('messages.jsonl');
+    const document = await filesystem.read(messagesUri, PRINCIPALS);
+    expect(JSON.parse(document.text.trim())).toMatchObject({ id: 'live-1' });
   });
 
   it('写文件 → 索引能查到 → 权限行存在（端到端）', async () => {

@@ -868,6 +868,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     // 删除会话时清物化权限行：那张表没有外键级联，而会话 ID 可以由调用方指定
     // （重建同名会话会继承上一轮的行）。
     permissions,
+    // `messages.jsonl` 是唯一能读的会话内容：写完之后走一次观察者，`node` /
+    // `node_permission` 里才有这一行，`list` / `tree` / `glob` 才看得到「原始对话」。
+    observer: indexObserver,
   });
 
   const search = new SearchService({
