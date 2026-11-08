@@ -1,0 +1,57 @@
+# 构建上下文排除清单。
+#
+# 判断标准：镜像里不该有「宿主机状态」。依赖（node_modules / .venv）由构建阶段
+# 在镜像内安装，运行数据（data/、local/）由卷提供，config.yaml 与模型权重
+# （*.gguf，1.28GB）是部署方的，不能进镜像。
+#
+# local-inference/ 的源码要进镜像（推理服务是运行时组件），但它的虚拟环境与
+# 模型权重不进——它们是本机构建产物，且体积占该目录的 99%。
+
+# 依赖（镜像内重装，宿主机的可能不是 linux/amd64 的产物）
+node_modules
+**/node_modules
+
+# Python 虚拟环境（local-inference 的 .venv / .venv-isa 以及兜底）
+**/.venv
+**/.venv-*
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+
+# 模型权重：1.28GB，运行时挂到 /models
+local-inference/models
+
+# 框架构建产物（build 阶段重新生成）
+web/.nuxt
+web/.output
+.nuxt
+.output
+dist
+*.tsbuildinfo
+
+# 运行数据与本地产物
+data
+local
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# 部署方配置与密钥（config.example.yaml 故意保留）
+config.yaml
+.env
+.env.*
+!.env.example
+
+# 版本控制与编辑器
+.git
+.gitignore
+.DS_Store
+.idea
+.vscode
+*.swp
+
+# 测试与覆盖率（tests/ 保留：镜像里的 test 阶段要跑全量测试）
+coverage
+.nyc_output

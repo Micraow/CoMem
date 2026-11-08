@@ -18,7 +18,18 @@ const ADAPTERS_MESSAGE =
 
 export default tseslint.config(
   {
-    ignores: ['node_modules/**', 'dist/**', 'local/**', 'docs/**', 'web/**', 'integrations/**'],
+    ignores: [
+      'node_modules/**',
+      'dist/**',
+      'local/**',
+      // local-inference/ 是 Python + vendored llama.cpp 源码 + 构建产物（.venv / models），
+      // 没有任何 JS/TS。不放进来时 eslint 会去扫 .venv 里的 site-packages 与
+      // llama.cpp 的 C++ 头文件，报几百个 no-undef。
+      'local-inference/**',
+      'docs/**',
+      'web/**',
+      'integrations/**',
+    ],
   },
   js.configs.recommended,
   tseslint.configs.recommended,

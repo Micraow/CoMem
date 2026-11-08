@@ -312,7 +312,8 @@ tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyn
 代价是**没有类型检查**：类型门禁是 `pnpm typecheck`，CI 与本地都要跑，不能指望启动时报错。
 
 `tsx` 是 devDependency。生产环境如果装依赖时带了 `--prod`，要显式把它算进去，或者换成
-先 `tsc` 出 `dist/` 再 `node dist/...`（仓库目前没有这个构建脚本）。
+先 `tsc` 出 `dist/` 再 `node dist/...`（仓库目前没有这个构建脚本）。**容器部署直接用
+下面的「Docker 部署」一节**：镜像把 tsx 作为全局包装好，`pnpm start` 开箱可用。
 
 ### 退出
 
@@ -320,6 +321,375 @@ tsx 把这层解析接管掉，也解释了 `import type` 与 `verbatimModuleSyn
 （会等在途的一轮跑完），再等后台摘要失效跑完（`indexObserver.drain()`），最后关数据库。
 10 秒没退完就强退（`process.exit(1)`）——「优雅但可能挂住」不如「确定会结束」
 （`src/bootstrap/main.ts` 的 `SHUTDOWN_TIMEOUT_MS`）。
+
+## Docker 部署
+
+生产镜像定义在仓库根的 [`Dockerfile`](../Dockerfile)，[`.dockerignore`](../.dockerignore)
+控制构建上下文。`docker-compose.yaml` 是可选的完整拓扑（后端 + 控制台 + 本地推理 +
+反向代理）。
+
+镜像**在目标机上构建**：`llama.cpp` 默认按构建机的 CPU 指令集编译
+（`-DGGML_NATIVE=ON`），编译机与运行机同一台时性能最优。CI 构建再分发到别的机器
+必须打开可移植开关，见「可移植构建」。
+
+### 阶段划分
+
+| 阶段 | 基础镜像 | 职责 | 缓存键 |
+|---|---|---|---|
+| `base` | `node:24-bookworm-slim` | `ca-certificates` + 固定版本的 pnpm / tsx | 基础镜像 + 版本 ARG |
+| `deps` | `base` | 后端与控制台两份完整依赖（含 devDependencies） | 两个 `package.json` + 两个 `pnpm-lock.yaml` + 两个 `pnpm-workspace.yaml` |
+| `build` | `deps` | `pnpm typecheck` + `pnpm check:config` + `pnpm --dir web build` | 全部源码 |
+| `test` | `build` | `pnpm lint`（**只在 `--target test` 时构建**） | 全部源码 |
+| `inference` | `python:3.12-slim-bookworm` | 源码编译 `llama-cpp-python`（CPU + Vulkan 后端） | 只有版本 ARG，**与 CoMem 源码无关** |
+| `prod-deps` | `deps` | `pnpm prune --prod` 裁出生产依赖子集 | 同 `deps` |
+| `runtime` | `base` | 生产依赖 + `src` + `prompts` + `integrations` + `web/.output` + 推理 venv | 上面各阶段的产物 |
+
+`inference` 阶段不 `COPY` 任何仓库文件，所以改一行 TypeScript 不会重编 `llama.cpp`
+（冷编译约 105 秒，热缓存 0 秒）。
+
+### 构建
+
+```bash
+# 生产镜像（默认目标 = runtime）
+docker build -t comem:0.1.0 .
+
+# 测试镜像：生产镜像按定义不带 vitest / eslint，全量测试与 lint 要单独构建
+docker build --target test -t comem:test-suite .
+
+# 可移植：多 ISA 变体，编译时间与体积都更大
+docker build --build-arg COMEM_PORTABLE_CPU=1 -t comem:0.1.0-portable .
+```
+
+实测（16 核 / 30GB，本机）：
+
+| 场景 | 耗时 | 镜像大小 |
+|---|---|---|
+| 冷构建（`--no-cache`，含 `llama.cpp` 编译） | 见下 | 见「镜像体积」 |
+| 热构建（改一行 `src/`） | 约 15 秒 | 同上 |
+| 只重编 `llama.cpp`（`--target inference`，`pip` 层缓存失效） | 约 105 秒 | — |
+
+依赖层只依赖两个 lockfile：改源码不会重装依赖。`pnpm` 的 store 用 BuildKit
+cache mount（`--mount=type=cache,id=comem-pnpm-store`），换 lockfile 才会重新下载。
+
+### 启动
+
+```bash
+docker run -d --name comem \
+  --init \
+  --restart unless-stopped \
+  -p 127.0.0.1:1933:1933 \
+  -v comem-data:/var/lib/comem \
+  -v "$PWD/config.yaml:/etc/comem/config.yaml:ro" \
+  comem:0.1.0
+```
+
+- `--init`：让 `tini` 当 PID 1，回收僵尸进程。镜像的 entrypoint 是
+  `exec "$@"`，`pnpm` 拿到 SIGTERM 后会转给 `tsx`/`node`；实测 `docker stop`
+  到进程退出 264ms，日志里有 `CoMem 已退出。`
+- 默认命令是 `pnpm start -- --config /etc/comem/config.yaml`。`--config` 指向的
+  文件**可以不存在**（`loadConfig` 把「文件不存在」当默认值），挂载进来就生效。
+- 覆盖命令：`docker run --rm comem:0.1.0 pnpm ingest --source all`。
+  `ENTRYPOINT` 是 `exec "$@"`，所以 `pnpm ...` 这种写法直接可用。
+
+### 环境变量
+
+配置的优先级是 **CLI 参数 > 环境变量 `COMEM_<SECTION>_<KEY>` > 配置文件 > 内置默认值**
+（`src/config/index.ts`）。
+
+| 变量 | 镜像默认 | 说明 |
+|---|---|---|
+| `COMEM_SERVER_HOST` | `0.0.0.0` | 监听地址。**镜像把它设成了 0.0.0.0**，因为 `config.schema.ts` 的默认值是 `127.0.0.1`，容器里绑 loopback 时 `-p` 端口转发不可达 |
+| `COMEM_SERVER_PORT` | `1933` | 监听端口。`HEALTHCHECK` 与 `EXPOSE` 都跟它走 |
+| `COMEM_DATA_DIR` | `/var/lib/comem` | 数据根。容器内按 `/.dockerenv` 推导，显式覆盖见「数据卷」 |
+| `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY` | 无 | 只是示例配置里的变量名；`config.yaml` 用 `${VAR}` 引用它们 |
+| `TZ` | 未设置（UTC） | 日志时间戳是 UTC ISO 8601。需要本地时间就 `-e TZ=Asia/Shanghai` |
+| `VK_ICD_FILENAMES` | 不需要 | Mesa 的 ICD 在默认搜索路径里，不用手工指定 |
+| `GGML_BACKEND_PATH` | `/opt/comem-inference/backends/libggml-vulkan.so` | 镜像已经设好。DL 构建里 ggml 不会自动加载 Vulkan 后端（见「踩过的坑」第 14 条），这个变量是唯一入口。native 构建里它指向已载入的同一个 `.so`，重复 dlopen 是幂等的 |
+
+**`server.host` 的坑。** 因为镜像把 `COMEM_SERVER_HOST` 设成了 `0.0.0.0`，而环境
+变量优先于配置文件，**`config.yaml` 里写 `server.host` 不会生效**。要改监听地址用
+`-e COMEM_SERVER_HOST=...`。这是 `loadConfig` 的优先级语义，不是镜像的 bug；但它是
+「配置改了不生效」那一类，所以单独写出来。
+
+### 配置：镜像里没有 `config.yaml`
+
+`config.yaml` 在 `.gitignore` 里（部署方的配置 + 密钥），`.dockerignore` 把它排除在
+构建上下文之外。三种提供方式：
+
+1. **挂载文件**（推荐）：`-v "$PWD/config.yaml:/etc/comem/config.yaml:ro"`。
+   文件里的 `${VAR}` 在加载时展开，变量未设置直接报错。
+2. **纯环境变量**：不挂文件，所有配置项都能用 `COMEM_*` 覆盖，例如
+   `-e COMEM_SERVER_SUBJECT=user:alice -e COMEM_RETRIEVAL_ENGINE=hybrid`。
+3. **两者混用**：环境变量覆盖文件里的同名叶子。
+
+`config.example.yaml` 在镜像里（`/app/config.example.yaml`），可以
+`docker run --rm comem:0.1.0 cat /app/config.example.yaml > config.yaml` 取出来改。
+
+### 数据卷
+
+| 挂载点 | 内容 | 说明 |
+|---|---|---|
+| `/var/lib/comem` | 内容文件（`user/`、`group/`、`resources/`…）+ `_meta/comem.sqlite` + 提示词覆盖 | 备份、恢复、迁移都只针对它 |
+
+- **命名卷**：`-v comem-data:/var/lib/comem`。Docker 从镜像继承属主（`node:node`，
+  uid 1000），开箱可写。
+- **bind mount**：宿主目录的 uid 必须是 1000，否则启动自检 `assertDataDirWritable`
+  直接失败：`chown -R 1000:1000 /srv/comem-data`。
+- **不要挂 `:ro`**：SQLite 的 WAL 与内容写入都需要写权限。
+
+### 控制台
+
+`web/.output` 在镜像里（`/app/web/.output`，Nuxt 3 的 Node server，自包含）。
+**后端不代理静态文件**（架构文档里没有这条），控制台的 `apiBase` 是相对路径
+`/api/v1`，浏览器会打到控制台自己的 origin 上。Nitro 的生产 server 对未知路径返回
+SPA 的 HTML（HTTP 200），所以直连控制台端口时每个 API 请求都会拿到一段 HTML：
+
+```
+$ curl -s -D- http://127.0.0.1:18082/api/v1/health | head -3
+HTTP/1.1 200 OK
+content-type: text/html;charset=utf-8
+x-powered-by: Nuxt
+```
+
+**必须有一层反向代理把 `/api`、`/health`、`/metrics`、`/mcp` 转给后端。**
+`docker-compose.yaml` 里的 `proxy` 服务就是干这个的（内联 nginx 配置，把其余路径
+转给控制台）。单独部署控制台：
+
+```bash
+docker run -d --name comem-console -p 127.0.0.1:3081:3081 \
+  -e NITRO_HOST=0.0.0.0 -e NITRO_PORT=3081 \
+  comem:0.1.0 node web/.output/server/index.mjs
+```
+
+### 本地推理（可选）
+
+镜像里带了编译好的 `llama-cpp-python`（CPU + Vulkan 两个后端）与 `local-inference/`
+的源码。**模型权重（两个 GGUF，1.28GB）不进镜像**，运行时挂载：
+
+```bash
+docker run -d --name comem-inference \
+  --device /dev/dri --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
+  -p 127.0.0.1:8089:8089 \
+  -v "$PWD/local-inference/models:/models:ro" \
+  comem:0.1.0 \
+  /opt/comem-inference/.venv/bin/python /app/local-inference/server.py \
+    --device gpu --host 0.0.0.0 --port 8089 \
+    --embedding-model /models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --rerank-model /models/qwen3-reranker-0.6b-q8_0.gguf
+```
+
+**Vulkan 的设备可见性在容器里是独立问题**，和镜像里有没有 Vulkan 后端无关：
+
+| 要求 | 为什么 |
+|---|---|
+| `--device /dev/dri` | 容器默认看不到 render 节点 |
+| `--group-add <render GID>` | 容器的 `node` 用户（uid 1000）要能打开 `renderD128` |
+| `mesa-vulkan-drivers` = backports 的 25.0.7 | **Debian 12 自带的 22.3.6 不认识 Intel Arc（ARL，PCI ID `0x7d51`）**，见「踩过的坑」 |
+
+实测（`--device /dev/dri --group-add 989`，`--user node`）：
+
+```
+$ docker run --rm --user node --device /dev/dri --group-add 989 comem:0.1.0 vulkaninfo --summary
+Devices:
+GPU0:
+	apiVersion         = 1.4.305
+	deviceID           = 0x7d51
+	deviceName         = Intel(R) Graphics (ARL)
+	driverName         = Intel open-source Mesa driver
+GPU1:
+	deviceName         = llvmpipe (LLVM 15.0.6, 256 bits)
+```
+
+推理服务的 `/health` 里 `device` 是**实际生效**的设备；纯 CPU 部署不需要
+`--device` / `--group-add`，`server.py` 会自动设 `GGML_VK_VISIBLE_DEVICES=""`
+（否则 CPU 推理会退化到单线程，见 `local-inference/README.md`）。
+
+模型加载实测：GPU 8 秒 ready（含预热），常驻内存约 4GB（两个 Q8_0 + 8K ctx）。
+
+### 可移植构建
+
+```bash
+docker build --build-arg COMEM_PORTABLE_CPU=1 -t comem:portable .
+```
+
+| `COMEM_PORTABLE_CPU` | CMake 参数 | 产物 | 什么时候用 |
+|---|---|---|---|
+| `0`（默认） | `-DGGML_VULKAN=ON -DGGML_NATIVE=ON` | 单套 `libggml-cpu.so`，绑定构建机指令集 | **在目标机上 `docker build`** |
+| `1` | `-DGGML_VULKAN=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF` | 多套 ISA 变体，运行期按 CPU 选择 | CI 构建 + 推 registry + 多台不同 CPU 的部署机 |
+
+**在 CI 里构建再分发镜像时必须打开 `COMEM_PORTABLE_CPU=1`**，否则部署机执行到
+构建机有、部署机没有的指令（AVX-512 等）会 SIGILL（非法指令，进程直接死）。
+`GGML_CPU_ALL_VARIANTS=ON` 与 `GGML_NATIVE=ON` 不能同时开，Dockerfile 里是互斥分支。
+
+可移植构建实测：200 秒（同一台 16 核机器），镜像 990MB（**比 native 小 65MB**：
+变体各自按基线指令集编译，代码体积比 `-march=native` 展开 AVX-512 后小）。
+编出 14 个 CPU 变体：
+
+```
+libggml-cpu-{alderlake,cannonlake,cascadelake,cooperlake,haswell,icelake,
+ivybridge,piledriver,sandybridge,sapphirerapids,skylakex,sse42,x64,zen4}.so
+```
+
+运行期 `ggml` 按当前 CPU 选一套，实测容器日志：
+
+```
+load_backend: loaded CPU backend from /usr/local/bin/libggml-cpu-alderlake.so
+```
+
+### 镜像体积
+
+| 层 | 大小 | 来源 |
+|---|---:|---|
+| `node:24-bookworm-slim` | 230 MB | 基础镜像 |
+| `base`：`ca-certificates` | 9.4 MB | 运行期 HTTPS |
+| `base`：pnpm 12.17.0 + tsx 4.23.15（全局） | 123 MB | 运行时跑 `tsx` / `pnpm <script>` |
+| 运行期 apt：Mesa 25.0.7 + Vulkan loader + `vulkan-tools` + Python 动态库 | 257 MB | 本地推理的 GPU 设备枚举 |
+| Python 3.12 解释器（从 `python:3.12-slim` 复制） | 32 MB | 推理 venv 的解释器 |
+| 推理 venv（`llama-cpp-python` + fastapi / uvicorn + ggml 后端库） | 358 MB | 本地推理 |
+| 生产 `node_modules`（`pnpm prune --prod`） | 41 MB | 后端 |
+| `web/.output` | 2.3 MB | 控制台 |
+| `src` + `prompts` + `integrations` + 配置 | ~2 MB | — |
+| **runtime 镜像合计** | **1.06 GB** | `docker image ls` |
+
+各目标阶段的镜像大小（同一份代码）：`deps` 748 MB、`build` 770 MB、`test` 775 MB、
+`inference` 1.04 GB、`runtime` 1.06 GB。
+
+**体积的大头是推理 venv 与 Mesa。** 不需要本地推理的部署可以删掉 `inference` 阶段、
+`runtime` 里对应的 `COPY`、以及 Mesa / `vulkan-tools` 两个 apt 包，镜像会回到约
+650 MB；本文保留它们，是因为「别人按文档部署后能用」的默认形态包含本地推理。
+
+### 踩过的坑
+
+1. **`node:24-bookworm-slim` 没有 `/etc/ssl/certs`。** 不装 `ca-certificates` 时服务
+   能启动、`/health` 正常、离线路径全绿，但第一次调用模型供应商的 HTTPS 就失败：
+   `Cannot connect to API: Client network socket disconnected before secure TLS
+   connection was established`。`base` 阶段装。
+2. **Debian 12 的 Vulkan 头文件太旧。** `libvulkan-dev` 是 1.3.239，而
+   `llama-cpp-python` 0.3.36 vendor 的 `llama.cpp` 用了 `VK_EXT_layer_settings`：
+   ```
+   ggml-vulkan.cpp:5214:21: error: ‘LayerSettingEXT’ is not a member of ‘vk’
+   ggml-vulkan.cpp:5218:17: error: ‘vk::LayerSettingTypeEXT’ has not been declared
+   ```
+   只换头文件（GitHub 的 `Vulkan-Headers` v1.4.368）不够——还要
+   `-DVulkan_INCLUDE_DIR=/opt/vulkan-headers/include`，否则 `find_package(Vulkan)`
+   仍然用系统头文件。
+3. **Debian 12 自带的 Mesa 22.3.6 认不出 Intel Arc。** 容器里 `vulkaninfo` 报：
+   ```
+   MESA: warning: Driver does not support the 0x7d51 PCI ID.
+   ERROR: [../src/intel/vulkan/anv_device.c:848] Code 0 : VK_ERROR_INCOMPATIBLE_DRIVER
+   Devices:   ← 空
+   ```
+   换成 `bookworm-backports` 的 25.0.7 才行。`libvulkan1`（loader 1.3.239）不用换。
+4. **Python 解释器是从 `python:3.12-slim` 复制过来的，扩展模块的动态库要自己补。**
+   `node` 镜像里没有 `libsqlite3.so.0`：
+   ```
+   ImportError: libsqlite3.so.0: cannot open shared object file: No such file or directory
+   ```
+   补 `libsqlite3-0 libncursesw6 libgdbm6 libnsl2 libtirpc3 libreadline8`
+   （`libpanelw6` 在 bookworm 里不存在，`curses.panel` 用不到，不装）。
+5. **`llama_supports_gpu_offload()` 在构建容器里是 `false`。** 构建容器没有
+   `--device /dev/dri`，Vulkan 枚举不到物理设备。用它做构建期断言会误报「没编入
+   Vulkan」。构建期只能断言「`libggml-vulkan.so` 在包里」，设备可见性在运行期用
+   `vulkaninfo` 验证。
+6. **pnpm 的 `node_modules` 是符号链接结构。** 直接 `COPY --from` 会保留
+   `.pnpm/...` 的软链（生产依赖层 41MB），前提是整棵树一起复制；只复制顶层包会得到
+   一堆悬空链接。镜像里 `node_modules/sqlite-vec` 仍是
+   `-> .pnpm/sqlite-vec@0.1.9/node_modules/sqlite-vec`。
+7. **`sqlite-vec` 是预编译的**（`optionalDependencies` 里的
+   `sqlite-vec-linux-x64@0.1.9`，`vec0.so`），不需要编译。但它是**可选依赖**，
+   装漏了不会报错，直到第一次向量检索 `CREATE VIRTUAL TABLE ... USING vec0` 才报
+   `no such module`。`build` 阶段有断言：`getLoadablePath()` 指向的 `.so` 必须存在。
+8. **控制台的 SPA 与 API 必须同源。** 直连控制台端口时 `/api/v1/health` 返回
+   `200 text/html`（SPA 兜底），界面上表现为「请求失败」。反向代理是必需组件，
+   不是可选优化。
+9. **Compose 会插值 nginx 配置里的 `$host`。** `configs.content` 里的 nginx 变量
+   要写成 `$$host`，否则 compose 把它们当环境变量展开成空串（启动时一串
+   `The "host" variable is not set` 警告）。
+10. **`config.yaml` 里的 `${VAR}` 是「全有或全无」。** 只要文件里任一 `${VAR}` 未
+    设置，进程启动即失败——即使那个 provider 的 `type` 是 `disabled`。所以示例配置
+    的 `providers.embedding.apiKey: ${COMEM_EMBEDDING_KEY}` 也要给值。
+11. **`node:sqlite` 在 Node 24.22.2 上不再打 `ExperimentalWarning`**（docs 里那句
+    警告是 Node 22 的行为）。容器里 `require('node:sqlite')` 干净通过，不需要
+    `--no-warnings`。
+12. **可移植构建必须同时开 `GGML_BACKEND_DL=ON`。** 只给
+    `GGML_CPU_ALL_VARIANTS=ON` 时 CMake 在配置阶段就失败：
+    ```
+    CMake Error at vendor/llama.cpp/ggml/src/CMakeLists.txt:489 (message):
+      GGML_CPU_ALL_VARIANTS requires GGML_BACKEND_DL
+    ```
+13. **可移植构建的 CPU 变体不在 `llama_cpp/lib/` 里。** 它们在
+    `site-packages/bin/`（scikit-build 的 runtime 目录），而 `ggml_backend_load_all()`
+    只扫「可执行文件所在目录」。`GGML_BACKEND_PATH` 不是目录参数——给它一个目录会报
+    ```
+    load_backend: failed to load /opt/.../bin: ...: cannot read file data: Is a directory
+    ```
+    它要的是单个 `.so` 文件路径。镜像里的做法是把 14 个变体 COPY 到
+    `/usr/local/bin/`（venv 的 python 是它的符号链接，`/proc/self/exe` 解析到这里）。
+    少了这一步时 `--device cpu` 会报
+    `ValueError: Failed to load model from file`，看起来像模型文件坏了。
+14. **DL 构建里 Vulkan 后端不会被自动加载。** `ggml_backend_load_best("vulkan")`
+    只认 `libggml-vulkan-<变体>.so` 前缀，并且要求后端导出
+    `ggml_backend_score` 符号（Vulkan 后端不导出，`hasattr(lib, "ggml_backend_score")`
+    为 False）——两个条件都不满足，所以纯 DL 构建的镜像是**只有 CPU 后端**的，
+    `--device gpu` 报
+    `这个 llama-cpp-python 构建没有 GPU 后端`。
+    绕开办法：`GGML_BACKEND_PATH` 直接指向 `libggml-vulkan.so` 文件（`ggml_backend_load`
+    按单个文件 dlopen，不查前缀、不查 score）。镜像里这个变量指向
+    `/opt/comem-inference/backends/libggml-vulkan.so`（符号链接）。
+14. **时区是 UTC。** 日志时间戳（`time` 字段）是 UTC ISO 8601，容器里没有
+    tzdata 之外的本地时区配置。`-e TZ=Asia/Shanghai` 可以改，但日志格式本身不变。
+
+### 容器内验证
+
+```bash
+# 全量测试（99 个文件 / 1914 个用例；3 个失败见下）
+docker run --rm comem:test-suite pnpm test
+
+# 类型检查
+docker run --rm comem:test-suite pnpm typecheck
+
+# 原生模块
+docker run --rm comem:0.1.0 node -e "require('node:sqlite'); require('sqlite-vec')"
+```
+
+**容器内 `pnpm test` 有 3 个环境相关失败**（`tests/unit/config.test.ts` 的
+`dataDir` 推导）：`resolveDataDir` 用 `existsSync('/.dockerenv') || pid === 1` 判定
+容器，容器里必然推导成 `/var/lib/comem`，而测试期望桌面形态的
+`$XDG_DATA_HOME/comem`。这不是镜像缺依赖——`1910 passed | 3 failed | 1 skipped` 里
+失败的 3 条只断言这个路径。容器外 `pnpm test` 是 `1913 passed | 1 skipped`。
+
+### compose 拓扑
+
+`docker compose up -d` 起四个服务：
+
+| 服务 | 镜像/命令 | 端口（宿主） |
+|---|---|---|
+| `comem` | 默认命令（后端） | `127.0.0.1:18081 → 1933` |
+| `console` | `node web/.output/server/index.mjs` | `127.0.0.1:18082 → 3081` |
+| `inference` | venv 里的 `server.py` | 不发布 |
+| `proxy` | `nginx:1.27-alpine`（内联配置） | `127.0.0.1:18080 → 80` |
+
+正常入口是 `http://127.0.0.1:18080`：`/health`、`/api/*`、`/metrics`、`/mcp` 走后端，
+其余走控制台。所有端口默认只绑 `127.0.0.1`，对外服务需要再前面加 TLS 入口。
+
+> 首次 `docker compose up` 如果遇到端口冲突，容器可能以「未连接网络」的状态留下
+> （`docker inspect` 里 `Networks` 为空），后续 `up -d` 只会启动它、不会重建。
+> 用 `docker compose up -d --force-recreate proxy` 重建。
+
+### 没覆盖的部署场景
+
+- **多副本。** 内容存储是本地文件系统、索引是本地 SQLite，没有共享存储抽象。
+  多副本会让每个副本看到不同的数据（架构文档 §2 明确不做多租户与分布式）。
+- **只读根文件系统。** `node:sqlite` 与内容写入都需要写数据根；只读根需要
+  `--read-only --tmpfs /tmp` 加可写数据卷，未验证。
+- **TLS 终止。** 镜像里没有证书与 TLS 配置，必须由前置代理终止。
+- **离线构建。** 构建需要 npm registry、PyPI、GitHub（Vulkan-Headers）与 Debian
+  源。没有做 vendor 化。
+- **非 x86_64。** `sqlite-vec` 的平台包只覆盖 linux/darwin 的 x64 与 arm64；
+  `Vulkan-Headers` 的版本是固定的。arm64 构建未验证。
+- **认证。** 打开 `auth.enabled` 是配置项，镜像不做额外处理；`sessionSecret` 必须
+  显式给值，否则每次重启失效。
+- **备份与告警。** 镜像只提供 `/health` 与 `/metrics`，没有内置备份任务。
 
 ## 后台调度器
 
