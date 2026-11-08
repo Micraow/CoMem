@@ -1328,21 +1328,29 @@ Codex」，导出目录是一次性的。
 
 ### 控制台每个请求 401
 
-**症状**：控制台能打开，但每个请求都是 `UNAUTHENTICATED`；`curl` 不带请求头反而正常。
+**症状**：`auth.enabled: false` 时控制台能打开，但每个请求都是 `UNAUTHENTICATED`；
+`curl` 不带请求头反而正常。
 
-**原因**：控制台发的 `x-comem-subject` 与服务图绑定的主体不一致。控制台不硬编码身份，
-它在启动时调 `GET /health` 拿 `result.subject`（`web/composables/consoleIdentity.ts`），
-所以只要服务端返回的是期望的主体，两边就一致。
+**原因**：单用户形态下，控制台发的 `x-comem-subject` 与服务图绑定的主体不一致。控制台
+不硬编码身份，它在启动时调 `GET /health` 拿 `result.subject`
+（`web/composables/consoleIdentity.ts`），所以只要服务端返回的是期望的主体，两边就一致。
+打开 `auth.enabled` 后 `x-comem-subject` 被忽略；这个症状对应的是凭据缺失或失效，控制台
+会清掉会话并跳登录页。
 
 **处理**：
 
-1. `curl -s http://127.0.0.1:1933/health | jq .result.subject`。不是期望的主体，
+1. 先确认部署形态：`curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:1933/api/v1/auth/logout`
+   返回 404 是单用户，返回 200 是多用户。
+2. 单用户：`curl -s http://127.0.0.1:1933/health | jq .result.subject`。不是期望的主体，
    说明 `server.subject` 没生效：检查 `COMEM_SERVER_SUBJECT` 环境变量与 `config.yaml`
    的优先级（CLI > 环境变量 > 配置文件 > 默认值），改完要重启后端。
-2. 控制台整页显示「控制台无法确定当前身份」时，说明 `/health` 拉取失败或字段缺失。
+3. 多用户：重新登录。登录后仍然 401 时，检查 `auth.sessionSecret` 是否在重启后变化
+   （空串 = 进程随机值），以及账号是否被改过密码 / 删除（`session_epoch` 轮换会让旧
+   token 立即失效）。
+4. 控制台整页显示「控制台无法确定当前身份」时，说明 `/health` 拉取失败或字段缺失。
    错误页会写出原因（HTTP 状态、超时、不是 JSON），按它排查；此时控制台**不会**发
    任何业务请求。
-3. 整页显示「当前主体没有可访问的命名空间」时，`result.scopes` 为空：该主体在用户
+5. 整页显示「当前主体没有可访问的命名空间」时，`result.scopes` 为空：该主体在用户
    目录里不存在 / 被禁用，或根目录的权限行没物化（见上面「会话页 403」）。
 
 ### `pnpm dev` 起不来
@@ -1440,13 +1448,16 @@ COMEM_SERVER_PORT=8080 pnpm dev
 2. **TTL 没有「给已有记忆批量设过期时间」的接口。** `memory.ttl.defaultDays` 只影响之后
    写入的记忆；存量要追平得直接改库（见「TTL 配错了」一节的 SQL）。`TtlService.setExpiry`
    是服务层方法，没有对应的 HTTP 路由。
-3. **认证默认关闭，控制台没有登录流程。** `auth.enabled: false` 时身份来自
-   `x-comem-subject`，且必须等于 `server.subject`（`src/bootstrap/container.ts` 的
-   `resolveIdentityOf`）——这是单用户形态。打开 `auth.enabled` 后身份来自凭据（session
-   token 或 API Key），`Authorizer` 按每请求的 `principals` 求权：组外用户读不到组根
-   （`tests/integration/services/acl.test.ts` 的 `user:bob` 用例）。但控制台只发
-   `x-comem-subject`（`web/composables/consoleIdentity.ts:92`），没有登录页也没有 Bearer
-   凭据，所以多用户管理面目前只能走 curl 或自建前端。
+3. **认证默认关闭。** `auth.enabled: false` 时身份来自 `x-comem-subject`，且必须等于
+   `server.subject`（`src/bootstrap/container.ts` 的 `resolveIdentityOf`）——这是单用户
+   形态，控制台不需要登录。打开 `auth.enabled` 后身份来自凭据（session token 或 API Key），
+   `Authorizer` 按每请求的 `principals` 求权：组外用户读不到组根
+   （`tests/integration/services/acl.test.ts` 的 `user:bob` 用例）。控制台按同一份凭据
+   工作：没有会话时整页跳 `/login?redirect=...`，登录页用 `POST /auth/login` 换 session
+   token，之后每个请求带 `Authorization: Bearer <token>`；凭据存 `sessionStorage`（刷新
+   保留、关标签页即清），顶栏提供退出。收到 401 时清掉本地会话并回登录页。可读根多于
+   一个时顶栏出现作用域选择器，选择存 `sessionStorage`，刷新后恢复；组根不可读时不会
+   列出来。
 4. **`reindex` 没有。** 「删库可重建」是设计承诺（§7、§21 的 backlog），命令不存在。
    索引坏了只能靠文件系统继续读写，检索能力等于没有。
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`

@@ -2399,20 +2399,40 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 ## 16. Web 控制台
 
-Nuxt 3 + shadcn-vue + Tailwind。八个页面：
+Nuxt 3 + shadcn-vue + Tailwind。九个业务页面，外加一个只在多用户部署下出现的登录页：
 
 | 页面 | 内容 |
 |---|---|
+| 登录 | 认证打开且浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
+| 概览 | 四个指标 + 最近任务；指标来自 `GET /health` 与 `GET /memories/pending` |
 | 文件树 | 左树右详情；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度 |
 | 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的分数、层级、命中原因 |
 | 记忆复核 | `pending` 列表 + diff 视图（before/after）；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
-| 用户与组 | 用户列表、组列表、组成员维护 |
+| 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
 | 会话与任务 | 会话列表、归档列表、任务状态、重试、僵尸回收记录 |
 | 监控 | 开销归因、吞吐（TPS / TTFB）、模型用量与成本、记忆健康度（见 §17.10） |
 | 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 
-**身份来自服务端。** 控制台不硬编码 `x-comem-subject`：`web/plugins/console-identity.ts` 在应用挂载前调一次 `GET /health`（§17.9），用返回的 `subject` 拼请求头，用 `scopes[0]` 作默认作用域根。插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的请求会带错主体。拉取失败时整页显示错误，**不回落 `user:local`**：回落会在运维把 `server.subject` 改成 `user:alice` 之后继续发旧身份，症状是每个请求 401，而界面上只有「请求失败」。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」区分开。
+**身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
+`web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`POST /auth/logout`
+在 `auth.enabled: false` 时返回 404），再分两条路径：
+
+- **单用户（默认）**：调一次 `GET /health`（§17.9），用返回的 `subject` 拼
+  `x-comem-subject`；没有存过的选择时用 `scopes[0]` 作作用域根。
+- **多用户**：从 `sessionStorage` 恢复会话；没有会话或已过期时整页进
+  `/login?redirect=...`，登录成功用 `POST /auth/login` 换 session token，之后每个请求带
+  `Authorization: Bearer <token>`。登录响应带 `subject` 与 `principals`，控制台按
+  `user:{uid}` / `group:{gid}` 推出候选根，再逐个用 `GET /fs/tree` 验证可读；读不到的根
+  （组根未预置）不列出来。凭据存 `sessionStorage`（刷新保留、关标签页即清），不存
+  `localStorage`；收到 401 时清掉本地会话并回登录页。
+
+插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的
+请求会带错主体。拉取失败时整页显示错误，**不回落 `user:local`**：回落会在运维把
+`server.subject` 改成 `user:alice` 之后继续发旧身份，症状是每个请求 401，而界面上只有
+「请求失败」。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」区分开。
+**作用域选择器**只在可读根多于一个时出现，选择存 `sessionStorage`；切换后文件树、检索、
+权限管理各自重新加载，文件详情不在新根下时回 `/files`。
 
 **为什么不给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把硬编码换成第二处配置：运维改 `server.subject` 时还要记得改控制台。服务端已经是这个值的唯一真相，控制台问一次即可。
 
