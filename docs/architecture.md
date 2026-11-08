@@ -98,7 +98,9 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 **没有 `ContentStore` 接口。** 内存实现没必要做：测试用 `fs.mkdtemp()` 建临时目录就够，文件系统在测试里一点不慢。既然只有一个实现，按 brief §7.2 的判据「只有一个实现时就地实现，不留接口」，它就是 `adapters/fs/content-store.ts` 里的一个具体类。分层靠「`node:fs` 只允许出现在 `adapters/`」这条 lint 规则保证，不靠接口。
 
-**没有 `Clock`、`IdGenerator`、`EmbeddingProvider`。** 时间直接 `new Date()`；任务租约过期的测试直接改数据库里的 `lease_until` 字段（本来就是这么造僵尸任务的）；ID 用 `crypto.randomUUID()`。v1 不做向量检索，就不需要 embedding 抽象——需要时再加。
+**没有 `Clock`、`IdGenerator`。** 时间直接 `new Date()`；任务租约过期的测试直接改数据库里的 `lease_until` 字段（本来就是这么造僵尸任务的）；ID 用 `crypto.randomUUID()`。
+
+**有 `EmbeddingProvider` 与 `RerankProvider`。** 这两个不是投机抽象：嵌入有 `AiSdkEmbeddingProvider`（OpenAI 兼容的 `/v1/embeddings`）一个真实实现，重排有 `HttpRerankProvider`（Cohere / Jina 兼容的 `/v1/rerank`）一个真实实现，而测试需要假实现。按「有两个以上真实实现才建抽象」的标准它们是边界情况，但**没有它们就没法在测试里替换掉网络**——而嵌入与重排都是要打外网的。
 
 **`LlmProvider` 这层必须有，理由不是「以后可能换」。** 是你说的那条：上层不该知道自己用的哪家 SDK。接口只暴露两个方法：
 
@@ -748,7 +750,59 @@ CREATE TABLE task (
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX task_claim ON task(status, lease_until);
+
+-- 嵌入模型的元数据（0007）。虚拟表 `node_embedding` 的维度建表时固化，
+-- 而维度来自配置，所以单独一行记「库里存的是哪个模型、多少维」。
+-- 启动时比对：不一致就报错提示跑 reindex——静默跳过会让语义检索永久返回空。
+CREATE TABLE embedding_model (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),   -- 单行表
+  model      TEXT NOT NULL,
+  dimension  INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- 用户与组目录（0008）。`acl_entry` / `node_permission` 存的是
+-- `user:{uid}` / `group:{gid}` 字符串，组员关系此前不落库，所以
+-- `GET /admin/*` 只能返回 501。这三张表是那组端点的数据来源。
+--
+-- 表名加 `app_` 前缀：`user` 是 SQLite 关键字，`group` 是 `GROUP BY` 的关键字。
+-- 加引号能用，但漏一次就是语法错误。
+CREATE TABLE app_user (
+  id           TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  email        TEXT,
+  status       TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE app_group (
+  id           TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  description  TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+-- 组成员关系。**不参与授权求值**——ACL 只认 `group:{gid}` 字符串。
+-- 这张表用于控制台展示，以及「删用户时清掉它的成员关系」。
+CREATE TABLE group_member (
+  group_id   TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (group_id, user_id)
+);
 ```
+
+**迁移清单**（`src/adapters/sqlite/migrations/`）：
+
+| 序号 | 文件 | 内容 |
+|---|---|---|
+| 0001 | `0001_init.sql` | `schema_version` / `node` / `node_permission` / `acl_entry` / `task` / `request_log` |
+| 0002–0006 | 增量 | FTS5 影子表、中文分词、索引与查询日志 |
+| 0007 | `0007_embedding.sql` | `embedding_model` 元数据（虚拟表 `node_embedding` 由 `reindex` 按配置维度建） |
+| 0008 | `0008_identity.sql` | `app_user` / `app_group` / `group_member` |
+| 0009 | `0009_access_tracking.sql` | `node.access_count` / `node.last_accessed_at`（热度衰减的输入） |
 
 **中文必须单字切分，否则检索整段失效。** 实测（SQLite 3.54.1，Node 26 的 `node:sqlite`）：
 
@@ -1920,7 +1974,7 @@ comem_llm_errors_total{purpose, code}
 - **不部署 Prometheus + Grafana**：`/metrics` 输出标准格式，接不接是运维的事。
 - **不做 OpenTelemetry 分布式追踪**：单进程服务，`requestId` 串起来就够。
 - **不做日志聚合**（ELK/Loki）：`error.log` + `grep` 够用。
-- **不做告警**：课程项目没人值夜班。
+- **不做告警**：单实例自托管部署没有值班表，告警没有接收方。`/metrics` 与 `/health` 提供查询接口，由部署方接入自己的监控。
 
 ## 18. 配置
 
@@ -1947,7 +2001,11 @@ summary:
   overviewMaxChars: 4000
 
 retrieval:
-  engine: fts5            # fts5 | vector（v1 只有 fts5）
+  # fts5 | vector | hybrid
+  #   fts5   关键词检索（BM25 + 中文 unigram 分词），零依赖
+  #   vector 语义检索，需要 providers.embedding
+  #   hybrid 并行跑两者再按 RRF 融合
+  engine: fts5
   candidateMultiplier: 4  # 先取 limit×N 候选，再按权限过滤
   levelWeights:           # 层级加权，用于 BM25 平局时打破
     l0: 1.15
@@ -2016,7 +2074,9 @@ task:
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
 
-**`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。v1 没有 `embedding` 段——不做向量检索就不需要 embedding 抽象，需要时再加。
+**`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
+
+**`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。
 
 **并发控制。** SQLite 开 `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=5000`，允许并发读、单写者。写事务统一走一个 `withWriteTransaction()` 包装，超过 `busy_timeout` 抛 `CONFLICT` 由任务层重试。这是 SQLite 的标准用法，不需要额外的写队列。
 

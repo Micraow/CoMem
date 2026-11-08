@@ -693,6 +693,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   const principals = [subject, ...groups, 'user:*'];
 
   const memory = new MemoryService({
+    // 配置项必须真的生效：写死的复核列表让 `memory.reviewRequired` 变成假配置。
+    reviewRequired: config.memory.reviewRequired,
     filesystem: rawFilesystem,
     search: {
       find: async (query, findOptions) => {
@@ -777,6 +779,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     metadata,
     llm,
     logger,
+    hookOverheadEnabled: config.telemetry.hookOverhead.enabled,
     requestLogPolicy: {
       enabled: config.telemetry.requestLog.enabled,
       sampleRate: config.telemetry.requestLog.sampleRate,

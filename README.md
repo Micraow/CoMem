@@ -195,8 +195,8 @@ pnpm verify     # typecheck + lint + 单元/集成测试 + Hook 测试
 | `pnpm test:integrations` | `node --test integrations/tests/`：Hook 插件的去重、游标、锁、超时预算 |
 
 测试不 mock 文件系统和数据库：用 `fs.mkdtemp()` 建临时目录、SQLite 用 `:memory:`。
-六条核心链路每条都有对应的集成测试（§20）。本次实测（2026-11-08）：59 个测试文件、
-1262 个用例通过、1 个跳过（跨设备 `move` 的 `EXDEV` 分支）；`integrations/` 107 个
+六条核心链路每条都有对应的集成测试（§20）。本次实测（2026-11-08）：73 个测试文件、
+1514 个用例通过、1 个跳过（跨设备 `move` 的 `EXDEV` 分支）；`integrations/` 107 个
 用例全部通过；`pnpm verify` 退出码 0。
 
 ## 许可证

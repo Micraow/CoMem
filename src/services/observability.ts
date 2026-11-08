@@ -198,6 +198,13 @@ export interface ObservabilityServiceDeps {
   /** §17.4 的模型用量；`LlmService.stats` 是累加器 */
   readonly llm: Pick<LlmService, 'stats'>;
   readonly logger: Logger;
+  /**
+   * 是否记录 Hook 阻塞开销（`telemetry.hookOverhead.enabled`）。
+   *
+   * 关闭时 `recordHookOverhead` 直接返回，`comem_hook_overhead_seconds` 不出现在
+   * `/metrics` 里。默认 `true`——它是控制台「监控」页的主要数据源，关掉就没有数据。
+   */
+  readonly hookOverheadEnabled?: boolean;
   /** 时钟；默认 `() => new Date()` */
   readonly now?: () => Date;
   /** §17.6 的采样；默认全量 */
@@ -274,6 +281,8 @@ export class ObservabilityService {
   /** §17.3 的 `comem_http_request_duration_seconds` 的 summary 累加器。 */
   #requestDurationSumSeconds = 0;
   #requestDurationCount = 0;
+  /** `telemetry.hookOverhead.enabled`。关掉时 `recordHookOverhead` 直接丢弃。 */
+  readonly #hookOverheadEnabled: boolean;
 
   constructor(deps: ObservabilityServiceDeps) {
     this.#requestLog = deps.requestLog;
@@ -283,6 +292,7 @@ export class ObservabilityService {
     this.#logger = deps.logger;
     this.#now = deps.now ?? (() => new Date());
     this.#policy = deps.requestLogPolicy ?? DEFAULT_REQUEST_LOG_POLICY;
+    this.#hookOverheadEnabled = deps.hookOverheadEnabled ?? true;
   }
 
   /**
@@ -390,6 +400,11 @@ export class ObservabilityService {
    * Prometheus 的抓取间隔共同回答，服务端不再存一份直方图。
    */
   async recordHookOverhead(report: HookOverheadReport): Promise<void> {
+    // 关掉时直接丢弃，不进 Map：Hook 每个事件每轮都上报，禁用它是为了省内存与 CPU，
+    // 记下来再过滤等于没关。
+    if (!this.#hookOverheadEnabled) {
+      return;
+    }
     const event = normalizeEvent(report.event);
     const phaseValues = new Map<string, number>();
     let totalMs = 0;

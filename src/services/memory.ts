@@ -69,6 +69,13 @@ export interface MemoryWriteResult {
  * 两个用例的必需能力。`FileSystemService` 结构上同时满足这四个方法。
  */
 export interface MemoryServicePorts {
+  /**
+   * 需要复核（写入时 `status = 'pending'`）的记忆类型。
+   *
+   * 缺省时用 `DEFAULT_REVIEW_REQUIRED`。生产装配必须传 `config.memory.reviewRequired`——
+   * 不传就是「配置项存在但不生效」。
+   */
+  readonly reviewRequired?: readonly string[];
   readonly filesystem: {
     /** 原样返回文件内容（含 frontmatter）。文件不存在时抛 `NOT_FOUND`。 */
     read(uri: Uri): Promise<{ readonly text: string }>;
@@ -118,7 +125,16 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** 走复核闸门的记忆类型（§11.6）。 */
-const GATED_MEMORY_TYPES: ReadonlySet<string> = new Set(['experiences', 'rules']);
+/**
+ * 默认需要复核的记忆类型（§11.6）。
+ *
+ * **可以被 `memory.reviewRequired` 覆盖。** 曾经把它写死在这里，配置项存在但不生效——
+ * 运维把 `rules` 从复核列表里去掉，写入仍然是 `pending`，然后控制台显示「待复核 1 条」
+ * 而没有任何地方能解释它从哪来。
+ *
+ * 这份常量只是配置的默认值，不要直接用它判断。
+ */
+const DEFAULT_REVIEW_REQUIRED: readonly string[] = ['experiences', 'rules'];
 
 /** scope 下放记忆的目录（§6.5）。 */
 const MEMORIES_DIRECTORY = 'memories';
@@ -537,11 +553,14 @@ export class MemoryService {
   readonly #filesystem: MemoryServicePorts['filesystem'];
   readonly #search: MemoryServicePorts['search'];
   readonly #logger: Logger;
+  /** 需要复核的记忆类型。来自 `memory.reviewRequired`，不是写死的。 */
+  readonly #reviewRequired: ReadonlySet<string>;
 
   constructor(ports: MemoryServicePorts) {
     this.#filesystem = ports.filesystem;
     this.#search = ports.search;
     this.#logger = ports.logger;
+    this.#reviewRequired = new Set(ports.reviewRequired ?? DEFAULT_REVIEW_REQUIRED);
   }
 
   /** 读一条记忆；不存在返回 `null`。 */
@@ -587,7 +606,7 @@ export class MemoryService {
     if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
       fields[UPDATED_AT_FIELD] = now;
     }
-    const status: MemoryStatus = GATED_MEMORY_TYPES.has(schema.type) ? 'pending' : 'active';
+    const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
 
     const text = serializeMemoryDocument({
       uri,
