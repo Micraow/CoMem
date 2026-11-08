@@ -332,6 +332,22 @@ export class IndexObserver implements NodeWriteObserver {
         { uri: record.uri },
         () => this.#acl.materializeNode(uri),
       );
+      // 反查表也要按新 URI 重建：`deleteSubtree(from)` 把源子树的 `acl_entry` 删了，
+      // 而 `materializeNode` 只写 `node_permission`。少了这一步，删账号时
+      // `purgePrincipal` 找不到那个目录，文件里的授权撤不掉，同 ID 重建就继承旧权限。
+      //
+      // 只处理目录：文件没有自己的 `.acl.json`（§6.7），读它只会多一次必然的
+      // ENOENT。目标侧没有文件的节点由 `syncEntriesFromFile` 直接跳过——按文件
+      // 为准，没有文件就没有直接授权。
+      if (record.kind === 'directory') {
+        await this.#isolate(
+          '节点移动后重建授权反查失败，已忽略。',
+          { uri: record.uri },
+          async () => {
+            await this.#acl.syncEntriesFromFile(uri);
+          },
+        );
+      }
     }
 
     // 向量：移动不改正文，旧向量按新 URI 重新挂上，不重新调模型。

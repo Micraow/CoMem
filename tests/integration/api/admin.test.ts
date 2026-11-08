@@ -535,6 +535,55 @@ describe('删除账号的授权清理', () => {
     ).toBe(0);
   });
 
+  /**
+   * 提权回归：`mv` 之后删账号必须能撤掉文件里的授权。
+   *
+   * 修复前 `onNodeMoved` 只重建 `node_permission`，`acl_entry` 在源前缀被
+   * `deleteSubtree` 删掉后没有按新 URI 写回。`purgePrincipal` 靠反查表找目录，
+   * 找不到就不改 `.acl.json`——同 ID 重建的账号继承旧权限。
+   */
+  it('mv 之后删账号能撤掉 .acl.json 里的授权，重建同 ID 不继承', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    const from = Uri.parse('comem://user/alice/resources/spec');
+    const to = Uri.parse('comem://user/alice/resources/spec-v2');
+    await container.services.filesystem.mkdir(from, AUTH_PRINCIPALS);
+    await container.services.acl.setAcl(
+      from,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 3, effect: 'allow' }],
+      },
+      'user:alice',
+      AUTH_PRINCIPALS,
+    );
+
+    await container.services.filesystem.move(from, to, AUTH_PRINCIPALS);
+    await container.services.indexObserver.drain();
+
+    // 反查表跟着目录搬到新 URI。
+    expect(
+      countRows(
+        'SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ? AND uri = ?',
+        'user:bob',
+        to.toString(),
+      ),
+    ).toBe(1);
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/bob' }));
+    await createUser('bob');
+    // 再物化一次：文件里如果还有授权，物化会把它算回来。
+    await container.services.acl.materializeNode(to);
+
+    expect(
+      await container.services.acl.check(to, 1, ['user:bob', 'user:*']),
+    ).toBe(false);
+    const onDisk = JSON.parse(
+      await readFile(join(dataDir, 'user', 'alice', 'resources', 'spec-v2', '.acl.json'), 'utf8'),
+    ) as { readonly entries: readonly unknown[] };
+    expect(onDisk.entries).toEqual([]);
+  });
+
   it('不能删除当前登录用户', async () => {
     const response = await inject({ method: 'DELETE', url: '/api/v1/admin/users/local' });
 

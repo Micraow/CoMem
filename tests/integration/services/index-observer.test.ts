@@ -30,6 +30,7 @@ interface Harness {
   readonly dataDir: string;
   readonly db: DatabaseSync;
   readonly store: ContentStore;
+  readonly acl: AclService;
   readonly filesystem: FileSystemService;
   readonly index: SqliteFtsIndex;
   readonly observer: IndexObserver;
@@ -119,6 +120,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     dataDir,
     db,
     store,
+    acl,
     filesystem,
     index,
     observer,
@@ -341,6 +343,32 @@ describe('IndexObserver.onNodeMoved', () => {
 
     expect(stale).toHaveBeenCalledTimes(1);
     expect(stale).toHaveBeenCalledWith(Uri.parse(RESOURCES));
+  });
+
+  it('移动目录后 acl_entry 按新 URI 重建（删账号能撤掉文件里的授权）', async () => {
+    const from = Uri.parse(`${RESOURCES}/spec`);
+    const to = Uri.parse(`${RESOURCES}/spec-v2`);
+    await harness.filesystem.mkdir(from, PRINCIPALS);
+    await harness.acl.setAcl(
+      from,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'user:bob', level: 3, effect: 'allow' }],
+      },
+      SUBJECT,
+      PRINCIPALS,
+    );
+
+    await harness.filesystem.move(from, to, PRINCIPALS);
+    await harness.observer.drain();
+
+    // 源前缀的反查行被删掉，目标前缀按 `.acl.json` 写回。
+    expect(
+      harness.permissions.entriesByPrincipal('user:bob').map((row) => row.uri),
+    ).not.toContain(from.toString());
+    expect(
+      harness.permissions.entriesByPrincipal('user:bob').map((row) => row.uri),
+    ).toContain(to.toString());
   });
 
   it('移动单个文件：源行清掉、目标行建出来', async () => {

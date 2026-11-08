@@ -630,6 +630,35 @@ export class AclService implements Authorizer {
   }
 
   /**
+   * 按磁盘上的 `.acl.json` 重建某节点的反查表（`acl_entry`）。
+   *
+   * 移动 / 改名后目标侧用：`PermissionRepository.deleteSubtree(from)` 会把源子树
+   * 的 `acl_entry` 删掉，而 `materializeNode` 只写 `node_permission`。反查表丢了
+   * 行之后 `purgePrincipal` 找不到那个目录，删账号撤不掉文件里的授权——同 ID 重建
+   * 的用户会继承旧权限，这是一条提权路径。
+   *
+   * 没有 `.acl.json` 时什么都不做：按文件为准，没有文件就没有直接授权（继承来的
+   * 权限不是这个节点的直接条目）。返回是否写了行，供观察者日志与测试判断。
+   */
+  async syncEntriesFromFile(uri: Uri): Promise<boolean> {
+    const file = await this.#aclFile.read(uri);
+    if (file === null) {
+      this.#logger.debug('节点没有 .acl.json，跳过反查表重建', { uri: uri.toString() });
+      return false;
+    }
+
+    const entryRows = toEntryRows(uri, file.entries);
+    this.#runInTransaction(() => {
+      this.#permissions.replaceEntries(uri.toString(), entryRows);
+    });
+    this.#logger.debug('反查表已按文件重建', {
+      uri: uri.toString(),
+      entries: entryRows.length,
+    });
+    return true;
+  }
+
+  /**
    * 主体展开：`user:alice` + 所属组 → 查询用的 principals 数组。
    *
    * 退组立即生效（§12.5）靠的就是「每次重新展开」：ACL 里存的是

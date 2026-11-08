@@ -690,9 +690,11 @@ summary_state: fresh            # fresh | stale
 |---|---|---|
 | `onNodeWritten(uri, kind)` | 单个节点被创建或覆盖 | 写该节点的索引 → 物化它自己与祖先目录的权限 → 父目录摘要标脏 |
 | `onNodeRemoved(uri)` | 节点被删除 | 删整棵子树的索引 / 物化权限 / 向量 → 父目录摘要标脏 |
-| `onNodeMoved(from, to)` | 节点被移动 / 改名 | 遍历 `to` 的整棵子树重建索引与物化权限，删掉 `from` 前缀的行 → 源与目标的父目录各标脏一次 |
+| `onNodeMoved(from, to)` | 节点被移动 / 改名 | 遍历 `to` 的整棵子树重建索引、物化权限与授权反查（`acl_entry`），删掉 `from` 前缀的行 → 源与目标的父目录各标脏一次 |
 
 **`move` 必须是一次通知，不能拆成「按 `from` 删除 + 按 `to` 写入」。** 拆开时目标路径只重建根节点自己，子项一条都不出现：文件在磁盘上还在，`tree` 却只剩一个空目录，`find` 搜不到，而且不报错。一次通知还让整棵子树只走一遍磁盘、只做一次索引事务、只投递两次摘要失效（源与目标各一次），而不是每个子项各一次。
+
+**反查表也要跟过去。** `deleteSubtree(from)` 会删掉源子树的 `acl_entry`，而 `materializeNode` 只写 `node_permission`。少了「按目标 URI 从 `.acl.json` 重建 `acl_entry`」这一步，`purgePrincipal` 反查不到那个目录，删账号撤不掉文件里的授权，同 ID 重建的账号继承旧权限。只对目录做：文件没有自己的 `.acl.json`，目标侧没有文件时直接跳过——按文件为准。
 
 **每个派生存储各一步 `try/catch`。** 四件事写在同一个 `try` 里时，任何一步抛错都会让后面的步骤全部跳过。默认配置（`providers.embedding.type === 'disabled'`，`node_embedding` 表不存在）正好会踩中：删节点时向量清理抛 `no such table`，父目录的物化权限与摘要失效静默丢失。
 
