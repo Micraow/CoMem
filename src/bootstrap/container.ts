@@ -55,7 +55,6 @@ import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
-import { OfflineLlmProvider } from '../adapters/llm/offline-provider.js';
 import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
@@ -478,20 +477,16 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   // ── 模型 ──
   const llmConfig = config.providers.llm.default;
   const llm = new LlmService({
-    // `offline` 不连网络：演示与端到端测试要验证的是管线编排，不是模型质量。
-    provider:
-      llmConfig.type === 'offline'
-        ? new OfflineLlmProvider()
-        : new AiSdkLlmProvider({
-            type: llmConfig.type,
-            ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
-            model: llmConfig.model,
-            apiKey: llmConfig.apiKey,
-            maxTokens: llmConfig.maxTokens,
-            timeoutSeconds: llmConfig.timeoutSeconds,
-            pricing: llmConfig.pricing,
-            logger,
-          }),
+    provider: new AiSdkLlmProvider({
+      type: llmConfig.type,
+      ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
+      model: llmConfig.model,
+      apiKey: llmConfig.apiKey,
+      maxTokens: llmConfig.maxTokens,
+      timeoutSeconds: llmConfig.timeoutSeconds,
+      pricing: llmConfig.pricing,
+      logger,
+    }),
     logger,
     pricing: llmConfig.pricing,
     model: llmConfig.model,

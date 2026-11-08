@@ -83,17 +83,35 @@ trap cleanup EXIT INT TERM
 rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/data"
 
-# 演示配置：规则摘要（不需要模型凭据）、固定端口、只写 warning 以上的日志。
-cat > "$DEMO_ROOT/config.yaml" <<YAML
-dataDir: ${DEMO_ROOT}/data
-# 离线提供者：演示环境没有模型凭据，抽取步骤返回「空操作列表」。
-# 这不是作弊——要验证的是管线编排与 .done 落盘，不是模型抽得准不准。
-providers:
+# 演示配置。
+#
+# **没有「离线提供者」这种假东西。** 有模型凭据就跑真实抽取，没有就把 `generator`
+# 降成 `rule` 并明确告诉用户「阶段二需要模型」——不拿空结果冒充成功。
+LLM_KEY="${COMEM_LLM_KEY:-}"
+LLM_BASE_URL="${COMEM_LLM_BASE_URL:-http://127.0.0.1:3425/v1}"
+LLM_MODEL="${COMEM_LLM_MODEL:-comate/600085158/xiaomi/mimo-v2.6-flash//public}"
+
+if [ -n "$LLM_KEY" ]; then
+  SUMMARY_GENERATOR=llm
+  PROVIDERS_BLOCK="providers:
   llm:
     default:
-      type: offline
+      type: openai-compatible
+      baseUrl: ${LLM_BASE_URL}
+      model: ${LLM_MODEL}
+      apiKey: ${LLM_KEY}
+      maxTokens: 32768
+      timeoutSeconds: 120"
+else
+  SUMMARY_GENERATOR=rule
+  PROVIDERS_BLOCK="# 没有 COMEM_LLM_KEY，阶段二会失败重试后进死信。摘要降级成规则生成。"
+fi
+
+cat > "$DEMO_ROOT/config.yaml" <<YAML
+dataDir: ${DEMO_ROOT}/data
+${PROVIDERS_BLOCK}
 summary:
-  generator: rule
+  generator: ${SUMMARY_GENERATOR}
 server:
   host: 127.0.0.1
   port: ${DEMO_PORT}
@@ -114,7 +132,8 @@ echo
 SERVER_PID=$!
 
 demo() {
-  "$NODE_BIN" "$REPO_ROOT/scripts/demo.mjs" "$@" --base-url "$BASE_URL" --root "$DEMO_ROOT"
+  CO_MEM_LLM_ENABLED="$([ -n "$LLM_KEY" ] && echo 1 || echo 0)" \
+    "$NODE_BIN" "$REPO_ROOT/scripts/demo.mjs" "$@" --base-url "$BASE_URL" --root "$DEMO_ROOT"
 }
 
 echo "==> 服务就绪"

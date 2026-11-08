@@ -294,7 +294,13 @@ async function showArchive() {
 
   // 阶段二在后台跑，轮询到终态再展示。不轮询就只能读到刚建任务时的 pending，
   // 那看起来像「执行器没跑」——而实际上它只是还没轮到。
-  const task = await waitForTask(taskId);
+  //
+  // **没有模型凭据时不轮询**：抽取步骤会失败重试三次再进死信，等它只是让人干等
+  // 30 秒，而且 `failed` 也不说明编排有问题。直接说「这一步需要模型」更诚实。
+  const llmEnabled = process.env['CO_MEM_LLM_ENABLED'] === '1';
+  const task = llmEnabled
+    ? await waitForTask(taskId)
+    : await api.get(`/tasks/${taskId}`);
   detail(`任务 ${task.task.id}：status=${task.task.status}，stepsDone=[${task.task.stepsDone.join(', ')}]`);
 
   const archiveDir = join(DATA_DIR, 'user', 'local', 'sessions', sessionId, 'history', archiveUri.slice(archiveUri.lastIndexOf('/') + 1));
@@ -305,7 +311,10 @@ async function showArchive() {
   const messages = readFileSync(join(archiveDir, 'messages.jsonl'), 'utf8').trim().split('\n');
   detail(`归档消息 ${archiveDir}/messages.jsonl：${messages.length} 行（每行一条消息）`);
 
-  if (task.task.status === 'done') {
+  if (!llmEnabled) {
+    detail('阶段二需要模型：设置 COMEM_LLM_KEY 后重跑，会真实执行四步并写 .done。');
+    detail('（摘要已用规则生成器降级产出，见上面的 .abstract.md / .overview.md。）');
+  } else if (task.task.status === 'done') {
     detail('阶段二完成：四步全部落盘，.done 已写。');
   } else {
     // 失败不吞掉：把服务端记的原因原样打出来，否则演示脚本会假装一切正常。

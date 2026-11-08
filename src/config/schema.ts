@@ -15,11 +15,14 @@ import { ComemError } from '../domain/errors.js';
 
 const llmProviderSchema = z.object({
   /**
-   * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`，
-   * `offline` 不连网络、对任何请求返回空结果（演示与端到端测试用，见
-   * `adapters/llm/offline-provider.ts` 的说明）。
+   * `openai-compatible` 走 `@ai-sdk/openai-compatible`，`anthropic` 走 `@ai-sdk/anthropic`。
+   *
+   * **没有 `offline` 这一档。** 曾经有过一个「不连网络、返回空结果」的假提供者，
+   * 用来让演示在没有模型凭据时跑通。删掉的理由：它让「阶段二从未真正执行」这个
+   * 缺陷看起来像正常状态——任务显示 `done`，但没有一条记忆被抽出来。
+   * 演示脚本现在直接读 `COMEM_LLM_*` 环境变量，没配就明确说「这一步需要模型」。
    */
-  type: z.enum(['openai-compatible', 'anthropic', 'offline']).default('openai-compatible'),
+  type: z.enum(['openai-compatible', 'anthropic']).default('openai-compatible'),
   baseUrl: z.string().default('https://api.example.com/v1'),
   model: z.string().default('gpt-4o-mini'),
   apiKey: z.string().default(''),
