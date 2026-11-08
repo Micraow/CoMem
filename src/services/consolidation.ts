@@ -47,9 +47,15 @@
  *
  * ## 并发
  *
- * 写盘阶段按 URI 升序**同时**持有全部记忆文件的 `exact` 锁：两个并发的合并如果
- * 加锁顺序不同会互相等待（死锁），升序是唯一确定的顺序。锁拿不到（`CONFLICT`）时
- * 还没写任何东西，整批不应用。
+ * 锁在 `MemoryService` 里，一条记忆一把 `exact` 锁（§18「并发控制」）。这里**不再
+ * 自己持锁**：`PathLockManager` 不可重入，外层再拿一把同 URI 的锁会等自己，5 秒后
+ * 抛 `CONFLICT`；而外层的锁本来也盖不住读——`#plan` 的正文读取发生在它之前。
+ *
+ * 代价是「锁拿不到时整批不应用」不再成立：中途 `CONFLICT` 时前面几条已经写盘。
+ * 这与其它写盘失败同一条出口——错误 `details` 里带上已应用的清单，由运维收尾。
+ *
+ * 写盘按 URI 升序**执行**（不是为了加锁）：`adds` / `updates` / `deletes` 的
+ * 顺序因此是确定的，报告与日志可以直接比对。
  */
 
 import { z } from 'zod';
@@ -65,8 +71,6 @@ import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 import { identityFields, type MemoryTypeSchema } from '../domain/memory-type.js';
 import { Uri } from '../domain/uri.js';
-
-import type { PathLockManager } from '../adapters/fs/lock.js';
 
 import { renderMemoryUri, type MemoryRecord, type MemoryService } from './memory.js';
 import type { SearchService } from './search.js';
@@ -90,7 +94,6 @@ export interface ConsolidationServiceDeps {
   readonly llm: {
     generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
   };
-  readonly locks: Pick<PathLockManager, 'withLock'>;
   readonly logger: Logger;
   /** 最大轮次。默认 10，来源见 `DEFAULT_MAX_ITERATIONS`。 */
   readonly maxIterations?: number;
@@ -362,7 +365,6 @@ export class ConsolidationService {
   readonly #memory: ConsolidationServiceDeps['memory'];
   readonly #search: ConsolidationServiceDeps['search'];
   readonly #llm: ConsolidationServiceDeps['llm'];
-  readonly #locks: ConsolidationServiceDeps['locks'];
   readonly #logger: Logger;
   readonly #maxIterations: number;
 
@@ -370,7 +372,6 @@ export class ConsolidationService {
     this.#memory = deps.memory;
     this.#search = deps.search;
     this.#llm = deps.llm;
-    this.#locks = deps.locks;
     this.#logger = deps.logger;
     this.#maxIterations = deps.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   }
@@ -438,48 +439,45 @@ export class ConsolidationService {
       return { adds, updates, deletes, trace };
     }
 
-    const sorted = [...plans].sort(compareByUri);
-    await this.#withLocks(sorted, async () => {
-      try {
-        for (const plan of sorted) {
-          if (plan.schema === null) {
-            // 删除必须可解释：`reason` 是模型给的理由，进日志（§11.8）。
-            await this.#memory.remove(plan.uri);
-            deletes.push(plan.uri.toString());
-            this.#logger.info('记忆合并删除了记忆', {
-              scope: scope.toString(),
-              uri: plan.uri.toString(),
-              reason: plan.operation.reason,
-            });
-            continue;
-          }
-          const write = await this.#memory.upsertMemory(scope, plan.schema, plan.values);
-          (write.created ? adds : updates).push(write.uri.toString());
-          this.#logger.info('记忆合并写入了记忆', {
+    try {
+      for (const plan of [...plans].sort(compareByUri)) {
+        if (plan.schema === null) {
+          // 删除必须可解释：`reason` 是模型给的理由，进日志（§11.8）。
+          await this.#memory.remove(plan.uri);
+          deletes.push(plan.uri.toString());
+          this.#logger.info('记忆合并删除了记忆', {
             scope: scope.toString(),
-            uri: write.uri.toString(),
-            memoryType: write.memoryType,
-            created: write.created,
+            uri: plan.uri.toString(),
             reason: plan.operation.reason,
           });
+          continue;
         }
-      } catch (error) {
-        const failure = ComemError.from(error);
-        // 不回滚：`MemoryService` 没有事务，逐字节前像也拿不回来（见文件头）。
-        // 已经应用的操作写进 details，运维按这份清单收尾。
-        throw new ComemError(
-          failure.code,
-          `记忆合并中途失败，已应用的 ${adds.length + updates.length + deletes.length} 条操作没有回滚：${failure.message}`,
-          {
-            ...(failure.details ?? {}),
-            scope: scope.toString(),
-            adds: [...adds],
-            updates: [...updates],
-            deletes: [...deletes],
-          },
-        );
+        const write = await this.#memory.upsertMemory(scope, plan.schema, plan.values);
+        (write.created ? adds : updates).push(write.uri.toString());
+        this.#logger.info('记忆合并写入了记忆', {
+          scope: scope.toString(),
+          uri: write.uri.toString(),
+          memoryType: write.memoryType,
+          created: write.created,
+          reason: plan.operation.reason,
+        });
       }
-    });
+    } catch (error) {
+      const failure = ComemError.from(error);
+      // 不回滚：`MemoryService` 没有事务，逐字节前像也拿不回来（见文件头）。
+      // 已经应用的操作写进 details，运维按这份清单收尾。
+      throw new ComemError(
+        failure.code,
+        `记忆合并中途失败，已应用的 ${adds.length + updates.length + deletes.length} 条操作没有回滚：${failure.message}`,
+        {
+          ...(failure.details ?? {}),
+          scope: scope.toString(),
+          adds: [...adds],
+          updates: [...updates],
+          deletes: [...deletes],
+        },
+      );
+    }
 
     this.#logger.info('记忆合并完成', {
       scope: scope.toString(),
@@ -746,27 +744,6 @@ export class ConsolidationService {
       );
     }
     return record;
-  }
-
-  /**
-   * 按升序**同时**持有全部锁再执行。
-   *
-   * 两个并发的合并如果加锁顺序不同会互相等待：升序是唯一确定的顺序。递归实现
-   * 让「拿到全部锁」与「全部释放」都只有一处出口——`withLock` 的 `finally` 在
-   * 每一层负责自己的释放，中途抛错时已持有的锁全部按栈回退释放。
-   *
-   * 模式是 `exact`（单个记忆文件）：`tree` 会连整个 `memories/` 子树一起锁住，
-   * 把同目录下无关的写入（别的 scope 的合并、控制台的复核）全部挡住。
-   */
-  async #withLocks<T>(plans: readonly WritePlan[], run: () => Promise<T>): Promise<T> {
-    const acquire = async (index: number): Promise<T> => {
-      const plan = plans[index];
-      if (plan === undefined) {
-        return run();
-      }
-      return this.#locks.withLock(plan.uri, 'exact', () => acquire(index + 1));
-    };
-    return acquire(0);
   }
 }
 

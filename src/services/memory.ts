@@ -30,8 +30,28 @@
  * `experiences` / `rules` 写入时 `status = 'pending'`，检索侧按 `status = 'active'`
  * 过滤，所以它们在被 `approve` 之前**不进检索结果**。其余类型直接 `active`。
  * 更新一条已复核的记录会把它重新打回 `pending`：正文变了就该重新看一遍。
+ *
+ * ## 并发：一条记忆一个 `exact` 锁（§18「并发控制」）
+ *
+ * 记忆写入是**读-改-写**：`#readDocument` 拿 `createdAt` / `created` / `addOnly`
+ * 判据，再整份覆盖。读在锁外时，两个写者各读一份旧正文、各写一份新的，后写者会
+ * 把先写者的字段整段抹掉（并发合并同一个 `preferences` URI 就是这样丢字段的）。
+ *
+ * 所以锁归本服务：`upsertMemory` / `approve` / `reject` / `remove` 都在
+ * `exact(uri)` 里完成「读 → 序列化 → 写」。粒度是**单文件**，不是 `memories/`
+ * 子树——`tree` 会把同目录下无关的写入全部挡住。
+ *
+ * **`upsertMemory` 是字段级合并，不是整份替换。** 传进来的 `values` 覆盖同名
+ * 字段，没传的字段保留磁盘上的值。这一条是丢字段缺陷的另一半：调用方（`memory_merge`
+ * 步骤、记忆合并）的读在锁外，"读 → 改 → 写" 里的"改"只对自己动过的字段负责，
+ * 保留其它字段才让两个并发写者的结果可以合并。整份替换时后写者会用它那份陈旧的
+ * 字段值盖掉先写者的新值。
+ *
+ * 锁**不可重入**（`adapters/fs/lock.ts` 是文件锁，同一进程内按锁路径排队）：任何
+ * 调用方都不能在持有 `exact(uri)` 的同时再调这里的方法，否则等 5 秒后拿 `CONFLICT`。
  */
 
+import type { PathLockManager } from '../adapters/fs/lock.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { identityFields, renderPath, type MemoryTypeSchema } from '../domain/memory-type.js';
@@ -70,6 +90,14 @@ export interface MemoryWriteResult {
  * 两个用例的必需能力。`FileSystemService` 结构上同时满足这四个方法。
  */
 export interface MemoryServicePorts {
+  /**
+   * 记忆文件的路径锁（§18「并发控制」）。
+   *
+   * 记忆写入的「读 → 序列化 → 写」必须被同一把 `exact` 锁覆盖，而这把锁不能由
+   * 调用方代持：`memory_merge` 步骤、记忆合并、HTTP 复核三条路径都会写同一个 URI，
+   * 让每个调用方自己加锁等于把「忘记加锁」变成静默丢字段。
+   */
+  readonly locks: Pick<PathLockManager, 'withLock'>;
   /**
    * 需要复核（写入时 `status = 'pending'`）的记忆类型。
    *
@@ -588,6 +616,7 @@ function assertFieldTypes(
 
 export class MemoryService {
   readonly #filesystem: MemoryServicePorts['filesystem'];
+  readonly #locks: MemoryServicePorts['locks'];
   readonly #search: MemoryServicePorts['search'];
   readonly #logger: Logger;
   /** 需要复核的记忆类型。来自 `memory.reviewRequired`，不是写死的。 */
@@ -595,6 +624,7 @@ export class MemoryService {
 
   constructor(ports: MemoryServicePorts) {
     this.#filesystem = ports.filesystem;
+    this.#locks = ports.locks;
     this.#search = ports.search;
     this.#logger = ports.logger;
     this.#reviewRequired = new Set(ports.reviewRequired ?? DEFAULT_REVIEW_REQUIRED);
@@ -616,7 +646,8 @@ export class MemoryService {
   }
 
   /**
-   * 按记忆类型渲染路径并写。
+   * 按记忆类型渲染路径并写。**字段级合并**：`values` 里的字段覆盖磁盘上的同名
+   * 字段，没传的字段保留（见文件头「并发」）。
    *
    * `addOnly` 类型（`events`）在文件已存在时抛 `ALREADY_EXISTS`：事件是「某时发生了
    * 什么」，发生之后不会改变，覆盖写等于篡改历史（§11.1）。
@@ -627,97 +658,116 @@ export class MemoryService {
     values: Readonly<Record<string, unknown>>,
   ): Promise<MemoryWriteResult> {
     assertMemoryIdentity(schema, values);
-    const uri = renderMemoryUri(scopeUri, schema, values);
-    const existing = await this.#readDocument(uri);
-    if (existing !== null && schema.operationMode === 'addOnly') {
-      throw new ComemError(
-        'ALREADY_EXISTS',
-        `记忆 ${uri.toString()} 已存在，${schema.type} 类型只允许新增。`,
-        { uri: uri.toString(), memoryType: schema.type },
-      );
-    }
-
     assertFieldTypes(schema, values);
-    const now = new Date().toISOString();
-    const fields: Record<string, unknown> = { ...values };
-    if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
-      fields[UPDATED_AT_FIELD] = now;
-    }
-    const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
+    const uri = renderMemoryUri(scopeUri, schema, values);
 
-    const text = serializeMemoryDocument({
+    // 锁覆盖整个读改写：`existing` 决定 `createdAt` / `created` / `addOnly` 判据，
+    // 读在锁外时两个写者会各自基于同一份旧正文构造新正文（§18）。
+    return this.#locks.withLock(
       uri,
-      memoryType: schema.type,
-      status,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      schema,
-      fields,
-    });
-    await this.#filesystem.write(uri, text);
+      'exact',
+      async () => {
+        const existing = await this.#readDocument(uri);
+        if (existing !== null && schema.operationMode === 'addOnly') {
+          throw new ComemError(
+            'ALREADY_EXISTS',
+            `记忆 ${uri.toString()} 已存在，${schema.type} 类型只允许新增。`,
+            { uri: uri.toString(), memoryType: schema.type },
+          );
+        }
 
-    this.#logger.info('记忆已写入', {
-      uri: uri.toString(),
-      memoryType: schema.type,
-      status,
-      created: existing === null,
-    });
+        const now = new Date().toISOString();
+        // 合并而不是替换：调用方读到的是一份快照，它的"改"只对自己动过的字段负责。
+        const fields: Record<string, unknown> = { ...existing?.fields, ...values };
+        if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
+          fields[UPDATED_AT_FIELD] = now;
+        }
+        const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
 
-    return {
-      uri,
-      memoryType: schema.type,
-      created: existing === null,
-      before: existing?.body ?? null,
-      after: renderBody(fields[CONTENT_FIELD]),
-    };
+        const text = serializeMemoryDocument({
+          uri,
+          memoryType: schema.type,
+          status,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+          schema,
+          fields,
+        });
+        await this.#filesystem.write(uri, text);
+
+        this.#logger.info('记忆已写入', {
+          uri: uri.toString(),
+          memoryType: schema.type,
+          status,
+          created: existing === null,
+        });
+
+        return {
+          uri,
+          memoryType: schema.type,
+          created: existing === null,
+          before: existing?.body ?? null,
+          after: renderBody(fields[CONTENT_FIELD]),
+        };
+      },
+      // 新记忆的父目录可能还不存在，此时锁文件也没有地方放——不建目录的话，
+      // 两个并发写者会同时通过（见 `LockAcquireOptions.createParentDirectory`）。
+      { createParentDirectory: true },
+    );
   }
 
   /** 复核通过：`pending` → `active`（§11.6）。已经是 `active` 时是空操作。 */
   async approve(uri: Uri): Promise<void> {
-    const document = await this.#readDocument(uri);
-    if (document === null) {
-      throw new ComemError('NOT_FOUND', `记忆不存在：${uri.toString()}`, { uri: uri.toString() });
-    }
-    const schema = getMemoryType(document.memoryType);
-    if (schema === undefined) {
-      throw invalidArgument(`未知的记忆类型：${document.memoryType}。`, {
+    await this.#locks.withLock(uri, 'exact', async () => {
+      const document = await this.#readDocument(uri);
+      if (document === null) {
+        throw new ComemError('NOT_FOUND', `记忆不存在：${uri.toString()}`, {
+          uri: uri.toString(),
+        });
+      }
+      const schema = getMemoryType(document.memoryType);
+      if (schema === undefined) {
+        throw invalidArgument(`未知的记忆类型：${document.memoryType}。`, {
+          memoryType: document.memoryType,
+        });
+      }
+      if (document.status === 'active') {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      await this.#filesystem.write(
+        uri,
+        serializeMemoryDocument({
+          uri,
+          memoryType: document.memoryType,
+          status: 'active',
+          createdAt: document.createdAt,
+          updatedAt: now,
+          schema,
+          fields: document.fields,
+        }),
+      );
+      this.#logger.info('记忆复核通过', {
+        uri: uri.toString(),
         memoryType: document.memoryType,
       });
-    }
-    if (document.status === 'active') {
-      return;
-    }
-
-    const now = new Date().toISOString();
-    await this.#filesystem.write(
-      uri,
-      serializeMemoryDocument({
-        uri,
-        memoryType: document.memoryType,
-        status: 'active',
-        createdAt: document.createdAt,
-        updatedAt: now,
-        schema,
-        fields: document.fields,
-      }),
-    );
-    this.#logger.info('记忆复核通过', {
-      uri: uri.toString(),
-      memoryType: document.memoryType,
     });
   }
 
   /** 复核拒绝：删除并记录原因（§11.6）。已经不在了是空操作。 */
   async reject(uri: Uri, reason: string): Promise<void> {
-    const document = await this.#readDocument(uri);
-    if (document === null) {
-      return;
-    }
-    await this.#filesystem.remove(uri);
-    this.#logger.info('记忆复核拒绝，已删除', {
-      uri: uri.toString(),
-      memoryType: document.memoryType,
-      reason,
+    await this.#locks.withLock(uri, 'exact', async () => {
+      const document = await this.#readDocument(uri);
+      if (document === null) {
+        return;
+      }
+      await this.#filesystem.remove(uri);
+      this.#logger.info('记忆复核拒绝，已删除', {
+        uri: uri.toString(),
+        memoryType: document.memoryType,
+        reason,
+      });
     });
   }
 
@@ -725,10 +775,13 @@ export class MemoryService {
    * 删除一条记忆（§11.5 的 `delete` 操作）。
    *
    * `rm -f` 语义：不存在不是错误。删除与覆盖写不同，它没有「部分成功」的形态，
-   * 所以不需要读回来判断。
+   * 所以不需要读回来判断。**仍然持 `exact` 锁**：并发的 `upsertMemory` 会在
+   * 「读完、还没写」之间被它看见，没有锁时删除与覆盖写的先后无法解释。
    */
   async remove(uri: Uri): Promise<void> {
-    await this.#filesystem.remove(uri);
+    await this.#locks.withLock(uri, 'exact', async () => {
+      await this.#filesystem.remove(uri);
+    });
     this.#logger.info('记忆已删除', { uri: uri.toString() });
   }
 

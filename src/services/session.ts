@@ -50,6 +50,7 @@ import type { Logger } from '../domain/log.js';
 import type {
   AutoCommitPolicy,
   ContentPart,
+  MessageRole,
   Session,
   SessionMessage,
   SessionMeta,
@@ -87,6 +88,14 @@ const ARCHIVE_DIRECTORY_PATTERN = /^archive_(\d+)$/;
 
 /** `messages.jsonl` 文件名（§6.5）。 */
 const MESSAGES_FILE_NAME = 'messages.jsonl';
+
+/**
+ * 稳定消息 ID 的分隔符。
+ *
+ * 用 NUL：它不会出现在角色名或 ISO 时间串里，正文里出现同样的字符也不会让
+ * `("ab", "c")` 与 `("a", "bc")` 拼出同一个摘要。
+ */
+const MESSAGE_ID_SEPARATOR = '\u0000';
 
 /** §12.1：write = 3（建会话是写操作）。 */
 const WRITE: AclAction = 3;
@@ -237,6 +246,30 @@ function sumTokens(messages: readonly SessionMessage[]): number {
 
 function archiveSequence(name: string): number {
   return Number(ARCHIVE_DIRECTORY_PATTERN.exec(name)?.[1] ?? '0');
+}
+
+/**
+ * 消息的稳定 ID：`sha256(role + \0 + text + \0 + createdAt)`。
+ *
+ * 与 `remember`（`api/mcp/tools/remember.ts` 的 `messageId`）同一个公式——两条
+ * 导入路径可能落进同一个会话，公式一漂就互相看不见对方的去重。
+ *
+ * 为什么要稳定 ID：游标只在消息落盘之后前进，进程死在「写完消息、游标没写」之间
+ * 时重跑会从同一个游标再读一遍。ID 每次随机时服务端没有任何判据能认出「这条已经
+ * 落过盘」，只能整批重复追加。有了稳定 ID，调用方按「会话已有的 ID」去重即可。
+ *
+ * **`createdAt` 是幂等键的一部分**：源日志没有时间戳时调用方只能填当前时刻，
+ * 重跑会得到不同的 ID，去重失效。这是已知窗口，写进 §18「并发控制」。
+ *
+ * 分隔符用 NUL：它不出现在角色名或 ISO 时间串里，正文里出现同样的字符也不会让
+ * `("ab", "c")` 与 `("a", "bc")` 拼出同一个摘要。
+ */
+export function stableMessageId(
+  role: MessageRole,
+  text: string,
+  createdAt: string,
+): string {
+  return createHash('sha256').update([role, text, createdAt].join(MESSAGE_ID_SEPARATOR)).digest('hex');
 }
 
 function createSessionId(): string {
@@ -429,15 +462,22 @@ export class SessionService {
    * `.meta.json` 只会多一次磁盘往返与一条假日志。
    */
   async archive(sessionUri: Uri): Promise<void> {
-    const meta = await this.#requireSession(sessionUri);
-    if (meta.status === 'archived') {
-      return;
-    }
-    await this.#meta.writeSession(sessionUri, { ...meta, status: 'archived' });
-    this.#logger.info('会话已归档（空闲过期）。', {
-      uri: sessionUri.toString(),
-      commitCount: meta.commitCount,
-      pendingTokens: meta.pendingTokens,
+    // **必须持 `TREE` 锁**（与 `addMessage` / `commitPhase1` 同一把）：这是
+    // `.meta.json` 的读-改-写。无锁时调度器的归档会把并发提交刚写进去的
+    // `commitCount` 盖回旧值，而 `#nextArchiveId` 就是 `commitCount + 1`——
+    // 少计一次，下一个归档就会重新分配已有的 `archive_NNN`，把上一份归档的
+    // `messages.jsonl` 与元数据原子覆盖掉（归档消息永久丢失）。
+    await this.#locks.withLock(sessionUri, 'tree', async () => {
+      const meta = await this.#requireSession(sessionUri);
+      if (meta.status === 'archived') {
+        return;
+      }
+      await this.#meta.writeSession(sessionUri, { ...meta, status: 'archived' });
+      this.#logger.info('会话已归档（空闲过期）。', {
+        uri: sessionUri.toString(),
+        commitCount: meta.commitCount,
+        pendingTokens: meta.pendingTokens,
+      });
     });
   }
 

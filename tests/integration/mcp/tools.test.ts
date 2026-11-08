@@ -270,6 +270,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
       remove: (uri) => store.remove(uri),
       list: (uri) => store.list(uri),
     },
+    locks,
     search: { find: async () => [] },
     logger,
   });

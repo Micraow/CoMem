@@ -939,6 +939,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
   const memory = new MemoryService({
     // 配置项必须真的生效：写死的复核列表让 `memory.reviewRequired` 变成假配置。
     reviewRequired: config.memory.reviewRequired,
+    // 记忆文件的「读 → 序列化 → 写」由 `MemoryService` 自己持 `exact` 锁：
+    // `rawFilesystem` 直接写字节，绕过了 `FileSystemService.write` 的锁。
+    locks,
     filesystem: rawFilesystem,
     search: {
       find: async (query, findOptions) => {
@@ -972,7 +975,6 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     memory,
     search,
     llm,
-    locks,
     logger,
     maxIterations: config.memory.consolidation.maxIterations,
   });

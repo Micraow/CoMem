@@ -23,7 +23,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { link, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -56,16 +56,32 @@ const DEFAULT_POLL_INTERVAL_MS = 25;
 /** 损坏的锁文件按「已过期」处理：删掉再重试。 */
 const CORRUPT_LOCK_EXPIRY = new Date(0).toISOString();
 
+export interface LockAcquireOptions {
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  /**
+   * 目标父目录不存在时先建出来，让锁文件有地方放。
+   *
+   * **只有写者能传。** 锁文件与目标同目录，父目录不存在时既没有可保护的内容、也
+   * 没有地方放锁文件——读者此时返回空释放函数是正确的（`read` / `remove` 一个不
+   * 存在的路径不该顺手造目录）。但写者会**创建**目标，两个并发的写者在「父目录还
+   * 不存在」这个窗口里都拿不到锁，于是「同一时刻只有一个写者」对**新路径**不成立：
+   * 两个归档同时新建同一个记忆文件时，后写者会用陈旧的字段集整份覆盖。
+   */
+  readonly createParentDirectory?: boolean;
+}
+
 export interface PathLockManager {
   /** 拿到锁返回释放函数；拿不到（超时）抛 `ComemError('CONFLICT')`。 */
-  acquire(
-    uri: Uri,
-    mode: LockMode,
-    options?: { readonly timeoutMs?: number; readonly signal?: AbortSignal },
-  ): Promise<() => void>;
+  acquire(uri: Uri, mode: LockMode, options?: LockAcquireOptions): Promise<() => void>;
 
   /** 拿锁执行，结束后一定释放（含抛错）。 */
-  withLock<T>(uri: Uri, mode: LockMode, fn: () => Promise<T>): Promise<T>;
+  withLock<T>(
+    uri: Uri,
+    mode: LockMode,
+    fn: () => Promise<T>,
+    options?: LockAcquireOptions,
+  ): Promise<T>;
 
   /** 当前持有的锁数，测试用。 */
   activeCount(): number;
@@ -387,7 +403,7 @@ export function createPathLockManager(options: PathLockManagerOptions): PathLock
   async function acquire(
     uri: Uri,
     mode: LockMode,
-    acquireOptions: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+    acquireOptions: LockAcquireOptions = {},
   ): Promise<() => void> {
     const lockPath = `${toDiskPath(dataDir, uri)}${LOCK_FILE_SUFFIX}`;
     const timeoutMs = acquireOptions.timeoutMs ?? defaultTimeoutMs;
@@ -444,9 +460,11 @@ export function createPathLockManager(options: PathLockManagerOptions): PathLock
         }
 
         // 目标父目录不存在时目标本身必然不存在：没有内容需要保护，也没有地方放锁文件。
-        // 返回空释放函数，避免 `read` / `remove` 一个不存在的路径时创建目录。
+        // 返回空释放函数，避免 `read` / `remove` 一个不存在的路径时创建目录；写者传
+        // `createParentDirectory` 时先把目录建出来，否则新路径的并发创建无锁可拿
+        // （见 `LockAcquireOptions.createParentDirectory`）。
         // 这一步必须在冲突检查之后：祖先的 `TREE` 锁即使目标还不存在也要等。
-        if (!(await directoryExists(dirname(lockPath)))) {
+        if (!(await ensureLockDirectory(lockPath, acquireOptions.createParentDirectory === true))) {
           return () => {};
         }
 
@@ -497,8 +515,13 @@ export function createPathLockManager(options: PathLockManagerOptions): PathLock
   return {
     acquire,
 
-    async withLock<T>(uri: Uri, mode: LockMode, fn: () => Promise<T>): Promise<T> {
-      const release = await acquire(uri, mode);
+    async withLock<T>(
+      uri: Uri,
+      mode: LockMode,
+      fn: () => Promise<T>,
+      options: LockAcquireOptions = {},
+    ): Promise<T> {
+      const release = await acquire(uri, mode, options);
       try {
         return await fn();
       } finally {
@@ -514,6 +537,31 @@ export function createPathLockManager(options: PathLockManagerOptions): PathLock
 
 function createOwner(): string {
   return `${process.pid}-${randomUUID()}`;
+}
+
+/**
+ * 保证锁文件所在目录存在。
+ *
+ * 返回 `false` 表示「没有地方放锁文件」，调用方按「无需加锁」处理（空释放函数）：
+ * 路径的某个祖先节点是文件时目标不可能是可写文件，硬造目录只会把一个 409 变成
+ * 一个 ENOENT。
+ */
+async function ensureLockDirectory(lockPath: string, createParent: boolean): Promise<boolean> {
+  const parent = dirname(lockPath);
+  if (await directoryExists(parent)) {
+    return true;
+  }
+  if (!createParent) {
+    return false;
+  }
+  try {
+    await mkdir(parent, { recursive: true });
+  } catch (error) {
+    if (!isErrnoCode(error, 'EEXIST') && !isErrnoCode(error, 'ENOTDIR')) {
+      throw error;
+    }
+  }
+  return directoryExists(parent);
 }
 
 async function directoryExists(path: string): Promise<boolean> {

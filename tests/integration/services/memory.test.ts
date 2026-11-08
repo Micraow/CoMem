@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import { eventsMemoryType } from '../../../src/domain/memory-types/events.js';
@@ -31,7 +32,12 @@ beforeEach(async () => {
   logger = createLogger();
   store = new ContentStore({ dataDir, logger });
   search = new FakeSearch();
-  memory = new MemoryService({ filesystem: createRawFilesystem(store), search, logger });
+  memory = new MemoryService({
+    filesystem: createRawFilesystem(store),
+    locks: createPathLockManager({ dataDir, logger }),
+    search,
+    logger,
+  });
 });
 
 afterEach(async () => {

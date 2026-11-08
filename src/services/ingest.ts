@@ -44,6 +44,17 @@
  * 同一个 `(harness, nativeSessionId)` 跑第二次：游标已经在末尾，`readMessages`
  * 不前进，`skipped + 1`，不建会话、不写消息、不提交。
  *
+ * **游标之外还有一层去重。** 游标只在消息落盘之后前进，所以进程死在「写完这批
+ * 消息、游标还没写」之间时，重跑会从**同一个**游标再读一遍。这时服务端必须能
+ * 认出「这条已经落过盘」，否则整批重复导入（且重复的消息是新的随机 ID，去重没有
+ * 判据）。
+ *
+ * 所以消息 ID 是**确定性**的：`sha256(role + text + createdAt)`
+ * （`stableMessageId`，与 `remember` 同一个公式）。追加前先收集会话已有的消息 ID
+ * （live + 全部归档的 `archivedMessageIds`），命中就跳过。**源时间戳是幂等键的
+ * 一部分**：源日志没有 `createdAt` 时只能填当前时刻，重跑会得到不同的 ID，这一段
+ * 仍然会重复——已知窗口，写在这里而不是留给人踩。
+ *
  * ## `dryRun` 不写
  *
  * `dryRun` 下不调 `SessionService` 的任何方法，也不调游标仓储的 `upsert`。它仍然
@@ -61,8 +72,6 @@
  * 而不是伪造一个读不回来的 `.meta.json` 字段。
  */
 
-import { randomUUID } from 'node:crypto';
-
 import type { IngestCursorRepository } from '../adapters/sqlite/ingest-cursor-repository.js';
 import { ComemError } from '../domain/errors.js';
 import type {
@@ -74,6 +83,7 @@ import type { Logger } from '../domain/log.js';
 import { Uri } from '../domain/uri.js';
 import type { LogSource } from '../ingest/source.js';
 
+import { stableMessageId } from './session.js';
 import type { SessionService } from './session.js';
 
 export interface IngestOptions {
@@ -245,7 +255,10 @@ export interface IngestServiceOptions {
    * 用 `Pick` 而不是整个 `SessionService`：导入只做三件事，构造它的其它依赖
    * （锁、任务、权限）与这里无关。
    */
-  readonly sessions?: Pick<SessionService, 'create' | 'addMessage' | 'commitPhase1'>;
+  readonly sessions?: Pick<
+    SessionService,
+    'create' | 'addMessage' | 'commitPhase1' | 'load' | 'listArchives' | 'readArchiveMeta'
+  >;
   /**
    * 游标端口。`dryRun` 时可以传只读连接；不传就当作「没有任何游标」。
    */
@@ -653,6 +666,13 @@ export class IngestService {
       existing === null ? null : parseUri(existing.sessionUri, ref.locator);
     let created = false;
     let written = 0;
+    /**
+     * 会话里已经有的消息 ID。**惰性**取：会话可能是这一批刚建的，此时它是空的。
+     *
+     * 只在第一次需要时读一次，之后的批共用。新追加的消息**不**加进来：同一批里
+     * 两条完全相同的消息是两次真实的发言，按 ID 去重会把它们合并成一条。
+     */
+    let known: ReadonlySet<string> | null = null;
 
     while (true) {
       const result = await source.readMessages(ref, cursor, batchSize);
@@ -668,15 +688,28 @@ export class IngestService {
             created = true;
           });
           const sessions = this.#requireWriter();
+          known ??= await this.#knownMessageIds(sessionUri);
+          let appended = 0;
           for (const message of result.messages) {
+            const createdAt = normalizeTimestamp(message.createdAt);
+            const id = stableMessageId(message.role, message.text, createdAt);
+            if (known.has(id)) {
+              // 重跑：这条消息上一次已经落过盘，只是游标没来得及前进
+              // （见文件头「幂等」）。再追加一次就是重复导入。
+              continue;
+            }
             await sessions.addMessage(sessionUri, {
-              id: randomUUID(),
+              id,
               role: message.role,
               parts: [{ kind: 'text', text: message.text }],
-              createdAt: normalizeTimestamp(message.createdAt),
+              createdAt,
             });
+            appended += 1;
           }
-          written += result.messages.length;
+          written += appended;
+          // 游标照常前进：这批消息已经在磁盘上了（要么这次写的，要么上次写的）。
+          // 不前进会让下一次重跑再读一遍同一段，虽然去重后不会重复，但白读一遍
+          // 整个文件。
           this.#writeCursor(source, ref, sessionUri, result.cursor, existing, written);
         } else {
           written += result.messages.length;
@@ -745,6 +778,30 @@ export class IngestService {
       dryRun: true,
     });
     return null;
+  }
+
+  /**
+   * 会话里已经有的消息 ID：live 与全部归档。
+   *
+   * 只读 live 不够——归档之后消息已经移进 `history/archive_NNN/`，live 是空的，
+   * 重跑会把整段对话再追加一遍。归档元数据里有 `archivedMessageIds`，不需要重新
+   * 解析 `messages.jsonl`。
+   *
+   * 与 `remember` 的 `knownMessageIds` 同一套判据（§11.9）。
+   */
+  async #knownMessageIds(sessionUri: Uri): Promise<ReadonlySet<string>> {
+    const sessions = this.#requireWriter();
+    const ids = new Set<string>();
+    for (const message of (await sessions.load(sessionUri)).messages) {
+      ids.add(message.id);
+    }
+    for (const archiveUri of await sessions.listArchives(sessionUri)) {
+      const meta = await sessions.readArchiveMeta(archiveUri);
+      for (const id of meta?.phase1.archivedMessageIds ?? []) {
+        ids.add(id);
+      }
+    }
+    return ids;
   }
 
   async #ensureSession(

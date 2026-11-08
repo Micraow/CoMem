@@ -14,7 +14,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ZodType } from 'zod';
 
-import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { createHttpServer } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
@@ -61,7 +60,6 @@ class ScriptedLlm {
 
 let dataDir: string;
 let container: Container;
-let locks: ReturnType<typeof createPathLockManager>;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-consolidation-'));
@@ -76,7 +74,6 @@ beforeEach(async () => {
       COMEM_LOGGING_LEVEL: 'error',
     },
   });
-  locks = createPathLockManager({ dataDir, logger: container.logger });
 });
 
 afterEach(async () => {
@@ -89,7 +86,6 @@ function createService(llm: ConsolidationServiceDeps['llm']): ConsolidationServi
     memory: container.services.memory,
     search: container.services.search,
     llm,
-    locks,
     logger: container.logger,
   });
 }

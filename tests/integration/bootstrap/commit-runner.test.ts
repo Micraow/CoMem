@@ -191,7 +191,7 @@ beforeEach(async () => {
     remove: (uri) => store.remove(uri),
     list: (uri) => store.list(uri),
   };
-  memory = new MemoryService({ filesystem, search: { find: async () => [] }, logger });
+  memory = new MemoryService({ filesystem, locks, search: { find: async () => [] }, logger });
 
   // 真实 `AclService`：归档步骤写摘要后要物化权限，桩会让这条链路在测试里断掉。
   const acl = new AclService({

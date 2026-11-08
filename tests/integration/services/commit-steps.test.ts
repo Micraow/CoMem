@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../../../src/domain/archive.js';
@@ -46,12 +47,14 @@ let dataDir: string;
 let store: ContentStore;
 let logger: Logger;
 let memory: MemoryService;
+let locks: ReturnType<typeof createPathLockManager>;
 let writeSpy: Mock<(uri: Uri, text: string) => Promise<unknown>>;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-steps-'));
   logger = createLogger();
   store = new ContentStore({ dataDir, logger });
+  locks = createPathLockManager({ dataDir, logger });
   writeSpy = vi.fn(async (uri: Uri, text: string) =>
     store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8'))),
   );
@@ -63,6 +66,7 @@ beforeEach(async () => {
       remove: (uri) => store.remove(uri),
       list: (uri) => store.list(uri),
     },
+    locks,
     search: { find: async () => [] },
     logger,
   });

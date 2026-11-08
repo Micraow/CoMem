@@ -272,12 +272,20 @@ export class FileSystemService {
     options: WriteTextOptions = {},
   ): Promise<WriteResult> {
     await this.#authorizer.assert(uri, WRITE, principals);
-    return this.#locks.withLock(uri, 'exact', async () => {
-      const created = !(await this.#store.exists(uri));
-      const stat = await this.#store.writeText(uri, text, options);
-      await this.#notifyWritten(uri, 'file');
-      return { uri, stat, created };
-    });
+    // 写者建立父目录：目标父目录不存在时锁文件没有地方放，而写者会**创建**目标
+    // ——不建目录的话「同一时刻只有一个写者」对新路径不成立
+    // （见 `LockAcquireOptions.createParentDirectory`）。
+    return this.#locks.withLock(
+      uri,
+      'exact',
+      async () => {
+        const created = !(await this.#store.exists(uri));
+        const stat = await this.#store.writeText(uri, text, options);
+        await this.#notifyWritten(uri, 'file');
+        return { uri, stat, created };
+      },
+      { createParentDirectory: true },
+    );
   }
 
   /**
