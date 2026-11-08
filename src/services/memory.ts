@@ -41,11 +41,15 @@
  * `exact(uri)` 里完成「读 → 序列化 → 写」。粒度是**单文件**，不是 `memories/`
  * 子树——`tree` 会把同目录下无关的写入全部挡住。
  *
- * **`upsertMemory` 是字段级合并，不是整份替换。** 传进来的 `values` 覆盖同名
- * 字段，没传的字段保留磁盘上的值。这一条是丢字段缺陷的另一半：调用方（`memory_merge`
- * 步骤、记忆合并）的读在锁外，"读 → 改 → 写" 里的"改"只对自己动过的字段负责，
- * 保留其它字段才让两个并发写者的结果可以合并。整份替换时后写者会用它那份陈旧的
- * 字段值盖掉先写者的新值。
+ * **`upsertMemory` 是字段级合并，不是整份替换。** 传进来的字段覆盖同名字段，
+ * 没传的字段保留磁盘上的值。这一条是丢字段缺陷的另一半：调用方的读在锁外，
+ * "读 → 改 → 写" 里的"改"只对自己动过的字段负责，保留其它字段才让两个并发写者
+ * 的结果可以合并。整份替换时后写者会用它那份陈旧的字段值盖掉先写者的新值。
+ *
+ * **字段级合并只保护「不同字段」。** `profile` 只有一个 `content` 字段，两个并发
+ * 写者各带一份基于旧正文算出的 `content` 时仍然是后写者赢。所以补丁形态的写入
+ * 走 `{ uri, update }`：`update` 在锁内拿到磁盘上的最新字段，SEARCH/REPLACE 在
+ * 最新正文上应用（`memory_merge` 用它，§18）。
  *
  * 锁**不可重入**（`adapters/fs/lock.ts` 是文件锁，同一进程内按锁路径排队）：任何
  * 调用方都不能在持有 `exact(uri)` 的同时再调这里的方法，否则等 5 秒后拿 `CONFLICT`。
@@ -74,9 +78,55 @@ export interface MemoryWriteResult {
   readonly uri: Uri;
   readonly memoryType: string;
   readonly created: boolean;
+  /**
+   * 是否真的落了盘。转换函数返回 `null`（没有可写的字段）时为 `false`，此时
+   * `before` 与 `after` 相同、`created` 为 `false`。
+   */
+  readonly written: boolean;
   /** 应用前的正文，用于 `memory_diff.json` 的 `before` */
   readonly before: string | null;
   readonly after: string;
+}
+
+/** 记忆的字段集（字段名 → 值）。 */
+export type MemoryFields = Readonly<Record<string, unknown>>;
+
+/**
+ * 在 `exact(uri)` 锁内执行的字段计算：拿到磁盘上的**最新**字段，返回要写的字段。
+ *
+ * 返回 `null` 表示「没有可写的字段」（例如补丁一条都没命中）：不落盘。覆盖写会
+ * 白白推后 `updated_at`，还会把已复核的记忆打回 `pending`。
+ */
+export type MemoryUpdate = (current: MemoryFields) => MemoryFields | null;
+
+/**
+ * 需要读盘才能算出的写入。`update` 的输入是磁盘上的最新字段，返回值按字段级合并
+ * 写回（没返回的字段保留磁盘上的值）。
+ *
+ * **为什么不只是 `(current) => values` 一个函数。** `upsertMemory` 的锁键是记忆
+ * 文件的 URI，而 URI 由 identity 字段渲染（`renderMemoryUri`）。转换函数的输入依赖
+ * 磁盘内容，渲染只能发生在读之后，而读必须在锁内——两者互相依赖。所以 URI 由调用方
+ * 给出（它本来就有：补丁是按 URI 分组的），写盘前再用 identity 字段重渲染一次并
+ * 比对，补丁改掉 identity 时直接拒绝，不做隐式 move。
+ */
+export interface MemoryUpdateInput {
+  readonly uri: Uri;
+  readonly update: MemoryUpdate;
+}
+
+/**
+ * 写入内容。两种形态共用同一条实现：锁、字段级合并、`addOnly` 判据、复核闸门
+ * （`status = pending`）都只写一遍。
+ *
+ * - 直接传字段：调用方已经知道自己要写什么。
+ * - `{ uri, update }`：字段依赖磁盘上的最新正文（SEARCH/REPLACE 补丁）。
+ */
+export type MemoryWrite = MemoryFields | MemoryUpdateInput;
+
+function isMemoryUpdateInput(input: MemoryWrite): input is MemoryUpdateInput {
+  // 记忆字段的值只有 string / number / boolean / string[]（`FieldType`），
+  // 只有转换形态的 `update` 是函数。
+  return typeof (input as MemoryUpdateInput).update === 'function';
 }
 
 /**
@@ -646,8 +696,8 @@ export class MemoryService {
   }
 
   /**
-   * 按记忆类型渲染路径并写。**字段级合并**：`values` 里的字段覆盖磁盘上的同名
-   * 字段，没传的字段保留（见文件头「并发」）。
+   * 按记忆类型渲染路径并写。**字段级合并**：返回的字段覆盖磁盘上的同名字段，
+   * 没返回的字段保留（见文件头「并发」）。
    *
    * `addOnly` 类型（`events`）在文件已存在时抛 `ALREADY_EXISTS`：事件是「某时发生了
    * 什么」，发生之后不会改变，覆盖写等于篡改历史（§11.1）。
@@ -655,37 +705,80 @@ export class MemoryService {
   async upsertMemory(
     scopeUri: Uri,
     schema: MemoryTypeSchema,
-    values: Readonly<Record<string, unknown>>,
+    input: MemoryWrite,
   ): Promise<MemoryWriteResult> {
-    assertMemoryIdentity(schema, values);
-    assertFieldTypes(schema, values);
-    const uri = renderMemoryUri(scopeUri, schema, values);
+    let target: MemoryUpdateInput;
+    if (isMemoryUpdateInput(input)) {
+      target = input;
+    } else {
+      // 直接传值：先校验 identity，`renderMemoryUri` 对缺失或非字符串的 identity
+      // 只会说「必须是字符串」，定位不到「哪个字段不能为空」。
+      assertMemoryIdentity(schema, input);
+      target = {
+        uri: renderMemoryUri(scopeUri, schema, input),
+        // 直接传值时字段是静态的；合并仍然发生在锁内。
+        update: () => input,
+      };
+    }
 
     // 锁覆盖整个读改写：`existing` 决定 `createdAt` / `created` / `addOnly` 判据，
     // 读在锁外时两个写者会各自基于同一份旧正文构造新正文（§18）。
     return this.#locks.withLock(
-      uri,
+      target.uri,
       'exact',
       async () => {
-        const existing = await this.#readDocument(uri);
+        const existing = await this.#readDocument(target.uri);
+        const current = existing?.fields ?? {};
+        // 补丁必须打在磁盘上的最新正文上：`current` 是锁内的读，不是调用方的快照。
+        const next = target.update(current);
+        if (next === null) {
+          // 没有可写的字段：落盘只会改 `updated_at` 并把 `status` 打回 `pending`。
+          return {
+            uri: target.uri,
+            memoryType: schema.type,
+            created: false,
+            written: false,
+            before: existing?.body ?? null,
+            after: existing?.body ?? '',
+          };
+        }
+
+        // 合并而不是替换：转换函数只对自己返回的字段负责。
+        const merged: Record<string, unknown> = { ...current, ...next };
+        assertMemoryIdentity(schema, merged);
+        assertFieldTypes(schema, merged);
+        // 补丁改掉了 identity 字段（如 `name`）时，渲染出的路径与锁键不是同一个
+        // 文件：写成功也只会多出一条重复记忆，目标文件里只剩半个结果。
+        if (!renderMemoryUri(scopeUri, schema, merged).equals(target.uri)) {
+          throw invalidArgument(
+            `记忆 ${target.uri.toString()} 的 identity 字段被改写，写回会落到另一个文件。`,
+            { uri: target.uri.toString(), memoryType: schema.type },
+          );
+        }
         if (existing !== null && schema.operationMode === 'addOnly') {
           throw new ComemError(
             'ALREADY_EXISTS',
-            `记忆 ${uri.toString()} 已存在，${schema.type} 类型只允许新增。`,
-            { uri: uri.toString(), memoryType: schema.type },
+            `记忆 ${target.uri.toString()} 已存在，${schema.type} 类型只允许新增。`,
+            {
+              uri: target.uri.toString(),
+              memoryType: schema.type,
+              // 供调用方区分「同一条事件重放」与「同 URI 的另一条事件」。两个值都
+              // 在锁内读到，比较的是同一时刻的内容。
+              existingContent: existing.fields[CONTENT_FIELD] ?? null,
+              nextContent: merged[CONTENT_FIELD] ?? null,
+            },
           );
         }
 
         const now = new Date().toISOString();
-        // 合并而不是替换：调用方读到的是一份快照，它的"改"只对自己动过的字段负责。
-        const fields: Record<string, unknown> = { ...existing?.fields, ...values };
+        const fields: Record<string, unknown> = { ...merged };
         if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
           fields[UPDATED_AT_FIELD] = now;
         }
         const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
 
         const text = serializeMemoryDocument({
-          uri,
+          uri: target.uri,
           memoryType: schema.type,
           status,
           createdAt: existing?.createdAt ?? now,
@@ -693,19 +786,20 @@ export class MemoryService {
           schema,
           fields,
         });
-        await this.#filesystem.write(uri, text);
+        await this.#filesystem.write(target.uri, text);
 
         this.#logger.info('记忆已写入', {
-          uri: uri.toString(),
+          uri: target.uri.toString(),
           memoryType: schema.type,
           status,
           created: existing === null,
         });
 
         return {
-          uri,
+          uri: target.uri,
           memoryType: schema.type,
           created: existing === null,
+          written: true,
           before: existing?.body ?? null,
           after: renderBody(fields[CONTENT_FIELD]),
         };

@@ -1322,6 +1322,8 @@ commit(sessionId, options)
     5. 写 .done（最后写）
 ```
 
+**阶段二的第 3 步在锁内应用补丁。** `memory_merge` 不读正文快照，补丁作为转换函数交给 `upsertMemory`，在 `exact(uri)` 锁内基于磁盘上的最新正文执行（§18「并发控制」）。`task.concurrency: 4` 下四个归档同时合并同一条记忆时，读在锁外会让后写者用陈旧正文覆盖先写者——`profile` 只有一个 `content` 字段，字段级合并保护不到它。
+
 **消息的 part 类型。** 一条消息由若干 part 组成，抽取时都参与：
 
 | Part | 内容 |
@@ -2972,6 +2974,33 @@ task:
 **记忆写入是字段级合并。** `upsertMemory` 只对自己拿到的字段负责，没传的字段保留
 磁盘上的值。整份替换时，调用方（`memory_merge` 步骤、记忆合并）那份陈旧的字段集
 会把并发写者的新值抹掉；合并之后两个写者的结果按字段收敛，最后写者赢。
+
+**字段级合并只保护「不同字段」，补丁必须在锁内应用。** `profile` 只有一个
+`content` 字段，两个并发写者各带一份基于旧正文算出的 `content` 时，字段级合并
+救不了它——后写者仍然覆盖先写者。所以 `upsertMemory` 的第三个参数除了「最终值」
+还接受 `{ uri, update }`：
+
+```ts
+await memory.upsertMemory(scope, schema, {
+  uri,
+  update: (current) => applyOperations(current, operations).value,  // 锁内执行
+});
+```
+
+`update` 在 `exact(uri)` 锁内拿到磁盘上的**最新**字段，返回要写的字段；返回 `null`
+表示没有可写的字段（例如补丁一条都没命中），此时不落盘（否则只会白改一次
+`updated_at`、把已复核的记忆打回 `pending`），结果的 `written` 为 `false`。
+
+URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘内容，渲染路径只能发生
+在读之后，而锁的键就是路径，两者不能同时由服务推出。写盘前服务会用 identity 字段
+重渲染一次并比对，补丁改掉 identity（如 `name`）时抛 `INVALID_ARGUMENT`——那会把
+结果写进另一个文件，目标文件里只剩半个结果。
+
+并发补丁的语义是**串行化**，不是合并、也不是报冲突：第 2 条补丁在第一条写回后的
+正文上匹配。两条补丁改同一段文本时，后一条的 SEARCH 可能仍然命中（各取所需），也
+可能因为正文已被改掉而落空；落空按 `patch_not_found` 记进
+`memory_diff.json` 的 `skippedOperations`，不做模糊匹配，也不回滚已应用的那条。
+`applyOperations` 抛错时写盘不会开始，锁由 `withLock` 的 `finally` 释放。
 
 **锁不可重入。** `PathLockManager` 是文件锁，同一进程内按锁路径排队：持有
 `exact(uri)` 时再拿同一把锁会等自己，5 秒后抛 `CONFLICT`。所以「锁归谁」只有一

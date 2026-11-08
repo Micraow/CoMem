@@ -24,6 +24,15 @@
  * `applyOperations` 逐条返回，写盘失败直接抛。写盘失败时 `memory_diff.json` 不写：
  * 它存在就代表「这批操作已经处理过」，先写会让重放跳过真正的写入。
  *
+ * **补丁在锁内应用。** 这里不读正文快照：`applyOperations` 作为转换函数交给
+ * `upsertMemory`，在 `exact(uri)` 锁内用磁盘上的最新字段执行（§18）。读在锁外时，
+ * `task.concurrency: 4` 下同时归档的四个写者各带一份基于旧正文算出的 `content`，
+ * 后写者覆盖先写者——`profile` 只有一个 `content` 字段，字段级合并保护不到它。
+ * 并发补丁的语义是**串行化**：第 2 个补丁在第一个补丁写回后的正文上匹配。两条
+ * 补丁改同一段时，后一条的 SEARCH 可能仍然命中（各取所需），也可能因为正文已被
+ * 改掉而落空——落空按 `patch_not_found` 记进 `skippedOperations`，不做模糊匹配，
+ * 也不回滚已应用的那条。
+ *
  * **`ALREADY_EXISTS` 是唯一不抛的写盘失败。** `addOnly` 类型（`events`）的目标已
  * 存在时，`upsertMemory` 一定拒绝写入（§11.1「覆盖写等于篡改历史」），所以这不是
  * 瞬态失败：重放一次、重排队一次，结果都一样。把它抛出去等于让一条已存在的记录
@@ -54,7 +63,7 @@ import type {
 import { applyOperations, suppressConflicts } from '../../../domain/merge-op.js';
 import { Uri } from '../../../domain/uri.js';
 
-import type { MemoryRecord, MemoryWriteResult } from '../../memory.js';
+import type { MemoryWrite, MemoryWriteResult } from '../../memory.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
 import { EXTRACT_RESULT_KEY, isMemoryExtractResult } from './memory-extract.js';
@@ -70,11 +79,10 @@ export interface MemoryMergeResult {
 
 export interface MemoryMergeStepDeps {
   readonly memory: {
-    read(uri: Uri): Promise<MemoryRecord | null>;
     upsertMemory(
       scopeUri: Uri,
       schema: MemoryTypeSchema,
-      values: Readonly<Record<string, unknown>>,
+      input: MemoryWrite,
     ): Promise<MemoryWriteResult>;
     remove(uri: Uri): Promise<void>;
   };
@@ -86,14 +94,6 @@ export interface MemoryMergeStepDeps {
   };
   readonly logger: Logger;
 }
-
-/**
- * 记忆正文的字段名。
- *
- * 与 `services/memory.ts` 的 `CONTENT_FIELD` 同一个字段，但那边没导出：它是记忆
- * 文件的磁盘形状（§6.6），合并步骤只拿它做「是不是同一条事件」的比较。
- */
-const CONTENT_FIELD = 'content';
 
 /** 失败原因的中文说明，只用于 `skippedOperations[].reason`。 */
 const FAILURE_LABELS: Readonly<Record<OperationFailureReason, string>> = {
@@ -225,24 +225,28 @@ export class MemoryMergeStep extends CommitStep {
         continue;
       }
 
-      const existing = await this.#memory.read(uri);
-      const result = applyOperations({ ...(existing?.fields ?? {}) }, group.operations);
-      for (const failure of result.skipped) {
-        skipped.push({
-          memoryType,
-          reasonCode: failure.reason,
-          reason: `字段 ${failure.operation.field}：${FAILURE_LABELS[failure.reason]}。`,
-        });
-      }
-      if (result.applied === 0) {
-        // 全部字段操作都失败：写盘只会把正文原样覆盖一遍（还会白改一次 updated_at）。
-        continue;
-      }
-
-      // 每个 URI 只写一次（§11.5）。
+      // 每个 URI 只写一次（§11.5）。补丁在 `upsertMemory` 的 `exact(uri)` 锁内
+      // 应用：`current` 是磁盘上的最新字段，不是这里提前读到的快照。读在锁外时，
+      // 两个并发归档各带一份基于旧正文算出的 `content`，后写者会覆盖先写者
+      // （`profile` 只有一个 `content` 字段，字段级合并保护不到它）。
       let write: MemoryWriteResult;
       try {
-        write = await this.#memory.upsertMemory(context.scopeUri, schema, result.value);
+        write = await this.#memory.upsertMemory(context.scopeUri, schema, {
+          uri,
+          update: (current) => {
+            const result = applyOperations({ ...current }, group.operations);
+            for (const failure of result.skipped) {
+              skipped.push({
+                memoryType,
+                reasonCode: failure.reason,
+                reason: `字段 ${failure.operation.field}：${FAILURE_LABELS[failure.reason]}。`,
+              });
+            }
+            // 全部字段操作都失败：不落盘。写盘只会把正文原样覆盖一遍（还会白改
+            // 一次 updated_at、把已复核的记忆打回 pending）。
+            return result.applied === 0 ? null : result.value;
+          },
+        });
       } catch (error) {
         const failure = ComemError.from(error);
         if (failure.code !== 'ALREADY_EXISTS') {
@@ -250,10 +254,10 @@ export class MemoryMergeStep extends CommitStep {
           throw error;
         }
 
-        // `addOnly` 类型的目标已存在。`existing` 为 `null` 说明读与写之间有别的
-        // 进程抢先落了盘：内容比较不了，按冲突记，不声称「同一条事件」。
+        // `addOnly` 类型的目标已存在。两个内容都在锁内读到：相同是重放
+        // （幂等），不同是同 URI 的另一条事件（本次内容没有落盘）。
         const sameEvent =
-          existing !== null && existing.fields[CONTENT_FIELD] === result.value[CONTENT_FIELD];
+          failure.details?.['existingContent'] === failure.details?.['nextContent'];
         const reasonCode = sameEvent ? 'already_exists' : 'uri_conflict';
         skipped.push({
           memoryType,
@@ -269,6 +273,9 @@ export class MemoryMergeStep extends CommitStep {
           memoryType,
           reasonCode,
         });
+        continue;
+      }
+      if (!write.written) {
         continue;
       }
       const entry: MemoryDiffEntry = {

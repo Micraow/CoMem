@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -17,6 +18,7 @@ import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { eventsMemoryType } from '../../../src/domain/memory-types/events.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
+import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import type { BatchOperation } from '../../../src/domain/merge-op.js';
 import type { ContentPart, SessionMessage } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
@@ -621,8 +623,7 @@ function createMergeStep(
   });
   const step = new MemoryMergeStep({
     memory: {
-      read: (uri) => memory.read(uri),
-      upsertMemory: (scopeUri, schema, values) => memory.upsertMemory(scopeUri, schema, values),
+      upsertMemory: (scopeUri, schema, input) => memory.upsertMemory(scopeUri, schema, input),
       remove: (uri) => memory.remove(uri),
       ...memoryOverride,
     },
@@ -669,6 +670,40 @@ describe('MemoryMergeStep', () => {
     expect(diffs[0]?.operations.updates[0]?.before).toBe('## content\n\nl1\nl2\nl3\nl4\nl5');
     expect(diffs[0]?.operations.updates[0]?.after).toBe(
       '## content\n\nl1-x\nl2-x\nl3-x\nl4-x\nl5-x',
+    );
+  });
+
+  it('两个归档并发 patch 同一个 profile，两次修改都保留', async () => {
+    const profileUri = `${SCOPE}/memories/profile.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), profileMemoryType, {
+      name: 'alice',
+      content: '第一段。\n第二段。',
+    });
+
+    // 两个写者都先完成「读正文」再各自写回：写盘放慢一次往返（30ms 远大于一次
+    // 临时目录写盘）。补丁在锁外应用时，后写者一定用它那份陈旧正文覆盖先写者。
+    writeSpy.mockImplementation(async (uri: Uri, text: string) => {
+      await delay(30);
+      return store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8')));
+    });
+
+    const patch = (search: string, replace: string): BatchOperation[] => [
+      {
+        kind: 'upsert',
+        uri: profileUri,
+        operation: { kind: 'patch', field: 'content', blocks: [{ search, replace }] },
+      },
+    ];
+
+    // `profile` 只有一个 `content` 字段：字段级合并保护不到它，两条补丁必须
+    // 串行地打在「前一条写回后的正文」上。
+    await Promise.all([
+      createMergeStep().step.run(mergeContext(patch('第一段。', '第一段（A）。'), [[profileUri, 'profile']])),
+      createMergeStep().step.run(mergeContext(patch('第二段。', '第二段（B）。'), [[profileUri, 'profile']])),
+    ]);
+
+    expect((await memory.read(Uri.parse(profileUri)))?.fields['content']).toBe(
+      '第一段（A）。\n第二段（B）。',
     );
   });
 

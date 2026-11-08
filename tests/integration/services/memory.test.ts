@@ -179,6 +179,42 @@ describe('upsertMemory / read', () => {
       }),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
+
+  it('转换函数返回 null 时不落盘，written 为 false', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: 'x',
+    });
+    const before = await readFile(toDiskPath(dataDir, Uri.parse(CODE_STYLE)), 'utf8');
+
+    const result = await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      uri: Uri.parse(CODE_STYLE),
+      update: () => null,
+    });
+
+    expect(result.written).toBe(false);
+    expect(result.created).toBe(false);
+    // 逐字节不变：白写一次会推后 `updated_at`，把已复核的记忆打回 `pending`。
+    expect(await readFile(toDiskPath(dataDir, Uri.parse(CODE_STYLE)), 'utf8')).toBe(before);
+  });
+
+  it('转换函数改掉 identity 时拒绝写入（不做隐式 move）', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: 'x',
+    });
+
+    await expect(
+      memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+        uri: Uri.parse(CODE_STYLE),
+        update: (current) => ({ ...current, topic: 'other' }),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // 目标文件没变，也没有在另一个路径下多出一条记忆。
+    expect((await memory.read(Uri.parse(CODE_STYLE)))?.fields['content']).toBe('x');
+    expect(await memory.read(Uri.parse(`${SCOPE}/memories/preferences/other.md`))).toBeNull();
+  });
 });
 
 describe('addOnly 类型（events）', () => {
