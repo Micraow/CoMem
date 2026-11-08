@@ -554,6 +554,24 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" ".backup /backup/comem.sqlite"
 恢复：解包回同一个 `dataDir`（路径必须一致——URI 与磁盘路径是一一对应的），再启动。
 启动时会跑迁移，幂等，不会重复建表。
 
+### 升到「组有 owner」之后
+
+迁移 0014 给 `app_group` 加 `owner_user_id`，并按 `group_member.added_at` 最早的成员
+回填（同毫秒时按 `user_id` 升序；一个成员都没有的组保持 `NULL`）。最早加入的成员未必是
+创建者，回填只是一个「有人能管这个组」的合理猜测。
+
+**回填只写目录行，不写 `.acl.json`。** 存量组的组根里通常还没有
+`user:{owner} = manage` 条目，所以 owner 暂时不能 `setAcl`。owner 调一次
+
+```bash
+curl -X POST http://127.0.0.1:1933/api/v1/admin/groups/eng/owner \
+  -H 'content-type: application/json' \
+  -d '{"userId":"alice"}'
+```
+
+（`userId` 填自己）即可把预置补齐；这个端点对「当前 owner」放行，不要求先有 manage
+条目。没有成员的存量组没有可回填的 owner，删掉重建即可——重建时会写新的 owner 预置。
+
 ## 监控
 
 两个端点都不认证：探活系统没有 CoMem 身份，要求 `x-comem-subject` 只会让 `curl /health`
@@ -986,6 +1004,14 @@ COMEM_SERVER_PORT=8080 pnpm dev
 
 15. **记忆合并的清单有 200 条上限。** 超过时只合并前 200 条，每次合并记一条 `warn`。
     更多记忆应该先按目录拆 scope，而不是把清单撑到模型看不完。
+
+16. **撤权扫描有 10,000 个目录的上限。** `AclService.purgePrincipal` 在反查表之外
+    还会扫描数据根下所有带 `.acl.json` 的目录（手工改过文件的授权也要撤）。扫描按目录
+    数计数，达到 `MAX_PURGE_SCAN_DIRECTORIES = 10000` 时停止并记一条 `truncated: true`
+    的 `warn`，账号删除继续执行。上限之外如果正好有属于被删账号的手工授权，
+    `node_permission` / `acl_entry` 行会被删掉，但 `.acl.json` 里的条目会留下——同 ID
+    重建后 `materializeNode` 会把它算回来。没有 `acl:rebuild` 命令可以自动收口；目录数
+    接近上限的部署应当在删账号后手工检查相关目录，或者按业务拆分数据根。
 
 16. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
     整条 KNN 查询就返回空。而「权限候选集里的 URI 刚被并发删除」是正常竞态，静默返回

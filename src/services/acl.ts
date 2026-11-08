@@ -82,6 +82,20 @@ const DEFAULT_GROUP_LEVEL: AclLevel = 3;
 const USER_WILDCARD = 'user:*';
 
 /**
+ * `purgePrincipal` 扫描 `.acl.json` 的目录数上限。
+ *
+ * **来源：经验假设，不是测量值。** 撤权是一次低频管理操作，但它在删除账号的
+ * 请求路径上；没有上限时，目录很多的部署上「删一个账号」会变成不可预期的长操作。
+ * 10,000 个目录在本地 SSD 上大约是亚秒级（每个目录一次 `readdir`，只有存在
+ * `.acl.json` 时才多一次读），覆盖到「中等规模部署」；再大的库由日志里的
+ * `truncated: true` 暴露出来，交给运维按已知限制处理。
+ *
+ * 达到上限时**不中止**删除：账号删除与撤权是两件事，第一部分失败会让账号删不
+ * 掉。残留风险是上限之外的手工授权没被撤回，记 warn。
+ */
+const MAX_PURGE_SCAN_DIRECTORIES = 10_000;
+
+/**
  * `services/` 不能 import `node:sqlite`（§4.2，连类型导入都算依赖）。
  *
  * 这里只声明用到的形状：`node_permission` 的级别查询要按 `action` 过滤，而
@@ -574,11 +588,14 @@ export class AclService implements Authorizer {
    * `.acl.json` 的物化结果，下次 `materializeNode` 会把它们重新算出来。删掉的账号
    * 重新创建同 ID 的用户就会立刻继承旧授权，这是一条提权路径。
    *
-   * 受影响的目录来自 `acl_entry` 的反查索引（`acl_principal`），**不扫盘**：一条
-   * 授权对应一个目录，没有授权的目录不需要打开。反查表与文件不同步时以文件为准
-   * （那是真相），文件里没有该主体就只删行、不写盘。
+   * **两路来源取并集。** `acl_entry` 的反查索引（`acl_principal`）是快路径；但
+   * 它可能不全——手工改过 `.acl.json`、或者 `mv` 之后反查表丢过行的目录都不在
+   * 表里。反查表与文件不同步时以文件为准（§7），所以还要扫描数据根下所有带
+   * `.acl.json` 的目录（`AclFileStore.scanDirectories`）。扫描有目录数上限
+   * （`MAX_PURGE_SCAN_DIRECTORIES`），达到上限时记 warn 并继续，避免大库上
+   * 变成无界操作。
    *
-   * 返回被改动的目录数。空操作返回 0。
+   * 文件里没有该主体就只删行、不写盘。返回被改动的目录数。空操作返回 0。
    *
    * **事务边界**：文件写入与两张表的删除包在同一个 `BEGIN IMMEDIATE` 里。写文件
    * 失败时 `ROLLBACK`，数据库保持旧值；数据库删除失败时把已经写出去的 `.acl.json`
@@ -594,9 +611,33 @@ export class AclService implements Authorizer {
     // 主体是调用方输入，进 SQL 之前按 §12.1 的形态校验。
     parsePrincipal(principal);
 
-    const rewrites: PurgeRewrite[] = [];
+    const targets = new Map<string, Uri>();
     for (const row of this.#permissions.entriesByPrincipal(principal)) {
-      const uri = Uri.parse(row.uri);
+      targets.set(row.uri, Uri.parse(row.uri));
+    }
+    const scan = await this.#aclFile.scanDirectories({
+      maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
+    });
+    for (const uri of scan.uris) {
+      targets.set(uri.toString(), uri);
+    }
+    if (scan.truncated) {
+      this.#logger.warn('撤权扫描达到目录上限，上限之外的 .acl.json 未检查', {
+        principal,
+        limit: MAX_PURGE_SCAN_DIRECTORIES,
+        scannedDirectories: scan.directoriesScanned,
+        aclFiles: scan.uris.length,
+      });
+    }
+
+    // 按 URI 升序：回滚顺序与日志顺序可复现，不依赖 Map 的插入来源。
+    const ordered = [...targets.values()].sort((left, right) => {
+      const leftUri = left.toString();
+      const rightUri = right.toString();
+      return leftUri < rightUri ? -1 : leftUri > rightUri ? 1 : 0;
+    });
+    const rewrites: PurgeRewrite[] = [];
+    for (const uri of ordered) {
       const previous = await this.#aclFile.read(uri);
       if (previous === null) {
         // 节点被外部删除、或反查表比文件新：没有文件要改，行仍然要删。
@@ -625,6 +666,9 @@ export class AclService implements Authorizer {
     this.#logger.info('主体授权已撤销', {
       principal,
       directories: rewrites.length,
+      scannedDirectories: scan.directoriesScanned,
+      aclFiles: scan.uris.length,
+      truncated: scan.truncated,
     });
     return rewrites.length;
   }

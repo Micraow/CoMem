@@ -319,3 +319,33 @@ describe('remove / exists', () => {
     await expect(store.exists(DIRECTORY)).resolves.toBe(false);
   });
 });
+
+describe('scanDirectories', () => {
+  it('只返回带 .acl.json 的目录，按 URI 升序；不进入 _meta', async () => {
+    await store.write(Uri.parse('comem://user/alice/memories'), SAMPLE);
+    await store.write(Uri.parse('comem://group/eng'), SAMPLE);
+    await mkdir(join(dataDir, 'user', 'alice', 'resources'), { recursive: true });
+    await mkdir(join(dataDir, '_meta', 'user', 'alice'), { recursive: true });
+    await writeFile(join(dataDir, '_meta', 'user', 'alice', ACL_FILE_NAME), json(SAMPLE), 'utf8');
+
+    const scan = await store.scanDirectories({ maxDirectories: 100 });
+
+    expect(scan.uris.map((uri) => uri.toString())).toEqual([
+      'comem://group/eng',
+      'comem://user/alice/memories',
+    ]);
+    expect(scan.truncated).toBe(false);
+    expect(scan.directoriesScanned).toBeGreaterThan(0);
+  });
+
+  it('达到目录上限时截断并报告，不抛错', async () => {
+    await store.write(Uri.parse('comem://user/alice/memories'), SAMPLE);
+    await store.write(Uri.parse('comem://user/alice/resources'), SAMPLE);
+
+    const scan = await store.scanDirectories({ maxDirectories: 2 });
+
+    expect(scan.truncated).toBe(true);
+    expect(scan.directoriesScanned).toBe(2);
+    expect(scan.uris.length).toBeLessThanOrEqual(1);
+  });
+});

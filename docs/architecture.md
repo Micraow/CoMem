@@ -684,6 +684,8 @@ summary_state: fresh            # fresh | stale
 | 没有跨文件事务 | 先写内容再更新索引；索引失败时标记为待重建，启动对账 |
 | 写入需要先 mkdir | `write` 内部自动建父目录，调用方不用关心 |
 
+**反查表也是派生数据，以文件为准。** `acl_entry` 从 `.acl.json` 推出，只服务授权反查（控制台 ACL 页、删账号撤权）。它可能不全：手工改过文件、`mv` 之后丢过行、从备份恢复过文件。`AclService.purgePrincipal` 因此不能只按表找目录——它取「反查表行 ∪ 数据根下所有带 `.acl.json` 的目录」的并集，文件里没有该主体就只删行、不写盘。扫描有目录数上限（`MAX_PURGE_SCAN_DIRECTORIES = 10000`，经验假设：撤权是低频管理操作，10,000 个目录在本地 SSD 上约亚秒级；超出时记 `truncated: true` 并继续，残余风险见 `docs/operations.md` 的已知限制）。
+
 **派生数据的三个通知入口。** 内容写完之后由 `IndexObserver` 把索引与物化权限追上来。它对外只有三个方法，对应三种磁盘状态变化：
 
 | 入口 | 什么时候 | 做什么 |
@@ -910,6 +912,8 @@ LIMIT ?;
 **代价在写入侧。** 改一个节点的 ACL，要重算它所有后代的 `node_permission`。ACL 改动是低频操作（一个项目整个周期可能就改几次），读是高频操作。物化方向必须是「写时算，读时查」。
 
 **重算用事务包住**：`BEGIN; DELETE FROM node_permission WHERE node_uri LIKE ? || '%'; INSERT ...; UPDATE acl_entry ...; COMMIT;`。中途失败整批回滚，`node_permission` 和 `.acl.json` 不会不一致。
+
+**`acl_entry` 是反查索引，不是求权来源。** 求权只读 `node_permission`；`acl_entry` 回答「哪些目录直接写了这个主体」。两者由同一个 `#writeAcl` 一起替换。节点被移动时 `acl_entry` 必须按新 URI 从 `.acl.json` 重建（否则删账号的反查会漏），这条重建在 `IndexObserver.onNodeMoved` 里逐目录执行；没有 `.acl.json` 的节点直接跳过。
 
 **写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 

@@ -25,17 +25,18 @@
  * 完整内容，要么是新的完整内容，不会读到写了一半的 JSON。
  */
 
+import type { Dirent } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { parsePrincipal } from '../../domain/acl.js';
 import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
-import type { Uri } from '../../domain/uri.js';
+import { Uri } from '../../domain/uri.js';
 
-import { TEMP_FILE_PREFIX, toDiskPath } from './path.js';
+import { TEMP_FILE_PREFIX, isArtifactName, toDiskPath } from './path.js';
 
 /** 目录几何文件的名字（架构文档 §6.2 规则 6 的保留名之一）。 */
 export const ACL_FILE_NAME = '.acl.json';
@@ -60,6 +61,25 @@ export interface AclFile {
 export interface AclFileStoreDeps {
   readonly dataDir: string;
   readonly logger: Logger;
+}
+
+export interface AclDirectoryScanOptions {
+  /**
+   * 最多访问多少个目录。达到上限就停，`truncated` 置 true。
+   *
+   * 调用方（`AclService.purgePrincipal`）用一个明确的上限把「撤权时扫全库」变成
+   * 有界操作；截断时的残留风险由调用方记录并让运维处理。
+   */
+  readonly maxDirectories: number;
+}
+
+export interface AclDirectoryScan {
+  /** 带 `.acl.json` 的目录，按 URI 升序（确定性，便于日志与测试）。 */
+  readonly uris: readonly Uri[];
+  /** 实际访问过的目录数（含数据根本身）。 */
+  readonly directoriesScanned: number;
+  /** 是否因为达到 `maxDirectories` 而提前停止。 */
+  readonly truncated: boolean;
 }
 
 /**
@@ -367,6 +387,94 @@ export class AclFileStore {
       }
       throw mapFsError(error, directoryUri);
     }
+  }
+
+  /**
+   * 扫描数据根下所有带 `.acl.json` 的目录。
+   *
+   * 撤权（`AclService.purgePrincipal`）不能只依赖反查表：手工改过的
+   * `.acl.json` 没有对应行，按表驱动会漏掉，删掉的账号重新创建同 ID 就继承
+   * 旧授权。反查表与文件不同步时以文件为准（§7），所以需要一个「文件里到底
+   * 有哪些节点」的入口。
+   *
+   * **有界**：`maxDirectories` 是访问目录数的上限，不是文件数。达到上限后停止
+   * 并返回 `truncated: true`，由调用方决定怎么记录/处理——没有上限时，一个
+   * 目录很多的部署上「删一个账号」会变成不可预期的长操作。
+   *
+   * 只进入 `user/` 与 `group/` 两个作用域：`_meta/`、`attachments/` 不是 URI
+   * 空间。符号链接不跟随（`Dirent.isDirectory()` 对链接返回 false），避免扫描
+   * 逃出数据根。
+   */
+  async scanDirectories(options: AclDirectoryScanOptions): Promise<AclDirectoryScan> {
+    const uris: Uri[] = [];
+    let directoriesScanned = 0;
+
+    const walk = async (absolute: string, segments: readonly string[]): Promise<boolean> => {
+      if (directoriesScanned >= options.maxDirectories) {
+        return false;
+      }
+      directoriesScanned += 1;
+
+      let entries: Dirent[];
+      try {
+        entries = await readdir(absolute, { withFileTypes: true });
+      } catch (error) {
+        const fsCode = fsErrorCode(error);
+        if (fsCode === 'ENOENT' || fsCode === 'ENOTDIR') {
+          return true;
+        }
+        throw new ComemError(
+          'INTERNAL',
+          `扫描 .acl.json 失败（${fsCode ?? 'UNKNOWN'}）：${absolute}`,
+          { path: absolute, fsCode },
+        );
+      }
+
+      // 数据根本身与 `user/`、`group/` 作用域目录不是 URI；至少要有
+      // `{scope}/{rootId}` 两段才是一个可寻址节点。
+      if (segments.length >= 2) {
+        if (entries.some((entry) => entry.isFile() && entry.name === ACL_FILE_NAME)) {
+          try {
+            uris.push(Uri.parse(`comem://${segments.join('/')}`));
+          } catch {
+            // 目录名不是合法 URI 段（手工创建的怪名字）：跳过而不是让整次撤权
+            // 失败。撤权失败会让账号删不掉，失败方向更差。
+            this.#logger.warn('扫描 .acl.json 时跳过无法映射成 URI 的目录', {
+              path: absolute,
+            });
+          }
+        }
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory() || isArtifactName(entry.name)) {
+          continue;
+        }
+        // 数据根下只有 user/ 与 group/ 是 URI 空间。
+        if (segments.length === 0 && entry.name !== 'user' && entry.name !== 'group') {
+          continue;
+        }
+        if (!(await walk(join(absolute, entry.name), [...segments, entry.name]))) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const complete = await walk(this.#dataDir, []);
+    // 按 URI 升序：同一份文件系统两次扫描给出同一个顺序，日志与测试可复现。
+    uris.sort((left, right) => {
+      const leftUri = left.toString();
+      const rightUri = right.toString();
+      return leftUri < rightUri ? -1 : leftUri > rightUri ? 1 : 0;
+    });
+
+    this.#logger.debug('扫描 .acl.json 完成', {
+      directoriesScanned,
+      aclFiles: uris.length,
+      truncated: !complete,
+    });
+    return { uris, directoriesScanned, truncated: !complete };
   }
 
   #path(directoryUri: Uri): string {

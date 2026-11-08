@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -582,6 +582,47 @@ describe('删除账号的授权清理', () => {
       await readFile(join(dataDir, 'user', 'alice', 'resources', 'spec-v2', '.acl.json'), 'utf8'),
     ) as { readonly entries: readonly unknown[] };
     expect(onDisk.entries).toEqual([]);
+  });
+
+  /**
+   * 提权回归：手工改 `.acl.json` 的授权在反查表里没有行。
+   *
+   * §7 说「人可以直接改元数据文件」，但 `purgePrincipal` 修复前只按 `acl_entry`
+   * 找目录。手工加的 `user:bob` 不在表里，删账号时不改文件，同 ID 重建就继承。
+   */
+  it('手工改 .acl.json 的授权，删账号时也能撤掉（扫描兜底）', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    const directory = Uri.parse('comem://user/alice/memories/manual');
+    await container.services.filesystem.mkdir(directory, AUTH_PRINCIPALS);
+    const aclPath = join(dataDir, 'user', 'alice', 'memories', 'manual', '.acl.json');
+    await writeFile(
+      aclPath,
+      `${JSON.stringify(
+        {
+          mode: 'inherit',
+          entries: [{ principal: 'user:bob', level: 'write', effect: 'allow' }],
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    // 前提：反查表里确实没有这一行（否则测的是快路径，不是扫描）。
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
+    ).toBe(0);
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/bob' }));
+
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly unknown[];
+    };
+    expect(onDisk.entries).toEqual([]);
+
+    await createUser('bob');
+    await container.services.acl.materializeNode(directory);
+    expect(await container.services.acl.check(directory, 1, ['user:bob', 'user:*'])).toBe(false);
   });
 
   it('不能删除当前登录用户', async () => {
