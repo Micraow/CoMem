@@ -14,7 +14,15 @@
  *
  * 只捕获主键/唯一约束（SQLite 扩展错误码 1555 / 2067）。`CHECK` 约束失败意味着
  * 调用方传了非法的枚举值，属于程序缺陷，原样抛出去由错误映射收敛成 `INTERNAL`。
+ *
+ * ## `session_epoch` 不出这个仓储
+ *
+ * `session_epoch` 是 session token 的身份版本（迁移 0016）：创建时生成、改密码时
+ * 轮换、校验 token 时比对。它**不进 `User`**——`User` 会进管理面响应，身份版本是
+ * 内部状态，和 `password_hash` 一样只在认证路径上读（`getSessionEpoch`）。
  */
+
+import { randomUUID } from 'node:crypto';
 
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 
@@ -101,16 +109,31 @@ export class UserRepository {
     this.#logger = deps.logger;
   }
 
-  /** 写入用户。主键已存在抛 `CONFLICT`。 */
+  /**
+   * 写入用户。主键已存在抛 `CONFLICT`。
+   *
+   * 身份版本（`session_epoch`）在这里生成：创建账号就是开启一个新的 token 生命周期，
+   * 同 ID 重建必须换一个新的版本，否则旧 token 会在重建后继续有效（迁移 0016）。
+   * 随机源用 `crypto.randomUUID()`，不需要调用方参与——它没有业务含义。
+   */
   create(user: Omit<User, 'createdAt' | 'updatedAt'>, now: Date): User {
     const timestamp = now.toISOString();
     try {
       withWriteTransaction(this.#db, () => {
         this.#db
           .prepare(
-            `INSERT INTO app_user (${USER_COLUMNS}) VALUES (${placeholders(USER_COLUMN_NAMES.length)})`,
+            `INSERT INTO app_user (${USER_COLUMNS}, session_epoch)
+             VALUES (${placeholders(USER_COLUMN_NAMES.length + 1)})`,
           )
-          .run(user.id, user.displayName, user.email, user.status, timestamp, timestamp);
+          .run(
+            user.id,
+            user.displayName,
+            user.email,
+            user.status,
+            timestamp,
+            timestamp,
+            randomUUID(),
+          );
       });
     } catch (error) {
       if (isDuplicateKey(error)) {
@@ -141,13 +164,35 @@ export class UserRepository {
     return String(row['password_hash']);
   }
 
-  /** 写密码哈希。用户不存在返回 `false`（不抛，与 `update` 一致）。 */
+  /**
+   * 读身份版本（`session_epoch`）。认证路径用：session token 的载荷必须等于它。
+   *
+   * 与 `getPasswordHash` 一样不放进 `User`：管理面响应不该带内部状态。用户不存在
+   * 返回 `null`；空串是迁移遗留的「版本未知」，调用方必须当成不匹配（见迁移 0016）。
+   */
+  getSessionEpoch(id: string): string | null {
+    const row = this.#db.prepare('SELECT session_epoch FROM app_user WHERE id = ?').get(id);
+    if (row === undefined || row['session_epoch'] === null || row['session_epoch'] === undefined) {
+      return null;
+    }
+    return String(row['session_epoch']);
+  }
+
+  /**
+   * 写密码哈希，**同时轮换身份版本**。用户不存在返回 `false`（不抛，与 `update` 一致）。
+   *
+   * 轮换是改密码语义的一部分：改密码的用途之一就是「让泄露的凭据立刻失效」。只换
+   * 哈希不换版本，已签发的 session token 会在整个 `exp` 窗口内继续有效——W47a 之前
+   * 的「改密码不踢线」限制就是这条。
+   */
   setPasswordHash(id: string, passwordHash: string, now: Date): boolean {
     const changed = Number(
       withWriteTransaction(this.#db, () =>
         this.#db
-          .prepare('UPDATE app_user SET password_hash = ?, updated_at = ? WHERE id = ?')
-          .run(passwordHash, now.toISOString(), id).changes,
+          .prepare(
+            'UPDATE app_user SET password_hash = ?, session_epoch = ?, updated_at = ? WHERE id = ?',
+          )
+          .run(passwordHash, randomUUID(), now.toISOString(), id).changes,
       ),
     );
     this.#logger.debug('用户密码已更新', { userId: id, changed });

@@ -44,6 +44,14 @@
  * API Key 的 secret 用与密码相同的 scrypt 编码（`services/password.ts`）。一把
  * key 就是一个 `(user_id)` 的完整凭证：见迁移 0013 的注释，那里写了为什么不做
  * key 级 scope。
+ *
+ * ## session token 还要比身份版本
+ *
+ * `session` 凭据除了用户 ID 还带 `epoch`（`app_user.session_epoch`，迁移 0016）。
+ * 只确认「用户存在且 active」不够：删账号再重建同 ID 时两件事都成立，旧 token 在
+ * 整个 `exp` 窗口内继续有效——撤销访问的动作本身失效。身份版本在重建账号与改密码
+ * 时轮换，比对它让这两条路径上的旧 token 立刻 401。比对放在服务层而不是
+ * `AuthService`：绕过 `resolveBearer` 直接调 `resolve` 的代码也要被挡住。
  */
 
 import type { ApiKeyRecord, ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
@@ -81,13 +89,13 @@ export interface IdentityServiceDeps {
  * 认证凭据。
  *
  * 三种形态对应两个入口：`password` 是登录，`api-key` 是请求头里的
- * `Authorization: Bearer comem_...`，`session` 是已经由 `AuthService` 校验过
- * 签名的 token 载荷（这里只做用户存在性检查）。
+ * `Authorization: Bearer comem_...`，`session` 是 `AuthService` 校验过签名的
+ * token 载荷（用户 ID + 身份版本，这里做存在性与版本比对）。
  */
 export type Credential =
   | { readonly kind: 'password'; readonly username: string; readonly password: string }
   | { readonly kind: 'api-key'; readonly apiKey: string }
-  | { readonly kind: 'session'; readonly userId: string };
+  | { readonly kind: 'session'; readonly userId: string; readonly epoch: string };
 
 /**
  * 一次已认证请求的身份（§12.7）。
@@ -391,11 +399,28 @@ export class IdentityService {
         return this.#contextFor(lookup.record.userId, lookup.record.id);
       }
       case 'session': {
-        // 签名已由 `AuthService` 校验；这里只补用户存在性（token 签发后账号可能
-        // 被删或禁用，签名仍然有效）。
+        // 签名已由 `AuthService` 校验；这里补两件签名管不到的事：账号是不是还是
+        // 签发 token 时的那个生命周期（`session_epoch`），以及账号是否还能登录
+        // （存在且 active）。空串是迁移遗留的「版本未知」，一律不匹配——不能因为
+        // 两边都是空串就放行。
+        const current = this.#users.getSessionEpoch(credential.userId);
+        if (current === null || current === '' || current !== credential.epoch) {
+          throw unauthenticated('Session token 无效或已过期。');
+        }
         return this.#contextFor(credential.userId, null);
       }
     }
+  }
+
+  /**
+   * 用户当前的 session 身份版本（签发 token 用）。用户不存在返回 `null`。
+   *
+   * 登录成功后由 `AuthService` 把返回值写进 token 载荷；之后每次请求都要与当前值
+   * 相等（`resolve` 的 `session` 分支）。空串是迁移遗留的「版本未知」，调用方必须
+   * 当成失败——见迁移 0016。
+   */
+  sessionEpochOf(userId: string): string | null {
+    return this.#users.getSessionEpoch(userId);
   }
 
   /**
@@ -426,7 +451,12 @@ export class IdentityService {
     return buildIdentity(userId, this.#groups.listGroupIdsOfUser(userId));
   }
 
-  /** 给用户设密码（管理端点）。用户不存在抛 `NOT_FOUND`。 */
+  /**
+   * 给用户设密码（管理端点）。用户不存在抛 `NOT_FOUND`。
+   *
+   * 同时轮换身份版本（`UserRepository.setPasswordHash`）：改密码的用途之一是让泄露
+   * 的凭据立刻失效，已签发的 session token 必须在下一次请求就 401。
+   */
   async setPassword(userId: string, password: string, now: Date = new Date()): Promise<void> {
     if (this.#users.get(userId) === null) {
       throw userNotFound(userId);

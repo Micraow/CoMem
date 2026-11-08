@@ -49,6 +49,15 @@ function createGroup(id: string): void {
   service.createGroup({ id, displayName: id }, NOW);
 }
 
+/** 当前身份版本。不存在时让测试直接失败，而不是用一个空串掩盖过去。 */
+function sessionEpochOf(id: string): string {
+  const epoch = service.sessionEpochOf(id);
+  if (epoch === null) {
+    throw new Error(`用户不存在：${id}`);
+  }
+  return epoch;
+}
+
 beforeEach(() => {
   db = openDatabase(':memory:');
   runMigrations(db);
@@ -371,12 +380,68 @@ describe('认证', () => {
     createGroup('eng');
     service.addMember('eng', 'alice', 'member', NOW);
 
-    const before = await service.resolve({ kind: 'session', userId: 'alice' });
+    const before = await service.resolve({
+      kind: 'session',
+      userId: 'alice',
+      epoch: sessionEpochOf('alice'),
+    });
     expect(before.principals).toContain('group:eng');
 
     service.removeMember('eng', 'alice');
-    const after = await service.resolve({ kind: 'session', userId: 'alice' });
+    const after = await service.resolve({
+      kind: 'session',
+      userId: 'alice',
+      epoch: sessionEpochOf('alice'),
+    });
     expect(after.principals).not.toContain('group:eng');
+  });
+
+  it('身份版本不符、为空串、用户不存在都是 UNAUTHENTICATED', async () => {
+    await expect(
+      service.resolve({ kind: 'session', userId: 'alice', epoch: 'stale-epoch' }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+    // 空串是迁移遗留的「版本未知」：两边都是空串也不能放行。
+    await expect(
+      service.resolve({ kind: 'session', userId: 'alice', epoch: '' }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+    await expect(
+      service.resolve({ kind: 'session', userId: 'missing', epoch: 'any' }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  /**
+   * 回归：删账号再重建同 ID 时，旧 token 会在整个 `exp` 窗口内继续有效——撤销
+   * 访问的动作本身失效（架构文档 §12.7）。
+   */
+  it('重建同 ID 生成新的身份版本，旧版本的凭据失效', async () => {
+    const before = sessionEpochOf('alice');
+    await expect(
+      service.resolve({ kind: 'session', userId: 'alice', epoch: before }),
+    ).resolves.toMatchObject({ subject: 'user:alice' });
+
+    service.deleteUser('alice');
+    createUser('alice');
+
+    expect(sessionEpochOf('alice')).not.toBe(before);
+    await expect(
+      service.resolve({ kind: 'session', userId: 'alice', epoch: before }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  it('改密码轮换身份版本，旧版本的凭据失效', async () => {
+    await service.setPassword('alice', 'first-password', NOW);
+    const before = sessionEpochOf('alice');
+
+    await service.setPassword('alice', 'second-password', LATER);
+
+    expect(sessionEpochOf('alice')).not.toBe(before);
+    await expect(
+      service.resolve({ kind: 'session', userId: 'alice', epoch: before }),
+    ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+    // 新密码仍然可以登录，并且拿到新版本。
+    await expect(
+      service.resolve({ kind: 'password', username: 'alice', password: 'second-password' }),
+    ).resolves.toMatchObject({ subject: 'user:alice' });
   });
 
   it('删除用户时一并清掉它的 API Key', async () => {

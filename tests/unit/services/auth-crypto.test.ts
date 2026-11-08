@@ -1,3 +1,5 @@
+import { createHmac } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import { generateApiKey, parseApiKey } from '../../../src/services/api-key.js';
@@ -71,17 +73,25 @@ describe('session-token', () => {
   const SECRET = 'test-secret';
   const NOW = new Date('2026-01-01T00:00:00Z');
 
-  it('签发的 token 可以被同一 secret 校验，载荷是用户与过期时刻', () => {
-    const { token, expiresAt } = issueSessionToken(SECRET, 'alice', 3600, NOW);
+  /** 手工签一个载荷任意的 token：用于构造「协议上不该出现」的形态。 */
+  function tokenWithPayload(payload: Record<string, unknown>): string {
+    const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const signed = `v1.${encoded}`;
+    return `${signed}.${createHmac('sha256', SECRET).update(signed).digest('base64url')}`;
+  }
+
+  it('签发的 token 可以被同一 secret 校验，载荷是用户、身份版本与过期时刻', () => {
+    const { token, expiresAt } = issueSessionToken(SECRET, 'alice', 'epoch-1', 3600, NOW);
     expect(expiresAt).toBe(Math.floor(NOW.getTime() / 1000) + 3600);
     expect(verifySessionToken(SECRET, token, NOW)).toEqual({
       userId: 'alice',
+      epoch: 'epoch-1',
       expiresAt,
     });
   });
 
   it('换 secret、改载荷、过期都校验失败', () => {
-    const { token } = issueSessionToken(SECRET, 'alice', 1, NOW);
+    const { token } = issueSessionToken(SECRET, 'alice', 'epoch-1', 1, NOW);
     const [version, payload, signature] = token.split('.');
     expect(verifySessionToken('other-secret', token, NOW)).toBeNull();
     expect(
@@ -89,6 +99,18 @@ describe('session-token', () => {
     ).toBeNull();
     // TTL 1 秒，两秒后过期。
     expect(verifySessionToken(SECRET, token, new Date(NOW.getTime() + 2000))).toBeNull();
+  });
+
+  it('载荷缺少身份版本或版本为空串时校验失败', () => {
+    // 空串是迁移遗留的「版本未知」。如果这里放行，`IdentityService` 的比对会因为
+    // 两边都是空串而通过——旧 token 在账号重建后继续有效，正是这次要修的缺陷。
+    for (const payload of [
+      { sub: 'alice', iat: 0, exp: 4_102_444_800 },
+      { sub: 'alice', iat: 0, exp: 4_102_444_800, epoch: '' },
+      { sub: 'alice', iat: 0, exp: 4_102_444_800, epoch: 42 },
+    ]) {
+      expect(verifySessionToken(SECRET, tokenWithPayload(payload), NOW), JSON.stringify(payload)).toBeNull();
+    }
   });
 
   it('任意畸形串返回 null，不抛', () => {

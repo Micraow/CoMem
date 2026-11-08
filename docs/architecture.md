@@ -848,6 +848,7 @@ CREATE TABLE group_member (
 | 0013 | `0013_auth.sql` | 用户名密码与 API Key |
 | 0014 | `0014_group_owner.sql` | `app_group.owner_user_id`（§12.6） |
 | 0015 | `0015_embedding_cache.sql` | `embedding_cache`（嵌入结果缓存） |
+| 0016 | `0016_session_epoch.sql` | `app_user.session_epoch`（session token 的身份版本，§12.7） |
 
 **`node_embedding` 与 `embedding_cache` 的职责边界。** 两张表都不是真相（文件是真相，§7），但它们回答的问题不同：
 
@@ -1964,6 +1965,12 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 主体 `*` 与非 `user` 格式（`assertOwnerUserId`）。HTTP 路径的 `assertValidUserId` 不能
 替服务方法兜底——绕过路由直接调用的代码不会补这一遍。
 
+**同一判据适用于凭据状态。** `app_user.session_epoch`（§12.7）只决定已签发的 token
+还能不能用，不产生任何权限；`api_key.revoked_at` 同理。它们与 ACL 条目分开存，是因为
+「这个凭据属于账号的哪一段生命周期」与「这个主体在哪个节点能做什么」是两个问题，
+混在一张表里会让撤权与撤凭据变成同一个动作——而它们的撤销语义不同（前者要改文件，
+后者只改行）。
+
 ### 12.3 继承不存快照
 
 `effective(N)` 递归到 `parent(N)`，**不预存继承快照**。存了必然在祖先变更后过期，而这类 bug 只在演示时暴露。
@@ -2060,8 +2067,13 @@ type Credential =
 生效」变成「重启后生效」——§12.5 的那条承诺就是靠这里兑现的。
 
 **Session token 是无状态 HMAC。** 形如 `v1.<base64url(payload)>.<签名>`，服务端
-不存 session 行。代价是**登出只能客户端丢弃 token**：服务端无法提前作废一个还没
-过期的 token。要立刻失效必须撤销 API Key 或改密码（改密码不影响已签发的 token）。
+不存 session 行。载荷是 `{sub, iat, exp, epoch}`：`sub` 是用户 ID，`epoch` 是账号
+的身份版本（`app_user.session_epoch`，迁移 0016）。**撤销走身份版本**：创建账号
+时生成、改密码时轮换，所以删账号重建同 ID、改密码都会让已签发的 token 在下一个
+请求就 401。`epoch` 为空串（迁移遗留的「版本未知」）永不匹配任何 token，等于强制
+重新登录——这是安全降级方向，宁可多一次登录，不能让旧 token 继续有效。代价是
+**登出只能客户端丢弃 token**：服务端没有「已签发」的行可以删，只能靠改密码或吊销
+API Key 让某个凭据失效，不能一次作废某个用户除此之外的全部 token。
 `auth.sessionSecret` 为空时装配层生成进程随机值，重启即失效。
 
 **认证失败一律 401 `UNAUTHENTICATED`，不区分原因**（用户不存在 / 密码错 / key

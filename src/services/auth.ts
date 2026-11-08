@@ -8,9 +8,14 @@
  * ## 无状态 session
  *
  * token 是 HMAC 签名串（`services/session-token.ts`），服务端不存 session。
- * 因此**登出只能客户端丢弃 token**：服务端无法提前作废一个还没过期的 token。
- * 要立刻失效必须撤销 API Key 或改密码。这是本设计的已知限制，写在
- * `docs/operations.md` 的「多用户部署」一节。
+ * 因此**登出只能客户端丢弃 token**：服务端没有「已签发」的行可以删。
+ *
+ * ## 撤销走身份版本
+ *
+ * 载荷里带账号的 `session_epoch`（迁移 0016）。校验签名之后还要与目录行的当前值
+ * 比对：删账号重建同 ID、改密码都会换一个新值，旧 token 的下一个请求就是 401。
+ * 这让「删账号」与「改密码」真正撤销访问，而不再是「等到 `exp` 才失效」。
+ * 撤销 API Key 仍然走 `api_key` 表（`resolve` 的 `api-key` 分支）。
  *
  * ## 一个 Secret 管全部 token
  *
@@ -62,12 +67,17 @@ export class AuthService {
    */
   async login(username: string, password: string, now: Date = new Date()): Promise<LoginResult> {
     const context = await this.#identity.resolve({ kind: 'password', username, password });
-    const issued = issueSessionToken(
-      this.#secret,
-      context.subject.replace(/^user:/u, ''),
-      this.#ttlSeconds,
-      now,
-    );
+    const userId = context.subject.replace(/^user:/u, '');
+    // 身份版本必须从目录行读：它回答「这个 token 属于账号的哪一段生命周期」。
+    // 空串是迁移遗留的「版本未知」（迁移 0016 会把存量行回填成随机值），此时签发
+    // 一个永远校验不过的 token 只会把问题推到下一个请求，不如在这里明确失败。
+    const epoch = this.#identity.sessionEpochOf(userId);
+    if (epoch === null || epoch === '') {
+      throw new ComemError('INTERNAL', '用户没有 session 身份版本，不能签发 token。', {
+        userId,
+      });
+    }
+    const issued = issueSessionToken(this.#secret, userId, epoch, this.#ttlSeconds, now);
     this.#logger.info('登录成功', { subject: context.subject, expiresAt: issued.expiresAt });
     return {
       token: issued.token,
@@ -91,7 +101,13 @@ export class AuthService {
     if (parsed === null) {
       throw new ComemError('UNAUTHENTICATED', 'Session token 无效或已过期。');
     }
-    return this.#identity.resolve({ kind: 'session', userId: parsed.userId });
+    // 载荷里的 `epoch` 交给 `IdentityService` 与目录行比对：版本不符（删账号重建、
+    // 改密码）与用户不存在走同一条 401，不区分原因。
+    return this.#identity.resolve({
+      kind: 'session',
+      userId: parsed.userId,
+      epoch: parsed.epoch,
+    });
   }
 }
 

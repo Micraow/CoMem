@@ -8,9 +8,10 @@
  *
  * session token 是无状态 HMAC 签名串（`services/session-token.ts`），服务端没有
  * 「已签发 token」的表。因此 `POST /auth/logout` 不改变服务端任何状态：它存在是
- * 为了让客户端有统一出口，也让「如何登出」有一个文档能指向的答案。要立刻让一个
- * 还没过期的 token 失效，只能撤销它对应的 API Key 或改密码——这两条都不影响已
- * 签发的 session token。这个限制写进 `docs/operations.md`。
+ * 为了让客户端有统一出口，也让「如何登出」有一个文档能指向的答案。要让已签发的
+ * token 立刻失效，改密码（轮换 `app_user.session_epoch`）或撤销 API Key。前者
+ * 只影响自己的 token，后者只影响一把 key——看不到别人的 token，这正是无状态设计
+ * 的边界。
  *
  * ## 认证未启用时返回 404
  *

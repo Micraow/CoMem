@@ -7,16 +7,26 @@
  * v1.<base64url(payload JSON)>.<base64url(HMAC-SHA256(secret, "v1.<payload>"))>
  * ```
  *
- * `payload` 是 `{ sub, iat, exp }`（用户 ID、签发时刻、过期时刻，秒级 Unix
- * 时间）。服务端不存 session 行：`auth.sessionTtlSeconds` 就是唯一的状态，
- * 校验只做签名与过期两件事。
+ * `payload` 是 `{ sub, iat, exp, epoch }`（用户 ID、签发时刻、过期时刻，秒级 Unix
+ * 时间，以及账号的身份版本）。服务端不存 session 行：`auth.sessionTtlSeconds` 就是
+ * 唯一的时间状态，校验只做签名、过期与「身份版本」三件事。
+ *
+ * ## 为什么载荷要带 `epoch`
+ *
+ * 只有用户 ID 时，token 的全部含义是「这个 ID 曾经存在过」。删账号再重建同 ID，
+ * 旧 token 在整个 `exp` 窗口内继续有效——撤销访问的动作本身失效。`epoch` 是
+ * `app_user.session_epoch`（迁移 `0016`）：创建账号时生成、改密码时轮换，所以
+ * 重建与改密码都会让已签发的 token 立刻失效。
+ *
+ * 这里只做格式校验，**不**查库比对：`AuthService` 拿 `IdentityService` 的当前值
+ * 比。`epoch` 为空串的载荷直接判无效——空串是迁移遗留的「版本未知」，不能因为
+ * 「两边都是空串」而放行。
  *
  * ## 为什么无状态
  *
  * 存储 session 要多一张表、一次写入、一次清理任务，而 session 的语义就是「在
- * TTL 内有效」。无状态的代价是**登出只能客户端丢弃 token**——服务端无法提前
- * 作废一个还没过期的 token。要立刻失效必须吊销 API key 或改密码（改密码不影响
- * 已签发的 session token）。这是本设计的已知限制，写在 `docs/operations.md`。
+ * TTL 内有效」。无状态的代价是**登出只能客户端丢弃 token**——服务端没有「已签发」
+ * 的行可以删。要立刻失效走改密码（轮换 `epoch`）或吊销 API Key。
  *
  * ## 为什么要带 `v1`
  *
@@ -40,6 +50,8 @@ const HMAC_ALGORITHM = 'sha256';
 export interface SessionToken {
   /** `user:{uid}` 里的 uid。 */
   readonly userId: string;
+  /** 签发时账号的身份版本（`app_user.session_epoch`）。 */
+  readonly epoch: string;
   /** 过期时刻（Unix 秒）。 */
   readonly expiresAt: number;
 }
@@ -49,6 +61,7 @@ interface TokenPayload {
   readonly sub: string;
   readonly iat: number;
   readonly exp: number;
+  readonly epoch: string;
 }
 
 function sign(secret: string, payload: string): string {
@@ -58,18 +71,22 @@ function sign(secret: string, payload: string): string {
 /**
  * 签发一个 token。
  *
+ * `epoch` 是账号当前的身份版本，由调用方从目录行读出来——这里不生成，签发必须
+ * 绑定「此刻的账号生命周期」。
+ *
  * `now` 只用于测试注入；生产路径由服务层传当前时刻，保证同一进程内签发的
  * token 可重放（同一毫秒签两个 token 也得到同一个串）。
  */
 export function issueSessionToken(
   secret: string,
   userId: string,
+  epoch: string,
   ttlSeconds: number,
   now: Date = new Date(),
 ): { readonly token: string; readonly expiresAt: number } {
   const issuedAt = Math.floor(now.getTime() / 1000);
   const expiresAt = issuedAt + ttlSeconds;
-  const payload: TokenPayload = { sub: userId, iat: issuedAt, exp: expiresAt };
+  const payload: TokenPayload = { sub: userId, iat: issuedAt, exp: expiresAt, epoch };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const signed = `${TOKEN_VERSION}.${encoded}`;
   return { token: `${signed}.${sign(secret, signed)}`, expiresAt };
@@ -77,6 +94,9 @@ export function issueSessionToken(
 
 /**
  * 校验签名与过期。任何一步失败返回 `null`，**不抛**——认证头是调用方输入。
+ *
+ * 身份版本的**比对**不在这里：那需要目录行（`IdentityService`）。这里只保证载荷
+ * 里有一个非空的 `epoch`，空串（迁移遗留）一律拒绝。
  */
 export function verifySessionToken(
   secret: string,
@@ -113,10 +133,17 @@ export function verifySessionToken(
     const record = parsed as Record<string, unknown>;
     const sub = record['sub'];
     const exp = record['exp'];
-    if (typeof sub !== 'string' || sub === '' || typeof exp !== 'number') {
+    const epoch = record['epoch'];
+    if (
+      typeof sub !== 'string' ||
+      sub === '' ||
+      typeof exp !== 'number' ||
+      typeof epoch !== 'string' ||
+      epoch === ''
+    ) {
       return null;
     }
-    payload = { sub, iat: typeof record['iat'] === 'number' ? record['iat'] : 0, exp };
+    payload = { sub, iat: typeof record['iat'] === 'number' ? record['iat'] : 0, exp, epoch };
   } catch {
     return null;
   }
@@ -124,5 +151,5 @@ export function verifySessionToken(
   if (payload.exp <= Math.floor(now.getTime() / 1000)) {
     return null;
   }
-  return { userId: payload.sub, expiresAt: payload.exp };
+  return { userId: payload.sub, epoch: payload.epoch, expiresAt: payload.exp };
 }

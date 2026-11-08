@@ -81,7 +81,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
-| `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码不会提前失效已签发的 token |
+| `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码会轮换身份版本，旧 token 立即失效 |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
 | `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
 | `logging.level` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
@@ -220,8 +220,8 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
 ### 已知限制
 
 - **登出只是客户端丢弃 token。** token 是无状态 HMAC，服务端没有「已签发」的
-  表，无法提前作废。要立刻失效只能撤销 API Key 或改密码。
-- **改密码不会踢掉已签发的 session token。** 同上。
+  表，无法提前作废某一个 token。要让某个用户的全部 token 失效走改密码（轮换
+  `app_user.session_epoch`），要只作废一把 key 走吊销。
 - **`sessionSecret` 留空时重启会让所有登录失效。** 这是刻意的默认值：不配置就
   不需要运维记住一个密钥，代价是重启后重新登录。
 - **组关系每请求查库。** 退组、加组立即生效，不需要重启。

@@ -127,6 +127,94 @@ describe('登录', () => {
   });
 });
 
+describe('删账号与改密码撤销访问', () => {
+  /**
+   * 回归：token 载荷只有用户 ID 时，「删账号」不撤销访问——同 ID 重建后旧 token
+   * 在整个 `exp` 窗口内继续有效，而且没有任何日志或错误提示（架构文档 §12.7）。
+   */
+  it('删账号重建同 ID 后旧 token 401', async () => {
+    const adminToken = await login();
+    const created = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      headers: bearer(adminToken),
+      payload: { id: 'alice', displayName: 'Alice' },
+    });
+    expect(created.statusCode).toBe(200);
+    await container.services.identity.setPassword('alice', PASSWORD);
+
+    const aliceToken = await login('alice', PASSWORD);
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/admin/users',
+          headers: bearer(aliceToken),
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    expect(
+      (
+        await inject({
+          method: 'DELETE',
+          url: '/api/v1/admin/users/alice',
+          headers: bearer(adminToken),
+        })
+      ).statusCode,
+    ).toBe(200);
+    // 同 ID 重建：`sub` 又存在且 active，只有身份版本变了。
+    expect(
+      (
+        await inject({
+          method: 'POST',
+          url: '/api/v1/admin/users',
+          headers: bearer(adminToken),
+          payload: { id: 'alice', displayName: 'Alice' },
+        })
+      ).statusCode,
+    ).toBe(200);
+
+    const stale = await inject({
+      method: 'GET',
+      url: '/api/v1/admin/users',
+      headers: bearer(aliceToken),
+    });
+    expect(stale.statusCode).toBe(401);
+    expect(json(stale)['error']).toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  it('改密码后旧 token 401，新密码可以登录', async () => {
+    const token = await login();
+    const changed = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users/local/password',
+      headers: bearer(token),
+      payload: { password: 'rotated-password' },
+    });
+    expect(changed.statusCode).toBe(200);
+
+    const stale = await inject({
+      method: 'GET',
+      url: '/api/v1/admin/users',
+      headers: bearer(token),
+    });
+    expect(stale.statusCode).toBe(401);
+
+    const fresh = await login('local', 'rotated-password');
+    expect(fresh).not.toBe(token);
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/admin/users',
+          headers: bearer(fresh),
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+});
+
 describe('API Key', () => {
   it('创建、使用、撤销一条链路；列表不返回明文', async () => {
     const token = await login();
