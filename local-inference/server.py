@@ -840,6 +840,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(_probe_devices(), indent=2, ensure_ascii=False))
         return 0
 
+    # 设备矩阵的预检：在起 uvicorn 之前拒绝，而不是让 lifespan 抛异常。后者会打出
+    # 一棵 traceback，而真正有用的只有最后一行——用户会以为服务本身坏了。
+    for role, device in (("嵌入", config.device), ("重排", config.rerank_device)):
+        if device == "npu":
+            print(
+                f"错误：{role}设备 npu 不可用。\n"
+                "llama.cpp 没有 Intel NPU 后端（上游没有对应的 ggml backend），"
+                "只有 OpenVINO 的 NPU 插件能驱动 Intel AI Boost。\n"
+                "请改用 --device cpu 或 --device gpu。",
+                file=sys.stderr,
+            )
+            return 2
+
     uvicorn.run(
         create_app(config),
         host=config.host,

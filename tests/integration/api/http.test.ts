@@ -13,11 +13,36 @@ import { Uri } from '../../../src/domain/uri.js';
 const ROOT = 'comem://user/local';
 const SUBJECT = 'user:local';
 
+/**
+ * LLM 供应商地址：**显式**指向一个不可能成功的回环端口。
+ *
+ * 这两个用例（`find/search/grep/glob` 与 `mode` 缺省快照）测的是「意图分析不可用
+ * 时的降级行为」。不写这个覆盖时，配置默认值是 `https://api.example.com/v1`——
+ * 测试会真的连外网，5 秒超时；而贡献者不设 `COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL`
+ * 时测试就红。**测试不能依赖本机环境**（同一个坑在 `config.yaml` 上踩过一次）。
+ *
+ * 回环端口 1 只是「意图」的书面说明：真正的隔离靠下面的 `fetch` 替身——它一定
+ * 抛错，不打开任何 socket。两者一起保证「没有一条真实网络请求」。
+ */
+const UNREACHABLE_LLM_BASE_URL = 'http://127.0.0.1:1/v1';
+
+/** 替身拦下的请求 URL。用于断言请求目标只可能是那个回环地址。 */
+const blockedFetchUrls: string[] = [];
+
 let dataDir: string;
 let container: Container;
 let app: FastifyInstance;
 
 beforeEach(async () => {
+  blockedFetchUrls.length = 0;
+  // 网络边界替身：任何一次 `fetch` 都立即失败，不产生真实连接。
+  vi.spyOn(globalThis, 'fetch').mockImplementation(
+    async (input: string | URL | Request): Promise<Response> => {
+      blockedFetchUrls.push(String(input));
+      throw new TypeError('fetch failed: 集成测试不发起真实网络请求。');
+    },
+  );
+
   dataDir = await mkdtemp(join(tmpdir(), 'comem-http-'));
   container = await createContainer({
     // **配置从临时目录读，不是仓库根。**
@@ -33,6 +58,7 @@ beforeEach(async () => {
       COMEM_DATA_DIR: dataDir,
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
+      COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: UNREACHABLE_LLM_BASE_URL,
     },
   });
   await container.services.acl.ensureRootPreset(Uri.parse(ROOT));
@@ -50,8 +76,25 @@ afterEach(async () => {
   await container.services.indexObserver.drain();
   await app.close();
   await container.close();
+  vi.restoreAllMocks();
   await rm(dataDir, { recursive: true, force: true });
 });
+
+/**
+ * 意图分析降级必须**可解释**，而且请求目标只能是我们注入的回环地址。
+ *
+ * 只断言「测试没超时」不够：下一次有人把 `fetch` 替身删掉，测试可能靠本机能连上
+ * 外网而继续绿。这里同时钉住 `analyzed === false`、`reason` 非空与「所有被拦下的
+ * URL 都是 127.0.0.1」三个事实。
+ */
+function expectIntentAnalysisDegraded(plan: Record<string, unknown>): void {
+  expect(plan['analyzed']).toBe(false);
+  expect(String(plan['reason'])).toContain('意图分析失败');
+  expect(blockedFetchUrls.length).toBeGreaterThan(0);
+  for (const url of blockedFetchUrls) {
+    expect(new URL(url).hostname).toBe('127.0.0.1');
+  }
+}
 
 function inject(options: InjectOptions) {
   return app.inject(options);
@@ -365,6 +408,8 @@ describe('检索', () => {
       await inject({ method: 'POST', url: '/api/v1/search/search', payload: { query: '记忆' } }),
     );
     expect(search['plan']).toBeDefined();
+    // 意图分析走的是注入的不可达 LLM 端口，降级必须写进 plan（§8.4）。
+    expectIntentAnalysisDegraded(search['plan'] as Record<string, unknown>);
 
     const grep = resultOf(
       await inject({
@@ -426,9 +471,11 @@ describe('检索 mode = context', () => {
       await inject({ method: 'POST', url: '/api/v1/search/search', payload: { query: '记忆' } }),
     );
 
-    // `elapsedMs` 是墙钟；`reason` 取决于本机能否连上模型（降级与否都合法），
-    // 两者归一化。其余字段（含分数）必须逐字相同。
+    // `elapsedMs` 是墙钟；`reason` 的文案取决于降级原因，两者归一化。其余字段
+    // （含分数）必须逐字相同。降级本身由上面的 `expectIntentAnalysisDegraded`
+    // 显式钉住——不依赖本机能不能连上模型。
     const plan = result['plan'] as Record<string, unknown>;
+    expectIntentAnalysisDegraded(plan);
     expect({
       ...result,
       plan: {
@@ -629,6 +676,11 @@ describe('ACL 与记忆复核', () => {
       (await import('../../../src/domain/memory-types/experiences.js')).experiencesMemoryType,
       { topic: 'monorepo', content: '迁移到 monorepo。' },
     );
+
+    // 写记忆时把 L0 摘要写进 frontmatter 的 `summary`：`IndexObserver` 把它当
+    // `abstract` 索引，检索侧的重排直接读它，不需要为了重排再打开文件。
+    const indexed = await container.services.index.stat(record.uri.toString());
+    expect(indexed?.abstract).toBe('迁移到 monorepo。');
 
     const pending = resultOf(
       await inject({ method: 'GET', url: `/api/v1/memories/pending?scopeUri=${encode(ROOT)}` }),
@@ -891,6 +943,13 @@ describe('重排接线', () => {
       await created.services.filesystem.write(Uri.parse(file), '上下文记忆数据库。', {
         frontmatter: { summary: '一句话摘要' },
       });
+      // 没有 frontmatter 摘要的普通文档（存量记忆、非记忆文件都是这种形态）。
+      // 重排必须降级用正文，否则空文本候选会被 `applyRerank` 全部跳过。
+      const bodyOnly = `${ROOT}/memories/rerank-body.md`;
+      await created.services.filesystem.write(
+        Uri.parse(bodyOnly),
+        '上下文记忆数据库的正文兜底。',
+      );
       await created.services.indexObserver.drain();
 
       const hits = await created.services.search.find('记忆', {
@@ -899,14 +958,13 @@ describe('重排接线', () => {
         principals: [SUBJECT, 'user:*'],
       });
 
-      expect(hits).toHaveLength(1);
+      expect(hits).toHaveLength(2);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(capturedUrl).toBe('https://rerank.example.test/v1/rerank');
-      // 候选文本是摘要，不是正文——重排模型吃不下长文本。
-      expect(capturedBody).toMatchObject({
-        model: 'test-reranker',
-        documents: ['一句话摘要'],
-      });
+      const documents = (capturedBody as { readonly documents: readonly string[] }).documents;
+      // 摘要优先（索引里就有，零 I/O），摘不到时用正文前 512 字符兜底。
+      expect(documents).toContain('一句话摘要');
+      expect(documents).toContain('上下文记忆数据库的正文兜底。');
       // 模型的分数直接成为最终分数（不 clamp、不与融合分混合）。
       expect(hits[0]?.score).toBe(0.99);
     } finally {

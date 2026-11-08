@@ -17,6 +17,20 @@
  * **一条会话失败不影响其它会话。** 单个文件坏掉（格式变化、权限、磁盘）时，其余
  * 会话仍然导入，失败进 `report.errors`。
  *
+ * ## 导入之后必须等阶段二
+ *
+ * `commitPhase1` 只写归档、建任务（阶段一，§10.1）。任务要由 `CommitRunner` 认领
+ * 才会跑阶段二：生成摘要、抽取记忆、合并、摘要失效。导入完立刻退出时任务停在
+ * `pending`，`find` 一条都搜不到——「导了 908 个会话，find 0 命中」。
+ *
+ * 所以 `waitForExtraction` **默认 `true`**：导入完一批会话就驱动执行器跑到这一批
+ * 的任务结束。关掉它只在「先看报告、稍后跑服务」时有用，报告里的 `extraction` 为
+ * `null`。
+ *
+ * **为什么要分批。** 908 个会话 × 每会话 1–2 次模型调用是 2–3 小时。等全部导完再
+ * 等阶段二，用户几个小时看不到一行进度；而且一次超时就会把整批算失败。按
+ * `extractionBatchSize`（默认 20）个会话一批，超时按批算，一批失败不阻塞后面。
+ *
  * ## 幂等
  *
  * 同一个 `(harness, nativeSessionId)` 跑第二次：游标已经在末尾，`readMessages`
@@ -27,6 +41,9 @@
  * `dryRun` 下不调 `SessionService` 的任何方法，也不调游标仓储的 `upsert`。它仍然
  * 读游标与源日志，所以报告里的「新建 / 跳过」是真实判断。游标仓储在 dry-run 时
  * 可以是只读连接，`services/` 不需要知道这一点。
+ *
+ * **`dryRun` 也忽略 `waitForExtraction`。** 没有任务可跑；为了「看看抽取效果」去
+ * 真的调模型会产生费用且不可逆。报告里的 `extraction` 是 `null`。
  *
  * ## 溯源
  *
@@ -64,6 +81,21 @@ export interface IngestOptions {
   readonly limitPerSession?: number;
   /** ISO 时间，只导这个时间之后的会话（`startedAt` 为 null 的会话仍然导入）。 */
   readonly since?: string;
+  /**
+   * 导入后等阶段二跑完。
+   *
+   * **默认 `true`**。用户要的是「导进来就能搜到」，不是「导进来一堆 pending 任务」。
+   * 关掉它只在批量导入、想先看报告时有用——报告里的 `extraction` 为 `null`，会话
+   * 仍然是 `pending` 任务，`find` 搜不到内容。
+   */
+  readonly waitForExtraction?: boolean;
+  /**
+   * 每批阶段二的最长等待，毫秒。`0` = 不等（等价于 `waitForExtraction: false`）。
+   *
+   * 默认 `DEFAULT_EXTRACTION_TIMEOUT_MS`（30 分钟）。超时按**批**算，不是按总量
+   * 算：908 个会话的总量是几小时，但一批 20 个会话通常 3–7 分钟。
+   */
+  readonly extractionTimeoutMs?: number;
 }
 
 export interface IngestError {
@@ -91,8 +123,83 @@ export interface IngestHarnessReport {
   readonly errors: readonly IngestError[];
 }
 
+/**
+ * 阶段二一批跑完的结果。
+ *
+ * 由装配方（`commands/ingest.ts`）实现：它知道 `CommitRunner`、任务表与
+ * `memory_diff.json` 的磁盘位置；`services/` 只负责「什么时候等、等多久」。
+ */
+export interface IngestExtractionBatch {
+  /** 本轮认领了多少个任务（含历史积压）。 */
+  readonly tasksAttempted: number;
+  readonly tasksCompleted: number;
+  readonly tasksFailed: number;
+  /**
+   * 本批写入的记忆：URI → 记忆类型。同一个 URI 只出现一次（一次合并写一次）。
+   */
+  readonly memories: ReadonlyMap<string, string>;
+  /**
+   * 本批写入的记忆中需要复核的 URI（记忆类型在 `memory.reviewRequired` 里）。
+   *
+   * 这些记忆的 `status = 'pending'`，**不会出现在检索结果里**，必须单独报给用户
+   * ——否则「导进来 100 条，30 条待复核」看起来像 100 条都能搜到。
+   */
+  readonly pendingReview: readonly string[];
+  /** 达到超时上限，队列里还有任务没跑。 */
+  readonly timedOut: boolean;
+}
+
+/**
+ * 阶段二执行端口（§10.1、§10.4）。
+ *
+ * `IngestService` 不能直接依赖 `CommitRunner`：后者在 `bootstrap/`，而
+ * `services/` 只能看到领域与应用层。装配方把「跑任务直到队列空」包成这个端口。
+ */
+export interface ExtractionRunner {
+  /**
+   * 跑任务直到队列空或超时。
+   *
+   * **执行器是全局的 FIFO 队列，不区分来源。** 本次导入创建的任务排在同一队列里；
+   * 历史积压会被先认领（报告里的完成数照实统计）。这是有意为之：任务表没有
+   * `source` 列，按来源过滤执行器等于再造一份「这次该跑哪些」的状态。
+   */
+  run(options: { readonly timeoutMs: number }): Promise<IngestExtractionBatch>;
+}
+
+/** 报告里的一批阶段二。 */
+export interface IngestExtractionBatchReport {
+  /** 全局批次序号，从 1 开始。 */
+  readonly index: number;
+  /** 这一批对应的来源；`null` 表示「队列积压」的收尾批。 */
+  readonly harness: IngestHarness | null;
+  /** 这一批包含多少个本次导入的会话；0 表示只处理了历史积压。 */
+  readonly sessions: number;
+  readonly tasksCompleted: number;
+  readonly tasksFailed: number;
+  readonly memoriesExtracted: number;
+  readonly memoriesPendingReview: number;
+  readonly durationMs: number;
+  /** 超时：队列里还有任务，等下一轮（或服务端执行器）继续。 */
+  readonly timedOut: boolean;
+  /** 执行器本身失败（不是任务失败）；`null` 表示这一批正常跑完。 */
+  readonly error: string | null;
+}
+
+export interface IngestExtractionReport {
+  readonly tasksCompleted: number;
+  readonly tasksFailed: number;
+  /** 抽取并写入的记忆条数（按 URI 去重；同一份记忆更新两次只算一条）。 */
+  readonly memoriesExtracted: number;
+  /** 其中需要复核、暂不参与检索的记忆条数。 */
+  readonly memoriesPendingReview: number;
+  readonly durationMs: number;
+  readonly batches: readonly IngestExtractionBatchReport[];
+}
+
 export interface IngestReport {
   readonly harnesses: readonly IngestHarnessReport[];
+  /** 阶段二的结果。`waitForExtraction: false`、`dryRun` 或 `extractionTimeoutMs: 0` 时为 `null`。 */
+  readonly extraction: IngestExtractionReport | null;
 }
 
 export interface IngestServiceOptions {
@@ -111,6 +218,23 @@ export interface IngestServiceOptions {
    * 游标端口。`dryRun` 时可以传只读连接；不传就当作「没有任何游标」。
    */
   readonly cursors?: Pick<IngestCursorRepository, 'get' | 'upsert'>;
+  /**
+   * 阶段二执行端口。`waitForExtraction` 为 `true` 且非 dry-run 时必须注入——
+   * 否则导入会静默停在「任务已建、记忆没抽」的假完成状态。
+   */
+  readonly extraction?: ExtractionRunner;
+  /**
+   * 每批等多少个会话的阶段二。
+   *
+   * 默认 `DEFAULT_EXTRACTION_BATCH_SIZE`（20）。来源见该常量的注释。
+   */
+  readonly extractionBatchSize?: number;
+  /**
+   * 每批阶段二的最长等待，毫秒。
+   *
+   * 默认 `DEFAULT_EXTRACTION_TIMEOUT_MS`（30 分钟）。来源见该常量的注释。
+   */
+  readonly extractionTimeoutMs?: number;
 }
 
 interface MutableReport {
@@ -123,6 +247,38 @@ interface MutableReport {
   failed: number;
   errors: IngestError[];
 }
+
+interface MutableExtraction {
+  tasksCompleted: number;
+  tasksFailed: number;
+  /** 全部批次写入的记忆 URI → 类型；用来算「抽取条数」的去重总数。 */
+  readonly memories: Map<string, string>;
+  readonly pendingReview: Set<string>;
+  durationMs: number;
+  readonly batches: IngestExtractionBatchReport[];
+}
+
+/**
+ * 每批等多少个会话的阶段二。
+ *
+ * 20 的来源是 W25 任务约定：一批 20 个会话 × 每会话 1–2 次模型调用 ≈ 20–40 次
+ * 调用，按 5 秒/次约 100–200 秒。用户在终端里按「批」看到进度，而不是等 908 个
+ * 会话全部导完才出第一行；批量再小会让执行器每几个任务空转一次，且批次日志过多。
+ *
+ * 测试与批量脚本可以覆盖，生产从 `ingest.extractionBatchSize` 传。
+ */
+const DEFAULT_EXTRACTION_BATCH_SIZE = 20;
+
+/**
+ * 每批阶段二的最长等待：30 分钟。
+ *
+ * 来源是「908 个会话 × 1–2 次模型调用 × 5 秒/次 ≈ 2–3 小时」的总量，换算到一批
+ * 20 个会话约 3–7 分钟。30 分钟留了 4–10 倍余量覆盖供应商尾延迟与单步重试；更
+ * 短会把「供应商慢一点」误判成超时，更长会让一次卡住的导入拖住终端。
+ *
+ * 超时按**批**算，不是按总量：总耗时可以是「批数 × 30 分钟」。
+ */
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 30 * 60 * 1000;
 
 function errorMessage(error: unknown): string {
   return ComemError.from(error).message;
@@ -163,6 +319,9 @@ export class IngestService {
   readonly #batchSize: number;
   readonly #sessions: IngestServiceOptions['sessions'];
   readonly #cursors: IngestServiceOptions['cursors'];
+  readonly #extraction: IngestServiceOptions['extraction'];
+  readonly #extractionBatchSize: number;
+  readonly #extractionTimeoutMs: number;
 
   constructor(options: IngestServiceOptions) {
     if (!Number.isInteger(options.batchSize) || options.batchSize <= 0) {
@@ -170,16 +329,37 @@ export class IngestService {
         batchSize: options.batchSize,
       });
     }
+    const extractionBatchSize = options.extractionBatchSize ?? DEFAULT_EXTRACTION_BATCH_SIZE;
+    if (!Number.isInteger(extractionBatchSize) || extractionBatchSize <= 0) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        `ingest.extractionBatchSize 必须是正整数：${extractionBatchSize}`,
+        { extractionBatchSize },
+      );
+    }
+    const extractionTimeoutMs = options.extractionTimeoutMs ?? DEFAULT_EXTRACTION_TIMEOUT_MS;
+    if (!Number.isInteger(extractionTimeoutMs) || extractionTimeoutMs < 0) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        `ingest.extractionTimeoutMs 必须是非负整数：${extractionTimeoutMs}`,
+        { extractionTimeoutMs },
+      );
+    }
     this.#sources = options.sources;
     this.#scopeUri = options.scopeUri;
     this.#logger = options.logger;
     this.#batchSize = options.batchSize;
     this.#sessions = options.sessions;
     this.#cursors = options.cursors;
+    this.#extraction = options.extraction;
+    this.#extractionBatchSize = extractionBatchSize;
+    this.#extractionTimeoutMs = extractionTimeoutMs;
   }
 
   async run(options: IngestOptions = {}): Promise<IngestReport> {
     const dryRun = options.dryRun ?? false;
+    const waitForExtraction = options.waitForExtraction ?? true;
+    const extractionTimeoutMs = options.extractionTimeoutMs ?? this.#extractionTimeoutMs;
     if (!dryRun) {
       this.#requireWriter();
       if (this.#cursors === undefined) {
@@ -188,7 +368,20 @@ export class IngestService {
           '导入需要游标仓储；`dryRun` 之外必须注入 IngestCursorRepository。',
         );
       }
+      if (waitForExtraction && extractionTimeoutMs > 0 && this.#extraction === undefined) {
+        throw new ComemError(
+          'INVALID_ARGUMENT',
+          '导入默认等待阶段二；要跳过抽取请显式传 waitForExtraction: false。',
+          { field: 'extraction' },
+        );
+      }
     }
+
+    // dry-run 不跑阶段二：没有任务，也不能为了「看看抽取效果」去真的调模型。
+    const extraction =
+      dryRun || !waitForExtraction || extractionTimeoutMs === 0
+        ? null
+        : createExtraction();
 
     const since = this.#parseSince(options.since);
     const batchSize = this.#parseBatchSize(options.limitPerSession);
@@ -206,6 +399,9 @@ export class IngestService {
         failed: 0,
         errors: [],
       };
+      // 这一批「本次导入创建的任务」。阶段二按批跑：攒够 extractionBatchSize 个
+      // 会话就等一批，避免 908 个会话全部导完才出进度。
+      const batchTaskIds: string[] = [];
 
       try {
         for await (const ref of source.discoverSessions()) {
@@ -215,7 +411,18 @@ export class IngestService {
             continue;
           }
           try {
-            await this.#ingestSessionAsync(source, ref, report, dryRun, batchSize);
+            const taskId = await this.#ingestSessionAsync(source, ref, report, dryRun, batchSize);
+            if (taskId !== null) {
+              batchTaskIds.push(taskId);
+              if (extraction !== null && batchTaskIds.length >= this.#extractionBatchSize) {
+                await this.#drainExtraction(
+                  source.harness,
+                  batchTaskIds.splice(0).length,
+                  extraction,
+                  extractionTimeoutMs,
+                );
+              }
+            }
           } catch (error) {
             report.failed += 1;
             report.errors.push({ locator: ref.locator, message: errorMessage(error) });
@@ -241,6 +448,24 @@ export class IngestService {
         });
       }
 
+      // 适配器按文件跳过的损坏导出。它们不中断来源，但必须出现在报告里——
+      // 「跳过了哪些文件」是用户判断「导入是不是完整」的唯一线索。
+      for (const fileError of source.fileErrors ?? []) {
+        report.failed += 1;
+        report.errors.push(fileError);
+      }
+
+      // 这一批的最后几个会话（不足 extractionBatchSize 的余数）。放在 catch 之后：
+      // 发现阶段失败时，失败之前已经建好的任务也要跑完，不能留在 pending。
+      if (extraction !== null && batchTaskIds.length > 0) {
+        await this.#drainExtraction(
+          source.harness,
+          batchTaskIds.splice(0).length,
+          extraction,
+          extractionTimeoutMs,
+        );
+      }
+
       reports.push(report);
       this.#logger.info('导入源完成', {
         harness: report.harness,
@@ -250,10 +475,101 @@ export class IngestService {
         appended: report.appended,
         messages: report.messages,
         failed: report.failed,
+        extractionBatches: extraction?.batches.length ?? 0,
       });
     }
 
-    return { harnesses: reports };
+    return {
+      harnesses: reports,
+      extraction: extraction === null ? null : freezeExtraction(extraction),
+    };
+  }
+
+  /**
+   * 跑一批阶段二。执行器认领的是全局队列，`sessions` 只用于报告展示「这一批对应
+   * 本次导入的多少个会话」。
+   *
+   * 执行器失败（不是任务失败）只记进报告，不抛出：一批跑失败不该让整次导入变成
+   * 异常——用户已经导进来的会话还在磁盘上，报告必须能说明「哪一批没跑完」。
+   *
+   * 队列为空（`tasksAttempted === 0`）时不产生空批次：正常导入的收尾批已经由上一
+   * 轮跑完，这里再记一条「0 个任务」只会让报告变长。
+   */
+  async #drainExtraction(
+    harness: IngestHarness | null,
+    sessions: number,
+    extraction: MutableExtraction,
+    timeoutMs: number,
+  ): Promise<void> {
+    const index = extraction.batches.length + 1;
+    const startedAt = Date.now();
+    let batch: IngestExtractionBatch;
+    try {
+      batch = await this.#requireExtraction().run({ timeoutMs });
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      extraction.durationMs += durationMs;
+      extraction.batches.push({
+        index,
+        harness,
+        sessions,
+        tasksCompleted: 0,
+        tasksFailed: 0,
+        memoriesExtracted: 0,
+        memoriesPendingReview: 0,
+        durationMs,
+        timedOut: false,
+        error: errorMessage(error),
+      });
+      this.#logger.error('阶段二执行失败', {
+        harness,
+        batch: index,
+        sessions,
+        reason: errorMessage(error),
+      });
+      return;
+    }
+
+    if (batch.tasksAttempted === 0) {
+      // 队列空：不产生空批次。计时也不累加——那是「等了一下」而不是「跑了一批」。
+      return;
+    }
+
+    const durationMs = Date.now() - startedAt;
+    extraction.tasksCompleted += batch.tasksCompleted;
+    extraction.tasksFailed += batch.tasksFailed;
+    extraction.durationMs += durationMs;
+    for (const [uri, memoryType] of batch.memories) {
+      extraction.memories.set(uri, memoryType);
+    }
+    for (const uri of batch.pendingReview) {
+      extraction.pendingReview.add(uri);
+    }
+
+    extraction.batches.push({
+      index,
+      harness,
+      sessions,
+      tasksCompleted: batch.tasksCompleted,
+      tasksFailed: batch.tasksFailed,
+      memoriesExtracted: batch.memories.size,
+      memoriesPendingReview: batch.pendingReview.length,
+      durationMs,
+      timedOut: batch.timedOut,
+      error: null,
+    });
+
+    this.#logger.info('阶段二完成', {
+      harness,
+      batch: index,
+      sessions,
+      tasksCompleted: batch.tasksCompleted,
+      tasksFailed: batch.tasksFailed,
+      memoriesExtracted: batch.memories.size,
+      memoriesPendingReview: batch.pendingReview.length,
+      durationMs,
+      timedOut: batch.timedOut,
+    });
   }
 
   async #ingestSessionAsync(
@@ -262,7 +578,7 @@ export class IngestService {
     report: MutableReport,
     dryRun: boolean,
     batchSize: number,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const existing = this.#cursors?.get(source.harness, ref.nativeSessionId) ?? null;
     if (existing !== null && existing.cursorKind !== source.cursorKind) {
       throw new ComemError('INTERNAL', `游标类型与源不匹配：${ref.locator}`, {
@@ -331,37 +647,45 @@ export class IngestService {
         nativeSessionId: ref.nativeSessionId,
         locator: ref.locator,
       });
-      return;
+      return null;
     }
 
     if (!dryRun) {
       if (sessionUri !== null) {
-        // 一条会话导入完立刻提交：不提交的话记忆永远不会被抽取，用户拿到的只是
-        // 一堆 `sessions/sess_xxx/messages.jsonl`。
-        await this.#requireWriter().commitPhase1(sessionUri);
+        // 一条会话导入完立刻提交：阶段一只落归档、建任务，记忆要等阶段二。
+        const commit = await this.#requireWriter().commitPhase1(sessionUri);
+        report.messages += written;
+        if (created) {
+          report.imported += 1;
+        } else {
+          report.appended += written;
+        }
+        this.#logger.info(created ? '会话已导入' : '会话已追加', {
+          harness: source.harness,
+          nativeSessionId: ref.nativeSessionId,
+          locator: ref.locator,
+          messages: written,
+          taskId: commit.taskId,
+        });
+        return commit.taskId;
       }
-      report.messages += written;
-      if (created) {
-        report.imported += 1;
-      } else {
-        report.appended += written;
-      }
-    } else {
-      report.messages += written;
-      if (created) {
-        report.imported += 1;
-      } else {
-        report.appended += written;
-      }
+      return null;
     }
 
+    report.messages += written;
+    if (created) {
+      report.imported += 1;
+    } else {
+      report.appended += written;
+    }
     this.#logger.info(created ? '会话已导入' : '会话已追加', {
       harness: source.harness,
       nativeSessionId: ref.nativeSessionId,
       locator: ref.locator,
       messages: written,
-      dryRun,
+      dryRun: true,
     });
+    return null;
   }
 
   async #ensureSession(
@@ -414,6 +738,16 @@ export class IngestService {
     return this.#sessions;
   }
 
+  #requireExtraction(): ExtractionRunner {
+    if (this.#extraction === undefined) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        '导入需要阶段二执行器；`waitForExtraction` 为 true 时必须注入 ExtractionRunner。',
+      );
+    }
+    return this.#extraction;
+  }
+
   #selectSources(harnesses: readonly IngestHarness[] | undefined): readonly LogSource[] {
     if (harnesses === undefined) {
       return this.#sources;
@@ -451,6 +785,28 @@ export class IngestService {
     }
     return since;
   }
+}
+
+function createExtraction(): MutableExtraction {
+  return {
+    tasksCompleted: 0,
+    tasksFailed: 0,
+    memories: new Map(),
+    pendingReview: new Set(),
+    durationMs: 0,
+    batches: [],
+  };
+}
+
+function freezeExtraction(extraction: MutableExtraction): IngestExtractionReport {
+  return {
+    tasksCompleted: extraction.tasksCompleted,
+    tasksFailed: extraction.tasksFailed,
+    memoriesExtracted: extraction.memories.size,
+    memoriesPendingReview: extraction.pendingReview.size,
+    durationMs: extraction.durationMs,
+    batches: extraction.batches,
+  };
 }
 
 function parseUri(value: string, locator: string): Uri {

@@ -274,7 +274,11 @@ comem://{scope}/{path}
 
 - `scope`：`user` | `group`
 - `path`：段用 `/` 分隔，末斜杠表示目录
-- 别名 `~`：服务端展开成 `comem://user/{当前 uid}`，只认第一段
+- 别名 `~`：**MCP 工具层**展开成当前绑定主体的根（`comem://user/{uid}` 或
+  `comem://group/{gid}`），只认第一段。展开目标来自 `health` 返回的 `subject`，
+  工具调用之间没有状态，Agent 靠它拼绝对 URI（§13.2）。`Uri.parse` 本身在没有主体
+  时拒绝 `~`（`INVALID_URI`），**不兜底到 `user:local`**——空库上猜错的根会让写入
+  落进别人的空间。
 
 ### 6.2 规范化
 
@@ -975,6 +979,18 @@ export interface RetrievalIndex {
 
 **为什么权重这么小**：加权是为了在 BM25 分数接近时打破平局，不是为了压过词频。1.15 意味着 L0 只要词频不差太多就能赢 L2；如果 L2 的词频明显更高，它仍然应该赢。
 
+**混合检索下，权重乘在每个后端对融合分的贡献上**，不是先改后端名次：
+
+```
+score(d) = Σ_retriever levelWeight(level_d) / (k + rank_retriever(d))
+```
+
+RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF，与接线前逐位相同（`1.0 * x === x`）。
+
+单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎就是 `hybrid`**，只给单引擎加权的实现等于「配置项在默认部署下不生效」。
+
+**重排之后先验仍然保留**（§18 的「重排的实际语义」）：模型分替换的是相关性判断，不是层级先验。不保留时 `hybrid + rerank` 下层级权重只在「模型没给分」的尾部候选上生效。
+
 权重集中配置（`retrieval.levelWeights`），来源是「摘要经过一次人工或模型的压缩，信息密度更高」这个经验假设。**没有实测数据支撑具体数值**，调参时应该用一批真实查询做对比。
 
 ### 8.6 上下文组装（Context Assembly）
@@ -1648,8 +1664,54 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 偏好、约定与踩过的坑是 CoMem 要存的东西，但用户不会一条条搬。`pnpm ingest` 把它们
 导进会话目录，再走 §10.1 的提交管线。
 
-**范围只到「落成会话 + 建归档任务」**。记忆抽取在阶段二（§10.1），与 `remember`
-工具同一条路径；导入命令不自己写记忆。
+**导入命令只落归档、建任务；记忆由阶段二抽取**（§10.1），与 `remember` 工具同一条
+路径。所以 `pnpm ingest` 在导完一批会话之后必须把阶段二驱动到结束——否则任务停在
+`pending`，用户得到的是「导了 908 个会话，`find` 0 命中」。见「导入后的处理」。
+
+#### 两条路，同一段管线
+
+本机历史对话有两条入口，**不是二选一**：它们负责的阶段不同。
+
+| | 服务端适配器（`pnpm ingest`） | Agent 侧提示词（`docs/ingest-prompt.md`） |
+|---|---|---|
+| 谁跑 | CoMem 进程内的 `LogSource` | 用户本机的 Agent |
+| 能读到什么 | 服务进程有权限的路径 | Agent 所在机器的完整磁盘（`~/Downloads`、`~/.claude`） |
+| 输入 | 四个内置宿主格式 | 任意宿主：Agent 自己解析成 `{role, text, createdAt}` |
+| 产出 | `sessions/<id>/messages.jsonl` | 同一个文件，经 `remember` |
+| 之后 | 阶段一 → 阶段二 → 记忆 | 完全一致 |
+
+**为什么不是二选一。** 服务端适配器只能覆盖「服务进程能读到、且格式已内置」的宿主；
+导出目录在用户自己的机器上，CoMem 进程看不到。反过来，Agent 侧提示词要自己解析
+每个宿主的日志格式，格式一变就漂——所以常见宿主仍然有服务端适配器。
+
+**Agent 只负责「原样上传」。** 提示词不写 `memories/*.md`，也不需要知道
+`memory_type`、目录布局与 frontmatter 格式。它把对话解析成消息数组，调 `remember`
+（带稳定的 `sessionId`）上传原始会话；归档、抽取、合并、复核闸门全在服务端。
+
+**这条边界是硬约束，不是实现细节。** 让 Agent 直接写 `memories/*.md` 会绕过：
+
+- **LLM 合并**（§11.2 / §11.8）：同一条事实会以多份副本落盘，且互相矛盾；
+- **复核闸门**（§11.6）：`experiences` / `rules` 不再需要人工通过；
+- **摘要失效**（§9.3）：索引里的摘要与正文对不上；
+- **补丁合并**（§11.5）：同一 URI 的多次写入没有收敛。
+
+结果就是「导进来的记忆」和「正常流程产出的记忆」不是同一种东西——两条写入路径迟早
+会漂，而漂移只在检索质量下降时暴露。
+
+#### `remember` 的 `sessionId` 与幂等
+
+不传 `sessionId` 时 `remember` 每次新建一个随机会话，这是「把当前这段对话存一下」的
+语义。批量上传必须传 `sessionId`（`<harness>-<native-id>`），否则 908 个会话重跑一次
+就变成 1,816 个。
+
+- **传了**：会话已存在就追加、不存在就创建（`SessionService.ensure` 不覆写消息）。
+- **幂等**：消息的稳定 ID 是 `sha256(role + text + createdAt)`。追加前收集会话已有的
+  消息 ID（live + `history/archive_NNN/` 的 `archivedMessageIds`），命中就跳过。所以
+  **调用方必须把源日志的 `createdAt` 原样传进来**；不传时用当前时刻，重跑无法去重。
+- **没有新消息**：不提交，返回 `taskId: none`。live 里还有上一次崩溃留下的未提交消息时
+  仍然提交——否则它们永远停在 live 里。
+- **并发**：去重是「读现有 → 追加」两步，没有跨请求的锁。批量导入是单协程顺序调用，
+  不受影响；并发同 `sessionId` 的两个调用各追加一份是已知窗口。
 
 #### 数据流
 
@@ -1665,6 +1727,43 @@ ingest_cursor：原生会话 → 我们的 session URI + 读到的位置
 
 `NormalizedMessage` 是宿主无关的对话轮（`role` / `text` / `createdAt` / `model` /
 `cwd`）。适配器只负责把各自的日志格式翻译成它，编排层不认识任何宿主的字段。
+
+#### 导入后的处理：为什么默认等阶段二
+
+阶段一只写归档、建任务（`pending`），阶段二由 `CommitRunner` 认领（§10.4）。一次性
+命令退出后没有东西再驱动执行器，任务就停在 `pending`——**「导了 908 个会话、`find`
+0 命中」不是检索坏了，是抽取从未发生**。所以 `IngestService.run` 默认
+`waitForExtraction: true`：每导完 `ingest.extractionBatchSize`（默认 20）个会话，
+就把执行器跑到队列空。
+
+| 选项 | 默认 | 作用 |
+|---|---|---|
+| `waitForExtraction` | `true` | 导入后等阶段二。关掉时报告里的 `extraction` 是 `null` |
+| `ingest.extractionBatchSize` | `20` | 每批等多少个会话；来源见 `config/schema.ts` 的注释 |
+| `ingest.extractionTimeoutMs` | `1800000`（30 分钟） | 每批的最长等待。`0` = 不等 |
+| `--no-wait` | — | 只导入、立即返回 |
+| `--timeout <秒>` | — | 覆盖每批超时（`--timeout 600` = 10 分钟） |
+
+**为什么分批。** 908 个会话 × 每会话 1–2 次模型调用 ≈ 2–3 小时。等全部导完再等阶段
+二，用户几个小时看不到一行进度；一批发生异常也会把整次等待算失败。分批之后超时按
+**批**算（不是按总量），用户按「批」看到进度，一批失败不阻塞后面的批。
+
+**超时不是取消。** 到点后不再认领新任务，**在途任务跑完再返回**（与
+`CommitRunner.stop` 同一取舍：中断一个跑到一半的合并会留下「部分步骤已标完成、却
+没有 `.done`」的归档）。没跑完的任务留在队列里，服务端执行器或下一次 `pnpm ingest`
+继续。
+
+**执行器是全局 FIFO 队列，不按来源过滤。** 任务表没有 `source` 列；`--source` 决定
+「导什么」，不决定「抽什么」。历史积压会被先认领，报告里的完成数照实统计。要清理
+积压可以起服务端，或清掉对应 `ingest_cursor` 行重导。
+
+**报告里的 `memoriesPendingReview` 必须单独看。** `experiences` / `rules`
+（`memory.reviewRequired`）写入时 `status = 'pending'`，**不参与检索**（§11.6）。报
+告里「抽取 100 条记忆（30 条待复核）」意味着 70 条能搜到、30 条要
+`POST /api/v1/memories/{id}/approve` 之后才会出现；只报总数会让用户以为 100 条都在。
+
+**`--dry-run` 忽略 `waitForExtraction`。** 没有任务可跑；为了「看看抽取效果」真的
+调模型会产生费用且不可逆。报告里的 `extraction` 是 `null`。
 
 #### 游标：为什么必须有
 
@@ -1742,12 +1841,23 @@ ingest:
 
 #### 已知限制
 
+- **导出前的脱敏会破坏 JSON。** 数字串被替换成中文字符串 `密码保护`
+  （`"total_tokens":4密码保护811`、`"create_time": 1791275310.6密码保护9`），三份
+  真实文件（Qwen 导出、ChatGPT 的 `conversations-000.json` / `library_files.json`）
+  因此不是合法 JSON。解析器先按「`密码保护` → `0`」修复再试一次；仍然失败才跳过该
+  文件并记进 `report.errors`，**不中断同一来源的其它文件**。被抹掉的是计数与时间戳
+  的高位，会话结构与正文都在。
 - **会话消息不进检索索引。** `messages.jsonl` 由 `SessionService` 直接写
   `ContentStore`，不经过 `IndexObserver`（§7 的取舍：`GET /sessions` 从磁盘列目录）。
-  `find` 要搜到导入的内容，得等阶段二把它抽取成记忆。
+  `find` 要搜到导入的内容，得等阶段二把它抽取成记忆；`pnpm ingest` 默认等阶段二
+  （见「导入后的处理」），`--no-wait` 时报告会明确说明「`find` 暂时搜不到」。
 - **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
   且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。
-- **Qwen 的损坏导出不可用。** 见上；适配器保留，遇到损坏文件明确报错。
+- **Qwen 的损坏导出不可用。** 未转义的引号（`Expecting ',' delimiter`）不是脱敏
+  伪影，修复救不回来；适配器跳过该文件并记进报告，不静默返回 0 个会话。
+- **Codex 的 94 个 rollout 文件只对应 20 个 `session_id`。** 文件名带 `_<threadId>`
+  后缀的是同一会话的续写 / 分叉，`session_id`（`session_meta.payload`）才是幂等键。
+  按文件导入会得到 4.7 倍重复；适配器按 `session_id` 发现会话。
 - **`.meta.json` 里没有 `source`。** 见「溯源的边界」。
 
 ## 12. 权限模型
@@ -1850,17 +1960,19 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 | `grep` | `uri`、`pattern`、`caseInsensitive=false`、`nodeLimit=10` | 文本：`Found N match(es):` + `uri` + `  L42 [pattern]: 内容` |
 | `glob` | `pattern`、`uri`、`nodeLimit=100` | 文本：`Found N file(s):` + `  uri` |
 | `download` | `uri` | 短期签名 URL（10 分钟） |
-| `health` | — | 文本：服务状态、索引条数、摘要降级标记 |
+| `health` | — | 文本：服务状态、当前身份 `subject`、可寻址的根 `scopes`、索引条数、摘要降级标记 |
 | `write` | `uri`、`content`、`mode=replace\|append\|create`、`wait=false` | 文本：写入结果 + 索引状态 |
 | `edit` | `uri`、`oldString`、`newString`、`replaceAll=false` | 文本：替换结果 |
-| `remember` | `messages[]` | 文本：`taskId` + 抽取在后台进行的提示 |
+| `remember` | `messages[]`（每条可带 `createdAt`）、`sessionId?` | 文本：`taskId`（没有新消息时是 `none`）+ 抽取在后台进行的提示 |
 | `forget` | `uri`、`recursive=false` | 文本：`Deleted: uri` |
 | `add_resource` | `parentUri`、`files[]`、`wait=false` | 文本：`created` / `updated` / `skipped` 计数 + 索引状态 |
 | `add_skill` | `parentUri`、`name`、`files[]` | 文本：技能 URI + 文件数 |
 
 **为什么返回文本而不是 JSON。** MCP 的返回值直接进模型上下文。文本格式的信息密度更高，模型也更容易读。JSON 适合程序消费，不适合模型消费。
 
-**`remember` 复用提交管线**：造一个合成会话再提交，不另写一条记忆写入路径。
+**`remember` 复用提交管线**：造一个合成会话再提交，不另写一条记忆写入路径。传 `sessionId`
+时用调用方给的稳定 ID 并跳过已有消息（`sha256(role + text + createdAt)`），批量上传本机
+历史对话重跑不会产生重复会话（§11.9）。
 
 **`add_resource` 分两步：先上传附件，再建资源。** 原始文件必须落盘保留，否则 `download` 没东西可下。
 
@@ -2470,7 +2582,10 @@ task:
 
 **重排的实际语义。** `retrieval.rerank.enabled` 打开后，`find` / `search` / `context` 在融合（或单引擎排序）之后、热度加权之前调用重排模型：
 
-- **候选文本是摘要（`abstract`），不是正文。** 重排模型吃不下长文本，而摘要在索引里就有。
+- **候选文本摘要优先、正文兜底。** `SearchHit.abstract` 在索引里就有，取值不花钱；`abstract` 为空（存量记忆、非记忆文件）时读正文前 **512 个字符**。不兜底时空文本候选会被 `applyRerank` 全部跳过——重排看起来开着，实际一个候选都没送模型，只多了一次延迟。512 的来源：重排模型的输入上限是 32k token，但重排只判断相关性，按摘要量级（L0 预算 256 的两倍）取足够。
+- **记忆写入时把 L0 摘要写进 frontmatter 的 `summary`**，`IndexObserver` 把它当 `abstract` 索引。新记忆因此零 I/O 就能重排；存量记忆走正文兜底，不需要 reindex 回填。
+- **层级先验在重排后保留。** 重排把相关性分换成模型分，但层级是**文档先验**（摘要经过压缩，模型从文本本身看不出出处）。先验按符号保序地乘回模型分：非负分乘权重、负分除以权重（模型分未归一化时直接乘会把负分惩罚得更狠，把先验反过来）。`weight = 1` 时是恒等变换。
+- **全部候选都没有可用文本时不发请求。** 模型对空串打不出有意义的分数，一次没有输入的调用只花延迟预算。
 - **`providers.rerank.topN` 是送去重排的条数上限。** 开启重排时候选集放宽到 `max(limit, topN)`，否则「融合排第 20 但最相关」的候选永远上不来；关闭时 `candidateLimit === limit`，与接线前逐字一致。
 - **`retrieval.rerank.keepTopN` 在重排之后截断**（`0` = 只重排不截断）。
 - **分数未归一化、可以是负数。** `jina/jina-reranker-v3` 的 `relevance_score` 没有约定值域，不要 clamp 到 `[0, 1]`，直接按原值降序。

@@ -33,7 +33,14 @@ import type {
 } from '../../domain/ingest.js';
 import type { Logger } from '../../domain/log.js';
 
-import { isRecord, walkFiles, type LogSource, type ReadMessagesResult } from '../source.js';
+import {
+  isRecord,
+  parseJsonDocument,
+  walkFiles,
+  type LogSource,
+  type ReadMessagesResult,
+  type SourceFileError,
+} from '../source.js';
 
 const DOWNLOADS = join(homedir(), 'Downloads');
 const QWEN_FILE_PREFIX = 'Qwen-chat-export-';
@@ -231,15 +238,31 @@ export class QwenSource implements LogSource {
   readonly #paths: readonly string[] | null;
   readonly #logger: Logger;
   readonly #documents = new Map<string, readonly QwenConversation[]>();
+  readonly #fileErrors: SourceFileError[] = [];
 
   constructor(options: QwenSourceOptions) {
     this.#paths = options.paths === undefined || options.paths.length === 0 ? null : options.paths;
     this.#logger = options.logger;
   }
 
+  get fileErrors(): readonly SourceFileError[] {
+    return this.#fileErrors;
+  }
+
   async *discoverSessions(): AsyncIterable<SessionRef> {
     for (const locator of await this.#locators()) {
-      for (const conversation of await this.#load(locator)) {
+      let conversations: readonly QwenConversation[];
+      try {
+        conversations = await this.#load(locator);
+      } catch (error) {
+        // 一份损坏的导出不该让同来源的其它文件也导不进来。跳过并记进报告，
+        // 由用户在报告里看到「哪个文件被跳过了、为什么」。
+        const message = errorMessage(error);
+        this.#fileErrors.push({ locator, message });
+        this.#logger.error('跳过无法解析的 Qwen 导出文件', { locator, reason: message });
+        continue;
+      }
+      for (const conversation of conversations) {
         yield {
           harness: this.harness,
           nativeSessionId: conversation.id,
@@ -346,26 +369,18 @@ export class QwenSource implements LogSource {
       });
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      throw new ComemError(
-        'INVALID_ARGUMENT',
-        `Qwen 导出文件不是合法 JSON：${locator}（${errorMessage(error)}）`,
-        {
-        locator,
-        reason: errorMessage(error),
-      });
+    const parsed = parseJsonDocument(raw, locator);
+    if (parsed.repaired) {
+      this.#logger.warn('Qwen 导出文件的脱敏伪影已按 0 修复', { locator });
     }
-    if (!isRecord(parsed) || !Array.isArray(parsed['data'])) {
+    if (!isRecord(parsed.value) || !Array.isArray(parsed.value['data'])) {
       throw new ComemError('INVALID_ARGUMENT', `Qwen 导出文件缺少 data 数组：${locator}`, {
         locator,
       });
     }
 
     const conversations: QwenConversation[] = [];
-    for (const value of parsed['data']) {
+    for (const value of parsed.value['data']) {
       const conversation = toConversation(value);
       if (conversation === null) {
         this.#logger.warn('跳过无法解析的 Qwen 会话', { locator });

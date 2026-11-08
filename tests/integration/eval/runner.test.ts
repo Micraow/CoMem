@@ -132,6 +132,7 @@ function identifierDataset(): EvalDataset {
 interface ObservedContainer {
   readonly engine: RetrievalEngine | undefined;
   readonly rerank: boolean;
+  readonly levelWeights: { readonly l0: number; readonly l1: number; readonly l2: number };
   readonly dataDir: string;
 }
 
@@ -150,6 +151,7 @@ function createTestContainer(options: CreateContainerOptions = {}): Promise<Cont
     observed.push({
       engine: container.config.retrieval.engine,
       rerank: container.config.retrieval.rerank.enabled,
+      levelWeights: container.config.retrieval.levelWeights,
       dataDir: container.config.dataDir,
     });
     return container;
@@ -293,6 +295,27 @@ describe('EvalRunner 的变体隔离', () => {
       ['fts5', false],
       ['hybrid', false],
       ['hybrid', true],
+    ]);
+  });
+
+  it('层级权重变体真的切进容器（配置项生效）', async () => {
+    const variants: readonly EvalVariant[] = [
+      { name: 'hybrid', engine: 'hybrid' },
+      {
+        name: 'hybrid+levels',
+        engine: 'hybrid',
+        overrides: { levelWeights: { l0: 1, l1: 1, l2: 1 } },
+      },
+    ];
+
+    await runner().run({ dataset: synonymDataset(), variants, k: 3 });
+
+    // 默认权重来自 `config/schema.ts`（1.15 / 1.05 / 1.00），覆盖来自
+    // `COMEM_RETRIEVAL_LEVEL_WEIGHTS_*`。两者必须真的不同，否则「层级权重
+    // 变体」只是报告里多一行与基线逐位相同的数字。
+    expect(observed.map((entry) => entry.levelWeights)).toEqual([
+      { l0: 1.15, l1: 1.05, l2: 1 },
+      { l0: 1, l1: 1, l2: 1 },
     ]);
   });
 

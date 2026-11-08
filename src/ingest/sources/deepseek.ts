@@ -42,7 +42,14 @@ import type {
 } from '../../domain/ingest.js';
 import type { Logger } from '../../domain/log.js';
 
-import { isRecord, walkFiles, type LogSource, type ReadMessagesResult } from '../source.js';
+import {
+  isRecord,
+  parseJsonDocument,
+  walkFiles,
+  type LogSource,
+  type ReadMessagesResult,
+  type SourceFileError,
+} from '../source.js';
 
 const DOWNLOADS = join(homedir(), 'Downloads');
 const CONVERSATIONS_FILE = 'conversations.json';
@@ -217,15 +224,30 @@ export class DeepSeekSource implements LogSource {
   readonly #logger: Logger;
   /** 当前文件解析后的会话。按 locator 缓存：一个 32MB 文件只解析一次。 */
   readonly #documents = new Map<string, readonly DeepSeekConversation[]>();
+  readonly #fileErrors: SourceFileError[] = [];
 
   constructor(options: DeepSeekSourceOptions) {
     this.#paths = options.paths === undefined || options.paths.length === 0 ? null : options.paths;
     this.#logger = options.logger;
   }
 
+  get fileErrors(): readonly SourceFileError[] {
+    return this.#fileErrors;
+  }
+
   async *discoverSessions(): AsyncIterable<SessionRef> {
     for (const locator of await this.#locators()) {
-      for (const conversation of await this.#load(locator)) {
+      let conversations: readonly DeepSeekConversation[];
+      try {
+        conversations = await this.#load(locator);
+      } catch (error) {
+        // 一份损坏的导出不该让同来源的其它文件也导不进来。跳过并记进报告。
+        const message = errorMessage(error);
+        this.#fileErrors.push({ locator, message });
+        this.#logger.error('跳过无法解析的 DeepSeek 导出文件', { locator, reason: message });
+        continue;
+      }
+      for (const conversation of conversations) {
         yield {
           harness: this.harness,
           nativeSessionId: conversation.id,
@@ -334,26 +356,18 @@ export class DeepSeekSource implements LogSource {
       });
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      throw new ComemError(
-        'INVALID_ARGUMENT',
-        `DeepSeek 导出文件不是合法 JSON：${locator}（${errorMessage(error)}）`,
-        {
-        locator,
-        reason: errorMessage(error),
-      });
+    const parsed = parseJsonDocument(raw, locator);
+    if (parsed.repaired) {
+      this.#logger.warn('DeepSeek 导出文件的脱敏伪影已按 0 修复', { locator });
     }
-    if (!Array.isArray(parsed)) {
+    if (!Array.isArray(parsed.value)) {
       throw new ComemError('INVALID_ARGUMENT', `DeepSeek 导出文件的顶层不是数组：${locator}`, {
         locator,
       });
     }
 
     const conversations: DeepSeekConversation[] = [];
-    for (const value of parsed) {
+    for (const value of parsed.value) {
       const conversation = toConversation(value);
       if (conversation === null) {
         this.#logger.warn('跳过无法解析的 DeepSeek 会话', { locator });

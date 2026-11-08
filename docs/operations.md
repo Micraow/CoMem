@@ -97,6 +97,8 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `task.concurrency` | `4` | 阶段二执行器同时跑几个任务。每个任务会调模型，调太高会把供应商的速率限制打满 |
 | `ingest.enabled` | `false` | 本机对话导入的总开关。关着时 `pnpm ingest` 拒绝真正写入，只允许 `--dry-run` |
 | `ingest.batchSize` | `100` | 每个会话一次读多少条。100 与 MCP 单次批量写入的量级一致（§10.6 的验收场景） |
+| `ingest.extractionBatchSize` | `20` | 阶段二每批等多少个会话。20 的来源见 `src/config/schema.ts` 的注释 |
+| `ingest.extractionTimeoutMs` | `1800000` | 每批阶段二的最长等待（30 分钟）。`0` = 不等。超时按批算，不是按总量 |
 | `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
 
 ## 启动
@@ -242,6 +244,87 @@ curl -s -X POST http://127.0.0.1:1933/api/v1/memories/consolidate \
 - 没有回滚：写盘前的校验全部前置，但 I/O 或加锁失败时已应用的操作不回退，错误
   `details` 里带清单（见「已知限制」）。
 - 不进 MCP（§3：16 个工具，不多不少）。
+
+## 本地推理
+
+可选的本地 embedding / rerank 服务，源码在 [`local-inference/`](../local-inference/README.md)，
+跑起来是一个 OpenAI `/v1/embeddings` + Cohere `/v1/rerank` 兼容的 HTTP 进程。
+
+**为什么需要它**：远程供应商按 token 计费，导入 810MB 历史对话（900+ 会话）一次全量
+回填就会打爆配额；而且 CoMem 的定位是本地数据库，把每条记忆的正文发给第三方做嵌入
+与这个定位冲突。`reindex` 换模型时也会再触发一次全量嵌入。
+
+### 装什么
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| Python | 3.12 | 系统 3.14 上没有 `llama-cpp-python` 的可用构建。`uv python install 3.12` |
+| `llama-cpp-python` | ≥ 0.3.16 | **必须带 Vulkan 源码编译**，预编译 wheel 只有 CPU 后端 |
+| 模型 | GGUF Q8_0 ×2 | `Qwen3-Embedding-0.6B` + `Qwen3-Reranker-0.6B`，合计 1.28GB |
+
+完整命令见 `local-inference/README.md` 的「安装」。这里只强调三个会静默出错的点：
+
+1. **`CMAKE_PREFIX_PATH=/usr/share/cmake`**（Arch 专有）：`spirv-headers` 的 CMake
+   配置文件不在默认搜索路径里，不设这个变量会在 `find_package(SPIRV-Headers)` 处失败。
+2. **`HF_ENDPOINT=https://hf-mirror.com`**：`huggingface.co` 直连在本机 401。国内
+   也可直接用 ModelScope 的 `resolve/master` 直链。
+3. **reranker 的 GGUF 只能用 `ggml-org` 那个仓库**。社区仓的 Q8_0 是坏转换器的产物
+   （310 张量、`pooling_type` 不是 `RANK`），加载不报错、分数看起来正常、排序是垃圾。
+
+### 跑起来
+
+```bash
+cd local-inference
+nice -n 10 taskset -c 0-5 .venv/bin/python server.py --device cpu --threads 6
+```
+
+- `--device`：`cpu` / `gpu`。**`npu` 会被拒绝**——llama.cpp 上游没有 Intel NPU 的
+  ggml backend（见「已知限制」）。
+- `--threads` 默认 `min(6, cpu_count // 2)`，要和 `taskset` 的核集合一样大，否则
+  `llama.cpp` 的 worker 线程会跑到集合之外。
+- 启动后 `curl http://127.0.0.1:8089/health` 的 `ready` 为 `true` 才算就绪。它会先
+  跑一次 `embed(["warmup"])`——不预热的话第一条真实请求要等几百毫秒。
+
+### 接进 CoMem
+
+```yaml
+providers:
+  embedding:
+    type: openai-compatible
+    baseUrl: http://127.0.0.1:8089/v1
+    model: Qwen3-Embedding-0.6B
+    apiKey: local          # 只检查 Authorization 头存在，值不校验
+    dimension: 1024
+    maxBatchSize: 32
+    timeoutSeconds: 60
+  rerank:
+    type: http
+    baseUrl: http://127.0.0.1:8089/v1
+    model: Qwen3-Reranker-0.6B
+    apiKey: local
+    timeoutSeconds: 20
+    topN: 50
+
+retrieval:
+  engine: hybrid
+  rerank:
+    enabled: true
+```
+
+`dimension` 必须是 1024（0.6B 的原生维度）。写错会在第一次嵌入时抛
+`PROVIDER_UNAVAILABLE`。
+
+### 已知限制
+
+- **NPU 不可用。** 本机有 Intel AI Boost NPU（`00:0b.0`，`intel_vpu` 已加载），但
+  llama.cpp 没有它的 ggml backend，`--device npu` 启动即退出（退出码 2）。要用 NPU
+  只能换 OpenVINO，而那是另一套运行时与另一套分数语义。
+- **重排分数是 `P(yes)`，在 [0, 1]。** 换量化档位（Q8_0 → Q4_K_M）时排序基本
+  不变，但绝对分数会漂；如果开了阈值过滤，必须在选定的档位上重新标定。
+- **单进程串行推理。** 模型实例不是线程安全的，并发请求排队。16 核机器上并行推理
+  只会让每个请求都变慢。
+- **`input_type: "query"` 是本地扩展。** 加 `Instruct:` 前缀在官方评估里提升
+  1%–5%，但会改变向量分布，切换时必须全量重建索引。
 
 ## 数据布局
 
@@ -445,12 +528,14 @@ pnpm eval --config local/eval-config.yaml --rerank   # 追加 hybrid+rerank 对�
 
 ## 导入本机 Agent 对话
 
-`pnpm ingest` 把机器上的历史对话导进会话目录，并逐条会话走阶段一提交。阶段二（记忆
-抽取）由 `CommitRunner` 在后台执行，与 `remember` 工具同一条路径。
+`pnpm ingest` 把机器上的历史对话导进会话目录，逐条会话走阶段一提交，然后**默认等
+阶段二（记忆抽取）跑完**——导进来的会话要变成 `find` 能搜到的记忆，才算完成。
 
 ```bash
-pnpm ingest --source claude-code          # 只导一个
+pnpm ingest --source claude-code          # 只导一个（默认等阶段二）
 pnpm ingest --source all                  # 全部
+pnpm ingest --source all --no-wait        # 只导入，立即返回
+pnpm ingest --source all --timeout 600    # 每批阶段二最多等 600 秒
 pnpm ingest --source all --dry-run        # 只报告不写
 pnpm ingest --source codex --since 2026-08-01
 pnpm ingest --source all --json           # 机器可读
@@ -466,22 +551,64 @@ pnpm ingest --source all --json           # 机器可读
 对应行即可（`DELETE FROM ingest_cursor WHERE native_session_id = '...'`）。
 
 **导入之后 `find` 搜不到原始对话正文是正常的。** 会话消息按设计不进检索索引；
-`find` 能搜到的是阶段二从归档里抽取出来的记忆。如果任务一直 `pending`，见「已知
-限制」第 1 条（只有 `main.ts` 起的进程会跑阶段二）。
+`find` 能搜到的是阶段二从归档里抽取出来的记忆。默认等待阶段二就是为了让这件事在
+命令结束时就成立，而不是留一堆 `pending` 任务。
+
+### 阶段二（记忆抽取）
+
+导入只做阶段一：归档消息、建任务（`pending`）。任务要由 `CommitRunner` 认领才会
+生成摘要、抽取记忆、合并、失效摘要。**不等阶段二 = 会话在磁盘上、`find` 搜不到。**
+
+- 默认 `waitForExtraction: true`，每 `ingest.extractionBatchSize`（20）个会话等一批。
+- 每批超时 `ingest.extractionTimeoutMs`（30 分钟），`--timeout <秒>` 覆盖。到点后
+  不再认领新任务，**在途任务跑完再返回**；没跑完的任务留在队列里，下次继续。
+- `--no-wait` 只导入。报告会明确写「`find` 暂时搜不到内容」。
+- 执行器是全局 FIFO 队列，不按 `--source` 过滤；历史积压会被先认领。
+- `--dry-run` 忽略等待：没有任务可跑。报告里的 `extraction` 是 `null`。
 
 ### 输出怎么读
 
 ```text
 来源 claude-code：发现 42 个会话
   ✅ 新建 38 个会话，共 1,204 条消息
-  ➕ 追加 12 条消息到已有会话
-  ⏭️  跳过 3 个（游标已到末尾）
-  ❌ 失败 1 个
-    - /path/to/session.jsonl：<原因>
+  ⏭️  跳过 4 个（游标已到末尾）
+
+阶段二（记忆抽取）：
+  第 1 批（20 个会话）✅ 抽取 14 条记忆（12 条 active，2 条待复核） 95.2s
+  第 2 批（18 个会话）✅ 抽取 11 条记忆（9 条 active，2 条待复核） 88.4s
+  合计：完成 38 个任务，失败 0 个，抽取 25 条记忆（21 条 active，4 条待复核），耗时 183.6s
+  待复核的记忆不会出现在检索结果里：用 `GET /api/v1/memories/pending` 查看，`POST /api/v1/memories/{uri}/approve` 通过。
 ```
 
 失败会带 `locator`（源文件路径），单条会话的失败不影响其它会话。命令在有失败时以
 退出码 1 结束，`--json` 的报告里 `harnesses[].errors` 是完整清单。
+
+### 待复核的记忆
+
+`experiences` / `rules`（`memory.reviewRequired`）写入时 `status = 'pending'`，**不
+参与检索**。报告里的「待复核」就是这批记忆：
+
+```bash
+# 列表（scopeUri 省略时取当前身份的作用域根）
+curl -s 'http://127.0.0.1:1933/api/v1/memories/pending' | jq '.result.memories'
+
+# 通过（URI 要做 URL 编码；通过之后才会出现在 find 里）
+curl -s -X POST \
+  "http://127.0.0.1:1933/api/v1/memories/$(jq -rn --arg u 'comem://user/local/memories/rules/example.md' '$u|@uri')/approve"
+```
+
+只报总数会让人以为「导进来 100 条，100 条都能搜到」；实际有一部分要人工过闸门。
+
+### 超时怎么调
+
+30 分钟是「20 个会话 × 1–2 次模型调用 × 5 秒/次」的 4–10 倍余量。供应商慢或模型
+上下文长时调大：
+
+```bash
+pnpm ingest --source all --timeout 3600   # 每批 1 小时
+```
+
+或改配置 `ingest.extractionTimeoutMs`（毫秒）。`0` 等价于 `--no-wait`。
 
 ### 源路径
 
@@ -697,9 +824,18 @@ COMEM_SERVER_PORT=8080 pnpm dev
     会把这一批再追加一次。最坏情况 100 条重复，不是整段对话。彻底消除要按源消息 ID
     逐条去重，v1 不做。
 
-19. **Qwen 的导出文件可能整份不可解析。** 本机实测的 35MB 导出在字符串里有未转义的
-    引号（`JSON.parse` 报 `Expecting ',' delimiter`）。导入命令会明确报
-    `INVALID_ARGUMENT` 并带 `locator`，不会静默返回 0 个会话。这份数据要重新导出。
+19. **导出前的脱敏会破坏 JSON（`密码保护`）。** 真实语料里数字串被替换成了中文字符
+    串：`"total_tokens":4密码保护811`、`"create_time": 1791275310.6密码保护9`。整份
+    导出因此不是合法 JSON，而 Qwen 是**单文件 35MB**、ChatGPT 是 19MB——整体
+    `JSON.parse` 一个坏文件就会让整个来源失败。解析器先按「把 `密码保护` 换成 `0`」修复
+    再试一次（会话结构与正文都在，被抹掉的是计数与时间戳的高位）；仍然失败才**跳过该
+    文件**并写进 `report.errors`，**不中断同一来源的其它文件**。报告里 `failed` 会加一，
+    `errors[].locator` 是被跳过的文件路径。
 
-20. **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
+20. **Qwen 的导出文件可能整份不可解析。** 本机实测的 35MB 导出在字符串里有未转义的
+    引号（`JSON.parse` 报 `Expecting ',' delimiter`）。脱敏修复救不回来时，导入会跳过
+    这个文件并记进报告，不会静默返回 0 个会话；同一来源的其它文件继续导入。这份数据
+    要重新导出。
+
+21. **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
     且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。

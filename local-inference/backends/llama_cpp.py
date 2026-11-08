@@ -59,12 +59,6 @@ POOLING_RANK = 4
 #: 这里按后缀匹配，避免换 arch 名时静默漏检。
 POOLING_KEY_SUFFIX = ".pooling_type"
 
-#: Qwen3-Reranker 的官方指令（模型卡 `format_instruction`）。换指令等于换一个打分
-#: 分布，所以写死在代码里。
-RERANK_INSTRUCTION = (
-    "Given a web search query, retrieve relevant passages that answer the query"
-)
-
 #: `llama_model_meta_val_str` 的缓冲区。Qwen3 的 chat template 约 4KB，8192 有量级余量。
 _METADATA_BUFFER = 8192
 _METADATA_KEY_BUFFER = 1024
@@ -113,22 +107,40 @@ def _read_metadata(llm: "object") -> dict[str, str]:
     metadata: dict[str, str] = {}
     for index in range(count):
         key_buffer = ctypes.create_string_buffer(_METADATA_KEY_BUFFER)
+        # 这两个 API 返回**写入的字节数**，不是 0 / -1。用 `!= 0` 判断会把每一条
+        # 都当成失败跳过，得到一个空 dict——而空 dict 会让 rerank 校验报「缺元数据」，
+        # 看起来像模型坏了。
         if (
             llama_cpp.llama_model_meta_key_by_index(
                 model, index, key_buffer, _METADATA_KEY_BUFFER
             )
-            != 0
+            < 0
         ):
             continue
         key = key_buffer.value.decode("utf-8", errors="replace")
         value_buffer = ctypes.create_string_buffer(_METADATA_BUFFER)
-        written = llama_cpp.llama_model_meta_val_str(
-            model, key.encode("utf-8"), value_buffer, _METADATA_BUFFER
-        )
-        if written < 0:
+        if (
+            llama_cpp.llama_model_meta_val_str(
+                model, key.encode("utf-8"), value_buffer, _METADATA_BUFFER
+            )
+            < 0
+        ):
             continue
         metadata[key] = value_buffer.value.decode("utf-8", errors="replace")
     return metadata
+
+
+def _rerank_template(metadata: dict[str, str]) -> str | None:
+    """取 GGUF 里的 rerank chat 模板。
+
+    **用模型自己的模板，不硬编码。** 官方模板末尾有一个空的 `<think>\n\n</think>`
+    ——少了它，模型会把它当成「思考模式」的开头，分数分布整体偏移。模板跟着 GGUF
+    走，换模型（或换成带思考的版本）时不需要改代码。
+    """
+    for key, value in metadata.items():
+        if key.endswith("chat_template.rerank"):
+            return value
+    return None
 
 
 def _require_gguf(path: str, what: str) -> Path:
@@ -149,8 +161,9 @@ def _require_device(device: Device) -> None:
     """
     if device == "npu":
         raise BackendUnavailableError(
-            "llama.cpp 没有 Intel NPU 后端（上游没有对应的 ggml backend）。"
-            f"本机 OpenVINO 报告的设备是 CPU / GPU / NPU，但本服务只实现了 llama.cpp。"
+            "llama.cpp 没有 Intel NPU 后端：上游没有对应的 ggml backend，"
+            "只有 OpenVINO 的 NPU 插件能驱动 Intel AI Boost。"
+            "本服务只实现 llama.cpp，请改用 --device cpu 或 --device gpu。"
         )
 
 
@@ -180,20 +193,23 @@ def _validate_reranker(
             f"{pooling_key} = {metadata[pooling_key]!r}（期望 {POOLING_RANK} = RANK）"
         )
 
+    # `classifier.output_labels` 是可选编码：官方 Q8_0 里没有这个键，分类头靠
+    # `llama_model_n_cls_out()` 报告（构造时另外校验）。有的话顺带核对一下。
     labels_key = next(
         (key for key in metadata if key.endswith("classifier.output_labels")), None
     )
-    if labels_key is None:
-        problems.append("缺少 classifier.output_labels 元数据")
-    else:
+    if labels_key is not None:
         label_text = metadata[labels_key]
         if "yes" not in label_text or "no" not in label_text:
-            problems.append(
-                f"{labels_key} = {label_text!r}（期望包含 yes 与 no）"
-            )
+            problems.append(f"{labels_key} = {label_text!r}（期望包含 yes 与 no）")
 
-    if not any("chat_template.rerank" in key for key in metadata):
-        problems.append("缺少 tokenizer.chat_template.rerank（llama.cpp 的 rerank 模板）")
+    template = _rerank_template(metadata)
+    if template is None:
+        problems.append(
+            "缺少 tokenizer.chat_template.rerank（llama.cpp 的 rerank 模板）"
+        )
+    elif "{query}" not in template or "{document}" not in template:
+        problems.append("tokenizer.chat_template.rerank 里没有 {query} / {document} 占位符")
 
     if problems:
         raise BackendUnavailableError(
@@ -343,16 +359,18 @@ class LlamaCppEmbedding:
 class LlamaCppRerank:
     """GGUF 重排后端（RANK 池化的分类头）。
 
-    分数取 `logit(yes) - logit(no)`：**未归一化、可以为负**，与 Cohere / Jina 的
-    `relevance_score` 同一语义。`/health` 的 `score_semantics` 报 `logit`。
+    **分数是 `P(yes)`，在 [0, 1]。** llama.cpp 的 RANK 池化在 `n_cls_out == 2` 时
+    已经对分类头做了 softmax，`llama_get_embeddings_seq` 返回的就是两个概率
+    （实测 `[0.987, 0.013]`，和为 1）。`/health` 的 `score_semantics` 报
+    `probability`。
 
-    不做 softmax：概率在两端会饱和（明确相关与极度相关都是 0.999），排序虽然不变，
-    但「差多少」的信息丢了。CoMem 只按降序取前 N，logit 差更稳。
+    **不要用 `Llama.embed()` 取这个值**：它按 `n_embd()`（hidden size，1024）切片，
+    而这里只有 2 个 float，切出来是越界读到的垃圾。
     """
 
     backend: str = "llama-cpp"
-    #: `logit(yes) - logit(no)`，未归一化
-    score_semantics: str = "logit"
+    #: 分类头 softmax 后 `P(yes)`
+    score_semantics: str = "probability"
 
     def __init__(
         self,
@@ -402,6 +420,10 @@ class LlamaCppRerank:
         _validate_reranker(path, header, metadata)
 
         self._tokenizer = _Tokenizer(self._llm, max_seq_len)
+        template = _rerank_template(metadata)
+        if template is None:  # pragma: no cover - _validate_reranker 已经挡过
+            raise BackendUnavailableError("rerank 模板缺失")
+        self._template = template
         # 分类头输出个数（yes / no 两个 logit）。用它而不是 `n_embd()`：后者是
         # hidden size（1024），按它切片会读到数组边界之外。
         self._n_cls = llama_cpp.llama_model_n_cls_out(self._llm.model)
@@ -435,7 +457,7 @@ class LlamaCppRerank:
             if was_truncated:
                 truncated.append(index)
             tokens += len(ids)
-            scores.append(self._logit_difference(ids))
+            scores.append(self._yes_probability(ids))
 
         return RerankBatch(scores=scores, prompt_tokens=tokens, truncated=truncated)
 
@@ -448,26 +470,20 @@ class LlamaCppRerank:
     # ------------------------------------------------------------------ 内部
 
     def _format(self, query: str, document: str) -> str:
-        """Qwen3-Reranker 的 chat 模板（模型卡原文）。
+        """按 GGUF 里的 rerank 模板拼 prompt。
 
-        系统提示里的「只能回答 yes 或 no」必须保留：分类头是在这个前缀上训出来的，
-        去掉之后输出仍然是一个数，但那个数的分布已经没意义了。
+        用 `str.replace` 而不是 `str.format`：模板里的 `{query}` 是字面占位符，
+        而 `format` 会把任何其它花括号当格式说明符（Jinja 模板里很常见），遇到就
+        抛 `KeyError`。
         """
-        return (
-            "<|im_start|>system\n"
-            "Judge whether the Document meets the requirements based on the Query and "
-            'the Instruct provided. Note that the answer can only be "yes" or "no".'
-            "<|im_end|>\n"
-            f"<|im_start|>user\n<Instruct>: {RERANK_INSTRUCTION}\n"
-            f"<Query>: {query}\n<Document>: {document}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+        return self._template.replace("{query}", query).replace("{document}", document)
 
-    def _logit_difference(self, ids: list[int]) -> float:
-        """跑一次 decode，取池化层的 `logit(yes) - logit(no)`。
+    def _yes_probability(self, ids: list[int]) -> float:
+        """跑一次 decode，取池化层的 `P(yes)`。
 
-        **不能用 `Llama.embed()`**：它按 `n_embd()`（hidden size，1024）切片，而
-        RANK 池化的输出只有 2 个 float，切出来是越界读到的垃圾。
+        两个输出是 `[P(yes), P(no)]`（softmax 过，和为 1）。取第一个而不是差值：
+        差值是 `2P-1`，把「明确不相关」（0.00005）压成 -0.9999，与「完全不相关」的
+        区分度反而变小。
         """
         import llama_cpp
         from llama_cpp._internals import LlamaBatch
@@ -482,11 +498,10 @@ class LlamaCppRerank:
             pointer = llama_cpp.llama_get_embeddings_seq(self._llm._ctx.ctx, 0)  # noqa: SLF001
             if pointer is None:
                 raise InferenceError("llama_get_embeddings_seq 返回空指针")
-            values = [float(pointer[i]) for i in range(self._n_cls)]
+            score = float(pointer[0])
         finally:
             self._llm._ctx.kv_cache_clear()  # noqa: SLF001
 
-        difference = values[0] - values[1]
-        if not math.isfinite(difference):
-            raise InferenceError(f"重排输出不是有限数：{values}")
-        return difference
+        if not math.isfinite(score):
+            raise InferenceError(f"重排输出不是有限数：{score}")
+        return score

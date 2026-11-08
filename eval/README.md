@@ -44,14 +44,19 @@ pnpm eval --json                            # 机器可读输出
 |---|---|---|
 | `--rerank` | `hybrid+rerank` | 重排到底提升多少 |
 | `--hotness-weight 0.1` | `hybrid+hotness=0.1` | 热度加权是帮忙还是帮倒忙 |
-| `--level-weights 1,1,1` | `fts5+levels` | 层级加权是调好了还是调坏了 |
+| `--level-weights 1,1,1` | `hybrid+levels` | 层级先验是调好了还是调坏了 |
 
 重排变体需要 `providers.rerank` 配好（`retrieval.rerank.enabled` 的交叉校验
 要求它不是 `disabled`）。没有配置时容器创建会抛 `INVALID_ARGUMENT`，不会静默
-退回「不重排」。
+退回「不重排」。候选文本**摘要优先、正文兜底**：摘要在索引里就有，摘要为空
+（存量记忆、非记忆文件）时读正文前 512 个字符——不兜底时空文本候选会被
+`applyRerank` 全部跳过，重排等于没开。
 
-`--level-weights` 追加的是 `fts5+levels`：层级加权只作用在单引擎的排序上，
-`hybrid` 的 RRF 融合按名次计算，不乘层级权重。
+`--level-weights` 追加的是 `hybrid+levels`，与默认变体 `hybrid` 对比。层级权重
+在 `hybrid` 下乘在每个后端对 RRF 融合分的贡献上（`levelWeight / (k + rank)`），
+不是只改单引擎的排序分。传 `1,1,1` 就是关掉这个先验（标准 RRF），所以
+`hybrid+levels` 与 `hybrid` 的差异直接回答「1.15 / 1.05 / 1.00 这组经验值在
+`hybrid` 下有没有用」。
 
 ```bash
 pnpm eval --config local/eval-config.yaml --rerank
@@ -164,6 +169,10 @@ cases:
    权限过滤仍然生效（`node_permission` 的 allow/deny 谓词），但只有一组主体。
 5. **没有统计显著性。** 34 条查询上 0.02 的差距可能是噪声。报告给的是点估计，
    不是置信区间；要判断「真的变好了」，至少扩到几百条查询。
+6. **层级加权在 k=10 上看不出差别。** 它只重排 L0/L1 记录，而当前数据集的标注里
+   没有目录摘要（目录记录虽然进了索引，但没有被标成相关文档）。`--level-weights
+   1,1,1` 与默认权重的指标逐位相同（0.387 / 0.355 / 0.355），原因不是「加权没用」，
+   是「这批标注测不到它」。要测它，得把某个目录的 L0 摘要标成相关文档。
 
 ## 当前基线
 

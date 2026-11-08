@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -11,6 +12,8 @@ import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { IngestCursorRepository } from '../../../src/adapters/sqlite/ingest-cursor-repository.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
+import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import { runIngest } from '../../../src/commands/ingest.js';
 import type { AutoCommitPolicy } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -18,7 +21,11 @@ import { ClaudeCodeSource } from '../../../src/ingest/sources/claude-code.js';
 import { CodexSource } from '../../../src/ingest/sources/codex.js';
 import { DeepSeekSource } from '../../../src/ingest/sources/deepseek.js';
 import { QwenSource } from '../../../src/ingest/sources/qwen.js';
-import { IngestService } from '../../../src/services/ingest.js';
+import {
+  IngestService,
+  type ExtractionRunner,
+  type IngestServiceOptions,
+} from '../../../src/services/ingest.js';
 import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 
@@ -175,7 +182,10 @@ async function writeQwenFixture(): Promise<void> {
   await writeFile(join(dir, 'Qwen-chat-export-2.json'), '{"success": true, "data": [', 'utf8');
 }
 
-function createService(dryRun: boolean): IngestService {
+function createService(
+  dryRun: boolean,
+  overrides: Partial<IngestServiceOptions> = {},
+): IngestService {
   const sources = [
     new ClaudeCodeSource({ paths: [join(fixtures, 'claude', 'projects')], logger }),
     new CodexSource({ paths: [join(fixtures, 'codex')], logger }),
@@ -195,6 +205,7 @@ function createService(dryRun: boolean): IngestService {
     batchSize: 100,
     sessions,
     ...(dryRun ? {} : { cursors }),
+    ...overrides,
   });
 }
 
@@ -248,7 +259,7 @@ afterEach(async () => {
 
 describe('IngestService', () => {
   it('导入四个来源：建会话、写消息、提交归档、建任务、写游标', async () => {
-    const report = await createService(false).run();
+    const report = await createService(false).run({ waitForExtraction: false });
 
     expect(report.harnesses).toHaveLength(4);
     const claude = report.harnesses[0];
@@ -296,11 +307,11 @@ describe('IngestService', () => {
   });
 
   it('幂等：第二次跑全部跳过，不新建会话、不新建任务', async () => {
-    await createService(false).run();
+    await createService(false).run({ waitForExtraction: false });
     const sessionsBefore = await store.list(Uri.parse('comem://user/alice/sessions'));
     const tasksBefore = taskRepository.countByStatus('pending');
 
-    const report = await createService(false).run();
+    const report = await createService(false).run({ waitForExtraction: false });
     expect(report.harnesses.map((source) => source.discovered)).toEqual([3, 1, 1, 1]);
     expect(report.harnesses.map((source) => source.imported)).toEqual([0, 0, 0, 0]);
     expect(report.harnesses.map((source) => source.appended)).toEqual([0, 0, 0, 0]);
@@ -319,7 +330,7 @@ describe('IngestService', () => {
     const commit = vi.spyOn(sessions, 'commitPhase1');
     const upsert = vi.spyOn(cursors, 'upsert');
 
-    const report = await createService(true).run({ dryRun: true });
+    const report = await createService(true).run({ dryRun: true, waitForExtraction: false });
 
     expect(report.harnesses[0]?.imported).toBe(3);
     expect(report.harnesses[0]?.messages).toBe(4);
@@ -331,14 +342,17 @@ describe('IngestService', () => {
   });
 
   it('since 过滤：早于时间点的会话全部跳过', async () => {
-    const report = await createService(false).run({ since: '2030-01-01T00:00:00.000Z' });
+    const report = await createService(false).run({
+      since: '2030-01-01T00:00:00.000Z',
+      waitForExtraction: false,
+    });
     expect(report.harnesses.every((source) => source.imported === 0)).toBe(true);
     expect(report.harnesses[0]?.skipped).toBe(3);
     expect(cursors.count()).toBe(0);
   });
 
   it('只导指定来源', async () => {
-    const report = await createService(false).run({ harnesses: ['codex'] });
+    const report = await createService(false).run({ harnesses: ['codex'], waitForExtraction: false });
     expect(report.harnesses).toHaveLength(1);
     expect(report.harnesses[0]?.harness).toBe('codex');
     expect(report.harnesses[0]?.imported).toBe(1);
@@ -347,7 +361,274 @@ describe('IngestService', () => {
 
   it('未知来源明确报错', async () => {
     await expect(
-      createService(false).run({ harnesses: ['unknown' as 'codex'] }),
+      createService(false).run({ harnesses: ['unknown' as 'codex'], waitForExtraction: false }),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('脱敏伪影（密码保护）修复后继续，真正的坏文件跳过并进报告', async () => {
+    const dir = join(fixtures, 'qwen-repair');
+    await mkdir(dir, { recursive: true });
+    // `4密码保护811` 是真实的脱敏伪影：数字被替换成了中文字符串，整份不是合法 JSON。
+    const repaired = join(dir, 'Qwen-chat-export-10.json');
+    await writeFile(
+      repaired,
+      `{
+        "success": true,
+        "data": [{
+          "id": "qwen-repaired",
+          "title": "脱敏",
+          "chat": { "history": { "messages": {
+            "n1": {"id":"n1","role":"user","content":"修复后的用户","parentId":null,"childrenIds":[],"timestamp":1790000000,"total_tokens":4密码保护811}
+          } } }
+        }]
+      }`,
+      'utf8',
+    );
+    const broken = join(dir, 'Qwen-chat-export-11.json');
+    await writeFile(broken, '{"success": true, "data": [', 'utf8');
+
+    const service = new IngestService({
+      sources: [new QwenSource({ paths: [repaired, broken], logger })],
+      scopeUri: SCOPE,
+      logger,
+      batchSize: 100,
+      sessions,
+      cursors,
+    });
+    const report = await service.run({ waitForExtraction: false });
+    const qwen = report.harnesses[0];
+
+    // 修复后的文件照常导入，坏文件不中断同一来源。
+    expect(qwen?.discovered).toBe(1);
+    expect(qwen?.imported).toBe(1);
+    expect(qwen?.failed).toBe(1);
+    expect(qwen?.errors.map((error) => error.locator)).toEqual([broken]);
+  });
+
+  it('阶段二按批驱动：每 extractionBatchSize 个会话等一批，报告累计抽取与待复核', async () => {
+    const timeouts: number[] = [];
+    let sequences = 0;
+    const extraction: ExtractionRunner = {
+      async run(options) {
+        timeouts.push(options.timeoutMs);
+        sequences += 1;
+        // 模拟「一批 2 条记忆」：每次执行返回两条不同的 URI（一条待复核）。
+        const memories = new Map<string, string>([
+          [`comem://user/alice/memories/preferences/topic-${String(sequences)}.md`, 'preferences'],
+          [`comem://user/alice/memories/rules/rule-${String(sequences)}.md`, 'rules'],
+        ]);
+        return {
+          tasksAttempted: 1,
+          tasksCompleted: 1,
+          tasksFailed: 0,
+          memories,
+          pendingReview: [`comem://user/alice/memories/rules/rule-${String(sequences)}.md`],
+          timedOut: false,
+        };
+      },
+    };
+
+    const report = await createService(false, { extraction, extractionBatchSize: 2 }).run({
+      extractionTimeoutMs: 12_345,
+    });
+
+    // 每个来源单独分批：claude 3 个会话 → [2, 1]，其余来源各 1 个。
+    expect(timeouts).toEqual([12_345, 12_345, 12_345, 12_345, 12_345]);
+    expect(report.extraction?.tasksCompleted).toBe(5);
+    expect(report.extraction?.batches.map((batch) => batch.sessions)).toEqual([2, 1, 1, 1, 1]);
+    expect(report.extraction?.tasksFailed).toBe(0);
+    expect(report.extraction?.memoriesExtracted).toBe(10);
+    expect(report.extraction?.memoriesPendingReview).toBe(5);
+    expect(report.extraction?.batches.map((batch) => batch.index)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('waitForExtraction: false 时 extraction 为 null，执行器一次都不被调用', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(false, {
+      extraction: { run },
+    }).run({ waitForExtraction: false });
+
+    expect(run).not.toHaveBeenCalled();
+    expect(report.extraction).toBeNull();
+  });
+
+  it('extractionTimeoutMs: 0 等价于不等', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(false, {
+      extraction: { run },
+    }).run({ extractionTimeoutMs: 0 });
+
+    expect(run).not.toHaveBeenCalled();
+    expect(report.extraction).toBeNull();
+  });
+
+  it('dryRun 不跑阶段二：extraction 为 null，执行器一次都不被调用', async () => {
+    const run = vi.fn<ExtractionRunner['run']>();
+    const report = await createService(true, {
+      extraction: { run },
+    }).run({ dryRun: true });
+
+    expect(run).not.toHaveBeenCalled();
+    expect(report.extraction).toBeNull();
+  });
+
+  it('默认等待阶段二：没有注入执行器时明确拒绝，不静默停在 pending', async () => {
+    await expect(createService(false).run({})).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+  });
+
+  it('执行器失败只记进报告，不影响已经导入的会话与其它批次', async () => {
+    const extraction: ExtractionRunner = {
+      async run() {
+        throw new Error('执行器炸了');
+      },
+    };
+    const report = await createService(false, { extraction, extractionBatchSize: 2 }).run();
+
+    // 导入本身完成，报告说明阶段二失败。
+    expect(report.harnesses.map((source) => source.imported)).toEqual([3, 1, 1, 1]);
+    expect(report.extraction?.tasksCompleted).toBe(0);
+    expect(report.extraction?.batches.length).toBeGreaterThan(0);
+    expect(report.extraction?.batches[0]?.error).toContain('执行器炸了');
+  });
+});
+
+/**
+ * 假模型服务：只回答「一条 preferences 记忆」，每次调用换一个 topic。
+ *
+ * 走真实的 openai-compatible 适配器，而不是在服务层塞 `FakeLlmProvider`——要验证
+ * 的正是「导入命令 → 执行器 → 抽取 → 写盘 → 索引 → find」这条生产接线，替换掉
+ * 任何一段都会让测试绕过它。
+ */
+interface FakeLlmServer {
+  readonly baseUrl: string;
+  close(): Promise<void>;
+}
+
+async function startFakeLlmServer(): Promise<FakeLlmServer> {
+  let calls = 0;
+  const server: Server = createServer((request, response) => {
+    request.resume();
+    calls += 1;
+    const content = JSON.stringify({
+      operations: [
+        {
+          kind: 'upsert',
+          pageId: 100,
+          type: 'preferences',
+          identity: { topic: `ingest-topic-${String(calls)}` },
+          operations: [
+            { kind: 'replace', field: 'content', value: `导入抽取的记忆 ${String(calls)}` },
+          ],
+        },
+      ],
+    });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(
+      JSON.stringify({
+        id: `chatcmpl-${String(calls)}`,
+        object: 'chat.completion',
+        created: 0,
+        model: 'fake',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('假模型服务没有拿到监听端口');
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error === undefined) {
+            resolve();
+          } else {
+            reject(error);
+          }
+        });
+      }),
+  };
+}
+
+describe('导入后等阶段二（真实 createContainer）', () => {
+  let server: FakeLlmServer;
+  let configPath: string;
+  let container: Container | undefined;
+
+  beforeEach(async () => {
+    server = await startFakeLlmServer();
+    configPath = join(dataDir, 'ingest-config.yaml');
+    await writeFile(
+      configPath,
+      [
+        `dataDir: ${dataDir}`,
+        'providers:',
+        '  llm:',
+        '    default:',
+        '      type: openai-compatible',
+        `      baseUrl: ${server.baseUrl}`,
+        '      model: fake',
+        '      apiKey: test',
+        '      maxTokens: 4096',
+        '      timeoutSeconds: 30',
+        'summary:',
+        '  generator: rule',
+        'retrieval:',
+        '  engine: fts5',
+        'session:',
+        '  autoCommit:',
+        '    enabled: false',
+        'ingest:',
+        '  enabled: true',
+        '  extractionBatchSize: 2',
+        '  extractionTimeoutMs: 30000',
+        '  paths:',
+        '    claude-code:',
+        `      - ${join(fixtures, 'claude', 'projects')}`,
+      ].join('\n'),
+      'utf8',
+    );
+  });
+
+  afterEach(async () => {
+    await container?.close();
+    container = undefined;
+    await server.close();
+  });
+
+  it('导入 + 等待阶段二之后 find 能搜到抽取出的记忆', async () => {
+    const report = await runIngest({ configPath, dataDir, source: 'claude-code' });
+
+    expect(report.extraction).not.toBeNull();
+    expect(report.extraction?.tasksCompleted).toBeGreaterThan(0);
+    expect(report.extraction?.memoriesExtracted).toBeGreaterThan(0);
+    expect(report.extraction?.memoriesPendingReview).toBe(0);
+
+    // 重新起一个容器读同一个数据根：模拟「导入进程退出后，服务端能搜到」。
+    container = await createContainer({
+      configPath,
+      env: { ...process.env, COMEM_DATA_DIR: dataDir, COMEM_LOGGING_LEVEL: 'error' },
+    });
+    const hits = await container.services.search.find('导入抽取的记忆', {
+      scopes: ['comem://user/local'],
+      subject: 'user:local',
+      principals: ['user:local'],
+    });
+
+    expect(hits.length).toBeGreaterThan(0);
   });
 });

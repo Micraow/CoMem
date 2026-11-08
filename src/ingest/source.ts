@@ -42,6 +42,12 @@ export interface ReadMessagesResult {
   readonly cursor: IngestCursor;
 }
 
+/** 发现阶段跳过的文件（损坏、不可读）。由编排层收进 `report.errors`。 */
+export interface SourceFileError {
+  readonly locator: string;
+  readonly message: string;
+}
+
 export interface LogSource {
   readonly harness: IngestHarness;
   readonly cursorKind: CursorKind;
@@ -53,6 +59,64 @@ export interface LogSource {
     cursor: IngestCursor | null,
     limit: number,
   ): Promise<ReadMessagesResult>;
+  /**
+   * 发现阶段因为文件损坏而跳过的文件。
+   *
+   * 整份 JSON 导出（DeepSeek / Qwen）用整体 `JSON.parse`，一个坏文件不该中断同
+   * 来源的其它文件。适配器按文件 `catch` 后记到这里，编排层遍历结束后收进报告——
+   * 「跳过了哪些文件」必须在报告里可见。
+   *
+   * JSONL 来源不需要它：坏行由 `JsonlLogSource` 跳过并计数，文件本身不会整体失败。
+   */
+  readonly fileErrors?: readonly SourceFileError[];
+}
+
+/**
+ * 脱敏伪影：导出前做过脱敏，数字串被替换成中文字符串 `密码保护`
+ * （`"total_tokens":4密码保护811`、`"create_time": 1791275310.6密码保护9`），
+ * 整份 JSON 因此不可解析。
+ *
+ * 实测三份文件（Qwen 导出、ChatGPT 的 `conversations-000.json` 与
+ * `library_files.json`）只在这一处损坏。替换成 `0` 后可以完整解析：被抹掉的是
+ * 计数与时间戳的高位，会话结构与正文都在。这是修一个**确定的、可逆的**伪影，
+ * 不是「猜一个坏文件」。
+ */
+const DESENSITIZATION_ARTIFACT = '密码保护';
+const DESENSITIZATION_REPLACEMENT = '0';
+
+export interface ParsedJsonDocument {
+  readonly value: unknown;
+  /** 是否走了脱敏修复。调用方记日志，让「数字被改过」可追溯。 */
+  readonly repaired: boolean;
+}
+
+/**
+ * 解析整份 JSON 导出。
+ *
+ * 直接 `JSON.parse` 失败时先按脱敏伪影修复再试一次；仍然失败就抛带 `locator` 的
+ * `INVALID_ARGUMENT`。调用方按**文件**捕获，跳过坏文件并继续同来源的其它文件。
+ */
+export function parseJsonDocument(raw: string, locator: string): ParsedJsonDocument {
+  try {
+    return { value: JSON.parse(raw), repaired: false };
+  } catch (first) {
+    const repaired = raw.replaceAll(DESENSITIZATION_ARTIFACT, DESENSITIZATION_REPLACEMENT);
+    if (repaired !== raw) {
+      try {
+        return { value: JSON.parse(repaired), repaired: true };
+      } catch {
+        // 修复也救不回来：落到下面统一报错，带原始失败原因。
+      }
+    }
+    throw new ComemError('INVALID_ARGUMENT', `导出文件不是合法 JSON：${locator}`, {
+      locator,
+      reason: errorMessage(first),
+    });
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const NEWLINE = 0x0a;

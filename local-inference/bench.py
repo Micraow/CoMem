@@ -348,7 +348,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="CoMem 本地推理服务的基准测试（每个设备跑在子进程里）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(WORKER_FLAG, action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        WORKER_FLAG, dest="worker", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument("--worker-device", default="", help=argparse.SUPPRESS)
 
     parser.add_argument("--devices", default="cpu", help="逗号分隔：cpu,gpu,npu")

@@ -43,7 +43,12 @@ import type { Level } from '../domain/level.js';
 import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType } from '../domain/node.js';
-import { rankCandidates, type LevelWeights, type RankedCandidate } from '../domain/ranking.js';
+import {
+  applyLevelWeight,
+  rankCandidates,
+  type LevelWeights,
+  type RankedCandidate,
+} from '../domain/ranking.js';
 import { applyRerank, type RerankCandidate, type RerankProvider } from '../domain/rerank.js';
 import {
   applyQueryFilters,
@@ -63,6 +68,7 @@ import {
   type TypedQuery,
 } from '../domain/retrieval.js';
 import { renderMessageText, type SessionMessage } from '../domain/session.js';
+import { truncateToChars } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
@@ -379,6 +385,20 @@ const RECENT_MESSAGES = 10;
  */
 const REWRITE_TIMEOUT_MS = 10_000;
 
+/**
+ * 重排候选文本的兜底上限：512 个字符（Unicode 码点）。
+ *
+ * 重排模型（Qwen3-Reranker-0.6B）的输入上限是 32k token，但重排只判断「这段文本
+ * 是否回答了这个查询」，不需要全文。按**摘要量级**取 512 字符（L0 摘要预算是 256，
+ * §9.1；512 是「摘要 + 一点上下文」的两倍余量），再长不会让判断更准，只会让每次
+ * 查询多读几 KB 文件。
+ *
+ * 这是**兜底**，不是主路径：正常情况下重排直接读 `SearchHit.abstract`（记忆写入
+ * 时已经把 L0 摘要写进 frontmatter 的 `summary`），只有存量文档与非记忆文件才会
+ * 落到「读正文前 512 字符」。
+ */
+const RERANK_TEXT_MAX_CHARS = 512;
+
 /** §6.5 的 `sessions/sess_xxx/` 目录名（与 `services/session.ts` 指向同一个目录）。 */
 const SESSIONS_DIRECTORY_NAME = 'sessions';
 
@@ -658,8 +678,12 @@ export class SearchService {
   /**
    * 混合检索：并行跑 FTS5 与向量，RRF 融合。
    *
-   * **融合用两个后端自己的排序**，不先做层级加权：加权会改变名次，而 RRF 的输入
-   * 就是「各后端认为谁更相关」。层级加权只在单引擎与最终展示分上有意义。
+   * **融合用两个后端自己的名次**，不先按分数重排：RRF 的输入就是「各后端认为谁
+   * 更相关」。层级权重是**文档先验**（摘要比原文更可能相关），不是后端分数，所以
+   * 它乘在每个后端对融合分的贡献上（`levelWeight / (k + rank)`）——作用在名次上，
+   * 不改变「用名次而不是分数融合」这条性质（§8.5）。
+   *
+   * 权重为 1 时退化成标准 RRF，与接线前逐位相同。
    *
    * 向量降级时退化成纯 FTS5，并把原因带回给 `search` 的 `plan`。
    */
@@ -708,7 +732,8 @@ export class SearchService {
         { engine: 'fts5', hits: ftsHits },
         { engine: 'vector', hits: vectorHits },
       ],
-      { limit: candidateLimit },
+      // 层级先验在融合前作用于每个后端的贡献（见方法注释与 §8.5）。
+      { limit: candidateLimit, levelWeights: this.#config.levelWeights },
     );
 
     // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
@@ -1286,8 +1311,14 @@ export class SearchService {
    * 位置：融合 / 层级加权之后、热度加权之前。**先重排，再按热度乘性加权**——重排
    * 是相关性判断，热度是相关性同档内的微调；反过来会让「最近访问过」压过「更相关」。
    *
-   * 候选文本用**摘要**（`abstract`），不是正文：重排模型吃不下长文本，而摘要在
-   * 索引里就有，取值不花钱。`topN` 之外的候选不送模型，保留融合分。
+   * 候选文本**摘要优先、正文兜底**（见 `#rerankText`）：摘要在索引里就有，取值
+   * 不花钱；`abstract` 为空（存量文档、非记忆文件）时读正文前 512 字符，否则空
+   * 文本候选会被 `applyRerank` 全部跳过——重排看起来开着，实际一个候选都没送模型。
+   * `topN` 之外的候选不送模型，保留融合分。
+   *
+   * 拿到模型分后**重新施加层级先验**（`applyLevelPrior`）：模型判断相关性，层级
+   * 先验判断「这段文本的出处」，两者正交。全部候选都没有可用文本时直接返回融合
+   * 分，不发这次请求。
    *
    * **不要 clamp 分数**：`jina/jina-reranker-v3` 的 `relevance_score` 未归一化，
    * 可以是负数；按原值降序才是模型给出的顺序。等同分时按 URI 码点序，与
@@ -1303,11 +1334,25 @@ export class SearchService {
     }
 
     const limited = hits.slice(0, rerank.topN);
-    const candidates: RerankCandidate[] = limited.map((hit) => ({
+    // 候选文本有 I/O（摘要为空时要读正文），先并发取齐再一次性送模型：串行读
+    // 会把 N 次磁盘延迟叠在用户身上，而 topN 上限是配置里的 50 条。
+    const texts = await Promise.all(limited.map((hit) => this.#rerankText(hit)));
+    const candidates: RerankCandidate[] = limited.map((hit, index) => ({
       uri: hit.uri,
-      text: hit.abstract ?? '',
+      text: texts[index] ?? '',
       fallbackScore: hit.score,
     }));
+
+    // 全部候选都没有可用文本（正文读失败、摘要为空）时不发这次请求：模型对空串
+    // 打不出有意义的分数，`applyRerank` 也会逐条兜底。一次没有输入的调用只会
+    // 花掉一次延迟预算。
+    if (candidates.every((candidate) => candidate.text.trim() === '')) {
+      this.#logger.debug('重排候选全部没有可用文本，跳过本次重排', {
+        model: rerank.provider.model,
+        candidates: candidates.length,
+      });
+      return [...hits];
+    }
 
     let modelScores: readonly (number | null)[] | null = null;
     try {
@@ -1328,7 +1373,13 @@ export class SearchService {
     const result = applyRerank(candidates, modelScores);
     const reranked = limited.map((hit, index) => ({
       ...hit,
-      score: result.scores[index] ?? hit.score,
+      // 重排只换「相关性判断」，层级是**文档先验**（摘要经过压缩），必须保留：
+      // 否则 `hybrid + rerank` 下层级权重只在模型没给分的尾部候选上生效。
+      score: applyLevelPrior(
+        result.scores[index] ?? hit.score,
+        hit.level,
+        this.#config.levelWeights,
+      ),
     }));
     const merged = [...reranked, ...hits.slice(rerank.topN)];
     merged.sort((left, right) => {
@@ -1341,6 +1392,40 @@ export class SearchService {
       return left.uri < right.uri ? -1 : 1;
     });
     return rerank.keepTopN > 0 ? merged.slice(0, rerank.keepTopN) : merged;
+  }
+
+  /**
+   * 重排候选的文本：摘要优先，摘要为空时降级读正文前 `RERANK_TEXT_MAX_CHARS` 个
+   * 字符。
+   *
+   * **为什么需要兜底**：`SearchHit.abstract` 是 `document.frontmatter?.summary`，
+   * 只有 `addResource` 带 summary 的附件才有；绝大多数文档是 `null`。`applyRerank`
+   * 对空文本候选直接跳过（空串没有可打分的语义），所以只用摘要会让重排整批空转。
+   *
+   * 读盘失败（刚删、刚移动、权限在 `filesystem` 层被拒）时返回空串，让这一条用
+   * 融合分兜底：重排是质量增强，不能让一次读盘失败变成整次检索失败。**不降级成
+   * 「用别的候选的正文」**——那会把两条不相干的文档混在一起。
+   */
+  async #rerankText(hit: PreHotnessHit): Promise<string> {
+    const abstract = hit.abstract?.trim() ?? '';
+    if (abstract !== '') {
+      return truncateToChars(abstract, RERANK_TEXT_MAX_CHARS);
+    }
+
+    const uri = Uri.tryParse(hit.uri);
+    if (uri === null) {
+      return '';
+    }
+    try {
+      const document = await this.#filesystem.read(uri);
+      return truncateToChars(document.text.trim(), RERANK_TEXT_MAX_CHARS);
+    } catch (error) {
+      this.#logger.warn('重排候选正文不可读，改用融合分', {
+        uri: hit.uri,
+        code: ComemError.from(error).code,
+      });
+      return '';
+    }
   }
 
   /**
@@ -1478,6 +1563,27 @@ export class SearchService {
       maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
     });
   }
+}
+
+/**
+ * 重排后重新施加层级先验（§8.5）。
+ *
+ * 重排把「相关性分」换成模型的判断，但层级是**文档先验**：同一段文本，摘要经过
+ * 压缩，模型从文本本身看不出「这是摘要」这层出处信息。先验因子与单引擎排序 /
+ * RRF 贡献用的是同一个 `levelWeight`（1.15 / 1.05 / 1.00）。
+ *
+ * **按符号保序地**施加：非负分乘权重，负分除以权重。模型分未归一化（§18 明确
+ * 不 clamp，`jina-reranker-v3` 可能给负数），直接乘会让负分**更负**、把先验反
+ * 过来；除法在两种情况下都是「向更相关的方向移动」。`weight = 1` 时是恒等变换
+ * （`x * 1 === x / 1 === x`），关闭层级权重不改变重排分数。
+ *
+ * 不用加法（`modelScore + (weight - 1) × 融合分`）：两者量纲不同（融合分约
+ * `0.03`，模型分约 `1`），加出来的先验只有千分之几，除了精确同分之外没有可观察
+ * 效果，等于没接。
+ */
+function applyLevelPrior(score: number, level: Level, weights: LevelWeights): number {
+  const weight = applyLevelWeight(1, level, weights);
+  return score >= 0 ? score * weight : score / weight;
 }
 
 /**

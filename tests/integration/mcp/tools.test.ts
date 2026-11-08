@@ -567,6 +567,15 @@ describe('write / edit', () => {
     ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
   });
 
+  it('不传元数据时正文逐字节落盘（签名快照）', async () => {
+    const content = 'one\ntwo\n\n## content\n\n正文';
+    await callText('write', { uri: URI, content });
+
+    expect(Buffer.from(await harness.store.readBytes(Uri.parse(URI))).toString('utf8')).toBe(
+      content,
+    );
+  });
+
   it('edit 默认唯一命中，replaceAll 替换全部', async () => {
     const editUri = `${MEM}/edit.txt`;
     await harness.filesystem.write(Uri.parse(editUri), 'foo foo foo');
@@ -612,6 +621,79 @@ describe('health', () => {
     expect(text).toContain('index.nodes: 2');
     expect(text).toContain('summary.degraded: false');
   });
+
+  it('返回绑定主体与可寻址的根', async () => {
+    const text = await callText('health', {});
+
+    expect(text).toContain(`subject: ${SUBJECT}`);
+    expect(text).toContain(`scopes: ${SCOPE}`);
+  });
+});
+
+describe('~ 别名（§6.1）', () => {
+  const ALIAS = '~/mem/alias.md';
+
+  it('每个需要 URI 的工具都接受 ~ 开头的路径', async () => {
+    await harness.filesystem.write(Uri.parse(`${MEM}/alias.md`), 'x');
+    // `grep` / `find` / `search` / `glob` 走索引；别名展开后的 URI 必须与索引里的
+    // 绝对 URI 是同一个。
+    await seed(`${MEM}/alias.md`, 'x');
+
+    expect(await callText('read', { uri: ALIAS })).toBe('x');
+    expect(await callText('read', { uris: [ALIAS] })).toContain('x');
+    expect(await callText('list', { uri: '~/mem' })).toContain('alias.md');
+    expect(await callText('tree', { uri: '~' })).toContain('mem/');
+    expect(await callText('grep', { uri: '~/mem', pattern: 'x' })).toContain('Found 1 match(es)');
+    expect(await callText('glob', { pattern: '**/*.md', uri: '~/mem' })).toContain(
+      `${MEM}/alias.md`,
+    );
+    expect(await callText('find', { query: 'x', targetUri: '~' })).toContain('Found');
+    expect(await callText('search', { query: 'x', targetUri: '~' })).toContain('Found');
+    expect(await callText('download', { uri: ALIAS })).toContain('/content/download?');
+
+    expect(await callText('write', { uri: '~/mem/alias2.md', content: 'y' })).toContain(
+      'created: true',
+    );
+    expect(
+      await callText('edit', { uri: '~/mem/alias2.md', oldString: 'y', newString: 'z' }),
+    ).toContain('Replaced 1');
+    expect(await callText('forget', { uri: '~/mem/alias2.md' })).toContain('Deleted:');
+
+    expect(
+      await callText('add_resource', {
+        parentUri: '~/resources',
+        files: [{ path: 'docs/a.md', content: 'a' }],
+      }),
+    ).toContain('Added 1 file(s)');
+    expect(
+      await callText('add_skill', {
+        parentUri: '~/skills',
+        name: 'demo-skill',
+        files: [
+          {
+            path: 'SKILL.md',
+            content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
+          },
+        ],
+      }),
+    ).toContain('Installed skill "demo-skill"');
+  });
+
+  it('group 主体展开成 group 根', async () => {
+    const groupContext: McpToolContext = { ...harness.context, subject: 'group:eng' };
+
+    await callText('write', { uri: '~/mem/group.md', content: 'g' }, groupContext);
+
+    expect(await harness.store.exists(Uri.parse('comem://group/eng/mem/group.md'))).toBe(true);
+  });
+
+  it('没有主体时 ~ 抛 INVALID_URI，不兜底到 user:local', async () => {
+    const anonymous: McpToolContext = { ...harness.context, subject: '' };
+
+    await expect(callText('read', { uri: '~' }, anonymous)).rejects.toMatchObject({
+      code: 'INVALID_URI',
+    });
+  });
 });
 
 describe('search / rule_search', () => {
@@ -643,6 +725,24 @@ describe('search / rule_search', () => {
 });
 
 describe('remember / download', () => {
+  /** 会话所有归档里的正文，按归档顺序。 */
+  async function archivedTexts(sessionUri: Uri): Promise<string[]> {
+    const texts: string[] = [];
+    for (const archiveUri of await harness.context.session.listArchives(sessionUri)) {
+      const raw = Buffer.from(
+        await harness.store.readBytes(archiveUri.child('messages.jsonl')),
+      ).toString('utf8');
+      for (const line of raw.split('\n')) {
+        if (line.trim() === '') {
+          continue;
+        }
+        const message = JSON.parse(line) as { readonly parts: readonly { readonly text: string }[] };
+        texts.push(message.parts.map((part) => part.text).join(''));
+      }
+    }
+    return texts;
+  }
+
   it('remember 走提交管线并返回 taskId', async () => {
     const text = await callText('remember', {
       messages: [
@@ -653,6 +753,46 @@ describe('remember / download', () => {
 
     expect(text).toMatch(/^taskId: [0-9a-f-]+/);
     expect(text).toContain('Archived 2 message(s)');
+  });
+
+  it('同一 sessionId + 同一批消息跑两次只有一份', async () => {
+    const messages = [
+      { role: 'user', content: '我偏好中文回答', createdAt: '2026-08-25T03:13:44.000Z' },
+      { role: 'assistant', content: '收到', createdAt: '2026-08-25T03:13:45.000Z' },
+    ];
+    const sessionUri = Uri.parse(`${SCOPE}/sessions/claude-code-native-1`);
+
+    expect(
+      await callText('remember', { sessionId: 'claude-code-native-1', messages }),
+    ).toContain('Archived 2 message(s)');
+
+    // 幂等重跑：消息已经在归档里，live 为空，没有可提交的内容。
+    expect(
+      await callText('remember', { sessionId: 'claude-code-native-1', messages }),
+    ).toContain('taskId: none');
+
+    expect(await archivedTexts(sessionUri)).toEqual(['我偏好中文回答', '收到']);
+    expect((await harness.context.session.load(sessionUri)).messages).toHaveLength(0);
+  });
+
+  it('同一 sessionId + 新消息追加，不覆盖', async () => {
+    const sessionUri = Uri.parse(`${SCOPE}/sessions/codex-native-1`);
+    const first = { role: 'user', content: '第一句', createdAt: '2026-08-25T03:13:44.000Z' };
+    const second = { role: 'assistant', content: '第二句', createdAt: '2026-08-25T03:13:45.000Z' };
+
+    await callText('remember', { sessionId: 'codex-native-1', messages: [first] });
+    await callText('remember', { sessionId: 'codex-native-1', messages: [first, second] });
+
+    expect(await archivedTexts(sessionUri)).toEqual(['第一句', '第二句']);
+  });
+
+  it('不传 sessionId 时每次新建随机会话（向后兼容）', async () => {
+    const messages = [{ role: 'user', content: '同一句' }];
+
+    await callText('remember', { messages });
+    await callText('remember', { messages });
+
+    expect(await harness.store.list(Uri.parse(`${SCOPE}/sessions`))).toHaveLength(2);
   });
 
   it('download 返回签名 URL', async () => {

@@ -9,7 +9,7 @@
  * pnpm eval --engines fts5,vector,hybrid     # 只跑指定引擎
  * pnpm eval --rerank                         # 追加 hybrid+rerank 变体
  * pnpm eval --hotness-weight 0.1             # 追加 hybrid+hotness 变体
- * pnpm eval --level-weights 1,1,1            # 追加「关掉层级加权」的变体
+ * pnpm eval --level-weights 1,1,1            # 追加 hybrid+levels（关掉层级先验）
  * pnpm eval --json                           # 机器可读输出
  * ```
  *
@@ -196,13 +196,13 @@ function buildVariants(options: EvalCliOptions): readonly EvalVariant[] {
     });
   }
   if (options.levelWeights !== undefined) {
-    // 层级加权只作用在**单引擎**的排序上（`SearchService.#rank`）。`hybrid` 按
-    // 两个后端各自的名次做 RRF 融合，不再乘层级权重——所以对照变体必须是 `fts5`
-    // （目录的 L0 摘要只在关键词检索里出现），挂到 `hybrid` 上只会得到一行与
-    // 基线逐位相同的数字，看起来像「层级权重没用」。
+    // 层级加权在两种路径上都生效（`SearchService.#rank` 的单引擎排序，与
+    // `reciprocalRankFusion` 里每个后端的贡献）。对照变体必须挂在 `hybrid` 上：
+    // 默认引擎就是 `hybrid`（`config.example.yaml`），只测 `fts5` 测不到
+    // 「层级先验有没有进入融合」这条路径。
     variants.push({
-      name: 'fts5+levels',
-      engine: 'fts5',
+      name: 'hybrid+levels',
+      engine: 'hybrid',
       overrides: { levelWeights: options.levelWeights },
     });
   }

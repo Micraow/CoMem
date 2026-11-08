@@ -4,7 +4,6 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ComemError } from '../../../src/domain/errors.js';
 import type { SessionRef } from '../../../src/domain/ingest.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { QwenSource } from '../../../src/ingest/sources/qwen.js';
@@ -152,21 +151,40 @@ describe('QwenSource', () => {
     expect(result.messages.map((message) => message.text)).toEqual(['你好']);
   });
 
-  it('损坏的 JSON 明确抛错并带 locator，不静默返回 0 个会话', async () => {
+  it('损坏的 JSON 跳过该文件并记进 fileErrors，不静默返回 0 个会话', async () => {
     const path = join(root, 'Qwen-chat-export-3.json');
     await writeFile(path, '{"success": true, "data": [', 'utf8');
     const source = new QwenSource({ paths: [path], logger });
 
-    let caught: unknown;
-    try {
-      await collect(source);
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(ComemError);
-    const error = caught as ComemError;
-    expect(error.code).toBe('INVALID_ARGUMENT');
-    expect(error.details?.['locator']).toBe(path);
-    expect(error.message).toContain(path);
+    // 一份损坏的导出不该让同来源的其它文件也导不进来：`discoverSessions` 不抛错，
+    // 而是跳过并在 `fileErrors` 里留下带 `locator` 的记录，由编排层写进报告。
+    expect(await collect(source)).toEqual([]);
+    expect(source.fileErrors).toHaveLength(1);
+    expect(source.fileErrors[0]?.locator).toBe(path);
+    expect(source.fileErrors[0]?.message).toContain('不是合法 JSON');
+  });
+
+  it('脱敏伪影（密码保护）修复后照常发现会话', async () => {
+    const path = join(root, 'Qwen-chat-export-4.json');
+    await writeFile(
+      path,
+      `{
+        "success": true,
+        "data": [{
+          "id": "q4",
+          "title": null,
+          "chat": { "history": { "messages": {
+            "n1": {"id":"n1","role":"user","content":"修复后的用户","parentId":null,"childrenIds":[],"timestamp":1790000000,"total_tokens":4密码保护811}
+          } } }
+        }]
+      }`,
+      'utf8',
+    );
+    const source = new QwenSource({ paths: [path], logger });
+
+    const ref = single(await collect(source));
+    expect(source.fileErrors).toEqual([]);
+    const result = await source.readMessages(ref, null, 100);
+    expect(result.messages.map((message) => message.text)).toEqual(['修复后的用户']);
   });
 });

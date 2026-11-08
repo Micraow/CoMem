@@ -290,6 +290,30 @@ export class SessionService {
     return sessionUri;
   }
 
+  /**
+   * 按调用方指定的稳定 ID 取会话；不存在就创建。
+   *
+   * **已存在时不能走 `create`**：`create` 会把 `messages.jsonl` 覆写成空文件。
+   * 幂等上传（`remember` 的 `sessionId`）重跑时拿到的是同一个会话，消息由调用方
+   * 自己按稳定 ID 去重。
+   *
+   * 只认元数据是否存在：`.meta.json` 是会话「存在」的判据（`load` 也按它判）。
+   * `create` 先写消息、后写元数据，所以「目录在、元数据不在」只可能是崩溃留下的
+   * 空会话，重新创建不会丢消息。
+   */
+  async ensure(scopeUri: Uri, sessionId: string): Promise<Uri> {
+    const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
+    try {
+      await this.#requireSession(sessionUri);
+      return sessionUri;
+    } catch (error) {
+      if (error instanceof ComemError && error.code === 'NOT_FOUND') {
+        return this.create(scopeUri, { sessionId });
+      }
+      throw error;
+    }
+  }
+
   /** 读会话（含消息）。不存在抛 `NOT_FOUND`。 */
   async load(sessionUri: Uri): Promise<Session> {
     const meta = await this.#requireSession(sessionUri);

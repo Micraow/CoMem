@@ -11,6 +11,7 @@
 import type { Level } from './level.js';
 import type { ContextType, NodeKind, NodeStatus } from './node.js';
 import { ComemError } from './errors.js';
+import { applyLevelWeight, type LevelWeights } from './ranking.js';
 
 /** 索引里的一行 `node`（架构文档 §8.1）。 */
 export interface IndexRecord {
@@ -180,11 +181,26 @@ const DEFAULT_RRF_K = 60;
  * 而是 `Array.prototype.sort` 在 V8 上虽然稳定，但依赖「输入顺序稳定」在并发合并
  * 场景下不成立；显式给出全序才能让同一份输入每次都得到同一份输出。
  *
+ * ## 层级先验（`levelWeights`）
+ *
+ * 传了 `levelWeights` 时，每条候选对融合分的**贡献**乘上它所在层级的权重：
+ * `score = Σ levelWeight(level) / (k + rank)`。RRF 仍然是名次融合，只是给
+ * 「摘要比原文更可能相关」这个文档先验一个位置；它不引入检索后端的分数量纲，
+ * 所以 RRF「不比较 BM25 与余弦」的性质不变。
+ *
+ * 层级是**文档**的属性（`node.level`），不是后端的属性：同一个 URI 在两个后端
+ * 出现时层级相同，取第一次出现的那条即可。`levelWeights` 省略时权重恒为 1，
+ * 与不带先验的标准 RRF 逐位相同（`1.0 * x === x`），旧调用方不需要改。
+ *
  * `limit` 截断；不传 `limit` 时不截断。纯函数，无 IO。
  */
 export function reciprocalRankFusion(
   resultSets: readonly { readonly engine: RetrievalEngine; readonly hits: readonly SearchHit[] }[],
-  options: { readonly k?: number; readonly limit?: number } = {},
+  options: {
+    readonly k?: number;
+    readonly limit?: number;
+    readonly levelWeights?: LevelWeights;
+  } = {},
 ): FusedHit[] {
   const k = options.k ?? DEFAULT_RRF_K;
   if (!Number.isFinite(k) || k <= 0) {
@@ -217,10 +233,16 @@ export function reciprocalRankFusion(
 
   const fused: FusedHit[] = [];
   for (const [uri, accumulator] of byUri) {
+    // 层级是文档的属性（见上），同一 URI 在两个后端出现时层级相同；取第一次
+    // 出现的那条，保证「融合分的权重」与「结果里展示的 level」是同一个值。
+    const weight =
+      options.levelWeights === undefined
+        ? 1
+        : applyLevelWeight(1, accumulator.hit.level, options.levelWeights);
     let score = 0;
     for (const rank of Object.values(accumulator.ranks)) {
       if (rank !== null) {
-        score += 1 / (k + rank);
+        score += weight / (k + rank);
       }
     }
     fused.push({ ...accumulator.hit, uri, score, ranks: accumulator.ranks });

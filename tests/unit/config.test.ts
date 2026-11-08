@@ -115,6 +115,8 @@ function expectedDefaults(dataDir: string): unknown {
     ingest: {
       enabled: false,
       batchSize: 100,
+      extractionBatchSize: 20,
+      extractionTimeoutMs: 1_800_000,
       paths: { 'claude-code': [], codex: [], deepseek: [], qwen: [] },
     },
   };
@@ -239,12 +241,16 @@ describe('loadConfig', () => {
           COMEM_MEMORY_CONSOLIDATION_MAX_ITERATIONS: '5',
           COMEM_INGEST_ENABLED: 'true',
           COMEM_INGEST_BATCH_SIZE: '25',
+          COMEM_INGEST_EXTRACTION_BATCH_SIZE: '10',
+          COMEM_INGEST_EXTRACTION_TIMEOUT_MS: '600000',
         }),
       });
 
       expect(config.server.port).toBe(8080);
       expect(config.ingest.enabled).toBe(true);
       expect(config.ingest.batchSize).toBe(25);
+      expect(config.ingest.extractionBatchSize).toBe(10);
+      expect(config.ingest.extractionTimeoutMs).toBe(600000);
       expect(config.retrieval.assembly.maxTokens).toBe(800);
       expect(config.retrieval.levelWeights.l0).toBe(2);
       expect(config.acl.groupDefaultLevel).toBe('read');

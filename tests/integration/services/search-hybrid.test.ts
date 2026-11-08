@@ -26,6 +26,7 @@ import {
   SearchService,
   type FindOptions,
   type RetrievalSettings,
+  type SearchServiceDeps,
 } from '../../../src/services/search.js';
 
 const SCOPE = 'comem://user/alice';
@@ -171,6 +172,8 @@ function degradedEmbedding(reason = '供应商不可用'): FakeEmbedding {
 function createService(options: {
   readonly engine: RetrievalEngine;
   readonly embedding?: FakeEmbedding;
+  readonly levelWeights?: RetrievalSettings['levelWeights'];
+  readonly rerank?: SearchServiceDeps['rerank'];
 }): SearchService {
   const assembler = new ContextAssembler({
     store,
@@ -192,11 +195,15 @@ function createService(options: {
     authorizer,
     assembler,
     logger,
-    config: CONFIG,
+    config:
+      options.levelWeights === undefined
+        ? CONFIG
+        : { ...CONFIG, levelWeights: options.levelWeights },
     engine: options.engine,
     ...(options.embedding === undefined
       ? {}
       : { embedding: options.embedding, vectors, nodes }),
+    ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
   });
 }
 
@@ -345,6 +352,108 @@ describe('engine: hybrid', () => {
       expect(hit.matchedQuery).toBe('语义');
       expect(hit.ranks).not.toBeNull();
     }
+  });
+});
+
+describe('层级权重（§8.5）', () => {
+  /**
+   * 两个文档各只被一个后端命中：L0 只进 FTS5，L2 只进向量。
+   *
+   * 这样两边的原始 RRF 贡献都是 `1/61`，**同分**——不加层级先验时按 URI 升序，
+   * 加了之后 L0（1.15）必须排到 L2（1.00）前面。用同分构造是为了证明「权重真的
+   * 作用在融合分上」，而不是被别的排序因素盖住。
+   */
+  const L0_ONLY_FTS = 'comem://user/alice/mem/z-l0.md';
+  const L2_ONLY_VECTOR = 'comem://user/alice/mem/a-l2.md';
+
+  async function seedTie(): Promise<FakeEmbedding> {
+    await seed(L0_ONLY_FTS, '语义 记忆', { level: 'L0' });
+    await seed(L2_ONLY_VECTOR, '完全无关的正文', { level: 'L2' });
+    storeVector(L2_ONLY_VECTOR, [1, 0]);
+    return semanticEmbedding();
+  }
+
+  it('层级权重乘在每个后端对融合分的贡献上', async () => {
+    const embedding = await seedTie();
+    const service = createService({ engine: 'hybrid', embedding });
+
+    const hits = await service.find('语义', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([L0_ONLY_FTS, L2_ONLY_VECTOR]);
+    expect(hits[0]?.score).toBeCloseTo(1.15 / 61, 12);
+    expect(hits[1]?.score).toBeCloseTo(1 / 61, 12);
+  });
+
+  it('权重全为 1 时退化成标准 RRF（向后兼容）', async () => {
+    const embedding = await seedTie();
+    const service = createService({
+      engine: 'hybrid',
+      embedding,
+      levelWeights: { l0: 1, l1: 1, l2: 1 },
+    });
+
+    const hits = await service.find('语义', findOptions());
+
+    // 同分按 URI 升序：a-l2 在 z-l0 前面。
+    expect(hits.map((hit) => hit.uri)).toEqual([L2_ONLY_VECTOR, L0_ONLY_FTS]);
+    expect(hits[0]?.score).toBeCloseTo(1 / 61, 12);
+    expect(hits[1]?.score).toBeCloseTo(1 / 61, 12);
+  });
+});
+
+describe('重排后的层级先验', () => {
+  const L0_DOC = 'comem://user/alice/mem/z-summary.md';
+  const L2_DOC = 'comem://user/alice/mem/a-original.md';
+
+  /** 模型对两条候选给**同一个分**：此时先后完全由层级先验决定。 */
+  function fixedRerank(score = 0.5): SearchServiceDeps['rerank'] {
+    return {
+      provider: { model: 'test-reranker', score: vi.fn(async () => [score, score]) },
+      topN: 50,
+      keepTopN: 0,
+    };
+  }
+
+  it('重排后重新施加层级先验（模型同分时 L0 赢 L2）', async () => {
+    await seed(L0_DOC, '语义 记忆', { level: 'L0', abstract: 'L0 摘要' });
+    await seed(L2_DOC, '语义 记忆', { level: 'L2', abstract: 'L2 原文' });
+    const service = createService({ engine: 'fts5', rerank: fixedRerank() });
+
+    const hits = await service.find('语义', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([L0_DOC, L2_DOC]);
+    expect(hits[0]?.score).toBeCloseTo(0.5 * 1.15, 12);
+    expect(hits[1]?.score).toBeCloseTo(0.5, 12);
+  });
+
+  it('层级权重全为 1 时重排分原样保留', async () => {
+    await seed(L0_DOC, '语义 记忆', { level: 'L0', abstract: 'L0 摘要' });
+    await seed(L2_DOC, '语义 记忆', { level: 'L2', abstract: 'L2 原文' });
+    const service = createService({
+      engine: 'fts5',
+      levelWeights: { l0: 1, l1: 1, l2: 1 },
+      rerank: fixedRerank(),
+    });
+
+    const hits = await service.find('语义', findOptions());
+
+    // 同分按 URI 升序：a-original 在 z-summary 前面。
+    expect(hits.map((hit) => hit.uri)).toEqual([L2_DOC, L0_DOC]);
+    expect(hits.map((hit) => hit.score)).toEqual([0.5, 0.5]);
+  });
+
+  it('全部候选都没有可用文本时不发重排请求', async () => {
+    // 只写索引、不写文件：`#rerankText` 读正文会抛 `NOT_FOUND`，摘要又是 null，
+    // 两条候选的文本都是空串。模型对空串打不出有意义的分数，这次请求不该发。
+    await seed(L0_DOC, '语义 记忆', { level: 'L0' });
+    await seed(L2_DOC, '语义 记忆', { level: 'L2' });
+    const rerank = fixedRerank();
+    const service = createService({ engine: 'fts5', rerank });
+
+    const hits = await service.find('语义', findOptions());
+
+    expect(hits).toHaveLength(2);
+    expect(rerank?.provider.score).not.toHaveBeenCalled();
   });
 });
 

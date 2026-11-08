@@ -36,6 +36,7 @@ import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { identityFields, renderPath, type MemoryTypeSchema } from '../domain/memory-type.js';
 import { getMemoryType } from '../domain/memory-types/index.js';
+import { ABSTRACT_MAX_CHARS, truncateToChars } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
 export type MemoryStatus = 'active' | 'pending' | 'archived';
@@ -114,6 +115,14 @@ const STATUS_KEY = 'status';
 const CREATED_AT_KEY = 'created_at';
 const UPDATED_AT_KEY = 'updated_at';
 const URI_KEY = 'uri';
+/**
+ * L0 摘要（`DocumentFrontmatter.summary`）。
+ *
+ * 写记忆时同步写入，检索侧重排直接读它，不需要为了重排再打开文件。它是派生数据
+ * 而非记忆字段，所以进 `RESERVED_KEYS`：`read` 出来的 `fields` 里不该多一列
+ * 模型没给过的东西。
+ */
+const SUMMARY_KEY = 'summary';
 
 /** 这些键是文件元数据，不属于 `fields`。 */
 const RESERVED_KEYS: ReadonlySet<string> = new Set([
@@ -122,6 +131,7 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
   CREATED_AT_KEY,
   UPDATED_AT_KEY,
   URI_KEY,
+  SUMMARY_KEY,
 ]);
 
 /** 走复核闸门的记忆类型（§11.6）。 */
@@ -393,6 +403,26 @@ function parseStatus(value: unknown): MemoryStatus {
   return value === 'pending' || value === 'archived' ? value : 'active';
 }
 
+/**
+ * 记忆文件的 L0 摘要：正文第一个非空行，按 L0 预算截断。
+ *
+ * 记忆的 `content` 按 §11.1 就是「一句话说清」，第一行已经是摘要量级；不调模型、
+ * 不额外读盘。按 `ABSTRACT_MAX_CHARS`（256，§9.1 的 L0 预算）截断，与目录摘要
+ * 同一套口径——否则同一条文本在「记忆摘要」与「目录摘要」里会得到两个长度。
+ *
+ * 没有正文（例如只有 identity 字段的类型）时返回 `null`：写一个空的 `summary`
+ * 会让检索侧误以为「摘要可用但为空」，而它应该走「摘要为空 → 正文兜底」。
+ */
+function abstractOfContent(content: unknown): string | null {
+  if (typeof content !== 'string') {
+    return null;
+  }
+  const firstLine = content.split(/\r?\n/).find((line) => line.trim() !== '');
+  return firstLine === undefined
+    ? null
+    : truncateToChars(firstLine.trim(), ABSTRACT_MAX_CHARS);
+}
+
 function serializeMemoryDocument(input: {
   readonly uri: Uri;
   readonly memoryType: string;
@@ -410,6 +440,13 @@ function serializeMemoryDocument(input: {
     `${UPDATED_AT_KEY}: ${formatScalar(input.updatedAt)}`,
     `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
   ];
+
+  // L0 摘要写进 frontmatter：`IndexObserver` 把它当 `abstract` 索引，检索侧的
+  // 重排直接读它，不需要为了重排再打开文件（§8.5 的重排语义）。
+  const summary = abstractOfContent(input.fields[CONTENT_FIELD]);
+  if (summary !== null) {
+    header.push(`${SUMMARY_KEY}: ${formatScalar(summary)}`);
+  }
 
   for (const field of input.schema.fields) {
     if (field.name === CONTENT_FIELD || field.name === UPDATED_AT_FIELD) {
