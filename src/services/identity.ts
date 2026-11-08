@@ -15,11 +15,22 @@
  * 就会把授权算回来——删掉的账号重新创建同 ID 的用户会立刻继承旧授权，这是一条
  * 提权路径。
  *
+ * **两个主体之外，还要清掉命名空间里的直接授权。** `purgePrincipal` 只按主体清：
+ * `comem://user/alice/...` 上 `group:eng = read` 这样的条目不是 alice 作为主体的
+ * 授权。账号不存在了，它们挂在一条谁都解释不了的路径上，同 ID 重建后组员仍然能读
+ * 旧数据。所以 `DELETE /admin/users/{id}` 在 `purgePrincipal` 之后还要调
+ * `AclService.purgeSubtree('comem://user/{uid}')`；删组同理（`comem://group/{gid}`）。
+ *
+ * **召回账本也要删。** `_meta/recall/{scopeKey}.recall_log.json` 记的是「这个作用域
+ * 投过哪些 URI」，同 ID 重建后去重状态会带进新生命周期，第一次召回可能返回空。
+ * 账本按作用域分片（`scopeKeyOf` = `user_alice` / `group_eng`），删除同样由管理面
+ * 编排。
+ *
  * **编排在 HTTP 管理面（`api/http/routes/admin.ts`），不在这里。** 改 `.acl.json`
- * 是异步文件写入，而 `deleteUser` / `deleteGroup` 是同步方法（`node:sqlite` 的写
- * 事务也要求同步回调）；改成 `async` 会波及所有调用方。所以
- * `DELETE /admin/users/{id}` 与 `DELETE /admin/groups/{id}` 先调
- * `AclService.purgePrincipal` 撤权，再调这里的删除。
+ * 与删账本都是异步文件操作，而 `deleteUser` / `deleteGroup` 是同步方法
+ * （`node:sqlite` 的写事务也要求同步回调）；改成 `async` 会波及所有调用方。所以
+ * `DELETE /admin/users/{id}` 与 `DELETE /admin/groups/{id}` 先删账本、再调
+ * `AclService.purgePrincipal` / `purgeSubtree`，最后调这里的删除。
  *
  * ## 根预置不在这里
  *
@@ -191,9 +202,10 @@ export class IdentityService {
    * 从未被授予任何东西。置 `NULL` 的组没有 manage 持有者，恢复走 `pnpm group:owner`
    * （§12.6），日志里的 `ownedGroups` 指出哪些组需要人工接管。
    *
-   * 这里**不**撤 ACL。撤权是 `AclService.purgePrincipal`（异步写 `.acl.json`），
-   * 由 `DELETE /admin/users/{id}` 在调用本方法之前完成——只删物化行不改文件的话，
-   * 下次物化会把授权算回来。见文件头。
+   * 这里**不**撤 ACL、也不删召回账本。撤权是 `AclService.purgePrincipal` +
+   * `purgeSubtree`（异步写 `.acl.json`），账本是 `RecallLedger.remove`（异步删
+   * 文件），都由 `DELETE /admin/users/{id}` 在调用本方法之前完成——只删物化行不改
+   * 文件的话，下次物化会把授权算回来。见文件头。
    */
   deleteUser(id: string, now: Date = new Date()): void {
     if (this.#users.get(id) === null) {
@@ -294,8 +306,9 @@ export class IdentityService {
   /**
    * 删除组，同时清掉它的成员关系。不存在抛 `NOT_FOUND`。
    *
-   * 同 `deleteUser`：ACL 由路由先调 `AclService.purgePrincipal` 撤掉，这里只删
-   * 目录行与成员关系。
+   * 同 `deleteUser`：ACL 由路由先调 `AclService.purgePrincipal`（组主体）与
+   * `purgeSubtree`（子树里的直接授权）撤掉，召回账本由 `RecallLedger.remove` 删掉，
+   * 这里只删目录行与成员关系。
    */
   deleteGroup(id: string): void {
     if (this.#groups.get(id) === null) {

@@ -296,11 +296,19 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         }
 
         const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
-        // 删账号先删账本（缓存，丢了只多投一次）；失败时账号与授权都保持原样。
+        // 删账号要撤三样东西，顺序按「失败方向」排：先删账本（缓存，丢了只多投
+        // 一次），再撤主体条目（真改 `.acl.json`），最后清空命名空间里的直接授权。
+        // 反过来的话，撤权成功而账本删除失败会留下「账号还在、去重状态已经丢了」
+        // 的半撤状态；账本先删，失败时什么都没动。
         await ledger.remove(scopeKeyOf(Uri.parse(`comem://user/${id}`)));
         await acl.purgePrincipal(principal);
+        // `purgePrincipal` 只按主体清：`comem://user/alice/...` 上别人给 alice 开的
+        // 授权（`group:eng = read` 之类）不会被动。账号不存在了，它命名空间里的任何
+        // 授权都不该继续有效——同 ID 重建后组员仍然能读旧数据，等于删账号没有撤销
+        // 共享范围。清空条目但保留数据与 `mode`，见 `AclService.purgeSubtree`。
+        const clearedAclFiles = await acl.purgeSubtree(Uri.parse(`comem://user/${id}`));
         identity.deleteUser(id);
-        return ok({ id, deleted: true, revokedPermissions });
+        return ok({ id, deleted: true, revokedPermissions, clearedAclFiles });
       });
 
       // ── 密码 ──

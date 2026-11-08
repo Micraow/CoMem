@@ -417,10 +417,17 @@ describe('删除账号的授权清理', () => {
     );
     expect(deleted['revokedPermissions']).toBe(before);
 
+    // 物化表里只剩 owner 规则产生的那一行：`comem://user/alice` 是 alice 的根，
+    // 「owner 恒 manage」由 URI 根标识推导，不是 `.acl.json` 里的条目。它不随账号
+    // 删除消失，也不构成授权继承——重建后的 alice 本来就是根 owner。
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?', 'user:alice'),
+    ).toBe(1);
     expect(
       countRows(
-        'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?',
+        'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ? AND node_uri <> ?',
         'user:alice',
+        'comem://user/alice',
       ),
     ).toBe(0);
     expect(
@@ -495,10 +502,16 @@ describe('删除账号的授权清理', () => {
     };
     expect(onDisk.entries).toEqual([]);
 
-    // `.acl.json` 是 ACL 的真相：再物化一次，已经撤掉的授权不能回来。
+    // `.acl.json` 是 ACL 的真相：再物化一次，已经撤掉的授权不能回来。按具体
+    // 节点断言——`user:bob` 在自己根上的 owner 行是 URI 推导出来的，不在这条
+    // 授权链上。
     await container.services.acl.materializeNode(aliceRoot.child('project'));
     expect(
-      countRows('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?', 'user:bob'),
+      countRows(
+        'SELECT COUNT(*) AS total FROM node_permission WHERE principal = ? AND node_uri = ?',
+        'user:bob',
+        aliceRoot.toString(),
+      ),
     ).toBe(0);
     expect(
       countRows('SELECT COUNT(*) AS total FROM acl_entry WHERE principal = ?', 'user:bob'),
@@ -1035,6 +1048,55 @@ describe('删组清空子树里的直接授权', () => {
   });
 });
 
+describe('删账号清空命名空间里的直接授权', () => {
+  it('组在 alice 命名空间里的授权，重建同 ID 后不再生效', async () => {
+    await createUser('alice');
+    await createUser('bob');
+    await createGroup('eng');
+    const shared = Uri.parse('comem://user/alice/resources/shared');
+    await container.services.filesystem.mkdir(shared, AUTH_PRINCIPALS);
+    // 先物化：`setAcl` 的前置检查按 `node_permission` 求 manage。
+    await container.services.acl.materializeNode(shared);
+    await container.services.acl.setAcl(
+      shared,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'group:eng', level: 1, effect: 'allow' }],
+      },
+      'user:alice',
+      AUTH_PRINCIPALS,
+    );
+    expect(await container.services.acl.check(shared, 1, ['group:eng', 'user:*'])).toBe(true);
+
+    // `purgePrincipal('user:alice')` 只撤 alice 作为主体的条目，`group:eng` 那条
+    // 不在它的作用范围里——删账号要额外清空整个命名空间。
+    const deleted = resultOf(
+      await inject({ method: 'DELETE', url: '/api/v1/admin/users/alice' }),
+    );
+    expect(deleted['clearedAclFiles']).toBeGreaterThanOrEqual(1);
+
+    // 同 ID 重建：目录行回来了，旧授权不能跟着回来。
+    await createUser('alice');
+    await container.services.acl.materializeNode(shared);
+
+    expect(await container.services.acl.check(shared, 1, ['group:eng', 'user:*'])).toBe(false);
+    const onDisk = JSON.parse(
+      await readFile(join(dataDir, 'user', 'alice', 'resources', 'shared', '.acl.json'), 'utf8'),
+    ) as { readonly entries: readonly unknown[] };
+    expect(onDisk.entries).toEqual([]);
+  });
+});
+
+/**
+ * 回归：`app_group.owner_user_id` 没有外键时，绕过 `IdentityService.deleteUser`
+ * 直接删账号会留下 owner 元数据（架构文档 §12.2、§12.6）。
+ *
+ * 攻击链：`IdentityService.createGroup` 建组（owner = alice，不写根预置）→ 绕过
+ * 用例直接 `UserRepository.delete('alice')` → 重建同 ID → 以 alice 调
+ * `POST /groups/eng/owner`。修复前 `owner.ownerUserId` 仍是 `'alice'`，路由把
+ * 「元数据」当成「当前 owner」跳过组根求权，`setGroupOwner` 直接把
+ * `user:alice = manage` 写进组根——新账号拿到组管理权。
+ */
 describe('删账号 / 组清掉召回账本', () => {
   it('删账号后账本文件消失，重建同 ID 不再继承去重状态', async () => {
     await createUser('alice');

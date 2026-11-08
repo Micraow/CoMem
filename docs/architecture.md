@@ -1962,6 +1962,24 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 该组的 `owner_user_id` 清成 `NULL`——删除与重建同 ID 是常规操作，残留的元数据不能在重建
 后变成权限。置 `NULL` 的组没有 manage 持有者，只能通过 `pnpm group:owner` 恢复（§12.6）。
 
+**元数据列由外键兜底。** 迁移 0018 给 `owner_user_id` 补了
+`REFERENCES app_user(id) ON DELETE SET NULL`：绕过 `IdentityService.deleteUser` 直接
+`DELETE FROM app_user` 时，组的目录行保留、owner 清空。应用层的 `clearOwnerOfUser`
+仍然保留（删除日志要计数），外键保证仓储这条公开入口也收口——与 `group_member` /
+`api_key` 的迁移 0017 同一个判据：清理逻辑负责留痕，外键负责堵住绕过用例的路径。
+
+**删账号也要清空它命名空间里的直接授权。** `purgePrincipal('user:{uid}')` 只移除该主体
+作为条目的授权；`comem://user/{uid}/...` 上 `group:{gid} = read` 这样的条目不是它的。
+账号不存在了，这些条目挂在一条谁都解释不了的路径上，同 ID 重建后组员仍然能读旧数据——
+删账号没有撤销共享范围。所以 `DELETE /admin/users/{id}` 在 `purgePrincipal` 之后调
+`purgeSubtree('comem://user/{uid}')`，与删组同一套语义：保留数据与 `mode`，清空条目，
+按清空后的文件重算整棵子树的 `node_permission`。
+
+**召回账本也要删。** `_meta/recall/{scopeKey}.recall_log.json` 记的是「这个作用域投过
+哪些 URI」（`scopeKeyOf` = `user_alice` / `group_eng`）。删账号 / 组后账本仍在，同 ID
+重建的账号会继承去重状态——第一次召回被当成「刚投过」而返回空。账本是缓存，删除的代价
+只是多投一次。
+
 服务层也要自己校验 owner 主体：`AclService.ensureRootPreset` / `setGroupOwner` 拒绝通配
 主体 `*` 与非 `user` 格式（`assertOwnerUserId`）。HTTP 路径的 `assertValidUserId` 不能
 替服务方法兜底——绕过路由直接调用的代码不会补这一遍。
@@ -2030,7 +2048,7 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 **组必须有 owner。** 组根只有 `group:{gid} = write`（级别 3）时，没有任何主体能求 `manage`（级别 7）——`levelSatisfies(3, 7)` 为 false，`setAcl` / `getAcl` 永远 403，组内成员既不能给同组另一人开只读，也不能设 `restricted` 或建子目录授权。owner 记在 `app_group.owner_user_id`，是「这个组归谁管」的权威来源；owner 的 `manage` 仍然要作为条目真的写进 `.acl.json`，因为求权只查物化表。owner 为 `NULL` 的组保持只有 `group:{gid} = write`，`ensureRootPreset` 的返回值用 `ownerMissing` 报告这个状态。
 
-**删账号会清掉 owner。** `IdentityService.deleteUser` 把该用户名下的 `owner_user_id` 置 `NULL`（§12.2）：残留的 ID 在同 ID 重建后会被当成当前 owner。组里如果没有第二个 manage 持有者，`POST /groups/{id}/owner` 在求权阶段就 403，这个组从此不能改 ACL、不能加成员。恢复走命令行：
+**删账号会清掉 owner。** `IdentityService.deleteUser` 把该用户名下的 `owner_user_id` 置 `NULL`（§12.2），迁移 0018 的 `ON DELETE SET NULL` 外键兜住绕过用例的直接删行：残留的 ID 在同 ID 重建后会被当成当前 owner。组里如果没有第二个 manage 持有者，`POST /groups/{id}/owner` 在求权阶段就 403，这个组从此不能改 ACL、不能加成员。恢复走命令行：
 
 ```bash
 pnpm group:owner <groupId> <userId>
@@ -2044,7 +2062,7 @@ pnpm group:owner <groupId> <userId>
 
 **为什么不统一放 bootstrap。** 配置里声明的用户根是启动期就能确定的，组不是：控制台可以在运行期建组，而根预置必须在组 ID 存在之后写。把组根留给 bootstrap，新建的组就没有任何可授权的节点，成员也拿不到可读范围——这个组是死的。
 
-**为什么要真改 `.acl.json`。** 根预置与普通授权一样，`node_permission` 是它的物化结果。删用户 / 删组时只删物化行不够：下次 `materializeNode` 会把文件里的条目重新算出来，删掉的账号重新创建同 ID 的用户就继承了旧授权（提权）。撤销主体走 `AclService.purgePrincipal`，它改写所有 `.acl.json` 再删两张表的行。
+**为什么要真改 `.acl.json`。** 根预置与普通授权一样，`node_permission` 是它的物化结果。删用户 / 删组时只删物化行不够：下次 `materializeNode` 会把文件里的条目重新算出来，删掉的账号重新创建同 ID 的用户就继承了旧授权（提权）。撤销主体走 `AclService.purgePrincipal`，它改写所有 `.acl.json` 再删两张表的行；命名空间里的直接授权走 `purgeSubtree`（删用户时是 `comem://user/{uid}`，删组时是 `comem://group/{gid}`），它清空子树内的条目并重算整棵子树。两条路径都在管理面；账本（`_meta/recall/`）跟着一起删。
 
 ### 12.7 请求身份与认证
 
