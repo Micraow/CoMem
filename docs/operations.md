@@ -85,6 +85,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.ttl.defaultDays` | `0` | 记忆默认存活天数。0 = 永不过期。只影响之后写入的记忆 |
 | `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
+| `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
@@ -1157,69 +1158,22 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" ".backup /backup/comem.sqlite"
 恢复：解包回同一个 `dataDir`（路径必须一致——URI 与磁盘路径是一一对应的），再启动。
 启动时会跑迁移，幂等，不会重复建表。
 
-### 升到「组有 owner」之后
+### 版本与升级
 
-迁移 0014 给 `app_group` 加 `owner_user_id`，并按 `group_member.added_at` 最早的成员
-回填（同毫秒时按 `user_id` 升序；一个成员都没有的组保持 `NULL`）。最早加入的成员未必是
-创建者，回填只是一个「有人能管这个组」的合理猜测。
+**v0.1.0 是首个发布版本。** 此前的数据库 schema 只有一个初始建表脚本
+`src/adapters/sqlite/migrations/0001_init.sql`（一次 `runMigrations` 从空库建出完整结构，
+版本号 1），没有需要兼容的存量库——因此没有「从旧版本升级」的路径，也不需要
+`ALTER TABLE` / 回填之类的迁移补丁。
 
-**回填只写目录行，不写 `.acl.json`。** 存量组的组根里通常还没有
-`user:{owner} = manage` 条目，所以 owner 暂时不能 `setAcl`。owner 调一次
+**此后每次 schema 变更都新增一个迁移文件**（`NNNN_描述.sql`，`NNNN` 从 0002 起递增），
+不改 `0001_init.sql`。`runMigrations` 按文件名前缀的数字解析版本号，启动时逐版应用未执行过
+的迁移；`schema_version` 表记录已应用的版本，全新库为 0、应用 `0001` 后为 1。
 
-```bash
-curl -X POST http://127.0.0.1:1933/api/v1/admin/groups/eng/owner \
-  -H 'content-type: application/json' \
-  -d '{"userId":"alice"}'
-```
-
-（`userId` 填自己）即可把预置补齐；这个端点对「当前 owner」放行，不要求先有 manage
-条目。没有成员的存量组没有可回填的 owner，删掉重建即可——重建时会写新的 owner 预置。
-
-### 升到「身份表有外键」之后
-
-迁移 0017 把 `group_member` / `api_key` 重建成带 `ON DELETE CASCADE` 外键的表
-（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 + `INSERT INTO ... SELECT`
-+ `DROP` + `RENAME`）。重建时**只复制两端都存在的行**：引用已不存在的用户或组的
-孤儿行会被丢掉——它们正是这次要清掉的东西，旧库里能存在只是因为没约束。
-
-升级前可以先数一下会丢多少：
-
-```bash
-sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" "
-  SELECT 'group_member', COUNT(*) FROM group_member
-   WHERE user_id NOT IN (SELECT id FROM app_user)
-      OR group_id NOT IN (SELECT id FROM app_group)
-  UNION ALL
-  SELECT 'api_key', COUNT(*) FROM api_key
-   WHERE user_id NOT IN (SELECT id FROM app_user);"
-```
-
-非零说明有历史残留（孤儿成员关系会让同 ID 重建的用户立刻拿到 `group:{gid}` 主体）。
-丢掉不需要额外操作。之后直接 `DELETE FROM app_user` 也会级联清理——外键是应用层
-清理之外的防御纵深。
-
-### 升到「组 owner 有外键」之后
-
-迁移 0018 重建 `app_group`，给 `owner_user_id` 补 `REFERENCES app_user(id) ON DELETE
-SET NULL`（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 + `INSERT INTO ...
-SELECT` + `DROP` + `RENAME`）。孤儿 owner（指向不存在的用户）在重建时被置 `NULL`：
-组的目录行、成员关系与数据都保留，只是暂时没有 owner。升级前可以数一下有多少组会被
-置空：
-
-```bash
-sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" "
-  SELECT COUNT(*) FROM app_group
-   WHERE owner_user_id IS NOT NULL
-     AND owner_user_id NOT IN (SELECT id FROM app_user);"
-```
-
-非零说明有历史残留，恢复走 `pnpm group:owner`（见「恢复组的 owner」）。
-
-**迁移期间外键强制是关的。** 重建 `app_group` 要 `DROP TABLE`，它在
-`foreign_keys = ON` 下会先做隐式 `DELETE FROM`，把 `group_member` 的成员关系按
-`ON DELETE CASCADE` 一起删掉。迁移框架（`runMigrations`）在每个迁移外面关掉外键
-强制、提交前用 `PRAGMA foreign_key_check` 确认没有悬空引用、再恢复原值。有冲突时
-整份迁移回滚并报 `INTERNAL`。
+**迁移期间外键强制是关的。** 如果某个迁移要重建被引用的表（SQLite 不支持 `ALTER TABLE
+ADD CONSTRAINT`，只能新表 + `INSERT INTO ... SELECT` + `DROP` + `RENAME`），`DROP TABLE`
+在 `foreign_keys = ON` 下会先做隐式 `DELETE FROM`，按 `ON DELETE CASCADE` 删掉子表行。
+迁移框架（`runMigrations`）在每个迁移外面关掉外键强制、提交前用 `PRAGMA foreign_key_check`
+确认没有悬空引用、再恢复原值。有冲突时整份迁移回滚并报 `INTERNAL`。
 
 ## 监控
 

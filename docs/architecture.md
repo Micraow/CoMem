@@ -731,16 +731,20 @@ CREATE TABLE node (
   size           INTEGER NOT NULL,
   updated_at     TEXT NOT NULL,
   status         TEXT NOT NULL,      -- active | pending | archived
-  -- 记忆的过期时间（0010）。NULL = 永不过期；存**绝对时刻**而不是「N 天后」，
-  -- 因为相对时长每次读都要重算「从什么时候开始算」（§11.7）
-  expires_at     TEXT,
   -- 目录摘要的新鲜度（§9.3）。只在 kind = 'directory' 的行上有意义
   summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
   summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
-  summary_entries  INTEGER NOT NULL DEFAULT 0    -- 生成摘要时的直接子项数
+  summary_entries  INTEGER NOT NULL DEFAULT 0,   -- 生成摘要时的直接子项数
+  -- 访问热度（§11.7 的热度衰减输入）
+  access_count     INTEGER NOT NULL DEFAULT 0,
+  last_accessed_at TEXT,
+  -- 记忆的过期时间。NULL = 永不过期；存**绝对时刻**而不是「N 天后」，
+  -- 因为相对时长每次读都要重算「从什么时候开始算」（§11.7）
+  expires_at     TEXT
 );
 CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
+CREATE INDEX idx_node_last_accessed ON node(last_accessed_at);
 -- 部分索引：只收录有过期时间的行。默认配置（memory.ttl.defaultDays = 0）下整张
 -- 索引是空的，不为「没人用 TTL」的部署付索引维护成本（§11.7）
 CREATE INDEX idx_node_expires ON node(expires_at) WHERE expires_at IS NOT NULL;
@@ -788,6 +792,8 @@ CREATE TABLE task (
   updated_at   TEXT NOT NULL
 );
 CREATE INDEX task_claim ON task(status, lease_until);
+CREATE INDEX task_type_status ON task(type, status);
+CREATE INDEX task_created ON task(created_at);
 
 -- 嵌入模型的元数据（0007）。虚拟表 `node_embedding` 的维度建表时固化，
 -- 而维度来自配置，所以单独一行记「库里存的是哪个模型、多少维」。
@@ -812,56 +818,84 @@ CREATE TABLE embedding_cache (
 );
 CREATE INDEX idx_embedding_cache_created ON embedding_cache(created_at);
 
--- 用户与组目录（0008）。`acl_entry` / `node_permission` 存的是
+-- 用户与组目录（§12）。`acl_entry` / `node_permission` 存的是
 -- `user:{uid}` / `group:{gid}` 字符串；这三张表是组员关系与
 -- `GET /admin/*` 的数据来源。
 --
 -- 表名加 `app_` 前缀：`user` 是 SQLite 关键字，`group` 是 `GROUP BY` 的关键字。
 -- 加引号能用，但漏一次就是语法错误。
 CREATE TABLE app_user (
-  id           TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  email        TEXT,
-  status       TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  id            TEXT PRIMARY KEY,
+  display_name  TEXT NOT NULL,
+  email         TEXT,
+  status        TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  password_hash TEXT,               -- 用户名密码登录（§12.7）
+  session_epoch TEXT NOT NULL DEFAULT ''  -- session token 的身份版本（§12.7）
 );
 
 CREATE TABLE app_group (
-  id           TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  description  TEXT,
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
+  id            TEXT PRIMARY KEY,
+  display_name  TEXT NOT NULL,
+  description   TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  -- 组的 owner（§12.6）。删用户是删主体不是删组，置 NULL 保留组。
+  owner_user_id TEXT REFERENCES app_user(id) ON DELETE SET NULL
 );
 
 -- 组成员关系。**不参与授权求值**——ACL 只认 `group:{gid}` 字符串。
 -- 这张表用于控制台展示，以及「删用户时清掉它的成员关系」。
+-- 外键 ON DELETE CASCADE 保证绕过用例的直接删行也收口。
 CREATE TABLE group_member (
-  group_id   TEXT NOT NULL,
-  user_id    TEXT NOT NULL,
-  created_at TEXT NOT NULL,
+  group_id TEXT NOT NULL REFERENCES app_group(id) ON DELETE CASCADE,
+  user_id  TEXT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  role     TEXT NOT NULL CHECK (role IN ('owner', 'member')),
+  added_at TEXT NOT NULL,
   PRIMARY KEY (group_id, user_id)
 );
+CREATE INDEX idx_group_member_user ON group_member(user_id);
+
+-- API Key（§12.7）。user_id 外键 ON DELETE CASCADE。
+CREATE TABLE api_key (
+  id         TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  key_hash   TEXT NOT NULL,
+  prefix     TEXT NOT NULL UNIQUE,
+  name       TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX idx_api_key_user ON api_key(user_id);
 ```
 
 **迁移清单**（`src/adapters/sqlite/migrations/`）：
 
 | 序号 | 文件 | 内容 |
 |---|---|---|
-| 0001 | `0001_init.sql` | `schema_version` / `node` / `node_permission` / `acl_entry` / `task` / `request_log` |
-| 0002–0006 | 增量 | FTS5 影子表、中文分词、索引与查询日志 |
-| 0007 | `0007_embedding.sql` | `embedding_model` 元数据（虚拟表 `node_embedding` 由 `reindex` 按配置维度建） |
-| 0008 | `0008_identity.sql` | `app_user` / `app_group` / `group_member` |
-| 0009 | `0009_access_tracking.sql` | `node.access_count` / `node.last_accessed_at`（热度衰减的输入） |
-| 0010 | `0010_ttl.sql` | `node.expires_at` + 部分索引 `idx_node_expires`（记忆 TTL，§11.7） |
-| 0011 | `0011_ingest.sql` | 本机 Agent 对话导入的游标 |
-| 0012 | `0012_prompt.sql` | `prompt_override`（§18.1） |
-| 0013 | `0013_auth.sql` | 用户名密码与 API Key |
-| 0014 | `0014_group_owner.sql` | `app_group.owner_user_id`（§12.6） |
-| 0015 | `0015_embedding_cache.sql` | `embedding_cache`（嵌入结果缓存） |
-| 0016 | `0016_session_epoch.sql` | `app_user.session_epoch`（session token 的身份版本，§12.7） |
-| 0017 | `0017_identity_foreign_keys.sql` | `group_member` / `api_key` 的外键（§12.7 的防御纵深） |
+| 0001 | `0001_init.sql` | 完整初始 schema（唯一建表脚本，版本号 1） |
+
+**为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
+补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
+一路 migrate 上来，补丁历史只增加阅读负担——新读者要读 18 个文件才能拼出最终结构。
+这些迁移已经合并成 `0001_init.sql`：一次 `runMigrations` 从空库建出最终 schema，版本号 1。
+
+**此后每次 schema 变更新增一个迁移文件**（`NNNN_描述.sql`，`NNNN` 从 0002 起递增），
+不再改 `0001_init.sql`。`runMigrations` 按文件名前缀的数字解析版本号，逐版应用未执行过的
+迁移；`schema_version` 表由 `runMigrations` 自己创建，不写进迁移文件。
+
+`0001_init.sql` 里包含的表（最终结构，被补丁合并进来的部分已就地写进建表语句）：
+
+- `app_user`（含 `password_hash`、`session_epoch`）/ `app_group`（含 `owner_user_id` 外键
+  `ON DELETE SET NULL`）/ `group_member`（`ON DELETE CASCADE`）/ `api_key`（`ON DELETE CASCADE`）
+- `node`（含摘要新鲜度三列、`access_count` / `last_accessed_at`、`expires_at`）及其索引、
+  `node_fts`（FTS5）
+- `node_permission`（含 `effect`）/ `acl_entry`
+- `task` / `request_log`
+- `embedding_model` / `embedding_cache`
+- `ingest_cursor` / `prompt_override`
 
 **`node_embedding` 与 `embedding_cache` 的职责边界。** 两张表都不是真相（文件是真相，§7），但它们回答的问题不同：
 
@@ -1480,6 +1514,8 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 四个入口统一 `withPathLock(mode, uri, fn)` 包装。
 
+**锁不可重入。** 持有者再拿同一路径（含祖先 `TREE` 与后代 `EXACT` 的冲突）的锁会等自己，超时抛 `CONFLICT`。多锁必须按路径字典序升序获取、反序释放——`FileSystemService.move` 就是这条规则。ACL 写入的锁粒度、锁序与「读-改-写必须在同一把锁内」的完整契约见 §12.8。
+
 **为什么要 TREE 而不是只锁文件**：`rm -r resources/foo` 要保证「删索引 → 删文件」期间没有人往 `foo/` 里写。只锁 `foo` 自身挡不住写 `foo/bar.md` 的人。
 
 **元数据写保护**
@@ -1581,6 +1617,29 @@ export const preferencesMemoryType = {
 `renderPath(schema, values)` 的 `values` 是 `Record<string, string>`：缺值报错（否则拼出带花括号的路径），多值报错（说明调用方搞错了类型），每段值做单段安全校验（拒绝 `/`、`..`、控制字符）。
 
 内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`identity`、`soul`、`experiences`、`rules`。
+
+#### 用户画像（`profile`）
+
+画像**整份注入每次会话的开头**（`integrations/servers/session-start.mjs`），长度是每次请求的固定成本。它的 `description` 原样渲染进抽取提示词（`services/prompts/extract.ts` 的 `renderMemoryTypes`），所以那里写的是**判定规则**而不是摘要：收录范围、路由表、格式契约、反例。改它等于改模型行为。
+
+| 判定 | 内容 | 归位 |
+|---|---|---|
+| 收录 | 姓名或称谓、年龄段、籍贯与当前所在地、当前学历职业与雇主、关系状态、长期健康、稳定的沟通风格 | `profile` |
+| 日期型转变、已完成事件、做过的决定 | 「2026-10 离职」 | `events` |
+| 喜好、习惯、对做法的取舍 | 「偏好 2 空格缩进」 | `preferences` |
+| 具体项目、库、工具、组织、第三方人物 | 「`Settings::nextHop` 是三级映射」 | `entities` |
+| 必须遵守的约束、可复用流程 | | `rules` / `experiences` |
+| 一次性技术细节、临时状态、推断、性格评价 | 类型签名、配置值、代码片段、「他很严谨」 | 丢弃 |
+
+**格式契约**：正文是一组 bullet（不带小标题），每条以 `(as of YYYY-MM-DD)` 结尾、单条不超过 30 字（日期后缀不算），同一可变状态只留最新值。
+
+**超阈值重写。** `memory.profile.maxChars`（默认 800）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
+
+800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。
+
+**产生侧与注入侧是两个数字，不是一个。** 产生侧 `memory.profile.maxChars`（默认 800 **字符**）要求抽取时收敛；注入侧 `profileBudgetTokens`（默认 2,000 **token**，`integrations/lib/config.mjs`，见 §15.2）是兜底，超了按 head/tail 截断。产生侧卡得紧，所以注入侧在正常情况下**永远不会触发**——它挡的是这次改动之前产生的旧画像，以及人手编辑的 `profile.md`。不要把 800 当成 2,000 的余量：800 字符 ≈ 0.5–0.6K token，离 2,000 还有三倍多的空间，那三倍是给「产生侧还没跑过重写」的存量数据的，不是给新增长用的。
+
+重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 800 字正文，约 0.5–0.8K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
 
 ### 11.2 合并操作
 
@@ -2045,11 +2104,11 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 该组的 `owner_user_id` 清成 `NULL`——删除与重建同 ID 是常规操作，残留的元数据不能在重建
 后变成权限。置 `NULL` 的组没有 manage 持有者，只能通过 `pnpm group:owner` 恢复（§12.6）。
 
-**元数据列由外键兜底。** 迁移 0018 给 `owner_user_id` 补了
+**元数据列由外键兜底。** `app_group.owner_user_id` 带
 `REFERENCES app_user(id) ON DELETE SET NULL`：绕过 `IdentityService.deleteUser` 直接
 `DELETE FROM app_user` 时，组的目录行保留、owner 清空。应用层的 `clearOwnerOfUser`
 仍然保留（删除日志要计数），外键保证仓储这条公开入口也收口——与 `group_member` /
-`api_key` 的迁移 0017 同一个判据：清理逻辑负责留痕，外键负责堵住绕过用例的路径。
+`api_key` 的外键同一个判据：清理逻辑负责留痕，外键负责堵住绕过用例的路径。
 
 **删账号也要清空它命名空间里的直接授权。** `purgePrincipal('user:{uid}')` 只移除该主体
 作为条目的授权；`comem://user/{uid}/...` 上 `group:{gid} = read` 这样的条目不是它的。
@@ -2131,7 +2190,7 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 **组必须有 owner。** 组根只有 `group:{gid} = write`（级别 3）时，没有任何主体能求 `manage`（级别 7）——`levelSatisfies(3, 7)` 为 false，`setAcl` / `getAcl` 永远 403，组内成员既不能给同组另一人开只读，也不能设 `restricted` 或建子目录授权。owner 记在 `app_group.owner_user_id`，是「这个组归谁管」的权威来源；owner 的 `manage` 仍然要作为条目真的写进 `.acl.json`，因为求权只查物化表。owner 为 `NULL` 的组保持只有 `group:{gid} = write`，`ensureRootPreset` 的返回值用 `ownerMissing` 报告这个状态。
 
-**删账号会清掉 owner。** `IdentityService.deleteUser` 把该用户名下的 `owner_user_id` 置 `NULL`（§12.2），迁移 0018 的 `ON DELETE SET NULL` 外键兜住绕过用例的直接删行：残留的 ID 在同 ID 重建后会被当成当前 owner。组里如果没有第二个 manage 持有者，`POST /groups/{id}/owner` 在求权阶段就 403，这个组从此不能改 ACL、不能加成员。恢复走命令行：
+**删账号会清掉 owner。** `IdentityService.deleteUser` 把该用户名下的 `owner_user_id` 置 `NULL`（§12.2），`ON DELETE SET NULL` 外键兜住绕过用例的直接删行：残留的 ID 在同 ID 重建后会被当成当前 owner。组里如果没有第二个 manage 持有者，`POST /groups/{id}/owner` 在求权阶段就 403，这个组从此不能改 ACL、不能加成员。恢复走命令行：
 
 ```bash
 pnpm group:owner <groupId> <userId>
@@ -2180,7 +2239,7 @@ type Credential =
 生效」变成「重启后生效」——§12.5 的那条承诺就是靠这里兑现的。
 
 **孤儿行由外键兜底。** `group_member` / `api_key` 的 `user_id` / `group_id` 带
-`ON DELETE CASCADE`（迁移 0017）。正常路径由 `IdentityService.deleteUser` 显式
+`ON DELETE CASCADE`。正常路径由 `IdentityService.deleteUser` 显式
 清理（删除日志要计数），外键保证**绕过用例直接删行**时不留孤儿行——仓储是公开
 入口，孤儿成员关系会让同 ID 重建的用户立刻拿到 `group:{gid}` 主体。连接级
 `PRAGMA foreign_keys = ON` 在 `openDatabase` 里设置（SQLite 默认关闭，且 PRAGMA
@@ -2188,7 +2247,7 @@ type Credential =
 
 **Session token 是无状态 HMAC。** 形如 `v1.<base64url(payload)>.<签名>`，服务端
 不存 session 行。载荷是 `{sub, iat, exp, epoch}`：`sub` 是用户 ID，`epoch` 是账号
-的身份版本（`app_user.session_epoch`，迁移 0016）。**撤销走身份版本**：创建账号
+的身份版本（`app_user.session_epoch`）。**撤销走身份版本**：创建账号
 时生成、改密码时轮换，所以删账号重建同 ID、改密码都会让已签发的 token 在下一个
 请求就 401。`epoch` 为空串（迁移遗留的「版本未知」）永不匹配任何 token，等于强制
 重新登录——这是安全降级方向，宁可多一次登录，不能让旧 token 继续有效。代价是
@@ -2211,6 +2270,35 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 
 `auth.enabled: false` 时登录端点返回 404：签发一个不会被接受的 token 比明确的
 404 更难发现。
+
+### 12.8 ACL 写入的锁契约
+
+`AclService` 的每个写方法都是「读整个 `.acl.json` → 改 → 写回」。读在锁外时两个
+并发写者各拿一份旧条目，后写者整份覆盖，先写者的条目**静默消失**：丢 `allow` 是
+拒绝服务，丢 `deny` 是越权。所以互斥必须**覆盖读与写两步**，不能只包写盘。
+
+| 方法 | 锁粒度 | 为什么 |
+|---|---|---|
+| `setAcl` / `ensureRootPreset` / `setGroupOwner` | `EXACT(uri)` | 互斥资源是**单个** `.acl.json`；同目录其它写入无关 |
+| `purgeSubtree` | `TREE(root)` | 「扫子树 → 改每个文件」，只锁单文件会在扫描与写入之间漏掉新建目录（残留授权） |
+| `purgePrincipal` | 全部目标 `EXACT`，**按 URI 升序** | 撤权横跨整库，没有单一路径能覆盖；多锁必须定序 |
+| `getAcl` / `materializeNode` / `syncEntriesFromFile` | **不加锁** | 只读或只写派生表；且由 `IndexObserver` 在 `FileSystemService` 已持锁的回调里调用 |
+
+**`setAcl` 的两种输入对应两种语义。** 完整快照是「整份替换」（`PUT /acl` 编辑器：
+后写者赢是调用方选择覆盖，不是丢更新）；**转换函数**是「在现有条目上加/减一条」
+（`/acl/grant`、`/acl/revoke`），它必须在 `EXACT(uri)` 锁内基于最新快照求值。路由层
+禁止「锁外 `getAcl` + 整份 `setAcl`」——那是两端并发 grant 各拿旧条目、后写者覆盖的
+丢更新路径。
+
+**锁序规则（多锁时）。** 全部按 `Uri.toString()` 字典序**升序**获取，反序释放。
+`FileSystemService.move` 用同一条全局顺序（源与目标两把 `TREE`），两个方向相反的
+`move` 因此不会互等。任何新增的多锁路径必须沿用这条顺序。
+
+**不可重入。** `PathLockManager` 不可重入（`adapters/fs/lock.ts` 按锁路径排队，持有
+者再拿同路径的锁会等自己，超时抛 `CONFLICT`）。因此 `purgeSubtree` 持 `TREE(root)`
+期间**直接写文件**，不调 `setAcl`——后者要 `EXACT(descendant)`，与祖先的 `TREE`
+冲突。`#writeAcl` 因此要求调用方已持有 `EXACT(uri)`，回滚（`#restoreAclFiles`）也必须
+仍在锁内，否则会覆盖并发写者刚写入的条目。
 
 ## 13. MCP 工具契约
 

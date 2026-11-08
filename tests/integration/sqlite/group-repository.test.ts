@@ -46,9 +46,8 @@ function createGroup(id: string): void {
 }
 
 /**
- * 建用户的简写。迁移 0017 / 0018 之后 `group_member.user_id` 与
- * `app_group.owner_user_id` 都有外键，关系不能指向不存在的用户——那正是迁移要
- * 挡住的孤儿行。
+ * 建用户的简写。`group_member.user_id` 与 `app_group.owner_user_id` 都有外键，
+ * 关系不能指向不存在的用户——外键挡住孤儿行。
  */
 function createUser(id: string): void {
   users.create({ id, displayName: id, email: null, status: 'active' }, NOW);
@@ -136,7 +135,7 @@ describe('list / update / delete / count', () => {
     expect(repository.setOwner('missing', 'alice', NOW)).toBeNull();
   });
 
-  it('setOwner 指向不存在的用户被外键拒绝（迁移 0018）', () => {
+  it('setOwner 指向不存在的用户被外键拒绝', () => {
     repository.create(input(), NOW);
 
     expect(() => repository.setOwner('eng', 'ghost', LATER)).toThrow(

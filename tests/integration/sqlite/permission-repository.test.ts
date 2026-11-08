@@ -284,7 +284,7 @@ describe('迁移 0004：effect 列', () => {
   it('重复运行迁移不炸，版本号不再前进', () => {
     const applied = runMigrations(db);
 
-    expect(applied).toBeGreaterThanOrEqual(4);
+    expect(applied).toBeGreaterThanOrEqual(1);
     expect(runMigrations(db)).toBe(applied);
     expect(currentVersion(db)).toBe(applied);
   });

@@ -1,5 +1,5 @@
 /**
- * 记忆 TTL 的验收（架构文档 §11.7、`0010_ttl.sql`）。
+ * 记忆 TTL 的验收（架构文档 §11.7）。
  *
  * 用真实 SQLite（`:memory:`）与真实的 `NodeRepository` / `SqliteFtsIndex`：这一层
  * 的价值全在 SQL 上（部分索引、`status <> 'archived'` 的幂等、不碰 `updated_at`），
