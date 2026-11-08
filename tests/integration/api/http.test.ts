@@ -739,7 +739,46 @@ describe('会话与任务', () => {
     const missing = await inject({ method: 'GET', url: '/api/v1/tasks/nope' });
     expect(missing.statusCode).toBe(404);
   });
-});
+
+  it('已存在的 sessionId 不会被清空消息（409）', async () => {
+    // `PostToolUse` 与 `Stop` 在同一轮里各 `POST /sessions` 一次。第二次如果拿到
+    // 200，说明 `create` 把 `messages.jsonl` 覆写成了空文件——上一轮采集到的
+    // 工具消息就没了。契约是：已存在返回 409，消息原样保留。
+    const created = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        payload: { sessionId: 'sess_w51b_1' },
+      }),
+    );
+    expect(String(created['uri'])).toBe(`${ROOT}/sessions/sess_w51b_1`);
+
+    const appended = await inject({
+      method: 'POST',
+      url: '/api/v1/sessions/sess_w51b_1/messages',
+      payload: {
+        messages: [
+          { role: 'tool', parts: [{ kind: 'text', text: '工具输出' }] },
+          { role: 'user', parts: [{ kind: 'text', text: '继续' }] },
+        ],
+      },
+    });
+    expect(appended.statusCode).toBe(200);
+
+    const again = await inject({
+      method: 'POST',
+      url: '/api/v1/sessions',
+      payload: { sessionId: 'sess_w51b_1' },
+    });
+    expect(again.statusCode).toBe(409);
+    expect(errorOf(again)['code']).toBe('ALREADY_EXISTS');
+
+    const loaded = resultOf(
+      await inject({ method: 'GET', url: '/api/v1/sessions/sess_w51b_1' }),
+    );
+    expect(loaded['messageCount']).toBe(2);
+    expect((loaded['messages'] as unknown[]).length).toBe(2);
+  });});
 
 describe('ACL 与记忆复核', () => {
   it('get → grant → get → revoke', async () => {

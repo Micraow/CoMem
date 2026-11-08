@@ -402,7 +402,7 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 | 读 profile / 偏好 | `GET /api/v1/content/read?uri=<uri>` | `{status:'ok', result:{text}}` 或纯文本 |
 | 技能目录 | `GET /api/v1/skills` | `result: {skills: [{name, description?}]}` 或 URI 数组 |
 | 召回 | `POST /api/v1/search/find`，`{query, limit}` | `result` 为命中数组或 `{hits}`；每条含 `uri` / `score` / `abstract?` / `memoryType?` |
-| 建会话 | `POST /api/v1/sessions`，`{sessionId, userId}` | 2xx；409 视为已存在 |
+| 建会话 | `POST /api/v1/sessions`，`{sessionId, userId}` | 200 新建；409 已存在，复用（消息原样保留） |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
 | 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；是否真的归档由服务端 `session.autoCommit` 决定 |
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |

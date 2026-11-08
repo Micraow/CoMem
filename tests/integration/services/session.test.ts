@@ -195,6 +195,36 @@ describe('create / load', () => {
     expect(sessionUri.toString()).toBe(`${SCOPE_ROOT}/sessions/sess_manual`);
   });
 
+  it('已存在的 sessionId 再 create 抛 ALREADY_EXISTS，消息原样保留', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_existing',
+    });
+    await service.addMessage(sessionUri, message('m1', '第一句'));
+    await service.addMessage(sessionUri, message('m2', '第二句'));
+
+    // `create` 只创建、不重置：Hook 的 `PostToolUse` / `Stop` 在同一轮里各建一次，
+    // 第二次拿到 200 就说明第一次采集到的消息被覆写成空文件了。
+    await expect(
+      service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, { sessionId: 'sess_existing' }),
+    ).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+
+    const live = await service.load(sessionUri);
+    expect(live.messageCount).toBe(2);
+    expect(live.messages.map((item) => item.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('ensure 复用已存在的会话，不清空消息', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_ensure',
+    });
+    await service.addMessage(sessionUri, message('m1'));
+
+    expect(
+      (await service.ensure(Uri.parse(SCOPE_ROOT), 'sess_ensure', AUTH_PRINCIPALS)).toString(),
+    ).toBe(sessionUri.toString());
+    expect((await service.load(sessionUri)).messageCount).toBe(1);
+  });
+
   it('不存在的会话抛 NOT_FOUND', async () => {
     await expect(service.load(Uri.parse(`${SCOPE_ROOT}/sessions/sess_missing`))).rejects.toMatchObject(
       { code: 'NOT_FOUND' },

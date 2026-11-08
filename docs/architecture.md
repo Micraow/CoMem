@@ -2294,6 +2294,19 @@ interface AddResourceInput {
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`；`PUT /prompts/{id}`；`DELETE /prompts/{id}`；`POST /prompts/{id}/preview` |
 | 运维 | `GET /health`、`GET /metrics` |
 
+**`POST /sessions` 只创建，不重置。** 已存在的 `sessionId` 返回 **409**（`ALREADY_EXISTS`），
+`messages.jsonl` 原样保留；「已存在就复用」是服务层 `SessionService.ensure` 的语义，不是路由的。
+判据是 `.meta.json` 是否存在（与 `GET /sessions/{id}` 相同），且检查与写入持 `TREE` 锁，
+并发的同 ID 创建只有一个成功。
+
+**为什么不能是 200。** Hook 的 `PostToolUse` 与 `Stop` 在同一轮里各 `POST /sessions` 一次，
+两者都按「409 = 已存在，复用」实现。第二次拿到 200 意味着会话刚被创建——`messages.jsonl`
+被覆写成空文件，上一轮采集到的工具消息就没了。这是静默数据丢失，不是「多建了一个会话」。
+
+没有「重置会话」端点，也不预留 `?reset=true`：清空 live 消息没有合法调用方。归档走
+`POST /sessions/{id}/commit`（消息移进 `history/`，不丢），删除由会话过期策略负责
+（`SessionService.remove`，可审计）。
+
 MCP 挂在 `/mcp`，Streamable HTTP 传输。
 
 ## 15. Agent 集成

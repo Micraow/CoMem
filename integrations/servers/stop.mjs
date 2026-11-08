@@ -142,6 +142,17 @@ export async function readTranscriptMessages(transcriptPath, sessionId) {
   return messages;
 }
 
+/**
+ * 确保会话存在：**409 是正常路径**，表示会话已存在，复用即可。
+ *
+ * 服务端的 `POST /sessions` 只创建、不重置。收到 200 说明这一轮刚建出一个空
+ * 会话；收到 409 说明它已经在了，消息原样保留。两者都可以继续写消息，但**只有
+ * 409 能证明上一轮的消息没被清空**——所以这里不能把 409 当错误，也不能把
+ * 409 之外的状态当成「已存在」。
+ *
+ * @param {{ sessionId: string }} event
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient> }} deps
+ */
 async function ensureSession(event, deps) {
   try {
     await deps.http.post(SESSIONS_PATH, {

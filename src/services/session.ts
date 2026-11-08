@@ -266,7 +266,23 @@ export class SessionService {
     this.#permissions = options.permissions;
   }
 
-  /** 建会话。目录 `sessions/sess_xxx/`，写 `messages.jsonl`（空）与 `.meta.json`。 */
+  /**
+   * 建会话。目录 `sessions/sess_xxx/`，写 `messages.jsonl`（空）与 `.meta.json`。
+   *
+   * **只创建，不重置。** 已存在的会话（`.meta.json` 在）抛 `ALREADY_EXISTS`，HTTP
+   * 映射成 409。`messages.jsonl` 是会话的真相，用同 ID 再建一次就把它覆写成空文件
+   * 是静默数据丢失——Hook 的 `PostToolUse` 与 `Stop` 在同一轮里各建一次，工具消息
+   * 会被后一次 `Stop` 抹掉。要「已存在就复用」用 {@link ensure}。
+   *
+   * 不提供「重置」：清空消息没有合法调用方。归档走 `commitPhase1`（消息移进
+   * `history/`，不丢），删除走 `remove`（整目录删除，可审计）。
+   *
+   * 判据与 `load` / `ensure` 一致：`.meta.json` 存在即会话存在。目录在、元数据不在
+   * 只可能是 `create` 中途崩溃留下的空会话（先写消息、后写元数据），重建不会丢消息。
+   *
+   * 检查与写入持 `TREE` 锁（§10.6）：两个同 ID 的 `create` 并发时，后一个必须看到
+   * 前一个写下的元数据并失败，不能把前一个刚写下的消息覆写成空文件。
+   */
   async create(
     scopeUri: Uri,
     principals: readonly string[],
@@ -274,21 +290,32 @@ export class SessionService {
   ): Promise<Uri> {
     const sessionId = options.sessionId ?? createSessionId();
     const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
+    // 锁文件是会话目录的同级文件，`sessions/` 必须先存在（`acquire` 不建父目录）。
+    // 目录已存在时它是幂等的，所以放在检查之前不会改变「存在」的判据。
     await this.#store.mkdir(sessionUri, { recursive: true });
-    // 先写消息文件再写元数据：崩溃时留下的是「有目录、没有元数据」，`load` 按
-    // NOT_FOUND 处理；反过来会留下一个声称存在、但读不出消息的会话。
-    await this.#store.writeText(this.#messagesUri(sessionUri), '');
-    await this.#meta.writeSession(sessionUri, {
-      sessionId,
-      userId: scopeUri.rootId,
-      status: 'open',
-      createdAt: new Date().toISOString(),
-      commitCount: 0,
-      lastCommitAt: null,
-      pendingTokens: 0,
+    await this.#locks.withLock(sessionUri, 'tree', async () => {
+      if ((await this.#meta.readSession(sessionUri)) !== null) {
+        throw new ComemError('ALREADY_EXISTS', `会话已存在：${sessionUri.toString()}`, {
+          uri: sessionUri.toString(),
+          sessionId,
+        });
+      }
+      // 先写消息文件再写元数据：崩溃时留下的是「有目录、没有元数据」，`load` 按
+      // NOT_FOUND 处理；反过来会留下一个声称存在、但读不出消息的会话。
+      await this.#store.writeText(this.#messagesUri(sessionUri), '');
+      await this.#meta.writeSession(sessionUri, {
+        sessionId,
+        userId: scopeUri.rootId,
+        status: 'open',
+        createdAt: new Date().toISOString(),
+        commitCount: 0,
+        lastCommitAt: null,
+        pendingTokens: 0,
+      });
     });
     // §12.4 的「写时算」：会话目录与 `messages.jsonl` 都没有经过观察者。不物化的话
     // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空。
+    // 放在锁外：它要查 ACL 表，失败只记日志，不需要与创建互斥。
     await this.#materialize(sessionUri, principals);
     this.#logger.info('会话已创建', { uri: sessionUri.toString() });
     return sessionUri;
@@ -297,7 +324,6 @@ export class SessionService {
   /**
    * 按调用方指定的稳定 ID 取会话；不存在就创建。
    *
-   * **已存在时不能走 `create`**：`create` 会把 `messages.jsonl` 覆写成空文件。
    * 幂等上传（`remember` 的 `sessionId`）重跑时拿到的是同一个会话，消息由调用方
    * 自己按稳定 ID 去重。
    *

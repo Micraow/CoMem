@@ -7,11 +7,13 @@
 
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { advanceCursor, cursorFilePath, readCursor } from '../lib/cursor.mjs';
+import { createHttpClient } from '../lib/http.mjs';
 import { captureSession } from '../servers/stop.mjs';
 
 function message(index) {
@@ -222,5 +224,101 @@ test('会话已存在（409）时继续写消息', async () => {
       '/api/v1/sessions/cc-1/commit',
     ]);
     assert.equal(await readCursor('cc-1', { dir }), 1);
+  });
+});
+
+/**
+ * 假服务端：**按真实契约**实现 `POST /sessions`。
+ *
+ * 第一次创建返回 `{status:'ok'}`，同一个 `sessionId` 再来一次返回 409
+ * （`ALREADY_EXISTS`），消息按会话存在内存里。返回值里的 `messages()` 让用例能
+ * 断言「上一轮的消息还在」——只断言请求序列测不出「服务端把消息清空了」。
+ */
+async function startSessionServer() {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const sessions = new Map();
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) {
+      chunks.push(chunk);
+    }
+    const text = Buffer.concat(chunks).toString('utf8');
+    const body = text === '' ? undefined : JSON.parse(text);
+    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
+    const send = (status, payload) => {
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(payload));
+    };
+    const ok = (result) => {
+      send(200, { status: 'ok', result });
+    };
+
+    if (request.method === 'POST' && path === '/api/v1/sessions') {
+      const sessionId = body.sessionId;
+      if (sessions.has(sessionId)) {
+        send(409, {
+          status: 'error',
+          error: { code: 'ALREADY_EXISTS', message: '会话已存在。' },
+        });
+        return;
+      }
+      sessions.set(sessionId, []);
+      ok({ uri: `comem://user/alice/sessions/${sessionId}` });
+      return;
+    }
+    const append = /^\/api\/v1\/sessions\/([^/]+)\/messages$/.exec(path);
+    if (request.method === 'POST' && append !== null) {
+      sessions.get(decodeURIComponent(append[1])).push(...body.messages);
+      ok({ count: body.messages.length });
+      return;
+    }
+    if (request.method === 'POST' && /^\/api\/v1\/sessions\/[^/]+\/commit$/.test(path)) {
+      ok({ taskId: 'task-1' });
+      return;
+    }
+    send(404, { status: 'error', error: { code: 'NOT_FOUND', message: '没有这个接口。' } });
+  });
+  await new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    messages(sessionId) {
+      return (sessions.get(sessionId) ?? []).map((item) => item.id);
+    },
+    close() {
+      return new Promise((resolve) => {
+        server.closeAllConnections();
+        server.close(resolve);
+      });
+    },
+  };
+}
+
+test('ensureSession 在 409 时复用会话，不清空已采集的消息', async () => {
+  await withTempDir(async ({ config }) => {
+    const server = await startSessionServer();
+    try {
+      const http = createHttpClient({ baseUrl: server.baseUrl });
+      const capture = (messages) =>
+        captureSession(
+          { sessionId: 'cc-w51b', cwd: '/repo', eventId: null, transcriptPath: null, messages },
+          { config, http, env: {} },
+        );
+
+      // 第一轮：PostToolUse 那条 tool 消息先落盘。
+      const first = await capture([message(0)]);
+      assert.equal(first.captured, 1);
+      assert.deepEqual(server.messages('cc-w51b'), ['msg-0']);
+
+      // 第二轮：Stop 先 `POST /sessions`，服务端回 409。hook 必须把它当「复用」：
+      // 当成失败会抛错；而服务端若回 200 并重置会话，上面那条消息就没了。
+      const second = await capture([message(0), message(1)]);
+      assert.equal(second.captured, 1);
+      assert.deepEqual(server.messages('cc-w51b'), ['msg-0', 'msg-1']);
+    } finally {
+      await server.close();
+    }
   });
 });

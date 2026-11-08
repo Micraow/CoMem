@@ -182,6 +182,9 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const scope = scopeFrom(body, context.subject);
         await authorizer.assert(scope, WRITE, context.principals);
         const sessionId = optionalString(body, 'sessionId');
+        // 已存在返回 409（`ALREADY_EXISTS` → §19 的状态表）：`create` 只创建，
+        // 不重置已有会话的消息。Hook 的 `PostToolUse` / `Stop` 按「409 即复用」
+        // 实现——它们收到 200 就会以为刚建出一个空会话。
         const uri = await session.create(
           scope,
           context.principals,

@@ -82,7 +82,8 @@ export async function handlePostToolUse(event, deps) {
       userId: deps.config.userId,
     });
   } catch (error) {
-    // 会话已存在是正常路径：`POST /sessions` 幂等失败，继续写消息。
+    // 409 = 会话已存在（正常路径）：复用它，消息原样保留，继续追加。
+    // 其它状态说明服务端不可用：这次采集放弃，游标不前进，下一次重投。
     if (error.status !== CONFLICT_STATUS) {
       return undefined;
     }
