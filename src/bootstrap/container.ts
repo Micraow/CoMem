@@ -95,6 +95,7 @@ import { createHttpRouteGroups } from '../api/http/routes/index.js';
 import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
 import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
+import type { CommitStepName, CommitStepSkipReason } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { RetrievalIndex } from '../domain/retrieval.js';
@@ -1002,6 +1003,27 @@ async function ensureUserNamespace(userId: string): Promise<void> {
    * 合并步骤写进 `state` 的「真正写过的文件」集合，顺序调换后它什么都读不到，
    * 目录摘要从此永远不重算，而日志里只会有一行「没有记忆写入，跳过摘要失效」。
    */
+  /**
+   * 没有可用模型时不能执行的步骤。
+   *
+   * `DisabledLlmProvider` 抛 `INVALID_ARGUMENT`，而它是 `isTerminalStepError` 的
+   * 终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一
+   * （归档落盘、建任务、`session` 关联）不依赖模型，缺模型只让阶段二的产物消失，
+   * 所以这两步跳过、归档照常完成。判据与 `ingest` 的
+   * `{ skipped: true, reason: 'llm_disabled' }` 完全相同：装配层从
+   * `providers.llm.default.type` 推出，`services/` 不 import `config/`。
+   *
+   * `memory_merge` 跟着跳过：它的输入是抽取结果，没有抽取就没有可合并的操作。另外
+   * 两步不调模型——`archive_summary` 走规则摘要，`summary_invalidate` 只标脏。
+   */
+  const commitSkippedSteps =
+    config.providers.llm.default.type === 'disabled'
+      ? new Map<CommitStepName, CommitStepSkipReason>([
+          ['memory_extract', 'llm_disabled'],
+          ['memory_merge', 'llm_disabled'],
+        ])
+      : new Map<CommitStepName, CommitStepSkipReason>();
+
   const commitRunner = new CommitRunner({
     tasks: task,
     createPipeline: (archiveUri, onStepsChanged) => {
@@ -1027,6 +1049,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
           new SummaryInvalidateStep({ summary, logger }),
         ],
         ports,
+        skippedSteps: commitSkippedSteps,
         logger,
       });
     },

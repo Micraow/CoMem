@@ -78,6 +78,7 @@ function createHarness(options: HarnessOptions): Harness {
       retainedMessageIds: [],
     },
     stepsDone: options.stepsDone ?? [],
+    skippedSteps: [],
     taskId: 'task_1',
   };
 

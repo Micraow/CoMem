@@ -12,6 +12,10 @@
  *   骗人；
  * - `ok`：其余。
  *
+ * `memoryExtract.skipped` 单独报告归档提交的记忆抽取是否被跳过（`providers.llm.default.type`
+ * 是 `disabled` 时是）。它不参与 `status` 判定：同样的部署下 `summary.generator`
+ * 必须是 `rule`，`status` 已经是 `degraded`；再加一个条件只是重复。
+ *
  * 索引与文件系统对账不一致也是 `degraded` 的判定条件，v1 没有对账任务（backlog 的
  * `reindex`），所以这一条判不出来，不要假装能判。
  *
@@ -86,6 +90,10 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
       app.get('/health', async () => {
         const health = await observability.health();
         const ruleGenerator = config.summary.generator === 'rule';
+        // 没有可用模型时，归档提交会跳过 `memory_extract` / `memory_merge`（见
+        // `bootstrap/container.ts` 的 `commitSkippedSteps`）。这两步不执行时归档
+        // 仍然会写 `.done`，除了这条信息没有任何错误——降级必须可见。
+        const memoryExtractSkipped = config.providers.llm.default.type === 'disabled';
         // 重排是「配了就必须能查」的质量增强：`degraded` 为真表示最近一次重排
         // 调用失败、这次检索用的是融合分。与 `summary.degraded` 同一个判定模式。
         const rerank = search.rerankHealth;
@@ -103,6 +111,12 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             degraded: ruleGenerator,
             pendingDirs: health.staleSummaries,
             degradedDirs: health.degradedSummaries,
+          },
+          // 归档提交的记忆抽取。形状与 `ingest` 报告的 `extraction` 一致
+          // （`{ skipped, reason }`），两边说的是同一件事。
+          memoryExtract: {
+            skipped: memoryExtractSkipped,
+            reason: memoryExtractSkipped ? 'llm_disabled' : null,
           },
           // 重排健康度。`failures` 是累计值（看得出间歇性失败），`lastFailure`
           // 在成功一次后清空（看得出「现在」还在不在跑）。

@@ -281,6 +281,7 @@ function createFakePorts(overrides: Partial<StepContextPorts> = {}): StepContext
         retainedMessageIds: [],
       },
       stepsDone: [],
+      skippedSteps: [],
       taskId: null,
     }),
     writeArchiveMeta: async () => undefined,

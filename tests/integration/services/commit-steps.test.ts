@@ -92,6 +92,7 @@ function createMeta(): ArchiveMeta {
       retainedMessageIds: [],
     },
     stepsDone: [],
+    skippedSteps: [],
     taskId: 'task_1',
   };
 }

@@ -40,6 +40,7 @@ import type {
   ArchivePhase1,
   ArchivePhaseStatus,
   CommitStepName,
+  SkippedCommitStep,
 } from '../../domain/archive.js';
 import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
@@ -245,6 +246,28 @@ function isCommitStepNameArray(value: unknown): value is readonly CommitStepName
   return isStringArray(value) && value.every(isCommitStepName);
 }
 
+/**
+ * 一项「被跳过的步骤」。
+ *
+ * 原因目前只有一个合法值。写成白名单而不是 `typeof reason === 'string'`：坏值读回
+ * 去会让调用方按 `'llm_disabled'` 之外的值去解释，而这一段在类型上根本不成立。
+ */
+function isSkippedCommitStep(value: unknown): value is SkippedCommitStep {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const step = value['step'];
+  return (
+    typeof step === 'string' &&
+    isCommitStepName(step) &&
+    value['reason'] === 'llm_disabled'
+  );
+}
+
+function isSkippedCommitStepArray(value: unknown): value is readonly SkippedCommitStep[] {
+  return Array.isArray(value) && value.every(isSkippedCommitStep);
+}
+
 function isArchivePhaseStatus(value: unknown): value is ArchivePhaseStatus {
   return value === 'preparing' || value === 'ready' || value === 'failed';
 }
@@ -279,6 +302,8 @@ function toArchiveMeta(value: unknown, uri: Uri): ArchiveMeta {
   }
   const archiveId = value['archiveId'];
   const stepsDone = value['stepsDone'];
+  // 旧版本的归档没有这个字段：缺省是「没有任何步骤被跳过」，不是数据损坏。
+  const skippedSteps = value['skippedSteps'] ?? [];
   const taskId = value['taskId'];
   if (typeof archiveId !== 'string') {
     throw corruptMetadata(uri, 'archiveId 不是字符串');
@@ -286,10 +311,19 @@ function toArchiveMeta(value: unknown, uri: Uri): ArchiveMeta {
   if (!isCommitStepNameArray(stepsDone)) {
     throw corruptMetadata(uri, 'stepsDone 不是步骤名数组');
   }
+  if (!isSkippedCommitStepArray(skippedSteps)) {
+    throw corruptMetadata(uri, 'skippedSteps 不是 { step, reason } 数组');
+  }
   if (taskId !== null && typeof taskId !== 'string') {
     throw corruptMetadata(uri, 'taskId 不是字符串或 null');
   }
-  return { archiveId, phase1: toArchivePhase1(value['phase1'], uri), stepsDone, taskId };
+  return {
+    archiveId,
+    phase1: toArchivePhase1(value['phase1'], uri),
+    stepsDone,
+    skippedSteps,
+    taskId,
+  };
 }
 
 function toSessionMeta(value: unknown, uri: Uri): SessionMeta {

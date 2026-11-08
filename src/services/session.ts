@@ -486,6 +486,8 @@ export class SessionService {
         retainedMessageIds: retained.map((message) => message.id),
       },
       stepsDone: [],
+      // 阶段一不跳过任何步骤；跳过只发生在阶段二（没有可用 LLM 时）。
+      skippedSteps: [],
       taskId: null,
     };
     await this.#meta.writeArchive(archiveUri, preparing);
@@ -544,6 +546,8 @@ export class SessionService {
         retainedMessageIds: retained.map((message) => message.id),
       },
       stepsDone: existing?.stepsDone ?? [],
+      // 补完归档时保留已经记录过的跳过原因：阶段二可能已经跑过并跳过了某几步。
+      skippedSteps: existing?.skippedSteps ?? [],
       taskId: existing?.taskId ?? null,
     };
     await this.#meta.writeArchive(archiveUri, ready);

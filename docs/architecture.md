@@ -590,6 +590,7 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
     "retainedMessageIds": []
   },
   "stepsDone": ["archive_summary", "memory_extract", "memory_merge", "summary_invalidate"],
+  "skippedSteps": [],
   "taskId": "task_b41e"
 }
 ```
@@ -637,7 +638,7 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
 
 **六种元数据文件的读写全部在 `adapters/fs/metadata-file.ts` 与 `adapters/fs/acl-file.ts`。** `services/` 只声明它需要的方法，具体落盘由适配层做——这条不是为了好看：`services/` 一旦碰 `node:fs`，它下面对 `domain/` 的所有判断就没法用内存数据穷举测试了（§4.2）。
 
-**`.meta.json` 有两种形状**：会话级（`sessionId` / `commitCount` / `pendingTokens`）与归档级（`archiveId` / `phase1` / `stepsDone` / `taskId`），见 §6.6。同一个文件名承载两种结构，靠路径区分——归档在 `history/archive_NNN/` 下。
+**`.meta.json` 有两种形状**：会话级（`sessionId` / `commitCount` / `pendingTokens`）与归档级（`archiveId` / `phase1` / `stepsDone` / `skippedSteps` / `taskId`），见 §6.6。同一个文件名承载两种结构，靠路径区分——归档在 `history/archive_NNN/` 下。
 
 **文件级摘要不另存档，写在文件自己的 frontmatter 里。**
 
@@ -1326,6 +1327,8 @@ commit(sessionId, options)
 
 **每步完成都写 `.meta.json` 的 `stepsDone`。** 这样重放能跳过已完成的步骤，不会重复应用记忆操作。记忆操作不幂等——重复应用会造出重复记忆。
 
+**部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把这两步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
+
 ### 10.2 归档边界
 
 默认归档全部消息。可选 `keepRecentCount` 保留最近 N 条。归档序号单调递增，`archive_001`、`archive_002`……，从不复用。
@@ -1368,6 +1371,11 @@ class CommitPipeline {
   async run(ctx: StepContext): Promise<void> {
     for (const step of this.steps) {
       if (ctx.meta.stepsDone.includes(step.name)) continue;
+      const skipReason = this.skippedSteps.get(step.name);
+      if (skipReason !== undefined) {
+        await ctx.markStepSkipped(step.name, skipReason);
+        continue;
+      }
       await this.withRetry(step, ctx);
       await ctx.markStepDone(step.name);
     }
@@ -1375,7 +1383,7 @@ class CommitPipeline {
 }
 ```
 
-Template Method 固定「跳过已完成 → 执行 → 记录」的骨架，变化点是四个步骤的实现。新增步骤不改骨架。
+Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → 记录」的骨架，变化点是四个步骤的实现。新增步骤不改骨架。`skippedSteps` 是装配期传入的 `Map<CommitStepName, CommitStepSkipReason>`（目前只有 `llm_disabled`）：它表示「这个部署里这一步不可能成功」，重试没有意义。
 
 ### 10.4 任务恢复
 
@@ -1744,9 +1752,12 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 还有一半用处（原始对话落盘、可检索）。
 
 **注意「停在 `pending`」只对导入进程成立。** 同机若有服务端在跑，它的
-`CommitRunner`（默认启动、每秒轮询）会认领这些任务，然后因为调不到模型而停在
-`memory_extract` 并置 `failed`——`INVALID_ARGUMENT` 是终态错误，不会重试。所以
-「先归档、以后再抽取」要求导入时没有服务端共用同一个数据目录。
+`CommitRunner`（默认启动、每秒轮询）会认领这些任务。修复前它会停在
+`memory_extract` 并置 `failed`（`INVALID_ARGUMENT` 是终态错误，不会重试）；现在
+归档提交与导入走同一条判据：跳过 `memory_extract` 与 `memory_merge`，任务以
+`done` 结束，`.meta.json` 的 `skippedSteps` 写明原因。两种形态都没有记忆抽取，
+区别是任务状态——`done` 的归档不会在配好模型后补抽取，要让「先归档、以后再抽取」
+成立，得在没有服务端共用同一个数据目录时导入（任务停在 `pending`）。
 
 #### 两条路，同一段管线
 

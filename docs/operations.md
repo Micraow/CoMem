@@ -122,6 +122,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | 目录摘要 | 降级成 `summary.generator: rule`，结果标 `degraded: true` | 规则生成器能直接产出可用的 L0 / L1，只是质量差 |
 | 记忆合并 | 启动失败（`INVALID_ARGUMENT`） | 合并是 agentic 循环，规则生成器产不出操作列表 |
 | 工作记忆 | 启动失败（`INVALID_ARGUMENT`） | 工作记忆没有规则生成器 |
+| 归档提交（阶段二） | 降级：跳过 `memory_extract` / `memory_merge`，归档照常完成。`.meta.json` 的 `skippedSteps` 写明原因，记一条 `warn` 日志，`GET /health` 的 `memoryExtract.skipped` 为真 | 阶段一（归档落盘、建任务、`session` 关联）不依赖模型；跳过比让每个任务失败更诚实 |
 | 本机对话导入（阶段二） | 降级：只归档，报告的 `extraction` 是 `{ skipped: true, reason: "llm_disabled" }` | 阶段一（归档 + 建任务 + 游标）不依赖模型，先导进来本身有价值 |
 
 **为什么导入能降级、工作记忆不能。** 导入有两个独立的产物：阶段一（会话进库、能按
@@ -132,12 +133,12 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 `memory.workingMemory.enabled` 与 `providers.llm.default.type: disabled` 同时出现时
 启动期失败，错误消息里带 `field: memory.workingMemory.enabled`。
 
-**已知限制：** 没有 LLM 时**普通的归档提交**仍然会在 `memory_extract` 步骤失败（任务
-置 `failed`，归档停在 `stepsDone: ["archive_summary"]`）。导入路径靠「跳过阶段二」避开
-了这一点，但任何被 `CommitRunner` 认领的任务都会撞上它。这不是配置项之间的不一致
-（`memory_extract` 没有开关，它是提交管线的固定一步），目前的处理是让任务显式失败
-而不是静默完成；要让「先归档、以后再抽取」成立，需要让执行器在没有模型时保留任务为
-`pending`。
+**归档提交与导入走同一条判据。** 没有 LLM 时，`CommitRunner` 认领的归档任务同样
+跳过 `memory_extract` 与 `memory_merge`：任务以 `done` 结束，`.meta.json` 的
+`skippedSteps` 记下 `{ step: "memory_extract", reason: "llm_disabled" }`，并记一条
+`warn` 日志。**跳过的归档不会补抽取**——它在阶段二结束时就已经是完成态，配好模型
+之后重跑归档也不会再抽取一次。要保留补抽取的可能，只能让任务停在 `pending`，而那
+与「阶段二不执行」是同义反复。
 
 ### 配置自检
 
@@ -1152,6 +1153,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
     "index": { "nodes": 4 },
     "queue": { "pending": 0, "processing": 0 },
     "summary": { "degraded": false, "pendingDirs": 0, "degradedDirs": 3 },
+    "memoryExtract": { "skipped": false, "reason": null },
     "rerank": {
       "configured": true,
       "degraded": true,
@@ -1184,6 +1186,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
 | `summary.pendingDirs` | 待刷新摘要的目录数 | 长期不降 = 摘要失效在堆积 |
 | `summary.degradedDirs` | 用规则摘要生成的目录数 | 模型不可用时会涨；恢复后需要重算 |
+| `memoryExtract.skipped` | 归档提交是否跳过记忆抽取（`providers.llm.default.type` 是 `disabled` 时为 `true`） | 为真 = 归档照常完成，但 `memory_extract` / `memory_merge` 没跑，`find` 搜不到新记忆。`reason` 是 `llm_disabled` |
 | `rerank.configured` | 是否配了重排（`retrieval.rerank.enabled` + `providers.rerank.type: http`） | 配了重排但这里是 `false` = 装配没接上 |
 | `rerank.degraded` | 最近一次重排调用是否失败（已退回融合分） | 为真 = 这次检索用的是融合分。反复为真看 `lastFailure.reason`：「超时」调大 `timeoutSeconds` 或降低 `topN`，`http_5xx` 看供应商，`network` 看 `baseUrl` |
 | `rerank.failures` | 进程启动以来重排失败的累计次数 | 与 `degraded` 一起看：`degraded: false` + `failures > 0` = 间歇性失败过，最近一次已成功 |
@@ -1330,14 +1333,15 @@ pnpm ingest --source all --json           # 机器可读
 
   **这是合法的降级部署**（先把数据导进来、模型以后配），不是配置错误——所以不拒绝
   命令，只降级。阶段一不依赖模型：原始对话落盘、能按内容检索，本身就有价值。但
-  报告与终端输出都会说明「记忆还没抽取，`find` 暂时搜不到内容」；配好
-  `providers.llm` 后重跑 `pnpm ingest`，积压的任务会被执行器认领。
+  报告与终端输出都会说明「记忆还没抽取，`find` 暂时搜不到内容」。
 
   **注意：同机有服务端在跑时，任务不会一直 `pending`。** 服务端的 `CommitRunner`
-  默认启动并每秒轮询，它会认领这些任务，然后因为调不到模型而停在 `memory_extract`
-  并置 `failed`（`INVALID_ARGUMENT` 是终态错误，不重试）。所以「先归档、以后再
-  抽取」只在导入进程独占数据目录时成立；否则需要先停服务端再导入。见「没有可用
-  LLM 时」一节的已知限制。
+  默认启动并每秒轮询，它会认领这些任务。修复前这一步会停在 `memory_extract` 并置
+  `failed`（`INVALID_ARGUMENT` 是终态错误，不重试）；现在归档提交与导入走同一条
+  判据：跳过 `memory_extract` / `memory_merge`，任务以 `done` 结束，`.meta.json`
+  的 `skippedSteps` 写明原因。两种形态都没有记忆抽取，区别是任务状态——`done` 的
+  归档**不会**在配好模型后补抽取，要让「先归档、以后再抽取」成立，得在没有服务端
+  共用数据目录时导入（任务停在 `pending`）。见「没有可用 LLM 时」一节。
 - `--no-wait` 与降级是两件事：显式 `--no-wait` 时 `extraction` 仍是 `null`（「没
   等」），不会写成「跳过」。
 

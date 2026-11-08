@@ -37,12 +37,37 @@ export type CommitStepName =
   | 'memory_merge'
   | 'summary_invalidate';
 
+/**
+ * 步骤被跳过的原因。
+ *
+ * 目前只有一种：`providers.llm.default.type` 是 `disabled`。与 `memory_diff.json`
+ * 的 `skippedOperations[].reasonCode` 不是一回事——那是**操作**级的跳过（某条补丁
+ * 没匹配上），这里是**步骤**级的跳过（这一步在本次部署里不可能执行，也不该阻塞
+ * 归档完成）。
+ */
+export type CommitStepSkipReason = 'llm_disabled';
+
+/** 没有执行、但归档仍然完成的步骤。 */
+export interface SkippedCommitStep {
+  readonly step: CommitStepName;
+  readonly reason: CommitStepSkipReason;
+}
+
 /** `archive_NNN/.meta.json` 的形状（§6.6）。 */
 export interface ArchiveMeta {
   readonly archiveId: string;
   readonly phase1: ArchivePhase1;
   /** 已完成的步骤，按完成顺序 */
   readonly stepsDone: readonly CommitStepName[];
+  /**
+   * 没有执行、但归档仍然完成的步骤，按跳过顺序。
+   *
+   * **与 `stepsDone` 分开是必要的。** `stepsDone` 是重放判据（「跑过没有」），跳过
+   * 的步骤也要写进去——否则每次任务重放都会再判一次「没有模型」。但「归档完成了，
+   * 只是没抽取记忆」这个事实只有这里说得清：只看 `stepsDone` 的话，一份跳过抽取的
+   * 归档和一份真的没抽出任何操作的归档长得一模一样。
+   */
+  readonly skippedSteps: readonly SkippedCommitStep[];
   readonly taskId: string | null;
 }
 
@@ -113,7 +138,14 @@ export function summarizeMemoryDiff(
   };
 }
 
-/** 步骤失败时用的错误码判断：这些错误重放没意义，直接把归档标失败。 */
+/**
+ * 步骤失败时用的错误码判断：这些错误重放没意义，直接把归档标失败。
+ *
+ * **终态错误不能靠重试绕过。** 部署缺少某项能力（目前只有「没有可用 LLM」）时，
+ * 正确的做法是在装配期把对应步骤登记进 `CommitPipelineOptions.skippedSteps`，
+ * 让它根本不执行——`INVALID_ARGUMENT` 第一次就会把任务置 `failed`，归档永远停在
+ * 上一步。
+ */
 export function isTerminalStepError(code: ComemErrorCode): boolean {
   return code === 'INVALID_URI' || code === 'INVALID_ARGUMENT' || code === 'PERMISSION_DENIED';
 }

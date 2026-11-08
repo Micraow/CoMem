@@ -183,7 +183,8 @@ task:
 # `pnpm ingest` 拒绝真正写入，只允许 `--dry-run` 报告。
 #
 # 没有可用 LLM（`providers.llm.default.type: disabled`）时阶段二自动跳过：会话
-# 照常归档，报告里 `extraction.skipped` 为 `true`。先导数据、后配模型是合法的顺序。
+# 照常归档，报告里 `extraction.skipped` 为 `true`。服务端的归档提交走同一条判据：
+# 跳过记忆抽取，`.meta.json` 的 `skippedSteps` 写明原因。先导数据、后配模型是合法的顺序。
 ingest:
   enabled: false
   # 每个会话一次读多少条。100 与 MCP 单次批量写入的量级一致（§10.6 的验收场景

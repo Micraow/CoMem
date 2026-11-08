@@ -50,6 +50,7 @@ const ARCHIVE_META: ArchiveMeta = {
     retainedMessageIds: [],
   },
   stepsDone: ['archive_summary'],
+  skippedSteps: [],
   taskId: 'task-1',
 };
 

@@ -17,9 +17,25 @@
  *
  * 超过重试上限的错误原样抛给 `TaskService`，由任务层决定是否把任务置为 `failed`
  * 或者等租约过期后重放（§10.4）。
+ *
+ * ## 部署缺少能力时跳过步骤，而不是让任务失败
+ *
+ * `providers.llm.default.type: disabled` 的部署里，`memory_extract` 每次都会撞上
+ * `DisabledLlmProvider` 抛出的 `INVALID_ARGUMENT`。那是**终态错误**：第一次就把
+ * 任务置 `failed`，归档永远停在 `archive_summary`。但阶段一（归档落盘、建任务、
+ * `session` 关联）不依赖模型，缺模型只让阶段二的产物消失——和 `ingest` 的
+ * `{ skipped: true, reason: 'llm_disabled' }` 是同一条判据。
+ *
+ * 所以「不能执行」由装配方**显式登记**（`skippedSteps`），管线在这一步只记
+ * `skippedSteps` 与一条 `warn` 日志，然后继续。`services/` 不 import `config/`：
+ * 判据在 `bootstrap/container.ts` 里从配置翻译过来。
  */
 
-import type { ArchiveMeta, CommitStepName } from '../../domain/archive.js';
+import type {
+  ArchiveMeta,
+  CommitStepName,
+  CommitStepSkipReason,
+} from '../../domain/archive.js';
 import { isTerminalStepError } from '../../domain/archive.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
@@ -66,6 +82,14 @@ export interface CommitPipelineOptions {
   readonly logger: Logger;
   /** 单步失败重试次数，默认 1（§11.4「解析失败只重试一次」） */
   readonly stepAttempts?: number;
+  /**
+   * 因部署缺少能力而**不能执行**的步骤 → 原因。
+   *
+   * 由装配方从配置推出（`services/` 不 import `config/`）。跳过的步骤仍写进
+   * `stepsDone`——否则每次任务重放都会再判一次「没有模型」，而且任务行无法看出
+   * 「四步都走过了」；原因另记在 `skippedSteps` 里。
+   */
+  readonly skippedSteps?: ReadonlyMap<CommitStepName, CommitStepSkipReason>;
 }
 
 /**
@@ -76,17 +100,24 @@ export interface CommitPipelineOptions {
  */
 const DEFAULT_STEP_ATTEMPTS = 1;
 
+/** 跳过原因的人类可读说明，只用于日志。 */
+const SKIP_REASON_LABELS: Readonly<Record<CommitStepSkipReason, string>> = {
+  llm_disabled: 'providers.llm.default.type 是 disabled',
+};
+
 export class CommitPipeline {
   readonly #steps: readonly CommitStep[];
   readonly #ports: StepContextPorts;
   readonly #logger: Logger;
   readonly #stepAttempts: number;
+  readonly #skippedSteps: ReadonlyMap<CommitStepName, CommitStepSkipReason>;
 
   constructor(options: CommitPipelineOptions) {
     this.#steps = options.steps;
     this.#ports = options.ports;
     this.#logger = options.logger;
     this.#stepAttempts = Math.max(0, options.stepAttempts ?? DEFAULT_STEP_ATTEMPTS);
+    this.#skippedSteps = options.skippedSteps ?? new Map();
   }
 
   async run(archiveUri: Uri, scopeUri: Uri): Promise<void> {
@@ -107,11 +138,44 @@ export class CommitPipeline {
       await this.#ports.writeArchiveMeta(meta);
     };
 
+    /**
+     * 跳过一步：既写 `stepsDone`（重放判据），也写 `skippedSteps`（为什么没做）。
+     *
+     * 两次写入合成一次：分开写会让「已经完成」和「被跳过」之间出现一个崩溃窗口，
+     * 而重放时那一步会被当成「该执行」。
+     */
+    const markStepSkipped = async (
+      step: CommitStepName,
+      reason: CommitStepSkipReason,
+    ): Promise<void> => {
+      if (meta.skippedSteps.some((skipped) => skipped.step === step)) {
+        return;
+      }
+      meta = {
+        ...meta,
+        stepsDone: meta.stepsDone.includes(step) ? meta.stepsDone : [...meta.stepsDone, step],
+        skippedSteps: [...meta.skippedSteps, { step, reason }],
+      };
+      await this.#ports.writeArchiveMeta(meta);
+    };
+
     for (const step of this.#steps) {
       if (meta.stepsDone.includes(step.name)) {
         this.#logger.debug('提交步骤已完成，跳过', {
           archive: archiveUri.toString(),
           step: step.name,
+        });
+        continue;
+      }
+
+      const skipReason = this.#skippedSteps.get(step.name);
+      if (skipReason !== undefined) {
+        await markStepSkipped(step.name, skipReason);
+        // 降级必须可见：归档会走到 `.done`，用户不会收到任何错误。
+        this.#logger.warn(`${step.name} 被跳过：${SKIP_REASON_LABELS[skipReason]}`, {
+          archive: archiveUri.toString(),
+          step: step.name,
+          reason: skipReason,
         });
         continue;
       }

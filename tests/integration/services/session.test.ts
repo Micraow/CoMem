@@ -455,6 +455,7 @@ describe('readArchiveMeta / writeArchiveMeta', () => {
         retainedMessageIds: [],
       },
       stepsDone: ['archive_summary' as const],
+      skippedSteps: [],
       taskId: 'task-1',
     };
 
