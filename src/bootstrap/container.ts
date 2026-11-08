@@ -92,6 +92,7 @@ import type { ToolRegistry } from '../api/mcp/registry.js';
 import { McpHttpServer } from '../api/mcp/server.js';
 import type { HttpRouteGroup } from '../api/http/server.js';
 import { createHttpRouteGroups } from '../api/http/routes/index.js';
+import type { MemoryStatsRow } from '../api/http/routes/stats.js';
 import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
 import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
@@ -1222,6 +1223,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
       userCount: () => userRepository.count(),
       groupCount: () => groupRepository.count(),
     },
+    memoryStats: {
+      rowsFor: (principals) => memoryStatsRowsOf(db, principals),
+    },
   });
 
   let closed = false;
@@ -1349,6 +1353,66 @@ function memberCountsOf(
     )
     .all(...groupIds);
   return new Map(rows.map((row) => [String(row['group_id']), Number(row['total'])]));
+}
+
+/**
+ * `GET /stats/memories` 的取数（§17.5）：当前主体可见的记忆节点的热度输入列。
+ *
+ * **可见性**复用 `retrieval-index` 的 `permissionPredicate` 语义：`node_permission`
+ * 上有该主体的 `allow` 行、且没有任何 `deny` 行（deny 覆盖 allow，§12.3）。谓词在
+ * 这里重写一份而不是导出那个私有函数——`api/` 不能 import `adapters/`，而 `bootstrap`
+ * 能同时看到两者；把同一段 SQL 复制到这里会让两处漂移，所以**只在这一层保留一份**，
+ * 检索侧仍用自己的那份。两处的语义由同一个物化表约束，改物化规则时都要跟着改。
+ *
+ * 只取**记忆**行（`context_type = 'memory'`）：资源、技能、会话不是「记忆」，不该进
+ * 冷热统计。`status <> 'archived'` 不排除：已归档的记忆仍是「存在且可能占磁盘」的
+ * 治理对象，把它藏起来会让「清理」看不到真正该清的那批。
+ *
+ * **不排序**：调用方要的是整体分布，顺序无意义；SQLite 的顺序扫描比带 ORDER BY 的
+ * 索引扫描在整表聚合上更快（实测见提交说明的 `EXPLAIN QUERY PLAN`）。
+ */
+function memoryStatsRowsOf(
+  db: DatabaseSync,
+  principals: readonly string[],
+): readonly MemoryStatsRow[] {
+  // 空主体集合：没有任何可见节点。空 `IN ()` 是语法错误，直接返回空。
+  if (principals.length === 0) {
+    return [];
+  }
+  const list = principals.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `SELECT n.memory_type, n.access_count, n.last_accessed_at, n.updated_at, n.size
+         FROM node n
+        WHERE n.context_type = 'memory'
+          AND EXISTS (
+            SELECT 1 FROM node_permission p
+             WHERE p.node_uri = n.uri
+               AND p.principal IN (${list})
+               AND p.level >= 1
+               AND p.effect = 'allow'
+               AND NOT EXISTS (
+                 SELECT 1 FROM node_permission d
+                  WHERE d.node_uri = p.node_uri
+                    AND d.principal IN (${list})
+                    AND d.effect = 'deny'
+               )
+          )`,
+    )
+    .all(...principals, ...principals);
+
+  return rows.map((row) => ({
+    memoryType: row['memory_type'] === null || row['memory_type'] === undefined
+      ? null
+      : String(row['memory_type']),
+    accessCount: Number(row['access_count']),
+    lastAccessedAt:
+      row['last_accessed_at'] === null || row['last_accessed_at'] === undefined
+        ? null
+        : String(row['last_accessed_at']),
+    updatedAt: String(row['updated_at']),
+    size: Number(row['size']),
+  }));
 }
 
 /**

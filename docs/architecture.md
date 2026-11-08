@@ -2773,13 +2773,16 @@ comem_llm_errors_total{purpose, code}
 ```json
 {
   "total": 128,
-  "byType":   { "preferences": 42, "entities": 31, "events": 24, "experiences": 18, "rules": 13 },
-  "byStatus": { "active": 120, "pending": 8 },
-  "hotness":  { "hot": 12, "warm": 45, "cold": 71 },
-  "stale":    { "directories": 5, "oldestHours": 18 },
+  "byCategory": { "preferences": 42, "entities": 31, "events": 24, "experiences": 18, "rules": 13 },
+  "hotness": { "hot": 12, "warm": 45, "cold": 71 },
+  "staleness": { "notAccessed7d": 50, "notAccessed30d": 20, "oldestMemoryAgeDays": 90 },
   "avgSizeBytes": 1840
 }
 ```
+
+**只统计当前身份可见的记忆**（`node_permission` 上 allow 且无 deny 的 `context_type =
+'memory'` 节点，§12.3 的物化表）。全库视角看 `GET /health` 的 `index.totalNodes`——
+那是运维的「库有多大」，与「我能看到多少、冷热如何」是两个问题。
 
 `GET /api/v1/stats/sessions/{id}`：
 
@@ -2794,7 +2797,9 @@ comem_llm_errors_total{purpose, code}
 }
 ```
 
-**热度的算法**：`sigmoid(log1p(activeCount)) × exp(-ln2 × ageHours / halfLifeHours)`。`activeCount` 是记忆被检索命中并注入的次数，`halfLifeHours` 默认 168（一周）。分桶：≥0.7 热、≥0.3 温、其余冷。
+**热度的算法**：`sigmoid(log1p(activeCount)) × exp(-ln2 × ageHours / halfLifeHours)`。`activeCount` 是记忆被检索命中并注入的次数，`halfLifeHours` 默认 168（一周）。分桶：≥0.7 热、≥0.3 温、其余冷。实现是 `domain/hotness.ts` 的 `hotnessScore` / `hotnessTier`，检索热路径与本端点共用同一份——不另造第二套阈值。
+
+**陈旧线（7 天 / 30 天）的来源**：7 天 = 与热度默认半衰期同一个数（过了半衰期权重减半，正是「该被想起来」的临界）；30 天 = 运维决定「一个月没碰就该清」的常见保守线。两者是经验值，不是测量结果；要调改 `stats.ts` 的 `STALE_DAYS_7` / `STALE_DAYS_30`。`oldestMemoryAgeDays` 用 `MIN(updated_at)`（`node` 表没有 `created_at`，`updated_at` 最小即存在最久的记忆；记忆被编辑会刷新它，此时「最老」指内容最老的）。
 
 **`weight` 默认 0 时不影响排序**：热度是治理指标（「哪些记忆该清理」），不是检索指标。混进排序会让老记忆永远赢，新记忆永远出不来。这一档不查 `node.access_count`，`hotness` 恒为 `null`（「没算」），与「算出来是 0」（从没被访问过）不是一回事。
 

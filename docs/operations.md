@@ -1281,6 +1281,47 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 
 `/health` 与 `/metrics` 同时挂在根路径与 `/api/v1` 下，两处都能抓（§17.1）。
 
+### `/stats/memories`
+
+`GET /api/v1/stats/memories` 回答「哪些记忆冷了、哪些很久没碰、最老的多久」。这是
+治理指标：用来决定清理谁，不参与检索排序（§17.5）。
+
+**只统计当前身份可见的记忆**（`node_permission` 上 allow 且无 deny 的 `context_type =
+'memory'` 节点）。换一个 `x-comem-subject` 就只看得到那个主体有权限的那些——跨用户
+统计是信息泄露。全库总量看 `GET /health` 的 `index.totalNodes`，两者回答不同问题。
+
+```console
+$ curl -s http://127.0.0.1:1933/api/v1/stats/memories | jq
+{
+  "status": "ok",
+  "result": {
+    "total": 4,
+    "byCategory": { "preferences": 1, "entities": 1, "rules": 1, "events": 1 },
+    "hotness": { "cold": 2, "warm": 1, "hot": 1 },
+    "staleness": { "notAccessed7d": 3, "notAccessed30d": 2, "oldestMemoryAgeDays": 90 },
+    "avgSizeBytes": 100
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `total` | 当前身份可见的记忆文件数 |
+| `byCategory` | 按 `memory_type` 分布（profile / preferences / entities / events / identity / soul / experiences / rules）。`memory_type` 为 `null` 的行不计入 |
+| `hotness.cold` / `warm` / `hot` | 热度分档人数。分档用 `domain/hotness.ts` 的 `hotnessScore` + `hotnessTier`（`≥0.7` 热、`≥0.3` 温、其余冷） |
+| `staleness.notAccessed7d` | `last_accessed_at` 距今 ≥ 7 天，或从没访问过的条数 |
+| `staleness.notAccessed30d` | 同上，阈值 30 天。「从没访问过」同时计入 7d 与 30d（它比任何「N 天没碰」都更该清） |
+| `staleness.oldestMemoryAgeDays` | 最老记忆（`MIN(updated_at)`）距今天数。空库为 `null`（「没有」不是 0 天） |
+| `avgSizeBytes` | 可见记忆的平均正文字节数，估算清理能省多少磁盘 |
+
+**热度的算法**：`sigmoid(log1p(access_count)) × exp(-ln2 × ageDays / halfLifeDays)`，
+半衰期取 `telemetry.hotness.halfLifeHours`（默认 168 小时 = 一周）。与 §17.5 的排序
+加权是同一个函数，只是这个端点不排序、只分桶。
+
+**索引**：该聚合对 `context_type = 'memory'` 的过滤已由现有的 `node_scope(scope,
+context_type)` 索引服务（`EXPLAIN QUERY PLAN` 显示 `SEARCH n USING INDEX node_scope`）；
+加覆盖索引反而更慢（整表聚合下顺序扫描优于索引随机回表），所以**不新增索引**。
+
 ## 检索质量评估
 
 `pnpm eval` 在临时数据根里跑一份带标注的数据集，给出各引擎的 Recall / MRR / NDCG

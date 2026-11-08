@@ -43,6 +43,7 @@ import { createResourceRoutes } from './resources.js';
 import { createSearchRoutes } from './search.js';
 import { createSessionRoutes } from './sessions.js';
 import { createSkillRoutes } from './skills.js';
+import { createStatsRoutes, type MemoryStatsAccess } from './stats.js';
 import type { TaskQueryStore } from './tasks.js';
 import { createTaskRoutes } from './tasks.js';
 import { createTelemetryRoutes } from './telemetry.js';
@@ -89,6 +90,11 @@ export interface HttpRouteServices {
   /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
   readonly adminAccess: AdminAccess;
   /**
+   * 记忆健康度统计端口（`GET /stats/memories`，§17.5）。SQL 与 ACL 谓词由
+   * bootstrap 提供，`api/` 不碰 `adapters/`（§4.2）。
+   */
+  readonly memoryStats: MemoryStatsAccess;
+  /**
    * 服务图绑定的主体（`config.server.subject`，`createContainer` 的 `subject`
    * 可覆盖）。
    *
@@ -132,6 +138,7 @@ export function createHttpRouteGroups(
     createMemoryRoutes(services),
     createResourceRoutes(services),
     createSkillRoutes(services),
+    createStatsRoutes(services),
     createAdminRoutes(services),
     createAuthRoutes(services),
     createPromptRoutes(services),
