@@ -33,6 +33,7 @@ function input(overrides: Partial<GroupInput> = {}): GroupInput {
     id: 'eng',
     displayName: 'Engineering',
     description: '平台工程组',
+    ownerUserId: null,
     ...overrides,
   };
 }
@@ -60,6 +61,7 @@ describe('create / get', () => {
       id: 'eng',
       displayName: 'Engineering',
       description: '平台工程组',
+      ownerUserId: null,
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     });
@@ -108,6 +110,16 @@ describe('list / update / delete / count', () => {
 
   it('update 不存在返回 null', () => {
     expect(repository.update('missing', { displayName: 'X' }, NOW)).toBeNull();
+  });
+
+  it('setOwner 写 owner 并推进 updated_at；不存在的组返回 null', () => {
+    repository.create(input(), NOW);
+
+    const updated = repository.setOwner('eng', 'alice', LATER);
+
+    expect(updated?.ownerUserId).toBe('alice');
+    expect(updated?.updatedAt).toBe(LATER.toISOString());
+    expect(repository.setOwner('missing', 'alice', NOW)).toBeNull();
   });
 
   it('delete 返回行数，count 反映当前行数', () => {

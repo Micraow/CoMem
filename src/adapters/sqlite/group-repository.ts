@@ -43,6 +43,7 @@ const GROUP_COLUMN_NAMES = [
   'id',
   'display_name',
   'description',
+  'owner_user_id',
   'created_at',
   'updated_at',
 ] as const;
@@ -92,6 +93,7 @@ function toGroupRow(row: Record<string, SQLOutputValue>): Group {
     id: text(row['id']),
     displayName: text(row['display_name']),
     description: nullableText(row['description']),
+    ownerUserId: nullableText(row['owner_user_id']),
     createdAt: text(row['created_at']),
     updatedAt: text(row['updated_at']),
   };
@@ -124,7 +126,14 @@ export class GroupRepository {
           .prepare(
             `INSERT INTO app_group (${GROUP_COLUMNS}) VALUES (${placeholders(GROUP_COLUMN_NAMES.length)})`,
           )
-          .run(group.id, group.displayName, group.description, timestamp, timestamp);
+          .run(
+            group.id,
+            group.displayName,
+            group.description,
+            group.ownerUserId,
+            timestamp,
+            timestamp,
+          );
       });
     } catch (error) {
       if (isDuplicateKey(error)) {
@@ -189,6 +198,28 @@ export class GroupRepository {
       return null;
     }
     this.#logger.debug('组已更新', { groupId: id });
+    return this.get(id);
+  }
+
+  /**
+   * 改组的 owner，不存在的组返回 `null`。
+   *
+   * 单独一个方法而不是塞进 `update` 的补丁：owner 变更还要同步改写组根的
+   * `.acl.json`（`AclService.setGroupOwner`），混在「改显示名」里会让调用方
+   * 以为它只是一次目录行更新。
+   */
+  setOwner(id: string, userId: string, now: Date): Group | null {
+    const changed = Number(
+      withWriteTransaction(this.#db, () =>
+        this.#db
+          .prepare('UPDATE app_group SET owner_user_id = ?, updated_at = ? WHERE id = ?')
+          .run(userId, now.toISOString(), id).changes,
+      ),
+    );
+    if (changed === 0) {
+      return null;
+    }
+    this.#logger.debug('组 owner 已更新', { groupId: id, ownerUserId: userId });
     return this.get(id);
   }
 

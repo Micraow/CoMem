@@ -205,15 +205,22 @@ export class IdentityService {
       readonly id: string;
       readonly displayName: string;
       readonly description?: string | null;
+      /** 创建者；根预置会用它的 `manage` 权限（§12.6）。缺省 `null`（还没人管）。 */
+      readonly ownerUserId?: string | null;
     },
     now: Date = new Date(),
   ): Group {
     const id = assertValidGroupId(input.id);
     const group = this.#groups.create(
-      { id, displayName: input.displayName, description: input.description ?? null },
+      {
+        id,
+        displayName: input.displayName,
+        description: input.description ?? null,
+        ownerUserId: input.ownerUserId ?? null,
+      },
       now,
     );
-    this.#logger.info('组已创建', { groupId: group.id });
+    this.#logger.info('组已创建', { groupId: group.id, ownerUserId: group.ownerUserId });
     return group;
   }
 
@@ -236,6 +243,30 @@ export class IdentityService {
       throw groupNotFound(id);
     }
     this.#logger.info('组已更新', { groupId: id, fields: Object.keys(patch) });
+    return updated;
+  }
+
+  /**
+   * 改组 owner。组或用户不存在抛 `NOT_FOUND`。
+   *
+   * 只写 `app_group.owner_user_id`：组根的 `.acl.json` 由
+   * `AclService.setGroupOwner` 同步（那是权限的真相）。两个写入不在一个事务里
+   * ——文件系统与 SQLite 没有跨介质事务，顺序与 `setAcl` 相同：先写文件，再写
+   * 目录行。
+   */
+  setGroupOwner(id: string, userId: string, now: Date = new Date()): Group {
+    if (this.#groups.get(id) === null) {
+      throw groupNotFound(id);
+    }
+    if (this.#users.get(userId) === null) {
+      throw userNotFound(userId);
+    }
+    const updated = this.#groups.setOwner(id, userId, now);
+    if (updated === null) {
+      // 类型上不可达：上面已经确认组存在。走到这里说明数据库被改坏了。
+      throw groupNotFound(id);
+    }
+    this.#logger.info('组 owner 已更新', { groupId: id, ownerUserId: userId });
     return updated;
   }
 

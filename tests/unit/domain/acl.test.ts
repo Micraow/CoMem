@@ -117,7 +117,7 @@ describe('effectiveAcl', () => {
 
   it('user 根预置：owner 得到 manage，其他用户没有权限', () => {
     const root = Uri.parse('comem://user/alice');
-    const chain = [node(root.toString(), { owner: 'user:alice', entries: rootPreset(root) })];
+    const chain = [node(root.toString(), { owner: 'user:alice', entries: rootPreset(root).entries })];
 
     expect(sortedLevels(effectiveAcl(chain, 'user:alice'))).toEqual([7]);
     expect(sortedLevels(effectiveAcl(chain, 'user:bob'))).toEqual([]);
@@ -125,7 +125,7 @@ describe('effectiveAcl', () => {
 
   it('group 根预置：组员得到 write，组外用户没有权限', () => {
     const root = Uri.parse('comem://group/eng');
-    const chain = [node(root.toString(), { owner: 'user:owner', entries: rootPreset(root) })];
+    const chain = [node(root.toString(), { owner: 'user:owner', entries: rootPreset(root).entries })];
 
     expect(sortedLevels(effectiveAcl(chain, 'group:eng'))).toEqual([3]);
     expect(sortedLevels(effectiveAcl(chain, 'user:alice'))).toEqual([]);
@@ -325,15 +325,39 @@ describe('canModifyAcl', () => {
 
 describe('rootPreset', () => {
   it('user 根预置 owner = manage', () => {
-    expect(rootPreset(Uri.parse('comem://user/alice'))).toEqual([
-      { principal: 'user:alice', level: 7, effect: 'allow' },
-    ]);
+    expect(rootPreset(Uri.parse('comem://user/alice'))).toEqual({
+      entries: [{ principal: 'user:alice', level: 7, effect: 'allow' }],
+      ownerMissing: false,
+    });
   });
 
-  it('group 根预置 group = write', () => {
-    expect(rootPreset(Uri.parse('comem://group/eng'))).toEqual([
-      { principal: 'group:eng', level: 3, effect: 'allow' },
-    ]);
+  it('group 根预置 group = write；没有 owner 时 ownerMissing', () => {
+    expect(rootPreset(Uri.parse('comem://group/eng'))).toEqual({
+      entries: [{ principal: 'group:eng', level: 3, effect: 'allow' }],
+      ownerMissing: true,
+    });
+  });
+
+  it('group 根有 owner 时预置两条：owner 恒 manage，组员 write', () => {
+    expect(rootPreset(Uri.parse('comem://group/eng'), { ownerUserId: 'alice' })).toEqual({
+      entries: [
+        { principal: 'user:alice', level: 7, effect: 'allow' },
+        { principal: 'group:eng', level: 3, effect: 'allow' },
+      ],
+      ownerMissing: false,
+    });
+  });
+
+  it('groupDefaultLevel 只作用于组条目，不把 owner 的 manage 降级', () => {
+    expect(
+      rootPreset(Uri.parse('comem://group/eng'), { ownerUserId: 'alice', groupLevel: 1 }),
+    ).toEqual({
+      entries: [
+        { principal: 'user:alice', level: 7, effect: 'allow' },
+        { principal: 'group:eng', level: 1, effect: 'allow' },
+      ],
+      ownerMissing: false,
+    });
   });
 });
 

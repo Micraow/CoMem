@@ -1934,8 +1934,11 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 | `write` / `edit` / `mkdir` | write |
 | `rm` / `mv` | manage |
 | `getAcl` / `setAcl` | manage |
+| 改组 owner（`POST /admin/groups/{id}/owner`） | 当前 owner，或组根 manage |
 
 **列表语义**：无权限节点完全不出现，不返回「存在但无权」的占位。文件名和摘要本身就是信息。
+
+管理面的组 owner 变更不能只看「自己根的 manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能接管别人的组。判定改用组根的主体集合。
 
 ### 12.5 组空间的三层共享
 
@@ -1951,10 +1954,14 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 
 | 根 | 预置 | 谁写 |
 |---|---|---|
-| `comem://user/{uid}/` | `user:{uid} = manage` | 启动时给配置的主体预置（`bootstrap/container.ts`） |
-| `comem://group/{gid}/` | `group:{gid} = write` | 创建组时预置（`POST /admin/groups` → `AclService.ensureRootPreset`） |
+| `comem://user/{uid}/` | `user:{uid} = manage` | 启动时物化（owner 规则，`bootstrap/container.ts`） |
+| `comem://group/{gid}/` | `user:{owner} = manage` + `group:{gid} = write` | 创建组时预置（`POST /admin/groups` → `AclService.ensureRootPreset`），owner 是创建者 |
 
-两个预置都是普通 ACL 条目，可以改（owner 那一条除外）。写死会让组空间无法降级成只读。
+两个预置都是普通 ACL 条目，可以改（owner 那一条除外）。写死会让组空间无法降级成只读。组的默认级别来自 `acl.groupDefaultLevel`（`write` / `read`），只作用于 `group:{gid}` 那一条，不把 owner 的 `manage` 一起降级。
+
+**组必须有 owner。** 组根只有 `group:{gid} = write`（级别 3）时，没有任何主体能求 `manage`（级别 7）——`levelSatisfies(3, 7)` 为 false，`setAcl` / `getAcl` 永远 403，组内成员既不能给同组另一人开只读，也不能设 `restricted` 或建子目录授权。owner 记在 `app_group.owner_user_id`，是「这个组归谁管」的权威来源；owner 的 `manage` 仍然要作为条目真的写进 `.acl.json`，因为求权只查物化表。owner 为 `NULL` 的组保持只有 `group:{gid} = write`，`ensureRootPreset` 的返回值用 `ownerMissing` 报告这个状态。
+
+改 owner 走 `POST /api/v1/admin/groups/{id}/owner`（body `{userId}`），只有当前 owner 或组根的 `manage` 持有者能改。改 owner 会同步替换组根 `.acl.json` 里的 `user:{owner} = manage` 条目，保留其它条目与 `mode`。**当前 owner 单独成立**：迁移回填的存量组有 `owner_user_id` 但没有 manage 条目（SQL 迁移写不了文件），owner 调一次这个端点即可补齐预置；否则这条修复路径会被自己的求权挡住。
 
 **为什么不统一放 bootstrap。** 配置里声明的用户根是启动期就能确定的，组不是：控制台可以在运行期建组，而根预置必须在组 ID 存在之后写。把组根留给 bootstrap，新建的组就没有任何可授权的节点，成员也拿不到可读范围——这个组是死的。
 

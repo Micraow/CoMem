@@ -80,12 +80,15 @@ const MEMBER_ROLES = ['owner', 'member'] as const;
 export type AdminIdentity = Pick<
   HttpRouteServices['identity'],
   | 'createUser'
+  | 'getUser'
   | 'listUsers'
   | 'updateUser'
   | 'deleteUser'
   | 'createGroup'
+  | 'getGroup'
   | 'listGroups'
   | 'updateGroup'
+  | 'setGroupOwner'
   | 'deleteGroup'
   | 'addMember'
   | 'removeMember'
@@ -118,7 +121,10 @@ export interface AdminAccess {
  * 用 `Pick` 而不是整个 `AclService`：路由只需要「建根预置」与「按主体撤权」两个
  * 方法。`AclService` 结构上满足它。
  */
-export type AdminAcl = Pick<HttpRouteServices['acl'], 'ensureRootPreset' | 'purgePrincipal'>;
+export type AdminAcl = Pick<
+  HttpRouteServices['acl'],
+  'ensureRootPreset' | 'setGroupOwner' | 'purgePrincipal'
+>;
 
 export type AdminRouteServices = Pick<
   HttpRouteServices,
@@ -186,6 +192,11 @@ function ownRootOf(request: FastifyRequest): Uri {
   const context = requestContextOf(request);
   const principal = parsePrincipal(context.subject);
   return Uri.parse(`comem://user/${principal.id}`);
+}
+
+/** 当前主体的用户 ID（`user:{uid}` 的 uid）。中间件已经保证 subject 是 user。 */
+function callerUserIdOf(request: FastifyRequest): string {
+  return parsePrincipal(requestContextOf(request).subject).id;
 }
 
 async function assertManage(request: FastifyRequest, authorizer: Authorizer): Promise<void> {
@@ -375,14 +386,19 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const description = optionalNullableString(body, 'description');
         await assertManage(request, authorizer);
 
+        const ownerUserId = callerUserIdOf(request);
         const group = identity.createGroup({
           id,
           displayName,
           ...(description === undefined ? {} : { description }),
+          ownerUserId,
         });
         // 根预置必须在建组之后：`ensureRootPreset` 只接受根 URI，而根要由组 ID
         // 拼出来。不补这一步，组空间没有任何可授权的节点，成员也拿不到可读范围。
-        await acl.ensureRootPreset(Uri.parse(`comem://group/${group.id}`));
+        //
+        // owner 就是创建者：组根只有 `group:{gid} = write` 时没有任何主体能求
+        // manage，`setAcl` / `getAcl` 永远 403（§12.2 不变量 3）。
+        await acl.ensureRootPreset(Uri.parse(`comem://group/${group.id}`), ownerUserId);
         return ok({ group });
       });
 
@@ -398,6 +414,43 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           ...(description === undefined ? {} : { description }),
         });
         return ok({ group });
+      });
+
+      /**
+       * 改组的 owner。
+       *
+       * **只有当前 owner 或组根的 manage 持有者能改。** 不能只看「自己根的
+       * manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能
+       * 接管别人的组。
+       *
+       * 允许「当前 owner」单独成立是为迁移回填的存量组留修复路径：它们的
+       * `owner_user_id` 有值，但 `.acl.json` 里还没有 `user:{owner} = manage`
+       * 条目（SQL 迁移写不了文件）。owner 调一次本端点即可把预置补齐。
+       */
+      app.post<{ Params: { id: string }; Body: unknown }>('/groups/:id/owner', async (request) => {
+        const id = assertValidGroupId(request.params.id);
+        const body = requireRecord(request.body, 'admin/groups/:id/owner');
+        const userId = assertValidUserId(requireString(body, 'userId'));
+        const context = requestContextOf(request);
+
+        const group = identity.getGroup(id);
+        if (group === null) {
+          throw new ComemError('NOT_FOUND', `组不存在：${id}`, { groupId: id });
+        }
+        if (identity.getUser(userId) === null) {
+          throw new ComemError('NOT_FOUND', `用户不存在：${userId}`, { userId });
+        }
+
+        const groupRoot = Uri.parse(`comem://group/${id}`);
+        if (group.ownerUserId !== callerUserIdOf(request)) {
+          // 不是当前 owner 时按组根的 manage 求权（Service 层会再求一次纵深防御
+          // 之外的那部分由 `setGroupOwner` 跳过，原因见它的注释）。
+          await authorizer.assert(groupRoot, MANAGE, context.principals);
+        }
+
+        await acl.setGroupOwner(groupRoot, group.ownerUserId, userId);
+        const updated = identity.setGroupOwner(id, userId);
+        return ok({ group: updated });
       });
 
       app.delete<{ Params: { id: string } }>('/groups/:id', async (request) => {

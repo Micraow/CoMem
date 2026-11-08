@@ -56,8 +56,14 @@ import type {
   PermissionRepository,
   PermissionRow,
 } from '../adapters/sqlite/permission-repository.js';
-import { effectiveAcl, levelSatisfies, parsePrincipal, rootPreset } from '../domain/acl.js';
-import type { AclEntry, AclLevel, AclMode, AclNode } from '../domain/acl.js';
+import {
+  effectiveAcl,
+  levelSatisfies,
+  parsePrincipal,
+  rootPreset,
+  userPrincipal,
+} from '../domain/acl.js';
+import type { AclEntry, AclLevel, AclMode, AclNode, RootPreset } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { NodeKind } from '../domain/node.js';
@@ -426,23 +432,14 @@ export class AclService implements Authorizer {
     });
     const file: AclFile = { mode: acl.mode, entries };
 
-    // 求值只读文件，先算完再落盘：这样文件写失败时没有任何物化副作用。
-    const permissions = await this.#materialize(uri, file);
-    const entryRows = toEntryRows(uri, entries);
-
-    await this.#aclFile.write(uri, file);
-
-    this.#runInTransaction(() => {
-      this.#permissions.replaceSubtree(uri.toString(), permissions);
-      this.#permissions.replaceEntries(uri.toString(), entryRows);
-    });
+    const permissions = await this.#writeAcl(uri, file);
 
     this.#logger.info('ACL 已更新', {
       uri: uri.toString(),
       subject,
       mode: file.mode,
       entries: file.entries.length,
-      permissions: permissions.length,
+      permissions,
     });
   }
 
@@ -450,10 +447,21 @@ export class AclService implements Authorizer {
    * 新建根时写预置（§12.6）。
    *
    * user 根 → `user:{uid} = manage`；group 根 → `group:{gid} = write`（可由
-   * `groupDefaultLevel` 降为 read）。幂等：已有 `.acl.json` 就不覆盖，否则每次
-   * 启动都会把管理员改过的根权限冲掉。
+   * `groupDefaultLevel` 降为 read），组有 owner 时再预置 `user:{owner} = manage`。
+   *
+   * **判断依据是文件里的条目，不是文件是否存在。** 删组时会把 `.acl.json` 写成
+   * `{mode:'inherit', entries:[]}`（`restricted` 语义需要这个空文件），重建同 ID
+   * 的组时文件仍然在。按存在性跳过预置的话，新组根没有任何 `group:{gid}` 授权，
+   * 组空间对所有人永久空 ACL。user 根保持「文件存在就跳过」：user 的 manage 来自
+   * owner 规则（URI 根标识），不依赖条目。
+   *
+   * 幂等：组根已经有 `group:{gid}` 条目就不覆盖，否则每次启动都会把管理员调过的
+   * 根权限冲掉。
+   *
+   * 返回的 `ownerMissing` 告诉调用方「这个组还没有人管」——group 作用域没有 owner
+   * 时只有 `group:{gid} = write`，没有主体能求 manage，组空间无法改 ACL。
    */
-  async ensureRootPreset(uri: Uri): Promise<void> {
+  async ensureRootPreset(uri: Uri, ownerUserId: string | null = null): Promise<RootPreset> {
     if (!uri.isRoot) {
       throw new ComemError(
         'INVALID_ARGUMENT',
@@ -461,34 +469,101 @@ export class AclService implements Authorizer {
         { uri: uri.toString() },
       );
     }
-    if (await this.#aclFile.exists(uri)) {
-      this.#logger.debug('根预置已存在，跳过', { uri: uri.toString() });
-      return;
+
+    const preset = rootPreset(uri, {
+      ownerUserId,
+      groupLevel: this.#groupDefaultLevel,
+    });
+    if (preset.ownerMissing) {
+      this.#logger.warn('组根预置没有 owner，组空间暂时无人可管理', {
+        uri: uri.toString(),
+        hint: 'POST /api/v1/admin/groups/{id}/owner 可以指定 owner。',
+      });
     }
 
-    const entries: AclFileEntry[] = rootPreset(uri).map((entry) => ({
-      principal: entry.principal,
-      // 组根的预置级别来自配置（§18）；user 根恒 manage，不读配置。
-      level: levelName(uri.scope === 'group' ? this.#groupDefaultLevel : entry.level),
-      effect: entry.effect,
-    }));
-    const file: AclFile = { mode: 'inherit', entries };
+    const existing = await this.#aclFile.read(uri);
+    if (existing !== null) {
+      this.#logger.debug('根预置已存在，跳过', { uri: uri.toString() });
+      return preset;
+    }
 
-    const permissions = await this.#materialize(uri, file);
-    const entryRows = toEntryRows(uri, entries);
-
-    await this.#aclFile.write(uri, file);
-
-    this.#runInTransaction(() => {
-      this.#permissions.replaceSubtree(uri.toString(), permissions);
-      this.#permissions.replaceEntries(uri.toString(), entryRows);
-    });
+    const file: AclFile = {
+      mode: 'inherit',
+      entries: preset.entries.map((entry) => ({
+        principal: entry.principal,
+        level: levelName(entry.level),
+        effect: entry.effect,
+      })),
+    };
+    const permissions = await this.#writeAcl(uri, file);
 
     this.#logger.info('根预置已写入', {
       uri: uri.toString(),
       scope: uri.scope,
-      level: entries[0]?.level ?? 'read',
-      permissions: permissions.length,
+      ownerMissing: preset.ownerMissing,
+      entries: file.entries.length,
+      permissions,
+    });
+    return preset;
+  }
+
+  /**
+   * 改组 owner 的根预置：把 `user:{previousOwner} = manage` 换成
+   * `user:{nextOwner} = manage`。
+   *
+   * **这里不再求一次 manage。** 授权判定在路由：当前 owner（`owner_user_id`）
+   * 或组根 manage 持有者可以改。迁移回填的 owner 在 `.acl.json` 里通常还没有
+   * manage 条目（SQL 迁移写不了文件），如果这里再求一次 manage，它会被自己
+   * 的组挡在外面——「改 owner」这条唯一的修复路径就断了。
+   *
+   * 保留其他条目与 `mode`：owner 变更不应该顺手把组根的 `restricted` 或别人
+   * 的授权冲掉。组条目已存在时保留它的级别（管理员可能把它降成了 read）。
+   */
+  async setGroupOwner(
+    uri: Uri,
+    previousOwnerId: string | null,
+    nextOwnerId: string,
+  ): Promise<void> {
+    if (uri.scope !== 'group' || !uri.isRoot) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        `组 owner 预置只能写在组根 URI 上：${uri.toString()}`,
+        { uri: uri.toString() },
+      );
+    }
+    parsePrincipal(userPrincipal(nextOwnerId));
+
+    const previous = await this.#aclFile.read(uri);
+    const preset = rootPreset(uri, {
+      ownerUserId: nextOwnerId,
+      groupLevel: this.#groupDefaultLevel,
+    });
+    const previousOwnerPrincipal =
+      previousOwnerId === null ? null : userPrincipal(previousOwnerId);
+    const nextOwnerPrincipal = userPrincipal(nextOwnerId);
+
+    const entries: AclFileEntry[] = (previous?.entries ?? []).filter(
+      (entry) =>
+        entry.principal !== previousOwnerPrincipal && entry.principal !== nextOwnerPrincipal,
+    );
+    for (const entry of preset.entries) {
+      // 已经有的条目保留原级别：管理员把组根降成 read 之后改 owner 不应该恢复成 write。
+      if (entries.some((candidate) => candidate.principal === entry.principal)) {
+        continue;
+      }
+      entries.push({
+        principal: entry.principal,
+        level: levelName(entry.level),
+        effect: entry.effect,
+      });
+    }
+    const file: AclFile = { mode: previous?.mode ?? 'inherit', entries };
+
+    await this.#writeAcl(uri, file);
+    this.#logger.info('组 owner 预置已更新', {
+      uri: uri.toString(),
+      previousOwnerId,
+      nextOwnerId,
     });
   }
 
@@ -649,6 +724,27 @@ export class AclService implements Authorizer {
         { uri: uri.toString() },
       );
     }
+  }
+
+  /**
+   * 写 `.acl.json`（真相）并重算整棵子树的 `node_permission` 与反查表。
+   *
+   * `setAcl` / `ensureRootPreset` / `setGroupOwner` 共用这一条顺序：先求值、再写
+   * 文件、最后在事务里替换两张派生表。文件写失败时事务根本不会开始，物化表保持
+   * 旧值（见文件头「写文件的顺序」）。
+   */
+  async #writeAcl(uri: Uri, file: AclFile): Promise<number> {
+    // 求值只读文件，先算完再落盘：这样文件写失败时没有任何物化副作用。
+    const permissions = await this.#materialize(uri, file);
+    const entryRows = toEntryRows(uri, file.entries);
+
+    await this.#aclFile.write(uri, file);
+
+    this.#runInTransaction(() => {
+      this.#permissions.replaceSubtree(uri.toString(), permissions);
+      this.#permissions.replaceEntries(uri.toString(), entryRows);
+    });
+    return permissions.length;
   }
 
   /**

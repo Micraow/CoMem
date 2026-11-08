@@ -239,32 +239,72 @@ export function checkAction(
   return false;
 }
 
+export interface RootPresetOptions {
+  /**
+   * 组的所有者。为空时组根只有 `group:{gid} = write`——这个组还没有人管。
+   *
+   * user 根忽略这个字段：user 空间的所有者由 URI 根标识推导（§12.6），不需要
+   * 额外记录。
+   */
+  readonly ownerUserId?: string | null;
+  /** 组的默认级别；§18 的 `acl.groupDefaultLevel` 可降为 read。默认 write。 */
+  readonly groupLevel?: AclLevel;
+}
+
+export interface RootPreset {
+  readonly entries: readonly AclEntry[];
+  /**
+   * group 作用域下没有 owner：这个组还没有人管。
+   *
+   * 调用方（`AclService.ensureRootPreset`）用它在日志里提示「组空间暂时无人
+   * 可管理」；user 根恒为 false（user 根的所有者由 URI 推导）。
+   */
+  readonly ownerMissing: boolean;
+}
+
 /**
  * 根预置（§12.6）。
  *
- * user 根的所有者得到 manage，group 根的全组得到 write。两个预置都是普通 ACL 条目，
- * 只有 user 根 owner 那一条例外（owner 恒 manage，改不了）。
+ * user 根的所有者得到 manage。group 根有两条：owner（如果存在）得到 manage，
+ * 全组得到 write。没有 owner 的组只有一条——成员之间可以读写，但没有人能改
+ * ACL，这正是「这个组还没人管」的状态，由 `ownerMissing` 告诉调用方。
+ *
+ * 两个预置都是普通 ACL 条目，只有 user 根 owner 那一条例外（owner 恒 manage，
+ * 改不了）。group 的 owner 条目不是隐式规则：它必须真的写进 `.acl.json`，
+ * 否则 `check(N, manage)` 只查物化表，看不到 owner 这个身份。
  *
  * 调用方传入根 URI（`uri.isRoot` 为 true）；本函数只读取 scope 与 rootId。
  */
-export function rootPreset(uri: Uri): readonly AclEntry[] {
+export function rootPreset(uri: Uri, options: RootPresetOptions = {}): RootPreset {
   if (uri.scope === 'user') {
-    return [
-      {
-        principal: formatPrincipal({ kind: 'user', id: uri.rootId }),
-        level: MANAGE_LEVEL,
-        effect: 'allow',
-      },
-    ];
+    return {
+      entries: [
+        {
+          principal: formatPrincipal({ kind: 'user', id: uri.rootId }),
+          level: MANAGE_LEVEL,
+          effect: 'allow',
+        },
+      ],
+      ownerMissing: false,
+    };
   }
 
-  return [
-    {
-      principal: formatPrincipal({ kind: 'group', id: uri.rootId }),
-      level: WRITE_LEVEL,
+  const entries: AclEntry[] = [];
+  const ownerUserId = options.ownerUserId ?? null;
+  if (ownerUserId !== null && ownerUserId !== '') {
+    entries.push({
+      principal: formatPrincipal({ kind: 'user', id: ownerUserId }),
+      level: MANAGE_LEVEL,
       effect: 'allow',
-    },
-  ];
+    });
+  }
+  entries.push({
+    principal: formatPrincipal({ kind: 'group', id: uri.rootId }),
+    level: options.groupLevel ?? WRITE_LEVEL,
+    effect: 'allow',
+  });
+
+  return { entries, ownerMissing: ownerUserId === null || ownerUserId === '' };
 }
 
 /** 只有 manage 能改 ACL（§12.2 第 3 条）。`setAcl` 的前置检查。 */

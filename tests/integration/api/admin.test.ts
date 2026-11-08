@@ -611,20 +611,29 @@ describe('purgePrincipal 的事务边界', () => {
 });
 
 describe('组的根预置', () => {
-  it('建组后 comem://group/{gid}/ 有 ACL 根，成员有可读范围', async () => {
+  it('建组后 comem://group/{gid}/ 有 ACL 根，创建者拿到 manage，成员有可读范围', async () => {
     await createGroup('eng');
 
     const aclPath = join(dataDir, 'group', 'eng', '.acl.json');
     expect(JSON.parse(await readFile(aclPath, 'utf8'))).toEqual({
       mode: 'inherit',
-      entries: [{ principal: 'group:eng', level: 'write', effect: 'allow' }],
+      entries: [
+        { principal: 'group:eng', level: 'write', effect: 'allow' },
+        { principal: 'user:local', level: 'manage', effect: 'allow' },
+      ],
     });
 
-    const row = container.db
+    const groupRow = container.db
       .prepare('SELECT level, effect FROM node_permission WHERE node_uri = ? AND principal = ?')
       .get('comem://group/eng', 'group:eng');
-    expect(row?.['effect']).toBe('allow');
-    expect(Number(row?.['level'])).toBe(3);
+    expect(groupRow?.['effect']).toBe('allow');
+    expect(Number(groupRow?.['level'])).toBe(3);
+
+    const ownerRow = container.db
+      .prepare('SELECT level, effect FROM node_permission WHERE node_uri = ? AND principal = ?')
+      .get('comem://group/eng', 'user:local');
+    expect(ownerRow?.['effect']).toBe('allow');
+    expect(Number(ownerRow?.['level'])).toBe(7);
 
     // 成员能读到的前提是「组主体在根上有授权」+「成员关系存在」。
     await inject({
@@ -639,6 +648,97 @@ describe('组的根预置', () => {
         'local',
       ),
     ).toBe(1);
+  });
+});
+
+/**
+ * 回归：组根必须有一个 manage 持有者（架构文档 §12.2 不变量 3、§12.6）。
+ *
+ * 修复前组根只有 `group:{gid} = write`，`levelSatisfies(3, 7)` 为 false，
+ * `setAcl` / `getAcl` 对组空间永远 403。
+ */
+describe('组 owner', () => {
+  const GROUP_ROOT = Uri.parse('comem://group/eng');
+  const LOCAL_PRINCIPALS = ['user:local', 'user:*'];
+
+  it('创建者能 setAcl；同组普通成员 setAcl 得到 403', async () => {
+    await createUser('alice');
+    await createGroup('eng');
+
+    expect(await container.services.acl.check(GROUP_ROOT, 7, LOCAL_PRINCIPALS)).toBe(true);
+    await container.services.acl.setAcl(
+      GROUP_ROOT,
+      {
+        mode: 'inherit',
+        entries: [{ principal: 'group:eng', level: 3, effect: 'allow' }],
+      },
+      'user:local',
+      LOCAL_PRINCIPALS,
+    );
+
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/members',
+      payload: { userId: 'alice' },
+    });
+    const alicePrincipals = ['user:alice', 'group:eng', 'user:*'];
+    expect(await container.services.acl.check(GROUP_ROOT, 3, alicePrincipals)).toBe(true);
+    expect(await container.services.acl.check(GROUP_ROOT, 7, alicePrincipals)).toBe(false);
+
+    await expect(
+      container.services.acl.setAcl(
+        GROUP_ROOT,
+        { mode: 'inherit', entries: [] },
+        'user:alice',
+        alicePrincipals,
+      ),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('改 owner：当前 owner 可以改，改完之后原 owner 失去 manage', async () => {
+    await createUser('alice');
+    await createGroup('eng');
+
+    const updated = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/admin/groups/eng/owner',
+        payload: { userId: 'alice' },
+      }),
+    );
+    expect((updated['group'] as Record<string, unknown>)['ownerUserId']).toBe('alice');
+
+    const aclPath = join(dataDir, 'group', 'eng', '.acl.json');
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string; readonly level: string }[];
+    };
+    expect(onDisk.entries).toEqual(
+      expect.arrayContaining([
+        { principal: 'user:alice', level: 'manage', effect: 'allow' },
+        { principal: 'group:eng', level: 'write', effect: 'allow' },
+      ]),
+    );
+    expect(onDisk.entries.some((entry) => entry.principal === 'user:local')).toBe(false);
+
+    // local 已经不是 owner，组根也没有 manage 条目 → 不能再改回去。
+    const denied = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/owner',
+      payload: { userId: 'local' },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(errorOf(denied)['code']).toBe('PERMISSION_DENIED');
+  });
+
+  it('owner 指向不存在的用户返回 404', async () => {
+    await createGroup('eng');
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/owner',
+      payload: { userId: 'missing' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(errorOf(response)['code']).toBe('NOT_FOUND');
   });
 });
 
@@ -681,7 +781,8 @@ describe('授权', () => {
       groupCount: () => 0,
     };
     const acl = {
-      ensureRootPreset: async () => {},
+      ensureRootPreset: async () => ({ entries: [], ownerMissing: false }),
+      setGroupOwner: async () => {},
       purgePrincipal: async () => 0,
     };
 

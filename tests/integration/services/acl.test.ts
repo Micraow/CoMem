@@ -14,7 +14,7 @@ import {
   type PermissionRow,
 } from '../../../src/adapters/sqlite/permission-repository.js';
 import { levelSatisfies } from '../../../src/domain/acl.js';
-import type { AclEntry, AclLevel, AclMode } from '../../../src/domain/acl.js';
+import type { AclEntry, AclLevel, AclMode, RootPreset } from '../../../src/domain/acl.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { NodeKind } from '../../../src/domain/node.js';
@@ -74,7 +74,7 @@ interface BoundAcl {
     acl: { readonly mode: AclMode; readonly entries: readonly AclEntry[] },
     subject: string,
   ): Promise<void>;
-  ensureRootPreset(uri: Uri): Promise<void>;
+  ensureRootPreset(uri: Uri, ownerUserId?: string | null): Promise<RootPreset>;
   materializeNode(uri: Uri): Promise<void>;
   purgePrincipal(principal: string): Promise<number>;
   resolvePrincipals(subject: string, groups: readonly string[]): readonly string[];
@@ -104,7 +104,7 @@ function createService(
     filterReadable: (uris) => acl.filterReadable(uris, principals),
     getAcl: (uri, requester) => acl.getAcl(uri, requester, principals),
     setAcl: (uri, input, requester) => acl.setAcl(uri, input, requester, principals),
-    ensureRootPreset: (uri) => acl.ensureRootPreset(uri),
+    ensureRootPreset: (uri, ownerUserId) => acl.ensureRootPreset(uri, ownerUserId),
     materializeNode: (uri) => acl.materializeNode(uri),
     purgePrincipal: (principal) => acl.purgePrincipal(principal),
     resolvePrincipals: (requester, requesterGroups) =>

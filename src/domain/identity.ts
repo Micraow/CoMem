@@ -43,6 +43,14 @@ export interface Group {
   readonly id: string;
   readonly displayName: string;
   readonly description: string | null;
+  /**
+   * 组的 owner（`user:{uid}` 的 uid）。`null` 表示还没有人管这个组。
+   *
+   * 这是「这个组归谁管」的权威来源，不参与 ACL 求值：owner 的 manage 权限是
+   * 组根 `.acl.json` 里的 `user:{owner} = manage` 条目（§12.6）。两者可能因为
+   * 手工改文件而不同步，此时以文件为准——`owner_user_id` 只决定「谁能改 owner」。
+   */
+  readonly ownerUserId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
