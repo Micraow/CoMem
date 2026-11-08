@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -26,6 +26,10 @@ import { Uri } from '../../../src/domain/uri.js';
 import { AclService } from '../../../src/services/acl.js';
 import type { Authorizer } from '../../../src/services/authorizer.js';
 import { IdentityService } from '../../../src/services/identity.js';
+import {
+  DEFAULT_RECALL_LEDGER_OPTIONS,
+  scopeKeyOf,
+} from '../../../src/services/recall-ledger.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
 
@@ -133,6 +137,7 @@ async function createAdminAppAs(subject: string): Promise<FastifyInstance> {
       authorizer: container.services.acl,
       adminAccess,
       acl: container.services.acl,
+      ledger: container.services.ledger,
     }).register,
     { prefix: '/admin' },
   );
@@ -1030,6 +1035,62 @@ describe('删组清空子树里的直接授权', () => {
   });
 });
 
+describe('删账号 / 组清掉召回账本', () => {
+  it('删账号后账本文件消失，重建同 ID 不再继承去重状态', async () => {
+    await createUser('alice');
+    const scopeKey = scopeKeyOf(Uri.parse('comem://user/alice'));
+    const delivered = 'comem://user/alice/memories/profile.md';
+    await container.services.ledger.record(
+      scopeKey,
+      'sess_1',
+      5,
+      [{ uri: delivered, detail: 'full' }],
+      DEFAULT_RECALL_LEDGER_OPTIONS,
+    );
+    expect(
+      await container.services.ledger.recentlyDelivered(
+        scopeKey,
+        'sess_1',
+        5,
+        DEFAULT_RECALL_LEDGER_OPTIONS,
+      ),
+    ).toEqual(new Set([delivered]));
+
+    const ledgerPath = join(dataDir, '_meta', 'recall', `${scopeKey}.recall_log.json`);
+    await expect(access(ledgerPath)).resolves.toBeUndefined();
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/users/alice' }));
+    await expect(access(ledgerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await createUser('alice');
+    expect(
+      await container.services.ledger.recentlyDelivered(
+        scopeKey,
+        'sess_1',
+        5,
+        DEFAULT_RECALL_LEDGER_OPTIONS,
+      ),
+    ).toEqual(new Set());
+  });
+
+  it('删组也清掉组作用域的账本', async () => {
+    await createGroup('eng');
+    const scopeKey = scopeKeyOf(Uri.parse('comem://group/eng'));
+    await container.services.ledger.record(
+      scopeKey,
+      'sess_1',
+      5,
+      [{ uri: 'comem://group/eng/memories/m1', detail: 'full' }],
+      DEFAULT_RECALL_LEDGER_OPTIONS,
+    );
+    const ledgerPath = join(dataDir, '_meta', 'recall', `${scopeKey}.recall_log.json`);
+    await expect(access(ledgerPath)).resolves.toBeUndefined();
+
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/groups/eng' }));
+    await expect(access(ledgerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
 describe('授权', () => {
   it('没有 manage 权限时 403', async () => {
     // 路由的授权在 owner 恒 manage 的规则下对「自身根」总是成立，所以这里用
@@ -1074,6 +1135,9 @@ describe('授权', () => {
       purgePrincipal: async () => 0,
       purgeSubtree: async () => 0,
     };
+    const ledger = {
+      remove: async () => {},
+    };
 
     const denyingApp = Fastify({ logger: false });
     denyingApp.addHook('onRequest', createRequestIdMiddleware());
@@ -1088,7 +1152,7 @@ describe('授权', () => {
       const mapped = toErrorEnvelope(error);
       reply.code(mapped.statusCode).send(mapped.body);
     });
-    denyingApp.register(createAdminRoutes({ identity, authorizer, adminAccess, acl }).register, {
+    denyingApp.register(createAdminRoutes({ identity, authorizer, adminAccess, acl, ledger }).register, {
       prefix: '/admin',
     });
     await denyingApp.ready();

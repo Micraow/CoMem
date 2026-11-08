@@ -50,7 +50,17 @@
 
 import { randomBytes } from 'node:crypto';
 import { constants as fsConstants, mkdirSync } from 'node:fs';
-import { access, appendFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -263,6 +273,20 @@ class FileLedgerStore implements LedgerStore {
     const temporary = `${key}.${process.pid.toString(36)}.tmp`;
     await writeFile(temporary, text, 'utf8');
     await rename(temporary, key);
+  }
+
+  async remove(key: string): Promise<void> {
+    // `rm -f` 语义：不存在不是错误（与 `read` 返回 `null` 一致）。只吞 ENOENT，
+    // 其余 IO 错误必须抛出去——静默失败会让删账号后的账本残留，同 ID 重建继承
+    // 去重状态。
+    try {
+      await unlink(key);
+    } catch (error) {
+      if (fsErrorCode(error) === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
   }
 }
 
@@ -1104,6 +1128,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     resource,
     skill,
     search,
+    ledger,
     identity: identityService,
     auth: authService,
     prompts,

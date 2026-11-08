@@ -53,6 +53,7 @@ import type { GroupMember, User } from '../../../domain/identity.js';
 import { assertValidGroupId, assertValidUserId } from '../../../domain/identity.js';
 import { Uri } from '../../../domain/uri.js';
 import type { Authorizer } from '../../../services/authorizer.js';
+import { scopeKeyOf } from '../../../services/recall-ledger.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import {
@@ -124,18 +125,26 @@ export interface AdminAccess {
 /**
  * 管理面需要的 ACL 操作。
  *
- * 用 `Pick` 而不是整个 `AclService`：路由只需要「建根预置」与「按主体撤权」两个
- * 方法。`AclService` 结构上满足它。
+ * 用 `Pick` 而不是整个 `AclService`：路由只需要「建根预置」与「按主体 / 子树撤权」
+ * 这几个方法。`AclService` 结构上满足它。
  */
 export type AdminAcl = Pick<
   HttpRouteServices['acl'],
   'ensureRootPreset' | 'setGroupOwner' | 'purgePrincipal' | 'purgeSubtree'
 >;
 
+/**
+ * 管理面需要的召回账本操作。
+ *
+ * 删账号 / 组时要删掉对应作用域的账本（`_meta/recall/{scopeKey}.recall_log.json`），
+ * 否则同 ID 重建的账号会继承去重状态。用 `Pick` 保持与 `AdminAcl` 同样的最小依赖。
+ */
+export type AdminRecallLedger = Pick<HttpRouteServices['ledger'], 'remove'>;
+
 export type AdminRouteServices = Pick<
   HttpRouteServices,
   'identity' | 'authorizer' | 'adminAccess'
-> & { readonly acl: AdminAcl };
+> & { readonly acl: AdminAcl; readonly ledger: AdminRecallLedger };
 
 function invalidArgument(field: string, expected: string, value: unknown): ComemError {
   return new ComemError('INVALID_ARGUMENT', `参数 ${field} 必须是${expected}。`, {
@@ -210,7 +219,7 @@ async function assertManage(request: FastifyRequest, authorizer: Authorizer): Pr
 }
 
 export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, acl } = services;
+  const { identity, authorizer, adminAccess, acl, ledger } = services;
 
   return {
     prefix: '/admin',
@@ -287,6 +296,8 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         }
 
         const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
+        // 删账号先删账本（缓存，丢了只多投一次）；失败时账号与授权都保持原样。
+        await ledger.remove(scopeKeyOf(Uri.parse(`comem://user/${id}`)));
         await acl.purgePrincipal(principal);
         identity.deleteUser(id);
         return ok({ id, deleted: true, revokedPermissions });
@@ -478,6 +489,8 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         }
 
         const revokedPermissions = adminAccess.permissionCounts([principal]).get(principal) ?? 0;
+        // 与删账号同序：账本是缓存，先删它失败时什么都没动。
+        await ledger.remove(scopeKeyOf(Uri.parse(`comem://group/${id}`)));
         await acl.purgePrincipal(principal);
         // 组主体之外，组子树里还可能有 `user:bob = write` 这样的直接授权。
         // `purgePrincipal` 只按主体清，这些条目会留下：组不存在了，授权挂在一条

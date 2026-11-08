@@ -20,6 +20,7 @@ import type { IdentityService } from '../../../services/identity.js';
 import type { MemoryService } from '../../../services/memory.js';
 import type { ObservabilityService } from '../../../services/observability.js';
 import type { PromptService } from '../../../services/prompt-service.js';
+import type { RecallLedger } from '../../../services/recall-ledger.js';
 import type { ResourceService } from '../../../services/resource.js';
 import type { SearchService } from '../../../services/search.js';
 import type { SessionService } from '../../../services/session.js';
@@ -77,6 +78,8 @@ export interface HttpRouteServices {
   readonly resource: ResourceService;
   readonly skill: SkillService;
   readonly search: SearchService;
+  /** 召回账本（§8.7）：删账号 / 组时清掉对应的作用域账本。 */
+  readonly ledger: RecallLedger;
   /** 用户与组用例（`/admin/*`）。 */
   readonly identity: IdentityService;
   /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */

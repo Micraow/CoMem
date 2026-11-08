@@ -64,6 +64,8 @@ export interface LedgerStore {
   read(key: string): Promise<string | null>;
   /** 整体替换；实现必须保证原子性（临时文件 + `rename`）。 */
   write(key: string, text: string): Promise<void>;
+  /** 删除账本；不存在不是错误（`rm -f` 语义，与 `read` 的 `null` 一致）。 */
+  remove(key: string): Promise<void>;
 }
 
 export interface RecallLedgerDeps {
@@ -264,6 +266,24 @@ export class RecallLedger {
   async save(scopeKey: string, data: RecallLedgerData): Promise<void> {
     const key = assertScopeKey(scopeKey);
     await this.#store.write(this.#pathOf(key), `${JSON.stringify(data, null, 2)}\n`);
+  }
+
+  /**
+   * 删掉一个作用域的账本（删账号 / 组时调用）。
+   *
+   * **为什么必须删。** 账本记录的是「哪个会话在第 N 轮投喂过哪些 URI」。账号被删、
+   * 同 ID 重建之后，新的会话 ID 通常不同，`recentlyDelivered` 的会话过滤会让旧条目
+   * 不匹配——但这不是保证：会话 ID 可以由调用方指定（`POST /sessions` 的
+   * `sessionId`），测试环境重置、导入工具复用 ID 都会让新账号的第一轮召回被旧账本
+   * 静默压制（第一次召回返回空）。
+   *
+   * 账本是缓存，删除的代价只是「多投一次」；留着则会让一个已经被删除的账号把去重
+   * 状态带进新生命周期。删除与 `purgeSubtree` 同源：账号不存在了，它命名空间里的
+   * 派生产物都不该继续有效。
+   */
+  async remove(scopeKey: string): Promise<void> {
+    const key = assertScopeKey(scopeKey);
+    await this.#store.remove(this.#pathOf(key));
   }
 
   /**

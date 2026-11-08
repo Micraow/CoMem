@@ -19,6 +19,7 @@ class MemoryLedgerStore implements LedgerStore {
   readonly files = new Map<string, string>();
   readonly reads: string[] = [];
   readonly writes: string[] = [];
+  readonly removals: string[] = [];
 
   async read(key: string): Promise<string | null> {
     this.reads.push(key);
@@ -28,6 +29,11 @@ class MemoryLedgerStore implements LedgerStore {
   async write(key: string, text: string): Promise<void> {
     this.writes.push(key);
     this.files.set(key, text);
+  }
+
+  async remove(key: string): Promise<void> {
+    this.removals.push(key);
+    this.files.delete(key);
   }
 }
 
@@ -334,6 +340,35 @@ describe('RecallLedger.recentlyDelivered', () => {
     );
 
     expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
+  });
+});
+
+describe('RecallLedger.remove', () => {
+  it('删掉作用域账本后，去重状态不再存在', async () => {
+    const { ledger, store } = createLedger();
+    const uri = 'comem://user/alice/memories/m1';
+    await ledger.record(SCOPE, SESSION, 4, [{ uri, detail: 'full' }], options());
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 4, options())).toEqual(new Set([uri]));
+
+    await ledger.remove(SCOPE);
+
+    expect(store.removals).toEqual([ledgerPath(SCOPE)]);
+    expect(await ledger.load(SCOPE)).toEqual({ version: 1, entries: [] });
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 4, options())).toEqual(new Set());
+  });
+
+  it('账本不存在时是空操作（rm -f 语义）', async () => {
+    const { ledger, store } = createLedger();
+
+    await expect(ledger.remove('user_nobody')).resolves.toBeUndefined();
+    expect(store.removals).toEqual([ledgerPath('user_nobody')]);
+  });
+
+  it('拒绝会拼出越界文件名的 scopeKey', async () => {
+    const { ledger, store } = createLedger();
+
+    await expect(ledger.remove('../evil')).rejects.toBeInstanceOf(ComemError);
+    expect(store.removals).toEqual([]);
   });
 });
 
