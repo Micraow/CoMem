@@ -14,6 +14,10 @@ export interface GroupRowPayload {
   readonly id: string
   readonly displayName: string
   readonly description: string | null
+  /** 组的 owner（`app_group.owner_user_id`）。`null` 表示还没有人管。 */
+  readonly ownerUserId: string | null
+  /** owner 为空：这个组只能通过命令行恢复管理（架构文档 §12.6）。 */
+  readonly ownerMissing: boolean
   readonly createdAt: string
   readonly updatedAt: string
   readonly memberCount: number
@@ -91,7 +95,10 @@ const canNext = computed(() => props.offset + props.limit < props.total)
         </thead>
         <tbody>
           <tr v-for="group in props.groups" :key="group.id">
-            <td class="mono strong">{{ group.id }}</td>
+            <td class="mono strong">
+              {{ group.id }}
+              <UiBadge v-if="group.ownerMissing" variant="red">无所有者</UiBadge>
+            </td>
             <td>{{ group.displayName }}</td>
             <td>
               <span v-if="group.description !== null && group.description !== ''">

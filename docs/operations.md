@@ -177,6 +177,26 @@ curl -sS http://127.0.0.1:1933/api/v1/auth/login \
 
 响应里的 `token` 就是后续请求的 `Authorization: Bearer <token>`。
 
+### 恢复组的 owner
+
+删账号会把该用户持有的组 `owner_user_id` 清成 `NULL`（架构文档 §12.2、§12.6）。组里如果
+没有第二个组根 `manage` 持有者，`POST /admin/groups/{id}/owner` 会在求权阶段 403——这个
+组不能再改 ACL、不能加成员，控制台的组列表会用「无所有者」标出来。恢复用命令：
+
+```bash
+pnpm group:owner eng alice
+```
+
+`groupId` 是组 ID（不是 `comem://` URI），`userId` 是要接手的人（必须已存在）。
+
+**为什么不走 HTTP。** 改 owner 的端点自己要求「当前 owner 或组根 manage」。owner 已经被
+删、组里又没有第二个 manage 持有者时，这个前提不成立，HTTP 永远是 403。命令直接打开
+数据库写行，再补组根的 `.acl.json`，与 `pnpm password` 解决的是同一类引导循环。
+
+命令做两件事：把 `app_group.owner_user_id` 写成目标用户，替换组根 `.acl.json` 里的
+`user:{owner} = manage` 条目；其它条目与 `mode` 保留。通配主体 `*` 与非 `user` 格式
+（例如 `group:eng`）在写盘之前就被拒绝。
+
 ### 管理 API Key
 
 ```bash
@@ -1043,3 +1063,9 @@ COMEM_SERVER_PORT=8080 pnpm dev
 
 21. **ChatGPT 的 HTML 导出不做适配器。** `chat.html` 是「另存为网页」，DOM 解析脆弱
     且不是官方导出格式；官方导出里的 `conversations.json` 才是稳定接口。
+
+22. **owner 为空的组只能通过命令行恢复。** 删账号会清掉 `app_group.owner_user_id`，组根
+    只剩 `group:{gid} = write`。组里没有第二个 manage 持有者时，HTTP 管理面改不了 owner
+    （求权阶段就 403），只能用 `pnpm group:owner <groupId> <userId>` 恢复。控制台的组列表
+    用「无所有者」标出来；没有「在界面上直接认领」的入口——那等于给任何组员一条不需要
+    manage 的授权通道。
