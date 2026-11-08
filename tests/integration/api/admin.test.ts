@@ -739,6 +739,44 @@ describe('组的根预置', () => {
       ),
     ).toBe(1);
   });
+
+  /**
+   * 回归：删组再建同 ID 不能留下空 ACL（架构文档 §12.6）。
+   *
+   * 删组时 `.acl.json` 会被保留（`restricted` 语义需要空文件），只清掉条目。
+   * `ensureRootPreset` 修复前按「文件存在吗」判断，重建的组根不会再写
+   * `group:{gid}`——组空间对所有人永久空 ACL。
+   */
+  it('删组再建同 ID：组根重新预置 group 授权', async () => {
+    await createGroup('eng');
+    resultOf(await inject({ method: 'DELETE', url: '/api/v1/admin/groups/eng' }));
+
+    const aclPath = join(dataDir, 'group', 'eng', '.acl.json');
+    const afterDelete = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string }[];
+    };
+    // 文件还在，只是 `group:eng` 条目没了。
+    expect(afterDelete.entries.some((entry) => entry.principal === 'group:eng')).toBe(false);
+
+    await createGroup('eng');
+
+    const onDisk = JSON.parse(await readFile(aclPath, 'utf8')) as {
+      readonly entries: readonly { readonly principal: string; readonly level: string }[];
+    };
+    expect(onDisk.entries).toEqual(
+      expect.arrayContaining([
+        { principal: 'group:eng', level: 'write', effect: 'allow' },
+        { principal: 'user:local', level: 'manage', effect: 'allow' },
+      ]),
+    );
+    expect(
+      countRows(
+        'SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ? AND principal = ?',
+        'comem://group/eng',
+        'group:eng',
+      ),
+    ).toBe(1);
+  });
 });
 
 /**

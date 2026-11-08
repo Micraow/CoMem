@@ -58,6 +58,7 @@ import type {
 } from '../adapters/sqlite/permission-repository.js';
 import {
   effectiveAcl,
+  groupPrincipal,
   levelSatisfies,
   parsePrincipal,
   rootPreset,
@@ -496,7 +497,7 @@ export class AclService implements Authorizer {
     }
 
     const existing = await this.#aclFile.read(uri);
-    if (existing !== null) {
+    if (existing !== null && this.#hasRootPreset(uri, existing)) {
       this.#logger.debug('根预置已存在，跳过', { uri: uri.toString() });
       return preset;
     }
@@ -519,6 +520,15 @@ export class AclService implements Authorizer {
       permissions,
     });
     return preset;
+  }
+
+  /** 根预置是否已经应用。见 `ensureRootPreset` 的注释。 */
+  #hasRootPreset(uri: Uri, file: AclFile): boolean {
+    if (uri.scope === 'user') {
+      return true;
+    }
+    const group = groupPrincipal(uri.rootId);
+    return file.entries.some((entry) => entry.principal === group && entry.effect === 'allow');
   }
 
   /**

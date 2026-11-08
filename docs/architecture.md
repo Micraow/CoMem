@@ -1920,6 +1920,8 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 2. **同节点 deny 优先**：同一主体在同一节点既有 allow 又有 deny 时，deny 赢。
 3. **只有 manage 能改 ACL**：`setAcl` 前置检查 `check(N, manage)`。ACL 工具不进 MCP——一个能给自己授权的 agent 就是提权漏洞。
 
+`owner(N)` 只对 `user/` 根成立；组空间没有隐式 owner。组的 owner 是组根 `.acl.json` 里的 `user:{owner} = manage` 条目（§12.6），可以被组根的 manage 持有者替换——它不是不变量 1 里的 `owner(N)`。
+
 ### 12.3 继承不存快照
 
 `effective(N)` 递归到 `parent(N)`，**不预存继承快照**。存了必然在祖先变更后过期，而这类 bug 只在演示时暴露。
@@ -1968,6 +1970,8 @@ check(N, action) = effective(N).some(e => e.allow && e.level & action == action)
 **组必须有 owner。** 组根只有 `group:{gid} = write`（级别 3）时，没有任何主体能求 `manage`（级别 7）——`levelSatisfies(3, 7)` 为 false，`setAcl` / `getAcl` 永远 403，组内成员既不能给同组另一人开只读，也不能设 `restricted` 或建子目录授权。owner 记在 `app_group.owner_user_id`，是「这个组归谁管」的权威来源；owner 的 `manage` 仍然要作为条目真的写进 `.acl.json`，因为求权只查物化表。owner 为 `NULL` 的组保持只有 `group:{gid} = write`，`ensureRootPreset` 的返回值用 `ownerMissing` 报告这个状态。
 
 改 owner 走 `POST /api/v1/admin/groups/{id}/owner`（body `{userId}`），只有当前 owner 或组根的 `manage` 持有者能改。改 owner 会同步替换组根 `.acl.json` 里的 `user:{owner} = manage` 条目，保留其它条目与 `mode`。**当前 owner 单独成立**：迁移回填的存量组有 `owner_user_id` 但没有 manage 条目（SQL 迁移写不了文件），owner 调一次这个端点即可补齐预置；否则这条修复路径会被自己的求权挡住。
+
+**根预置的幂等判断看条目，不看文件是否存在。** 删组时 `.acl.json` 会被保留（`restricted` 语义需要空文件），只是条目被清掉；按存在性判断会让重建的组根不再写 `group:{gid}`——组空间对所有人永久空 ACL。group 作用域的判断是「文件里有没有 `group:{gid}` 这一条」，user 根保持「文件存在就跳过」：user 的 manage 来自 owner 规则（URI 根标识），不依赖条目。
 
 **为什么不统一放 bootstrap。** 配置里声明的用户根是启动期就能确定的，组不是：控制台可以在运行期建组，而根预置必须在组 ID 存在之后写。把组根留给 bootstrap，新建的组就没有任何可授权的节点，成员也拿不到可读范围——这个组是死的。
 
