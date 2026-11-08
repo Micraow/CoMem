@@ -29,7 +29,7 @@ import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js'
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { createArchivePorts, createArchiveWriter } from '../../../src/bootstrap/archive-ports.js';
 import { CommitRunner } from '../../../src/bootstrap/commit-runner.js';
-import type { ArchiveTaskPayload } from '../../../src/domain/archive.js';
+import type { ArchiveTaskPayload, MemoryDiff } from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { AutoCommitPolicy, SessionMessage } from '../../../src/domain/session.js';
@@ -58,6 +58,7 @@ const SESSION = `${SCOPE}/sessions/sess_1`;
 const ARCHIVE = `${SESSION}/history/archive_001`;
 const ARCHIVE_ID = 'archive_001';
 const EXPERIENCE = `${SCOPE}/memories/experiences/code-style.md`;
+const EVENT = `${SCOPE}/memories/events/2026-11-08-commit-pipeline-order.md`;
 
 /** 架构文档 §10.3 的固定顺序：合并要在摘要失效之前。 */
 const ALL_STEPS = [
@@ -96,6 +97,27 @@ const EXTRACT_RESPONSE: unknown = {
       identity: { topic: 'code-style' },
       operations: [
         { kind: 'replace', field: 'content', value: '项目里不用 any，需要收窄时用 unknown。' },
+      ],
+    },
+  ],
+};
+
+/**
+ * 抽取步骤的模型输出：一条新建的 `events` 记忆（`addOnly`，§11.1）。
+ *
+ * 两次归档抽到**同一个** `event` 标识时，`upsertMemory` 会对已存在的文件抛
+ * `ALREADY_EXISTS`——正是「重复写入降级成跳过」要覆盖的路径。
+ */
+const EVENTS_RESPONSE: unknown = {
+  operations: [
+    {
+      kind: 'upsert',
+      pageId: 100,
+      type: 'events',
+      identity: { event: '2026-11-08-commit-pipeline-order' },
+      operations: [
+        { kind: 'replace', field: 'content', value: '提交管线固定四步，摘要失效在合并之后。' },
+        { kind: 'replace', field: 'occurredAt', value: '2026-11-08T00:00:00.000Z' },
       ],
     },
   ],
@@ -373,6 +395,68 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     // 跳过的步骤不重写 `.meta.json`。
     expect(await metadata.readArchive(committed.archiveUri)).toEqual(metaBefore);
     await expect(stat(join(archiveDirectory(ARCHIVE), '.done'))).resolves.toBeDefined();
+
+    await runner.stop();
+  });
+
+  it('events 类型重复写入降级成跳过，归档仍完成', async () => {
+    // 两次提交抽到同一个事件：第二次的 `memory_merge` 撞上 `ALREADY_EXISTS`。
+    // 期望「这一条没写入、其它照常、归档完成」，而不是整批归档失败。
+    const { runner } = createRunner([{ json: EVENTS_RESPONSE }, { json: EVENTS_RESPONSE }]);
+
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
+    await session.addMessage(sessionUri, message('msg_1', '决定：提交管线固定四步。'));
+    const first = await session.commitPhase1(sessionUri);
+    await runner.tick();
+
+    const written = await memory.read(Uri.parse(EVENT));
+    expect(written?.fields['content']).toBe('提交管线固定四步，摘要失效在合并之后。');
+
+    await session.addMessage(sessionUri, message('msg_2', '再确认：四步顺序不变。'));
+    const second = await session.commitPhase1(sessionUri);
+    // 跑满任务级重试上限：没有降级的话，第二次提交的归档会以 `failed` 收场
+    // （先撞一次步骤级重试，再被任务重排队）。
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+      await runner.tick();
+    }
+
+    // 归档完成：`memory_merge` 算成功，任务不 failed。
+    expect(taskStore.get(first.taskId)).toMatchObject({ status: 'done', error: null });
+    const secondTask = taskStore.get(second.taskId);
+    expect(secondTask).toMatchObject({ status: 'done', error: null });
+    expect(secondTask?.stepsDone).toEqual([...ALL_STEPS]);
+    // `attempts` 只在失败重排队时递增：0 表示第一次执行就跑完了，没有白重试。
+    expect(secondTask?.attempts).toBe(0);
+
+    // `memory_diff.json` 是「这条为什么没生效」的唯一入口。
+    const diff = JSON.parse(
+      await readFile(
+        join(archiveDirectory(second.archiveUri.toString()), 'memory_diff.json'),
+        'utf8',
+      ),
+    ) as MemoryDiff;
+    expect(diff.operations.adds).toEqual([]);
+    expect(diff.operations.updates).toEqual([]);
+    expect(diff.skippedOperations).toHaveLength(1);
+    expect(diff.skippedOperations[0]).toMatchObject({
+      memoryType: 'events',
+      reasonCode: 'already_exists',
+    });
+    expect(diff.skippedOperations[0]?.reason).toContain(EVENT);
+    expect(diff.summary).toMatchObject({ totalAdds: 0, totalSkipped: 1 });
+
+    // 事件文件没有被第二次写入覆盖：连 `updatedAt` 都没变。
+    expect(await memory.read(Uri.parse(EVENT))).toEqual(written);
+
+    // 降级必须可见：日志里带 URI 与原因。
+    const skipLog = vi
+      .mocked(logger.warn)
+      .mock.calls.find(([message]) => String(message).includes('记忆写入被跳过'));
+    expect(skipLog?.[1]).toMatchObject({
+      uri: EVENT,
+      memoryType: 'events',
+      reasonCode: 'already_exists',
+    });
 
     await runner.stop();
   });

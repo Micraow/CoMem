@@ -23,6 +23,17 @@
  * 一个 URI 失败不影响同批次其它 URI：分组循环里逐组捕获？不——`skip` 由
  * `applyOperations` 逐条返回，写盘失败直接抛。写盘失败时 `memory_diff.json` 不写：
  * 它存在就代表「这批操作已经处理过」，先写会让重放跳过真正的写入。
+ *
+ * **`ALREADY_EXISTS` 是唯一不抛的写盘失败。** `addOnly` 类型（`events`）的目标已
+ * 存在时，`upsertMemory` 一定拒绝写入（§11.1「覆盖写等于篡改历史」），所以这不是
+ * 瞬态失败：重放一次、重排队一次，结果都一样。把它抛出去等于让一条已存在的记录
+ * 拖垮整批操作，再白等步骤级重试与任务级重排队，最后还是把归档标成 `failed`。这里
+ * 改成记进 `skippedOperations`——归档照常完成，而「这条为什么没生效」留在
+ * `memory_diff.json` 里，那是唯一的查证入口。
+ *
+ * 跳过分两种，`reasonCode` 不同：正文与已有记录**相同**是重放（`already_exists`，
+ * 幂等），**不同**是同 URI 的另一条事件（`uri_conflict`，本次内容没有落盘）。
+ * 后者的正解是换 `event` 标识，不是覆盖写。
  */
 
 import type {
@@ -73,6 +84,14 @@ export interface MemoryMergeStepDeps {
   };
   readonly logger: Logger;
 }
+
+/**
+ * 记忆正文的字段名。
+ *
+ * 与 `services/memory.ts` 的 `CONTENT_FIELD` 同一个字段，但那边没导出：它是记忆
+ * 文件的磁盘形状（§6.6），合并步骤只拿它做「是不是同一条事件」的比较。
+ */
+const CONTENT_FIELD = 'content';
 
 /** 失败原因的中文说明，只用于 `skippedOperations[].reason`。 */
 const FAILURE_LABELS: Readonly<Record<OperationFailureReason, string>> = {
@@ -200,7 +219,37 @@ export class MemoryMergeStep extends CommitStep {
       }
 
       // 每个 URI 只写一次（§11.5）。
-      const write = await this.#memory.upsertMemory(context.scopeUri, schema, result.value);
+      let write: MemoryWriteResult;
+      try {
+        write = await this.#memory.upsertMemory(context.scopeUri, schema, result.value);
+      } catch (error) {
+        const failure = ComemError.from(error);
+        if (failure.code !== 'ALREADY_EXISTS') {
+          // 其它写盘失败是真正的故障：`memory_diff.json` 不写，重放才有意义。
+          throw error;
+        }
+
+        // `addOnly` 类型的目标已存在。`existing` 为 `null` 说明读与写之间有别的
+        // 进程抢先落了盘：内容比较不了，按冲突记，不声称「同一条事件」。
+        const sameEvent =
+          existing !== null && existing.fields[CONTENT_FIELD] === result.value[CONTENT_FIELD];
+        const reasonCode = sameEvent ? 'already_exists' : 'uri_conflict';
+        skipped.push({
+          memoryType,
+          reasonCode,
+          reason: sameEvent
+            ? `该 URI 已存在同一条事件，未重复写入：${uriString}（${memoryType} 类型只允许新增）。`
+            : `该 URI 已存在内容不同的事件，本次内容未写入：${uriString}。事件不可修改，请换一个 event 标识再提交。`,
+        });
+        // 降级必须可见：归档会走完，用户不会收到任何错误。
+        this.#logger.warn('记忆写入被跳过：目标已存在，记忆类型只允许新增', {
+          archive: context.archiveUri.toString(),
+          uri: uriString,
+          memoryType,
+          reasonCode,
+        });
+        continue;
+      }
       const entry: MemoryDiffEntry = {
         uri: write.uri.toString(),
         memoryType,

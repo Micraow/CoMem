@@ -1592,6 +1592,13 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 | 同一批次里既 upsert 又 delete 同一 URI | 保留 upsert（delete 视为误判） |
 | 同 URI 同时有 replace 和 patch | 按操作在输出里的出现顺序应用 |
 | SEARCH 命中多处 | 整条操作失败，记入 `skippedOperations`，**不做模糊匹配** |
+| `addOnly` 类型（`events`）的目标已存在 | 该条操作记入 `skippedOperations`，整批照常完成 |
+
+**`skippedOperations` 是「这条操作为什么没生效」的稳定出口。** 每条跳过带三个字段：`memoryType`、机器可读的 `reasonCode`、给用户看的 `reason`（完整句子，带 URI）。抽取阶段的弱校验（编号越界、类型不存在、identity 拼不出路径）、字段级合并失败（`patch_not_found` / `patch_ambiguous` / `immutable_violation`）、写盘冲突都在这里汇合，`memory_diff.json` 原样落盘，控制台与运维按它查证。
+
+**`addOnly` 的目标已存在是跳过，不是失败。** `events` 是「某时发生了什么」，写入模式是 `addOnly`：文件已存在时 `MemoryService.upsertMemory` 抛 `ALREADY_EXISTS`（§11.1「覆盖写等于篡改历史」）。`memory_merge` 捕获它，把这条操作记进 `skippedOperations` 后继续处理其余 URI——一条已存在的记录不该让整批归档失败。`reasonCode` 分两种：正文与已有记录**相同**是重放（`already_exists`，幂等，重跑多少次结果一样）；**不同**则是同 URI 的另一条事件（`uri_conflict`，本次内容没有落盘）。
+
+**为什么这两种必须分开。** `events` 的 URI 由 `{event}.md` 的 identity 值拼出，是调用方（模型）指定的标识，不是正文派生的哈希——「同 URI」不等于「同内容」。都写成「已存在」会把「换个 `event` 标识」这个动作藏起来；分开记，`memory_diff.json` 才能回答「是重放，还是两条不同的事件撞了名字」。无论哪种，事件都不可覆盖写，能做的只有跳过并记录。
 
 **为什么不做 LLM 二次合并**：那需要模型看到「这 5 条其实是同一件事的不同侧面」。v1 的抽取输出是结构化的（每次操作针对一个 schema 字段），同一字段的多条 patch 本来就该按顺序应用。语义重复（不同 URI 讲同一件事）留到 v2 再合并。
 
@@ -2943,7 +2950,7 @@ task:
 
 **重放语义分两套集合，互补而不是重复。** `domain/errors.ts` 的 `RETRYABLE_CODES`（`CONFLICT` / `RESOURCE_EXHAUSTED` / `PROVIDER_UNAVAILABLE`）回答「一次模型调用再发一次会不会成功」，由 `services/llm.ts` 消费；`domain/archive.ts` 的 `isTerminalStepError`（`INVALID_URI` / `INVALID_ARGUMENT` / `PERMISSION_DENIED` / `UNAUTHENTICATED`）回答「一步提交重放一次会不会成功」，由 `services/commit/pipeline.ts` 与 `services/task.ts` 消费。**两边都不在的 code 会被当成可重试**——`UNAUTHENTICATED` 曾经因此白重试 `(stepAttempts + 1) × taskAttempts` 次（默认 2 × 3 = 6 次）：一把错的 API Key 在模型调用层正确地不重试，到了步骤层却被当成瞬态失败。
 
-`INTERNAL` 是未知异常的兜底，步骤级重试；`NOT_FOUND` / `ALREADY_EXISTS` 是确定性失败，当前仍按可重试处理——已知缺口：前者只在步骤循环之外抛出，后者的正解是把冲突操作记进 `skippedOperations`（§11.5），而不是让整批归档失败。新增错误码时两套集合都要判断，检查方法见 `domain/errors.ts` 的 `RETRYABLE_CODES` 注释。
+`INTERNAL` 是未知异常的兜底，步骤级重试；`NOT_FOUND` 是确定性失败，当前仍按可重试处理——已知缺口：它只在步骤循环之外抛出，没有超时成本，所以不进终态集合。`ALREADY_EXISTS` 已经降级：`memory_merge` 捕获它并把冲突操作记进 `skippedOperations`（§11.5），归档照常完成。把它加进终态集合只是把「一步一步重试到失败」变成「第一次就失败」，并不能让那条记录生效，还会把这批操作里其余十九条一起赔进去。新增错误码时两套集合都要判断，检查方法见 `domain/errors.ts` 的 `RETRYABLE_CODES` 注释。
 
 **错误必须可解释**：写进 `error.log`，带请求 ID、URI、操作。不抛只有开发者能读的堆栈，也不静默吞掉。
 

@@ -14,6 +14,7 @@ import type { LlmOptions, LlmPrompt, LlmResult } from '../../../src/domain/llm.j
 import type { Logger } from '../../../src/domain/log.js';
 import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
+import { eventsMemoryType } from '../../../src/domain/memory-types/events.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import type { BatchOperation } from '../../../src/domain/merge-op.js';
 import type { ContentPart, SessionMessage } from '../../../src/domain/session.js';
@@ -622,6 +623,61 @@ describe('MemoryMergeStep', () => {
     expect((await memory.read(Uri.parse(goodUri)))?.fields['content']).toBe('hi');
     expect(diffs[0]?.skippedOperations[0]?.reasonCode).toBe('patch_ambiguous');
     expect(diffs[0]?.summary).toMatchObject({ totalUpdates: 1, totalSkipped: 1 });
+  });
+
+  it('addOnly 类型目标已存在时降级成跳过，同批其它 URI 照常写入', async () => {
+    const eventUri = `${SCOPE}/memories/events/2026-11-08-conflict.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), eventsMemoryType, {
+      event: '2026-11-08-conflict',
+      content: '第一条事件。',
+      occurredAt: '2026-11-08T00:00:00.000Z',
+    });
+    const before = await memory.read(Uri.parse(eventUri));
+
+    const operations: BatchOperation[] = [
+      {
+        kind: 'upsert',
+        uri: eventUri,
+        operation: { kind: 'replace', field: 'event', value: '2026-11-08-conflict' },
+      },
+      {
+        kind: 'upsert',
+        uri: eventUri,
+        operation: { kind: 'replace', field: 'content', value: '另一条事件。' },
+      },
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+      },
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'content', value: '新增的偏好' },
+      },
+    ];
+
+    const { step, diffs } = createMergeStep();
+    // 不抛：一条已存在的记录不该拖垮整批操作。
+    await step.run(
+      mergeContext(operations, [
+        [eventUri, 'events'],
+        [CODE_STYLE, 'preferences'],
+      ]),
+    );
+
+    // 已有事件一个字节都没变（`addOnly` 不允许覆盖写）。
+    expect(await memory.read(Uri.parse(eventUri))).toEqual(before);
+    // 同批的另一条 URI 照常写入。
+    expect((await memory.read(Uri.parse(CODE_STYLE)))?.fields['content']).toBe('新增的偏好');
+    // 内容不同 = 同 URI 的另一条事件，不是幂等重放：`reason` 要说清楚，不能静默。
+    expect(diffs[0]?.skippedOperations).toHaveLength(1);
+    expect(diffs[0]?.skippedOperations[0]).toMatchObject({
+      memoryType: 'events',
+      reasonCode: 'uri_conflict',
+    });
+    expect(diffs[0]?.skippedOperations[0]?.reason).toContain(eventUri);
+    expect(diffs[0]?.summary).toMatchObject({ totalAdds: 1, totalSkipped: 1 });
   });
 
   it('同批次 upsert + delete 同一 URI 时保留 upsert', async () => {
