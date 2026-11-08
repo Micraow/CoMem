@@ -648,7 +648,10 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     permissions,
     logger,
     embedding,
-    embeddings,
+    // 未配置嵌入时 `node_embedding` 表根本没有建（`ensureSchema` 只在
+    // `type !== 'disabled'` 时跑）。注入一个删不掉的仓储只会让默认部署的每一次
+    // 删除都记一条 `no such table`，而那正是「什么都不做」的正常配置。
+    ...(embeddingConfig.type === 'disabled' ? {} : { embeddings }),
   });
 
   const authorizer = new InheritingAuthorizer(acl, store);
@@ -684,6 +687,8 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     logger,
     meta: metadata,
     config: { autoCommit: config.session.autoCommit },
+    // 写后物化权限：服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
+    authorizer,
   });
 
   const search = new SearchService({
@@ -772,11 +777,13 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     summary,
     storage: new FileResourceStorage(dataDir),
     logger,
+    // 写后物化权限：资源与技能服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
+    authorizer,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     maxFiles: DEFAULT_MAX_FILES,
   });
 
-  const skill = new SkillService({ store, locks, index, summary, permissions, logger });
+  const skill = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
 
   /**
    * 阶段二执行器（§10.1、§10.3、§10.4）。

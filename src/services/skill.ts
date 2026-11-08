@@ -30,6 +30,10 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { SummaryService } from './summary.js';
+import type { AclAction, Authorizer } from './authorizer.js';
+
+/** §12.1：write = 3。 */
+const WRITE: AclAction = 3;
 
 /** 技能入口文件名。 */
 const SKILL_ENTRY_FILE = 'SKILL.md';
@@ -76,6 +80,14 @@ export interface SkillServiceDeps {
   readonly summary: Pick<SummaryService, 'markStale'>;
   /** 权限反查走物化表（§8.2）：`principals` 来自调用方身份，不重新展开组。 */
   readonly permissions: Pick<PermissionRepository, 'readableUris'>;
+  /**
+   * 写后物化权限（§12.4）。
+   *
+   * 技能文件直接写 `ContentStore`，不经过 `FileSystemService` 的观察者。不物化的话
+   * `node_permission` 里没有技能目录的行，而 `listSkills` 的过滤是纯 SQL 查询——
+   * 装好的技能在控制台里整个消失。
+   */
+  readonly authorizer: Authorizer;
   readonly logger: Logger;
 }
 
@@ -174,6 +186,7 @@ export class SkillService {
   readonly #index: RetrievalIndex;
   readonly #summary: Pick<SummaryService, 'markStale'>;
   readonly #permissions: Pick<PermissionRepository, 'readableUris'>;
+  readonly #authorizer: Authorizer;
   readonly #logger: Logger;
 
   constructor(deps: SkillServiceDeps) {
@@ -182,6 +195,7 @@ export class SkillService {
     this.#index = deps.index;
     this.#summary = deps.summary;
     this.#permissions = deps.permissions;
+    this.#authorizer = deps.authorizer;
     this.#logger = deps.logger;
   }
 
@@ -231,6 +245,9 @@ export class SkillService {
       }
 
       await this.#index.upsert(records);
+      // §12.4 的「写时算」：技能文件不经过 `FileSystemService`，观察者收不到通知。
+      // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。
+      await this.#materialize([skillUri, ...written]);
     });
 
     await this.#invalidateDirectories(written);
@@ -286,6 +303,42 @@ export class SkillService {
   }
 
   // ── 内部 ──
+
+  /**
+   * 为新建 / 覆盖的节点物化权限（含 `writeBytes` 顺手建出来的中间目录）。
+   *
+   * 技能包可能是 `scripts/check.sh` 这种嵌套路径，`scripts/` 目录同样需要自己的
+   * 行，否则它在 `tree` 里整个消失。逐级 `materializeNode` 是幂等的，去重之后
+   * 100 个文件只多出「目录数」条 UPSERT。
+   *
+   * 失败只记日志：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
+   */
+  async #materialize(uris: readonly Uri[]): Promise<void> {
+    const directories = new Map<string, Uri>();
+    for (const uri of uris) {
+      let current: Uri | null = uri;
+      while (current !== null) {
+        const key = current.toString();
+        if (directories.has(key)) {
+          // 祖先链已经收过，再往上都是重复。
+          break;
+        }
+        directories.set(key, current);
+        current = current.parent();
+      }
+    }
+
+    for (const [key, uri] of directories) {
+      try {
+        await this.#authorizer.assert(uri, WRITE);
+      } catch (error) {
+        this.#logger.error('技能节点权限物化失败，已忽略。', {
+          uri: key,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
 
   /**
    * 摘要失效投递：按直接父目录去重。

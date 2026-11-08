@@ -106,6 +106,19 @@ export interface NodeWriteObserver {
 
   /** 节点被删除、或 move 后源路径消失时调用。实现方负责清掉派生行。 */
   onNodeRemoved(uri: Uri): Promise<void>;
+
+  /**
+   * 节点被移动 / 改名后调用。
+   *
+   * **为什么不是一次删除 + 一次写入**：`move` 一个非空目录时，源路径的派生行要
+   * 整棵清掉，目标路径的每一层都要重建。拆成 `onNodeRemoved(from)` +
+   * `onNodeWritten(to, kind)` 只会重建目标节点自己，子项一条都不出现——文件在
+   * 磁盘上还在，`tree` 却只剩一个空目录。
+   *
+   * 一次通知让实现方在**一次遍历**里重建整棵子树：1000 个文件不该产生 1000 次
+   * 索引事务，也不该产生 1000 次摘要失效。
+   */
+  onNodeMoved(from: Uri, to: Uri): Promise<void>;
 }
 
 export interface FileSystemServiceDeps {
@@ -309,12 +322,10 @@ export class FileSystemService {
     await this.#locks.withLock(ordered.first, 'tree', () =>
       this.#locks.withLock(ordered.second, 'tree', async () => {
         await this.#store.move(from, to);
-        // 移动 = 源路径消失 + 目标路径出现，两侧的派生数据都要通知。
-        await this.#notifyRemoved(from);
-        const stat = await this.#store.stat(to);
-        if (stat !== null) {
-          await this.#notifyWritten(to, stat.kind);
-        }
+        // 移动 = 源路径消失 + 目标路径出现。**一次**通知：源路径的整棵子树要清掉，
+        // 目标路径的整棵子树要重建，拆成两次通知会让子项全部丢失（见
+        // `NodeWriteObserver.onNodeMoved`）。
+        await this.#notifyMoved(from, to);
       }),
     );
   }
@@ -347,6 +358,21 @@ export class FileSystemService {
       } catch (error) {
         this.#logger.error('节点删除观察者失败，已忽略。', {
           uri: uri.toString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  /** 通知「节点已移动」，失败语义与 `#notifyWritten` 相同。 */
+  async #notifyMoved(from: Uri, to: Uri): Promise<void> {
+    for (const observer of this.#observers) {
+      try {
+        await observer.onNodeMoved(from, to);
+      } catch (error) {
+        this.#logger.error('节点移动观察者失败，已忽略。', {
+          from: from.toString(),
+          to: to.toString(),
           error: error instanceof Error ? error.message : String(error),
         });
       }

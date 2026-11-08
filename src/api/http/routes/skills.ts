@@ -101,13 +101,6 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
           principals: context.principals,
         });
 
-        // 与 `resources` 同理：技能服务直接写 `ContentStore`，物化权限要补。
-        // 先物化目录（`list` 要它对自身求权），再逐个子项补。
-        await authorizer.assert(result.skillUri, WRITE);
-        for (const child of await services.filesystem.list(result.skillUri)) {
-          await authorizer.assert(child.uri, WRITE);
-        }
-
         return ok({
           skillUri: result.skillUri.toString(),
           fileCount: result.fileCount,

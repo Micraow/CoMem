@@ -62,6 +62,7 @@ import {
 import type { Uri } from '../domain/uri.js';
 
 import type { TaskService } from './task.js';
+import type { AclAction, Authorizer } from './authorizer.js';
 
 // 类型上移到领域层（§4.2：`services/` 与 `adapters/` 都要用它，而它是纯数据）。
 // 这里 re-export，既有 import 路径不变。
@@ -86,6 +87,9 @@ const ARCHIVE_DIRECTORY_PATTERN = /^archive_(\d+)$/;
 /** `messages.jsonl` 文件名（§6.5）。 */
 const MESSAGES_FILE_NAME = 'messages.jsonl';
 
+/** §12.1：write = 3（建会话是写操作）。 */
+const WRITE: AclAction = 3;
+
 export interface SessionServiceOptions {
   readonly store: ContentStore;
   /** 目录摘要文件；阶段二生成归档摘要时用（本 wave 不读它，保留装配位）。 */
@@ -105,6 +109,18 @@ export interface SessionServiceOptions {
     /** §6.5 的 `history/`；默认 `history` */
     readonly archiveDirectoryName?: string;
   };
+  /**
+   * 写后物化权限（§12.4）。
+   *
+   * `create` 直接写 `ContentStore`，不经过 `FileSystemService` 的观察者，所以
+   * `node_permission` 里没有会话目录的行。`GET /sessions` 的 `list` 是纯 SQL 过滤
+   * ——会话建成功了，列表里却没有。
+   *
+   * 可选是给「只关心提交管线」的调用方（单测、只读脚本）留的：不注入就整体跳过，
+   * 而不是每次 `create` 都打一次必定失败的求权。生产装配（`container.ts`）总是
+   * 注入。
+   */
+  readonly authorizer?: Authorizer;
 }
 
 export interface CommitPhase1Result {
@@ -206,6 +222,7 @@ export class SessionService {
   readonly #meta: MetadataFileStore;
   readonly #autoCommit: AutoCommitPolicy;
   readonly #archiveDirectoryName: string;
+  readonly #authorizer: Authorizer | undefined;
 
   constructor(options: SessionServiceOptions) {
     this.#store = options.store;
@@ -215,6 +232,7 @@ export class SessionService {
     this.#meta = options.meta;
     this.#autoCommit = options.config.autoCommit;
     this.#archiveDirectoryName = options.config.archiveDirectoryName ?? DEFAULT_ARCHIVE_DIRECTORY_NAME;
+    this.#authorizer = options.authorizer;
   }
 
   /** 建会话。目录 `sessions/sess_xxx/`，写 `messages.jsonl`（空）与 `.meta.json`。 */
@@ -234,6 +252,9 @@ export class SessionService {
       lastCommitAt: null,
       pendingTokens: 0,
     });
+    // §12.4 的「写时算」：会话目录与 `messages.jsonl` 都没有经过观察者。不物化的话
+    // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空。
+    await this.#materialize(sessionUri);
     this.#logger.info('会话已创建', { uri: sessionUri.toString() });
     return sessionUri;
   }
@@ -486,6 +507,30 @@ export class SessionService {
       lastCommitAt: new Date().toISOString(),
       pendingTokens: sumTokens(retained),
     });
+  }
+
+  /**
+   * 为新会话目录物化权限（§12.4 的「写时算」）。
+   *
+   * `InheritingAuthorizer` 的写路径在缺行时先 `materializeNode` 再求权，所以调一次
+   * `assert` 就是「从父目录复制一份有效权限」。
+   *
+   * 失败只记日志：目录与 `messages.jsonl` 已经落盘，回滚反而丢数据（§7 的同一
+   * 原则）；下一次 `GET /sessions/{id}` 的读路径还会补一次。
+   */
+  async #materialize(sessionUri: Uri): Promise<void> {
+    const authorizer = this.#authorizer;
+    if (authorizer === undefined) {
+      return;
+    }
+    try {
+      await authorizer.assert(sessionUri, WRITE);
+    } catch (error) {
+      this.#logger.error('会话目录权限物化失败，已忽略。', {
+        uri: sessionUri.toString(),
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async #requireSession(sessionUri: Uri): Promise<SessionMeta> {

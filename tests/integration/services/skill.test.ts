@@ -5,6 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
@@ -12,8 +13,11 @@ import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/databa
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
+import { FileSystemService } from '../../../src/services/filesystem.js';
 import { SkillService } from '../../../src/services/skill.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 
@@ -38,6 +42,7 @@ let summary: SummaryService;
 let permissions: PermissionRepository;
 let logger: Logger;
 let service: SkillService;
+let filesystem: FileSystemService;
 
 function createLogger(): Logger {
   const logger: Logger = {
@@ -88,7 +93,20 @@ beforeEach(async () => {
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
   });
   permissions = new PermissionRepository({ db, logger });
-  service = new SkillService({ store, locks, index, summary, permissions, logger });
+  // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
+  const acl = new AclService({
+    dataDir,
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions,
+    nodes: new NodeRepository({ db, logger }),
+    logger,
+    subject: 'user:alice',
+  });
+  await acl.ensureRootPreset(Uri.parse(SCOPE));
+  const authorizer = new InheritingAuthorizer(acl, store);
+  filesystem = new FileSystemService({ store, locks, authorizer, logger });
+  service = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
 });
 
 afterEach(async () => {
@@ -125,6 +143,33 @@ describe('addSkill', () => {
     // 两个文件分属两个目录（技能根与 scripts/），所以失效投递两次。
     expect(markStale).toHaveBeenCalledTimes(2);
     expect(locks.activeCount()).toBe(0);
+  });
+
+  it('安装后 list(parent) 能看到技能目录，技能根与文件都有物化权限行', async () => {
+    await service.addSkill(
+      skillOptions('code-review', [
+        { path: 'SKILL.md', content: encode(SKILL_MD) },
+        { path: 'scripts/check.sh', content: encode('#!/bin/sh\nexit 0\n') },
+      ]),
+    );
+
+    // 技能服务直接写 `ContentStore`，观察者收不到通知。物化权限漏掉时 `list` 与
+    // `listSkills` 都会把技能整个过滤掉——装成功了，列表里却没有。
+    const listed = await filesystem.list(Uri.parse(SKILLS));
+    expect(listed.map((entry) => entry.uri.toString())).toContain(SKILL);
+
+    const visible = await service.listSkills(Uri.parse(SCOPE), {
+      subject: 'user:alice',
+      principals: ['user:alice'],
+    });
+    expect(visible.map((uri) => uri.toString())).toEqual([SKILL]);
+
+    for (const uri of [SKILL, `${SKILL}/SKILL.md`, `${SKILL}/scripts`]) {
+      const rows = db
+        .prepare('SELECT principal, level, effect FROM node_permission WHERE node_uri = ?')
+        .all(uri);
+      expect(rows.length).toBeGreaterThan(0);
+    }
   });
 
   it('缺少 SKILL.md 抛 INVALID_ARGUMENT', async () => {
@@ -181,10 +226,12 @@ describe('listSkills', () => {
 
   it('只返回调用方有 read 权限的技能', async () => {
     const visible = await install('alpha');
-    await install('beta');
+    const hidden = await install('beta');
 
-    permissions.replaceNode(visible.toString(), [
-      { nodeUri: visible.toString(), principal: 'user:alice', level: 1, effect: 'allow' },
+    // 安装会为技能目录物化权限（从根继承），所以要把 beta 换成「只授权给别人」的
+    // 行——`readableUris` 是纯 SQL 过滤，不在调用方主体集合里的行等于看不见。
+    permissions.replaceNode(hidden.toString(), [
+      { nodeUri: hidden.toString(), principal: 'user:bob', level: 7, effect: 'allow' },
     ]);
 
     const listed = await service.listSkills(Uri.parse(SCOPE), {

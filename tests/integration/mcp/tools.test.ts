@@ -5,6 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
@@ -16,6 +17,7 @@ import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js'
 import type { McpToolContext } from '../../../src/api/mcp/context.js';
 import type { McpToolName, McpToolResult } from '../../../src/api/mcp/registry.js';
 import { MCP_TOOLS } from '../../../src/api/mcp/tools/index.js';
+import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { configSchema } from '../../../src/config/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
@@ -29,6 +31,7 @@ import {
   type AclAction,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
+import { AclService } from '../../../src/services/acl.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 import { MemoryService } from '../../../src/services/memory.js';
@@ -131,7 +134,19 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function createHarness(options: { readonly authorizer?: Authorizer } = {}): Promise<Harness> {
+interface HarnessOptions {
+  readonly authorizer?: Authorizer;
+  /**
+   * 用与生产装配同一份的真实权限：`AclService` + `InheritingAuthorizer`。
+   *
+   * 默认的 `AllowAllAuthorizer` 的 `assert` 是空操作——它永远不会物化
+   * `node_permission` 行，所以「写完之后 `list` 能不能看到」这类断言在它下面
+   * 恒真，测不出东西。
+   */
+  readonly realAcl?: boolean;
+}
+
+async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const dataDir = await mkdtemp(join(tmpdir(), 'comem-mcp-tools-'));
   const db = openDatabase(':memory:');
   runMigrations(db);
@@ -144,7 +159,25 @@ async function createHarness(options: { readonly authorizer?: Authorizer } = {})
   const nodes = new NodeRepository({ db, logger });
   const permissions = new PermissionRepository({ db, logger });
   const tasks = new TaskService({ tasks: new TaskRepository({ db, logger }), logger });
-  const authorizer = options.authorizer ?? new AllowAllAuthorizer();
+  const acl =
+    options.realAcl === true
+      ? new AclService({
+          dataDir,
+          db,
+          aclFile: new AclFileStore({ dataDir, logger }),
+          permissions,
+          nodes,
+          logger,
+          subject: SUBJECT,
+        })
+      : null;
+  if (acl !== null) {
+    // 根预置（§12.6）：没有 `user:alice = manage` 这一行，新建节点从父目录复制不到
+    // 任何权限，`list` 会把它们全部过滤掉。
+    await acl.ensureRootPreset(Uri.parse(SCOPE));
+  }
+  const authorizer =
+    acl === null ? (options.authorizer ?? new AllowAllAuthorizer()) : new InheritingAuthorizer(acl, store);
 
   const filesystem = new FileSystemService({ store, locks, authorizer, logger });
   const assembler = new ContextAssembler({
@@ -189,6 +222,7 @@ async function createHarness(options: { readonly authorizer?: Authorizer } = {})
         keepRecentCount: 0,
       },
     },
+    authorizer,
   });
   const memory = new MemoryService({
     filesystem: {
@@ -208,8 +242,9 @@ async function createHarness(options: { readonly authorizer?: Authorizer } = {})
     summary,
     storage: new MemoryResourceStorage(),
     logger,
+    authorizer,
   });
-  const skill = new SkillService({ store, locks, index, summary, permissions, logger });
+  const skill = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
 
   const context: McpToolContext = {
     filesystem,
@@ -653,6 +688,78 @@ describe('add_resource / add_skill', () => {
 
     expect(text).toContain('Installed skill "demo-skill"');
     expect(await harness.store.exists(Uri.parse(`${parent}/demo-skill/SKILL.md`))).toBe(true);
+  });
+});
+
+describe('写后物化权限', () => {
+  // 三个 ingest 工具都不经过 `FileSystemService` 的观察者（直接写 `ContentStore`）。
+  // 物化漏掉时它们返回成功，但 `list` / `tree` / `find` 因为缺 `node_permission` 行
+  // 整个看不到——写成功了，树里什么都没有。这里用真实 ACL 断言「写得进去也看得见」。
+  async function withRealAcl(
+    run: (context: McpToolContext, filesystem: FileSystemService) => Promise<void>,
+  ): Promise<void> {
+    const local = await createHarness({ realAcl: true });
+    try {
+      await run(local.context, local.filesystem);
+    } finally {
+      await local.close();
+    }
+  }
+
+  it('add_resource 之后 list(parent) 能看到新文件', async () => {
+    const parent = `${SCOPE}/resources`;
+    await withRealAcl(async (context, filesystem) => {
+      await tool('add_resource').execute(
+        { parentUri: parent, files: [{ path: 'docs/api.md', content: '# API' }] },
+        context,
+      );
+
+      const topLevel = await filesystem.list(Uri.parse(parent));
+      expect(topLevel.map((entry) => entry.uri.name)).toEqual(['docs']);
+
+      const documents = await filesystem.list(Uri.parse(`${parent}/docs`));
+      expect(documents.map((entry) => entry.uri.toString())).toEqual([`${parent}/docs/api.md`]);
+    });
+  });
+
+  it('add_skill 之后 list(parent) 能看到技能目录', async () => {
+    const parent = `${SCOPE}/skills`;
+    await withRealAcl(async (context, filesystem) => {
+      await tool('add_skill').execute(
+        {
+          parentUri: parent,
+          name: 'demo-skill',
+          files: [
+            {
+              path: 'SKILL.md',
+              content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
+            },
+            { path: 'scripts/check.sh', content: '#!/bin/sh\nexit 0\n' },
+          ],
+        },
+        context,
+      );
+
+      const listed = await filesystem.list(Uri.parse(parent));
+      expect(listed.map((entry) => entry.uri.toString())).toEqual([`${parent}/demo-skill`]);
+
+      const nested = await filesystem.list(Uri.parse(`${parent}/demo-skill`));
+      expect(nested.map((entry) => entry.uri.name).sort()).toEqual(['SKILL.md', 'scripts']);
+    });
+  });
+
+  it('remember 之后会话目录可见（GET /sessions 依赖它）', async () => {
+    await withRealAcl(async (context, filesystem) => {
+      await tool('remember').execute(
+        { messages: [{ role: 'user', content: '我偏好中文回答' }] },
+        context,
+      );
+
+      const listed = await filesystem.list(Uri.parse(`${SCOPE}/sessions`));
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.kind).toBe('directory');
+      expect(listed[0]?.uri.name).toMatch(/^sess_[0-9a-f]{8}$/);
+    });
   });
 });
 

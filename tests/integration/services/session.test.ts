@@ -6,16 +6,22 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
+import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { AutoCommitPolicy, SessionMessage } from '../../../src/domain/session.js';
 import { estimateTokens, renderMessageText } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
+import { FileSystemService } from '../../../src/services/filesystem.js';
 import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 
@@ -38,6 +44,8 @@ let store: ContentStore;
 let locks: PathLockManager;
 let tasks: TaskService;
 let service: SessionService;
+let authorizer: InheritingAuthorizer;
+let filesystem: FileSystemService;
 
 function createLogger(): Logger {
   const mock: Logger = {
@@ -62,6 +70,7 @@ function createService(policy: Partial<AutoCommitPolicy> = {}): SessionService {
     logger,
     meta,
     config: { autoCommit: { ...DEFAULT_POLICY, ...policy } },
+    authorizer,
   });
 }
 
@@ -109,6 +118,21 @@ beforeEach(async () => {
     maxAttempts: 3,
     heartbeatSeconds: 20,
   });
+
+  // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
+  const acl = new AclService({
+    dataDir,
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions: new PermissionRepository({ db, logger }),
+    nodes: new NodeRepository({ db, logger }),
+    logger,
+    subject: 'user:alice',
+  });
+  await acl.ensureRootPreset(Uri.parse(SCOPE_ROOT));
+  authorizer = new InheritingAuthorizer(acl, store);
+  filesystem = new FileSystemService({ store, locks, authorizer, logger });
+
   service = createService();
 });
 
@@ -119,6 +143,21 @@ afterEach(async () => {
 });
 
 describe('create / load', () => {
+  it('建完之后 list(sessions) 能看到会话目录，且它有自己的物化权限行', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
+
+    // 会话服务直接写 `ContentStore`，观察者收不到通知。物化权限漏掉时
+    // `GET /sessions` 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空——
+    // 会话建成功了，列表里却没有。
+    const listed = await filesystem.list(Uri.parse(`${SCOPE_ROOT}/sessions`));
+    expect(listed.map((entry) => entry.uri.toString())).toContain(sessionUri.toString());
+
+    const rows = db
+      .prepare('SELECT principal, level, effect FROM node_permission WHERE node_uri = ?')
+      .all(sessionUri.toString());
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
   it('建目录、空 messages.jsonl 与 .meta.json', async () => {
     const sessionUri = await service.create(Uri.parse(SCOPE_ROOT));
 

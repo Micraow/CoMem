@@ -52,14 +52,17 @@
  */
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
-import type { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
+import type {
+  EmbeddingRepository,
+  EmbeddingRow,
+} from '../adapters/sqlite/embedding-repository.js';
 import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType, NodeStatus } from '../domain/node.js';
 import { stableDigest } from '../domain/node.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
-import type { Uri } from '../domain/uri.js';
+import { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
 import type { EmbeddingService } from './embedding.js';
@@ -117,7 +120,13 @@ export interface IndexObserverDeps {
    * （`bootstrap/container.ts`）总是注入。
    */
   readonly embedding?: Pick<EmbeddingService, 'embed' | 'model'>;
-  /** 向量仓储。与 `embedding` 成对出现；只注入一个时嵌入阶段整体跳过。 */
+  /**
+   * 向量仓储。与 `embedding` 成对出现；只注入一个时嵌入阶段整体跳过。
+   *
+   * 生产装配只在 `providers.embedding.type !== 'disabled'` 时注入：默认配置下
+   * `node_embedding` 表根本没有建（`ensureSchema` 也不会跑），注入一个删不掉的
+   * 仓储只会让每次删除都记一条 `no such table`。
+   */
   readonly embeddings?: EmbeddingRepository;
 }
 
@@ -246,26 +255,99 @@ export class IndexObserver implements NodeWriteObserver {
   }
 
   async onNodeRemoved(uri: Uri): Promise<void> {
-    try {
-      await this.#index.deleteByUri(uri.toString(), { recursive: true });
-      // 物化权限没有外键级联（见 `IndexObserverDeps.permissions`），子树的行要显式删。
-      this.#permissions.deleteSubtree(uri.toString());
-      // 向量同理：`node_embedding` 也没有外键，删节点不清理会留下指向不存在
-      // 文件的向量行——`find` 会命中一条打不开的记录。
-      this.#embeddings?.deleteByUri(uri.toString(), { recursive: true });
+    const key = uri.toString();
+    const details = { uri: key };
 
-      const parent = uri.parent();
+    await this.#isolate('节点删除后清理索引失败，已忽略。', details, () =>
+      this.#index.deleteByUri(key, { recursive: true }),
+    );
+    // 物化权限没有外键级联（见 `IndexObserverDeps.permissions`），子树的行要显式删。
+    await this.#isolate('节点删除后清理物化权限失败，已忽略。', details, () => {
+      this.#permissions.deleteSubtree(key);
+    });
+    // 向量同理：`node_embedding` 也没有外键，删节点不清理会留下指向不存在
+    // 文件的向量行——`find` 会命中一条打不开的记录。
+    await this.#isolate('节点删除后清理向量失败，已忽略。', details, () => {
+      this.#embeddings?.deleteByUri(key, { recursive: true });
+    });
+
+    const parent = uri.parent();
+    if (parent === null) {
+      return;
+    }
+    // 父目录的物化行要重算：删掉子项之后，它自己的有效权限可能变了。
+    await this.#isolate('节点删除后重算父目录权限失败，已忽略。', details, () =>
+      this.#acl.materializeNode(parent),
+    );
+    // 删子项同样是「父目录的 L0 变了」，摘要要重算（延后到锁释放后）。
+    this.#scheduleSummaryInvalidation(parent);
+  }
+
+  /**
+   * 移动 / 改名后的派生数据重建。
+   *
+   * `FileSystemService.move` 只调这一个通知。分两次通知（`onNodeRemoved(from)` +
+   * `onNodeWritten(to)`）时，子项一条都不会重建：`onNodeRemoved` 把整棵子树的
+   * `node` / `node_permission` / `node_embedding` 删掉，`onNodeWritten` 只写回
+   * 目标节点自己。移动一个非空目录之后，子文件在磁盘上还在，但 `tree` 只剩一个
+   * 空目录、`find` 搜不到、`list` 因为缺 `node_permission` 行返回空——而且不报错。
+   *
+   * **一次遍历**：目标子树只从磁盘走一遍，索引用**一次** `upsert` 写完
+   * （`node` 与 `node_fts` 在同一个事务里）。逐节点调 `onNodeWritten` 会产生
+   * N 次索引事务与 N 次摘要失效。
+   *
+   * **摘要失效只投给源与目标的父目录**（去重后各一次）：子项的正文没有变，把它们
+   * 的祖先链全部标脏只会让整条链白算一遍。
+   *
+   * 每个派生存储各一步 try/catch：默认配置（`providers.embedding.type ===
+   * 'disabled'`，`node_embedding` 表不存在）下向量清理必然抛错，一个 try 包住全部
+   * 会把物化权限与摘要失效一起跳过（`local/notes/refactor-plan.md` 的 P1-1）。
+   */
+  async onNodeMoved(from: Uri, to: Uri): Promise<void> {
+    const details = { from: from.toString(), to: to.toString() };
+
+    const records = await this.#subtreeRecords(to, details);
+    if (records === null) {
+      return;
+    }
+
+    // 索引：删掉源前缀的整棵子树，再一次性写回目标前缀的整棵子树。
+    await this.#isolate('节点移动后重建索引失败，已忽略。', details, async () => {
+      await this.#index.deleteByUri(details.from, { recursive: true });
+      await this.#index.upsert(records);
+    });
+
+    // 物化权限：源前缀的行没有外键级联，要显式删；目标前缀逐节点物化。
+    await this.#isolate('节点移动后清理源路径的物化权限失败，已忽略。', details, () => {
+      this.#permissions.deleteSubtree(details.from);
+    });
+    // `ContentStore.move` 会 `mkdir -p` 出目标路径的祖先，它们同样没有行。
+    await this.#isolate('节点移动后物化祖先目录失败，已忽略。', details, () =>
+      this.#materializeAncestors(to),
+    );
+    for (const record of records) {
+      const uri = Uri.parse(record.uri);
+      await this.#isolate(
+        '节点移动后物化权限失败，已忽略。',
+        { uri: record.uri },
+        () => this.#acl.materializeNode(uri),
+      );
+    }
+
+    // 向量：移动不改正文，旧向量按新 URI 重新挂上，不重新调模型。
+    await this.#isolate('节点移动后重挂向量失败，已忽略。', details, () => {
+      this.#rekeyEmbeddings(details.from, details.to, records);
+    });
+
+    // 摘要失效：源与目标的父目录各一次。同一个父目录只投递一次。
+    const parents = new Map<string, Uri>();
+    for (const parent of [from.parent(), to.parent()]) {
       if (parent !== null) {
-        // 父目录的物化行要重算：删掉子项之后，它自己的有效权限可能变了。
-        await this.#acl.materializeNode(parent);
-        // 删子项同样是「父目录的 L0 变了」，摘要要重算（延后到锁释放后）。
-        this.#scheduleSummaryInvalidation(parent);
+        parents.set(parent.toString(), parent);
       }
-    } catch (error) {
-      this.#logger.error('节点删除后清理索引失败，已忽略。', {
-        uri: uri.toString(),
-        error: errorMessage(error),
-      });
+    }
+    for (const parent of parents.values()) {
+      this.#scheduleSummaryInvalidation(parent);
     }
   }
 
@@ -279,6 +361,99 @@ export class IndexObserver implements NodeWriteObserver {
     while (this.#pending.size > 0) {
       await Promise.all([...this.#pending]);
     }
+  }
+
+  /**
+   * 派生数据的一步维护：失败只记这一步的日志，不跳过后续步骤。
+   *
+   * 一个 `try` 包住「索引 → 权限 → 向量 → 父摘要」时，任何一步抛错都会让后面的
+   * 步骤全部跳过，而日志里只有一行泛化消息。默认配置（`providers.embedding.type
+   * === 'disabled'`，`node_embedding` 表不存在）正好会踩中：删除节点时向量清理
+   * 抛 `no such table`，父目录的物化权限与摘要失效静默丢失。
+   */
+  async #isolate(
+    message: string,
+    details: Readonly<Record<string, string>>,
+    run: () => Promise<void> | void,
+  ): Promise<void> {
+    try {
+      await run();
+    } catch (error) {
+      this.#logger.error(message, { ...details, error: errorMessage(error) });
+    }
+  }
+
+  /**
+   * 目标路径整棵子树的索引记录。
+   *
+   * 从磁盘读（§7：文件是真相），与 `onNodeWritten` 用同一套 `#documentRecord` /
+   * `#directoryRecord`，保证移动后的行与「在新路径上写一次」完全一致。
+   * `ContentStore.list` 已经跳过临时文件、锁文件与元数据产物，不需要再过滤一遍。
+   *
+   * 读盘失败时返回 `null` 而不是空数组：空数组会把整棵子树的索引**删掉**再什么
+   * 都不写，比保留旧行（至少 `reindex` 能修）更糟。
+   */
+  async #subtreeRecords(
+    root: Uri,
+    details: Readonly<Record<string, string>>,
+  ): Promise<readonly IndexRecord[] | null> {
+    const records: IndexRecord[] = [];
+    try {
+      await this.#collectRecords(root, records);
+    } catch (error) {
+      this.#logger.error('节点移动后读取目标子树失败，索引未重建。', {
+        ...details,
+        error: errorMessage(error),
+      });
+      return null;
+    }
+    return records;
+  }
+
+  async #collectRecords(uri: Uri, records: IndexRecord[]): Promise<void> {
+    const stat = await this.#store.stat(uri);
+    if (stat === null) {
+      return;
+    }
+    const contextType = contextTypeOf(uri);
+    records.push(
+      stat.kind === 'file'
+        ? await this.#documentRecord(uri, contextType, stat.size, stat.updatedAt)
+        : this.#directoryRecord(uri, contextType, stat.size, stat.updatedAt),
+    );
+    if (stat.kind !== 'directory') {
+      return;
+    }
+    for (const child of await this.#store.list(uri)) {
+      await this.#collectRecords(child.uri, records);
+    }
+  }
+
+  /**
+   * 把源前缀的向量行按目标前缀重新挂上。
+   *
+   * 移动不改变正文，向量不需要重算（重算要调模型，而且换不出不同的结果）。`vec0`
+   * 不支持 UPSERT（见 `EmbeddingRepository.upsert`），所以是「读旧行 → 删旧前缀 →
+   * 插新行」，旧 URI 由新 URI 按前缀替换推出来。
+   */
+  #rekeyEmbeddings(from: string, to: string, records: readonly IndexRecord[]): void {
+    const embeddings = this.#embeddings;
+    if (embeddings === undefined) {
+      return;
+    }
+    const oldUris = records.map((record) => `${from}${record.uri.slice(to.length)}`);
+    const byOldUri = new Map(embeddings.getMany(oldUris).map((row) => [row.uri, row]));
+
+    const rekeyed: EmbeddingRow[] = [];
+    for (const [index, record] of records.entries()) {
+      const row = byOldUri.get(oldUris[index] ?? '');
+      if (row !== undefined) {
+        rekeyed.push({ ...row, uri: record.uri });
+      }
+    }
+
+    embeddings.deleteByUri(from, { recursive: true });
+    embeddings.upsert(rekeyed);
   }
 
   /**

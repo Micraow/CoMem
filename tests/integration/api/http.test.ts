@@ -387,6 +387,21 @@ describe('检索', () => {
 });
 
 describe('会话与任务', () => {
+  it('create 之后 GET /sessions 立刻能列出它（不靠后续写入补权限）', async () => {
+    const created = resultOf(
+      await inject({ method: 'POST', url: '/api/v1/sessions', payload: {} }),
+    );
+    const sessionUri = String(created['uri']);
+
+    // 会话服务直接写 `ContentStore`，观察者收不到通知。不物化时 `GET /sessions`
+    // 的 `list(sessions/)` 会因为缺 `node_permission` 行返回空——建成功了，列表里
+    // 却没有，要等用户点进某个会话 URI 才补出来。
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/sessions' }));
+    expect((listed['sessions'] as Record<string, unknown>[]).map((session) => session['uri'])).toEqual([
+      sessionUri,
+    ]);
+  });
+
   it('create → messages → get → list → commit → tasks', async () => {
     const created = resultOf(
       await inject({ method: 'POST', url: '/api/v1/sessions', payload: {} }),
@@ -519,6 +534,15 @@ describe('资源与技能', () => {
     expect((result['created'] as string[]).length).toBe(1);
     await container.services.indexObserver.drain();
     expect(await container.services.index.stat(`${parentUri}/docs/architecture.md`)).not.toBeNull();
+
+    // 写后物化：资源服务直接写 `ContentStore`，不走观察者。不物化时 `list` 会因为
+    // 缺 `node_permission` 行把新文件整个过滤掉——写成功了，树里什么都没有。
+    const listed = await container.services.filesystem.list(Uri.parse(parentUri));
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['docs']);
+    const documents = await container.services.filesystem.list(Uri.parse(`${parentUri}/docs`));
+    expect(documents.map((entry) => entry.uri.toString())).toEqual([
+      `${parentUri}/docs/architecture.md`,
+    ]);
   });
 
   it('add_skill 写入技能包并列出', async () => {
@@ -549,6 +573,11 @@ describe('资源与技能', () => {
     expect(listed['skills']).toEqual([
       { uri: `${parentUri}/code-review`, name: 'code-review' },
     ]);
+
+    // 写后物化：技能目录没有自己的 `node_permission` 行时，上面的 `listSkills`
+    // 会把它整个过滤掉。
+    const directories = await container.services.filesystem.list(Uri.parse(parentUri));
+    expect(directories.map((entry) => entry.uri.name)).toEqual(['code-review']);
   });
 });
 

@@ -10,6 +10,7 @@ import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repository.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
@@ -35,7 +36,16 @@ interface Harness {
   readonly summary: SummaryService;
   readonly permissions: PermissionRepository;
   readonly nodes: NodeRepository;
+  readonly logger: Logger;
   close(): Promise<void>;
+}
+
+interface HarnessOptions {
+  /**
+   * 注入一个**没有建表**的向量仓储，复现默认配置
+   * （`providers.embedding.type === 'disabled'`，`ensureSchema` 不跑）。
+   */
+  readonly embeddings?: boolean;
 }
 
 function createLogger(): Logger {
@@ -50,7 +60,7 @@ function createLogger(): Logger {
   return logger;
 }
 
-async function createHarness(): Promise<Harness> {
+async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const dataDir = await mkdtemp(join(tmpdir(), 'comem-index-observer-'));
   const db = openDatabase(':memory:');
   runMigrations(db);
@@ -95,6 +105,7 @@ async function createHarness(): Promise<Harness> {
     nodes,
     permissions,
     logger,
+    ...(options.embeddings === true ? { embeddings: new EmbeddingRepository({ db, logger }) } : {}),
   });
   const filesystem = new FileSystemService({
     store,
@@ -115,6 +126,7 @@ async function createHarness(): Promise<Harness> {
     summary,
     permissions,
     nodes,
+    logger,
     close: async () => {
       await observer.drain();
       db.close();
@@ -251,7 +263,160 @@ describe('IndexObserver.onNodeWritten', () => {
   });
 });
 
+describe('IndexObserver.onNodeMoved', () => {
+  const RESOURCES = `${ROOT}/resources`;
+
+  it('移动目录后整棵子树的索引与物化权限都跟着搬过去', async () => {
+    const from = Uri.parse(`${RESOURCES}/spec`);
+    const to = Uri.parse(`${RESOURCES}/spec-v2`);
+    await harness.filesystem.mkdir(from);
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      await harness.filesystem.write(from.child(name), `${name} 的正文。`);
+    }
+    await harness.observer.drain();
+
+    await harness.filesystem.move(from, to);
+    await harness.observer.drain();
+
+    // 源路径一条不剩。
+    expect(harness.nodes.get(from.toString())).toBeNull();
+    expect(permissionRowsOf(from.toString())).toEqual([]);
+
+    // 目标路径每一层都有索引行与物化权限行。
+    expect(harness.nodes.get(to.toString())?.kind).toBe('directory');
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      const child = to.child(name).toString();
+      expect(harness.nodes.get(child)?.kind).toBe('document');
+      expect(permissionRowsOf(child).length).toBeGreaterThan(0);
+    }
+
+    // `list` / `tree` / `find` 都能看到子项。
+    const listed = await harness.filesystem.list(to);
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['one.md', 'three.md', 'two.md']);
+
+    const tree = await harness.filesystem.tree(Uri.parse(RESOURCES));
+    expect(tree.entries.map((entry) => entry.uri.toString())).toEqual(
+      expect.arrayContaining(['one.md', 'two.md', 'three.md'].map((name) => to.child(name).toString())),
+    );
+
+    const hits = await harness.index.search({
+      text: '正文',
+      scopes: [ROOT],
+      principals: PRINCIPALS,
+      limit: 10,
+    });
+    expect(hits.filter((hit) => hit.uri.startsWith(`${to.toString()}/`))).toHaveLength(3);
+  });
+
+  it('摘要失效只投给源与目标的父目录各一次，不给每个子项失效', async () => {
+    const from = Uri.parse(`${RESOURCES}/spec`);
+    const to = Uri.parse(`${ROOT}/memories/spec`);
+    await harness.filesystem.mkdir(from);
+    for (const name of ['one.md', 'two.md', 'three.md']) {
+      await harness.filesystem.write(from.child(name), `${name} 的正文。`);
+    }
+    await harness.observer.drain();
+
+    const stale = vi.spyOn(harness.summary, 'markStale');
+    await harness.filesystem.move(from, to);
+    await harness.observer.drain();
+
+    // 源与目标各一个父目录；三个子项不再各投一次（那会把整条祖先链打穿）。
+    expect(stale).toHaveBeenCalledTimes(2);
+    expect(
+      stale.mock.calls.map(([directory]) => directory.toString()).sort(),
+    ).toEqual(
+      [Uri.parse(RESOURCES).toString(), Uri.parse(`${ROOT}/memories`).toString()].sort(),
+    );
+  });
+
+  it('同一个父目录内改名只投递一次摘要失效', async () => {
+    const from = Uri.parse(`${RESOURCES}/spec`);
+    await harness.filesystem.mkdir(from);
+    await harness.filesystem.write(from.child('one.md'), '正文。');
+    await harness.observer.drain();
+
+    const stale = vi.spyOn(harness.summary, 'markStale');
+    await harness.filesystem.move(from, Uri.parse(`${RESOURCES}/spec-v2`));
+    await harness.observer.drain();
+
+    expect(stale).toHaveBeenCalledTimes(1);
+    expect(stale).toHaveBeenCalledWith(Uri.parse(RESOURCES));
+  });
+
+  it('移动单个文件：源行清掉、目标行建出来', async () => {
+    const from = Uri.parse(`${RESOURCES}/one.md`);
+    const to = Uri.parse(`${RESOURCES}/renamed.md`);
+    await harness.filesystem.write(from, '正文。');
+    await harness.observer.drain();
+
+    await harness.filesystem.move(from, to);
+    await harness.observer.drain();
+
+    expect(harness.nodes.get(from.toString())).toBeNull();
+    expect(permissionRowsOf(from.toString())).toEqual([]);
+    expect(harness.nodes.get(to.toString())?.kind).toBe('document');
+    expect(permissionRowsOf(to.toString()).length).toBeGreaterThan(0);
+  });
+
+  it('向量按新 URI 重新挂上，不重新调模型', async () => {
+    const local = await createHarness({ embeddings: true });
+    try {
+      const embeddings = new EmbeddingRepository({ db: local.db, logger: local.logger });
+      embeddings.ensureSchema(3, 'test-model');
+
+      const from = Uri.parse(`${RESOURCES}/one.md`);
+      const to = Uri.parse(`${RESOURCES}/renamed.md`);
+      await local.filesystem.write(from, '正文。');
+      await local.observer.drain();
+      embeddings.upsert([
+        { uri: from.toString(), model: 'test-model', contentDigest: 'digest', vector: [0.1, 0.2, 0.3] },
+      ]);
+
+      await local.filesystem.move(from, to);
+      await local.observer.drain();
+
+      expect(embeddings.get(from.toString())).toBeNull();
+      const moved = embeddings.get(to.toString());
+      expect(moved?.model).toBe('test-model');
+      expect(moved?.contentDigest).toBe('digest');
+      expect(moved?.vector).toHaveLength(3);
+    } finally {
+      await local.close();
+    }
+  });
+});
+
 describe('IndexObserver.onNodeRemoved', () => {
+  it('向量清理失败不跳过物化权限与父目录摘要（默认配置下表不存在）', async () => {
+    // 默认 `providers.embedding.type === 'disabled'`：`ensureSchema` 不跑，
+    // `node_embedding` 表不存在。删除时的向量清理必然抛 `no such table`。
+    const local = await createHarness({ embeddings: true });
+    try {
+      const directory = Uri.parse(`${ROOT}/memories`);
+      const file = directory.child('note.md');
+      await local.filesystem.write(file, '正文。');
+      await local.observer.drain();
+      expect(local.db.prepare('SELECT 1 FROM node_permission WHERE node_uri = ?').all(file.toString())).toHaveLength(1);
+
+      const stale = vi.spyOn(local.summary, 'markStale');
+      await local.filesystem.remove(file);
+      await local.observer.drain();
+
+      // 向量那一步确实失败了（日志里有一条），但权限与摘要照常完成。
+      expect(local.logger.error).toHaveBeenCalledWith(
+        '节点删除后清理向量失败，已忽略。',
+        expect.objectContaining({ uri: file.toString() }),
+      );
+      expect(
+        local.db.prepare('SELECT 1 FROM node_permission WHERE node_uri = ?').all(file.toString()),
+      ).toEqual([]);
+      expect(stale).toHaveBeenCalledWith(directory);
+    } finally {
+      await local.close();
+    }
+  });
+
   it('删文件后索引无残留、权限行被清、父目录摘要重算', async () => {
     const directory = Uri.parse(`${ROOT}/memories`);
     const file = directory.child('note.md');

@@ -159,12 +159,6 @@ export function createResourceRoutes(services: HttpRouteServices): HttpRouteGrou
           maxFiles,
         });
 
-        // 摄取服务直接写 `ContentStore`（绕过 `FileSystemService`），索引是它自己
-        // upsert 的，但物化权限没有；不补这一步，写进去的资源对检索不可见。
-        for (const uri of [...result.created, ...result.updated, ...result.attachments]) {
-          await authorizer.assert(uri, WRITE);
-        }
-
         return ok({
           parentUri: parentUri.toString(),
           created: result.created.map((uri) => uri.toString()),

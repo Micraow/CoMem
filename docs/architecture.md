@@ -680,6 +680,18 @@ summary_state: fresh            # fresh | stale
 | 没有跨文件事务 | 先写内容再更新索引；索引失败时标记为待重建，启动对账 |
 | 写入需要先 mkdir | `write` 内部自动建父目录，调用方不用关心 |
 
+**派生数据的三个通知入口。** 内容写完之后由 `IndexObserver` 把索引与物化权限追上来。它对外只有三个方法，对应三种磁盘状态变化：
+
+| 入口 | 什么时候 | 做什么 |
+|---|---|---|
+| `onNodeWritten(uri, kind)` | 单个节点被创建或覆盖 | 写该节点的索引 → 物化它自己与祖先目录的权限 → 父目录摘要标脏 |
+| `onNodeRemoved(uri)` | 节点被删除 | 删整棵子树的索引 / 物化权限 / 向量 → 父目录摘要标脏 |
+| `onNodeMoved(from, to)` | 节点被移动 / 改名 | 遍历 `to` 的整棵子树重建索引与物化权限，删掉 `from` 前缀的行 → 源与目标的父目录各标脏一次 |
+
+**`move` 必须是一次通知，不能拆成「按 `from` 删除 + 按 `to` 写入」。** 拆开时目标路径只重建根节点自己，子项一条都不出现：文件在磁盘上还在，`tree` 却只剩一个空目录，`find` 搜不到，而且不报错。一次通知还让整棵子树只走一遍磁盘、只做一次索引事务、只投递两次摘要失效（源与目标各一次），而不是每个子项各一次。
+
+**每个派生存储各一步 `try/catch`。** 四件事写在同一个 `try` 里时，任何一步抛错都会让后面的步骤全部跳过。默认配置（`providers.embedding.type === 'disabled'`，`node_embedding` 表不存在）正好会踩中：删节点时向量清理抛 `no such table`，父目录的物化权限与摘要失效静默丢失。
+
 ## 8. 索引与检索
 
 ### 8.1 SQLite 表
@@ -885,6 +897,8 @@ LIMIT ?;
 **代价转移动了。** 改一个节点的 ACL，要重算它所有后代的 `node_permission`。ACL 改动是低频操作（一个项目整个周期可能就改几次），读是高频操作。物化方向必须是「写时算，读时查」。
 
 **重算用事务包住**：`BEGIN; DELETE FROM node_permission WHERE node_uri LIKE ? || '%'; INSERT ...; UPDATE acl_entry ...; COMMIT;`。中途失败整批回滚，`node_permission` 和 `.acl.json` 不会不一致。
+
+**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 
 ### 8.3 检索接口
 

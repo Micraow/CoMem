@@ -45,6 +45,7 @@ function createLogger(): RecordingLogger {
 class RecordingObserver implements NodeWriteObserver {
   readonly written: { readonly uri: string; readonly kind: 'file' | 'directory' }[] = [];
   readonly removed: string[] = [];
+  readonly moved: { readonly from: string; readonly to: string }[] = [];
 
   async onNodeWritten(uri: Uri, kind: 'file' | 'directory'): Promise<void> {
     this.written.push({ uri: uri.toString(), kind });
@@ -52,6 +53,10 @@ class RecordingObserver implements NodeWriteObserver {
 
   async onNodeRemoved(uri: Uri): Promise<void> {
     this.removed.push(uri.toString());
+  }
+
+  async onNodeMoved(from: Uri, to: Uri): Promise<void> {
+    this.moved.push({ from: from.toString(), to: to.toString() });
   }
 }
 
@@ -421,18 +426,22 @@ describe('观察者', () => {
     expect(observer.written).toEqual([{ uri: target.toString(), kind: 'directory' }]);
   });
 
-  it('move 后通知源删除与目标写入', async () => {
+  it('目录 move 只通知一次 onNodeMoved，整棵子树由观察者重建', async () => {
     const observer = new RecordingObserver();
     const service = createService(new AllowAllAuthorizer(), [observer]);
     const from = uri('dir');
     const to = uri('moved');
     await service.mkdir(from);
+    await service.write(from.child('one.md'), 'one');
     observer.written.length = 0;
 
     await service.move(from, to);
 
-    expect(observer.removed).toEqual([from.toString()]);
-    expect(observer.written).toEqual([{ uri: to.toString(), kind: 'directory' }]);
+    // 一次通知，而不是「源删除 + 目标写入」两次：拆成两次时子项一条都不会重建。
+    expect(observer.moved).toEqual([{ from: from.toString(), to: to.toString() }]);
+    expect(observer.removed).toEqual([]);
+    expect(observer.written).toEqual([]);
+    expect((await service.list(to)).map((entry) => entry.uri.name)).toEqual(['one.md']);
   });
 
   it('remove 后通知 onNodeRemoved', async () => {
@@ -455,6 +464,9 @@ describe('观察者', () => {
       async onNodeRemoved() {
         throw new Error('索引挂了');
       },
+      async onNodeMoved() {
+        throw new Error('索引挂了');
+      },
     };
     const service = createService(new AllowAllAuthorizer(), [unreliable]);
     const target = uri('a.md');
@@ -475,6 +487,9 @@ describe('观察者', () => {
         throw new Error('索引挂了');
       },
       async onNodeRemoved() {
+        throw new Error('索引挂了');
+      },
+      async onNodeMoved() {
         throw new Error('索引挂了');
       },
     };

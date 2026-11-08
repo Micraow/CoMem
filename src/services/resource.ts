@@ -43,6 +43,7 @@ import { stableDigest } from '../domain/node.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
+import type { AclAction, Authorizer } from './authorizer.js';
 import type { SummaryService } from './summary.js';
 
 /**
@@ -161,6 +162,14 @@ export interface ResourceServiceDeps {
   readonly locks: PathLockManager;
   readonly index: RetrievalIndex;
   readonly summary: Pick<SummaryService, 'markStale'>;
+  /**
+   * 写后物化权限（§12.4）。
+   *
+   * 本服务直接写 `ContentStore`，不经过 `FileSystemService` 的观察者，所以
+   * `node_permission` 没有人为新建节点算一遍。`InheritingAuthorizer` 的写路径会先
+   * `materializeNode` 再求权，调一次 `assert` 就是「算一遍」。
+   */
+  readonly authorizer: Authorizer;
   readonly storage: ResourceStorage;
   readonly logger: Logger;
   /** 默认 `DEFAULT_MAX_FILE_BYTES` */
@@ -168,6 +177,9 @@ export interface ResourceServiceDeps {
   /** 默认 `DEFAULT_MAX_FILES` */
   readonly maxFiles?: number;
 }
+
+/** §12.1：write = 3。 */
+const WRITE: AclAction = 3;
 
 /** 资源文件的索引层级：原文件是 L2（L0 / L1 是目录摘要，§9.1）。 */
 const RESOURCE_LEVEL = 'L2';
@@ -247,6 +259,7 @@ export class ResourceService {
   readonly #locks: PathLockManager;
   readonly #index: RetrievalIndex;
   readonly #summary: Pick<SummaryService, 'markStale'>;
+  readonly #authorizer: Authorizer;
   readonly #storage: ResourceStorage;
   readonly #logger: Logger;
   readonly #maxFileBytes: number;
@@ -262,6 +275,7 @@ export class ResourceService {
     this.#locks = deps.locks;
     this.#index = deps.index;
     this.#summary = deps.summary;
+    this.#authorizer = deps.authorizer;
     this.#storage = deps.storage;
     this.#logger = deps.logger;
     this.#maxFileBytes = maxFileBytes;
@@ -417,6 +431,15 @@ export class ResourceService {
           }
         }
       }
+
+      // §12.4 的「写时算」：本服务直接写 `ContentStore`，观察者收不到通知。不补
+      // 这一步，`node_permission` 里没有新文件的行，而 `list` / `tree` / `find`
+      // 的权限过滤是纯 SQL 查询——写成功了，树里却什么都没有。
+      //
+      // 放在 `index.upsert` 之后：`materializeNode` 从 `node` 表读 kind 决定链的
+      // 起点。索引写失败时仍然要物化——权限是独立的派生数据，而且 `kind` 缺失时
+      // 的兜底（按目录算）得到的是同一条有效权限。
+      await this.#materialize([...written, ...attachments]);
     });
 
     // §10.6 第 3 步：提交后统一投递摘要重算，每个父目录一次。
@@ -597,6 +620,42 @@ export class ResourceService {
           directory,
           error: errorMessage(error),
         });
+      }
+    }
+  }
+
+  /**
+   * 为新建 / 覆盖的节点物化权限（含 `mkdir -p` 顺手建出来的中间目录）。
+   *
+   * 只对「写出来的 URI」物化不够：`writeText` 写 `docs/api/spec.md` 时会建出
+   * `docs/` 与 `docs/api/`，这两个目录没有自己的行时会在 `list` / `tree` 里整个
+   * 消失（`filterReadable` 是纯 SQL 查询）。逐级 `materializeNode` 是幂等的，去重
+   * 之后 100 个文件只会多出「目录数」条 UPSERT。
+   *
+   * 失败只记日志 + 对账：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
+   */
+  async #materialize(uris: readonly Uri[]): Promise<void> {
+    const directories = new Map<string, Uri>();
+    for (const uri of uris) {
+      let current: Uri | null = uri;
+      while (current !== null) {
+        const key = current.toString();
+        if (directories.has(key)) {
+          // 祖先链已经收过，再往上都是重复。
+          break;
+        }
+        directories.set(key, current);
+        current = current.parent();
+      }
+    }
+
+    for (const [key, uri] of directories) {
+      try {
+        await this.#authorizer.assert(uri, WRITE);
+      } catch (error) {
+        const reason = errorMessage(error);
+        this.#logger.error('资源节点权限物化失败，已忽略。', { uri: key, reason });
+        await this.#recordReconcile('permission', key, reason);
       }
     }
   }

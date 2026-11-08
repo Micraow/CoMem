@@ -5,16 +5,21 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { isArtifactName, isReservedName } from '../../../src/adapters/fs/path.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
+import { FileSystemService } from '../../../src/services/filesystem.js';
 import {
   ResourceService,
   type ReconcileEntry,
@@ -39,6 +44,8 @@ let summary: SummaryService;
 let storage: ResourceStorage;
 let logger: RecordingLogger;
 let service: ResourceService;
+let filesystem: FileSystemService;
+let authorizer: InheritingAuthorizer;
 
 interface RecordingLogger extends Logger {
   readonly warnings: string[];
@@ -146,6 +153,7 @@ function createService(options: { maxFileBytes?: number; maxFiles?: number } = {
     summary,
     storage,
     logger,
+    authorizer,
     maxFileBytes: options.maxFileBytes,
     maxFiles: options.maxFiles,
   });
@@ -171,6 +179,23 @@ beforeEach(async () => {
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
   });
   storage = createStorage(dataDir);
+
+  // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
+  const acl = new AclService({
+    dataDir,
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions: new PermissionRepository({ db, logger }),
+    nodes: new NodeRepository({ db, logger }),
+    logger,
+    subject: 'user:alice',
+  });
+  // 根预置（§12.6）：没有 `user:alice = manage` 这一行，新建节点从父目录复制不到
+  // 任何权限，`list` 会把它们全部过滤掉。
+  await acl.ensureRootPreset(Uri.parse('comem://user/alice'));
+  authorizer = new InheritingAuthorizer(acl, store);
+  filesystem = new FileSystemService({ store, locks, authorizer, logger });
+
   service = createService();
 });
 
@@ -212,6 +237,26 @@ describe('addResource', () => {
     expect(stat?.contextType).toBe('resource');
     expect(stat?.abstract).toBe('规格说明');
     expect(markStale).toHaveBeenCalledTimes(1);
+  });
+
+  it('写完之后 list(parent) 能看到新文件，每个子项都有物化权限行', async () => {
+    await addFiles([{ path: 'docs/spec.md', content: '# 规格' }]);
+
+    // 资源服务直接写 `ContentStore`，不经过 `FileSystemService` 的观察者。物化权限
+    // 漏掉时 `list` / `tree` 会因为缺 `node_permission` 行把子项整个过滤掉——写成功
+    // 了，树里却什么都没有。
+    const topLevel = await filesystem.list(Uri.parse(PARENT));
+    expect(topLevel.map((entry) => entry.uri.toString())).toContain(DOCS);
+
+    const documents = await filesystem.list(Uri.parse(DOCS));
+    expect(documents.map((entry) => entry.uri.toString())).toContain(SPEC);
+
+    for (const uri of [DOCS, SPEC]) {
+      const rows = db
+        .prepare('SELECT principal, level, effect FROM node_permission WHERE node_uri = ?')
+        .all(uri);
+      expect(rows.length).toBeGreaterThan(0);
+    }
   });
 
   it('100 文件批量：索引一次、writeText 100 次、摘要按唯一目录去重', async () => {
