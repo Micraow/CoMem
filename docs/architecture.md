@@ -1516,7 +1516,15 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 **锁不可重入。** 持有者再拿同一路径（含祖先 `TREE` 与后代 `EXACT` 的冲突）的锁会等自己，超时抛 `CONFLICT`。多锁必须按路径字典序升序获取、反序释放——`FileSystemService.move` 就是这条规则。ACL 写入的锁粒度、锁序与「读-改-写必须在同一把锁内」的完整契约见 §12.8。
 
-**为什么要 TREE 而不是只锁文件**：`rm -r resources/foo` 要保证「删索引 → 删文件」期间没有人往 `foo/` 里写。只锁 `foo` 自身挡不住写 `foo/bar.md` 的人。
+**锁内不得跨越慢操作。** 一把锁只应保护「读状态 → 决定 → 写状态」这条**几毫秒**的短路径。LLM 调用（一次 7–9 秒）、网络请求、全库 / 全子树扫描、大批量文件 IO，都必须在锁外完成，做完再进锁写结果。原因有三，都会把「极少数慢请求」放大成「大面积 `CONFLICT`」：
+
+- `PathLockManager` **不可重入**：持锁期间再拿同路径或冲突路径的锁会等自己直到超时。
+- `TREE` 与祖先 / 后代的 `EXACT` 互斥：一次慢 `EXACT` 会挡住整棵子树的写入与 `rm -r`。
+- 默认获取超时 5000 ms：慢操作一进锁，持有时间放大上百到上千倍，并发的写者 5 秒后直接 `CONFLICT`。
+
+**这条规则的来源是一次实测。** W83 用 `summary.generator: llm` 跑 ingest 时，`SummaryService.#invalidateDirectory` 把 `generator.generate`（模型调用）放在目录的 `EXACT` 锁里，摘要一算 7–9 秒；期间的提取写操作要拿祖先 `TREE` 锁，正好撞上这把手慢锁，5 秒后 `CONFLICT`。当时的绕法是「必须把 `summary.generator` 设成 `rule` 才能跑通 ingest」。修复是把 `#invalidateDirectory` 拆成三段：锁内判定 → **锁外生成** → 锁内写回，锁持有时间从 ≈9 秒降到几毫秒（见 `src/services/summary.ts` 该方法注释）。代价是「摘要可能比目录内容旧一拍」——这是可接受的：第一段锁已把 `pending` 清零，生成期间到达的改动会经 `markStale` 重新计数，下一轮失效再重算，最终收敛。
+
+**为什么 TREE 而不是只锁文件**：`rm -r resources/foo` 要保证「删索引 → 删文件」期间没有人往 `foo/` 里写。只锁 `foo` 自身挡不住写 `foo/bar.md` 的人。
 
 **元数据写保护**
 

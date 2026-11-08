@@ -553,6 +553,84 @@ describe('markStale', () => {
   });
 });
 
+describe('锁内不得跨越慢操作（§10.6）', () => {
+  it('摘要生成（慢 LLM）期间，另一个写者能拿到子树锁', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    seedRow(STYLE);
+    // 目录自己：无基线 → 立刻重算，会走 `#summarize`（慢 LLM）。
+    seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
+
+    let markEntered!: () => void;
+    let markFinished!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      markFinished = resolve;
+    });
+
+    // 假 summarizer：进入时通知「锁内慢操作开始」，睡 500ms 后返回。
+    const slowGenerator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          markEntered();
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          markFinished();
+        }
+        return { abstract: '慢摘要', overview: '# preferences\n\n慢摘要', degraded: false };
+      },
+    };
+
+    const service = createService({ generator: slowGenerator });
+    const invalidation = service.markStale(Uri.parse(PREFERENCES));
+
+    // 等慢生成真正开始（此时若锁覆盖 LLM，EXACT(PREFERENCES) 正被持有）。
+    await entered;
+
+    // 另一个写者请求同一子树的 TREE 锁：必须立刻拿到，不能被 500ms 的 LLM 阻塞。
+    const t0 = Date.now();
+    const release = await locks.acquire(Uri.parse(PREFERENCES), 'tree');
+    const waited = Date.now() - t0;
+    release();
+
+    // 500ms 的 LLM 若在锁内，这里会等满 ~500ms（或直接 5s 超时抛 CONFLICT）。
+    expect(waited).toBeLessThan(250);
+
+    await finished;
+    await invalidation;
+
+    // 摘要最终仍然落盘（收敛）。
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('慢摘要');
+  });
+
+  it('慢生成期间到达的改动不被吞：pending 归零后再次加回，下一轮再重算', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    seedRow(STYLE);
+    seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
+
+    const slowGenerator: SummaryGenerator = {
+      async generate(): Promise<DirectorySummary> {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { abstract: 'A1', overview: '# preferences\n\nA1', degraded: false };
+      },
+    };
+
+    const service = createService({ generator: slowGenerator });
+    // 生成期间模拟一次并发写把 pending 加回（`markStale` 之外的写者）。
+    const inflight = service.markStale(Uri.parse(PREFERENCES));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    db.prepare('UPDATE node SET summary_pending = summary_pending + 1 WHERE uri = ?').run(
+      PREFERENCES,
+    );
+    await inflight;
+
+    // 第一段清零 → 慢操作期间的 +1 留下：写回时 consume(快照) 不应把它抹成 0。
+    expect(freshness(PREFERENCES).pending).toBe(1);
+  });
+});
+
 describe('read', () => {
   it('没有摘要文件时返回 null', async () => {
     await makeDirectory(PREFERENCES);

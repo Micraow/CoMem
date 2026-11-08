@@ -41,6 +41,11 @@
  * 互斥，否则后台写摘要与递归删除会同时改同一个目录。`locks` 省略时不加锁
  * （纯内存测试、单进程一次性重建）；**生产装配必须传**，否则这条互斥不成立。
  *
+ * **锁内不得跨越慢操作**（§10.6）：`generator.generate` 是一次 7–9 秒的模型调用，
+ * 不能放在 `EXACT` 锁里，否则锁持有时间放大 1000 倍，并发的 `tree` 锁会在 5 秒后
+ * `CONFLICT`（W83 实测）。所以 `#invalidateDirectory` 拆成「锁内判定 → 锁外生成 →
+ * 锁内写回」三段，中间只留下「摘要可能比内容旧一拍」这一可接受竞态（见该方法注释）。
+ *
  * ## 为什么事务不调用 `withWriteTransaction`
  *
  * 那是 `adapters/sqlite/database.ts` 的**值**导出，而 `services/` 只允许 `import type`
@@ -317,7 +322,14 @@ export class SummaryService {
           await visit(entry.uri);
         }
       }
-      await this.#withDirectoryLock(directoryUri, () => this.#summarize(directoryUri));
+      // 慢操作（模型调用）在锁外生成，只在写回时持锁（§10.6「锁内不得跨越慢操作」）。
+      // 快照在生成**之前**读：写回时 `pending = max(pending - 快照, 0)`，生成期间到达
+      // 的改动留在计数里（`consumeChanges`）。
+      const snapshot = this.#readFreshness(directoryUri.toString()).pendingChanges;
+      const summary = await this.#summarize(directoryUri);
+      await this.#withDirectoryLock(directoryUri, () =>
+        this.#persistSummary(directoryUri, summary, snapshot, null),
+      );
       recomputed.push(directoryUri.toString());
     };
 
@@ -450,63 +462,123 @@ export class SummaryService {
    *
    * 返回 `changed` / `unchanged` 表示重算了（后者指 L0 与旧值相同），`stale` 表示
    * 只记了脏。
+   *
+   * ## 为什么拆成两段锁（§10.6「锁内不得跨越慢操作」）
+   *
+   * 第一段（`EXACT`，几毫秒）：记脏、判定、需要重算则把本次要覆盖的 `pending`
+   * 快照抢下来并清零计数——这一段是「读状态 → 决定 → 写状态」的短路径，不能放
+   * LLM。`#summarize` 里的 `generator.generate` 是一次 7–9 秒的模型调用，放进锁里
+   * 会让 `EXACT` 锁持有 7–9 秒；而 `PathLockManager` 不可重入且与祖先 `TREE`
+   * 互斥，并发的 `rm -r` / `tree` 会在 5 秒后 `CONFLICT`（W83 实测：LLM 摘要时
+   * ingest 撞祖先 `tree` 锁超时，只能把 `summary.generator` 降级成 `rule`）。
+   *
+   * 第二段（`EXACT`，几毫秒）：写摘要文件、写索引、写回新鲜度。
+   *
+   * ## 两段之间的竞态
+   *
+   * 慢操作在锁外进行时，目录内容可能被别的写者改动（新增 / 删除子项）。我们
+   * **接受「摘要可能比内容旧一拍」**：第一段已经把 `pending` 清零，慢操作期间
+   * 到达的改动会重新把 `pending` 加回来（`onNodeWritten` → `markStale`），下一轮
+   * 失效会再次重算，摘要最终收敛到最新内容。这与文件头「消费时减而不是清零」
+   * 同一个机制——旧实现也在 `#summarize` 里读 `pending` 快照后于锁内消费，只是
+   * 那时改动无法插进来。
+   *
+   * 要「严格不旧」需要版本号：第一段记下当前内容版本，第二段写回前比对，不一致
+   * 就放弃这次结果、留待下次。这里不引入——摘要是派生数据、按拍收敛即可，多一次
+   * 重算的代价远小于 7–9 秒的锁。
    */
   async #invalidateDirectory(directoryUri: Uri): Promise<'changed' | 'unchanged' | 'stale'> {
-    return this.#withDirectoryLock(directoryUri, async () => {
-      const current = this.#readFreshness(directoryUri.toString());
+    const uri = directoryUri.toString();
+
+    // 第一段锁：记脏 → 判定 → （需要）抢快照并清零。
+    const decision = await this.#withDirectoryLock(directoryUri, async () => {
+      const current = this.#readFreshness(uri);
       const changed = recordChange(current);
 
       if (!shouldRecompute(changed, this.#thresholds)) {
         // §9.3 第 4 步的 else 分支：只更新计数器，等改动攒够。
-        this.#writePending(directoryUri.toString(), changed.pendingChanges);
-        return 'stale';
+        this.#writePending(uri, changed.pendingChanges);
+        return { recompute: false as const };
       }
 
-      const previous = this.#nodes.get(directoryUri.toString())?.bodyDigest ?? null;
-      const summary = await this.#summarize(directoryUri);
-      const baseline = stableDigest(summary.abstract);
-      // §9.3 第 5 步：L0 没变就不往上传。父目录的输入（这个目录的 L0）没有变化，
-      // 重算父目录只会得到同一份摘要。
-      return previous !== null && previous === baseline ? 'unchanged' : 'changed';
+      // 记下本次生成覆盖的 `pending` 快照，并把计数清零。慢操作期间到达的改动
+      // 会被重新加回（`markStale`），因此清零不等于吞掉这些改动：写回时以
+      // `snapshotPending = 0` 消费，本轮到达的改动原样留在计数里。
+      this.#writePending(uri, 0);
+      const previous = this.#nodes.get(uri)?.bodyDigest ?? null;
+      return { recompute: true as const, previous };
     });
+
+    if (!decision.recompute) {
+      return 'stale';
+    }
+
+    // 慢操作在锁外：调模型 / 规则生成 L0 + L1。这一步可能要 7–9 秒。
+    const summary = await this.#summarize(directoryUri);
+
+    // 第二段锁：写回。摘要文件、索引、新鲜度都在这里落盘。
+    return await this.#withDirectoryLock(directoryUri, () =>
+      this.#persistSummary(directoryUri, summary, 0, decision.previous),
+    );
   }
 
   // ── 生成 ──
 
   /**
-   * 生成一个目录的 L0 + L1 并落盘、写索引、写回新鲜度（§9.2、§9.3）。
+   * 生成一个目录的 L0 + L1（**只生成，不落盘**，§9.2）。
    *
-   * 新鲜度快照在调模型**之前**读：写回时 `pending = max(pending - 快照, 0)`，
-   * 生成期间到达的改动留在计数里（`consumeChanges`）。
+   * 拆成「生成」与「落盘」两步是为了让慢操作（`generator.generate`）待在锁外：
+   * `#invalidateDirectory` 在锁外调本方法，拿到结果后再进锁调 {@link #persistSummary}。
+   * `regenerate` 是显式全量重建，读目录列表本身在锁外，本方法后直接落盘即可。
+   *
+   * 预算在服务这一层执行：换任何生成器实现都不会超。
    */
   async #summarize(directoryUri: Uri): Promise<DirectorySummary> {
-    const snapshot = this.#readFreshness(directoryUri.toString()).pendingChanges;
     const children = await this.#summaryChildren(directoryUri);
     const generated = await this.#generator.generate({ uri: directoryUri, children });
 
-    // 预算在服务这一层执行：换任何生成器实现都不会超。
     const overview = truncateToChars(generated.overview, this.#config.overviewMaxChars);
     // L0 从 L1 提取（§9.1）：两层各生成一遍必然互相矛盾。
     const abstract = truncateToChars(
       extractAbstract(overview),
       this.#config.abstractMaxChars,
     );
-    const summary: DirectorySummary = { abstract, overview, degraded: generated.degraded };
-    const baseline = stableDigest(abstract);
+    return { abstract, overview, degraded: generated.degraded };
+  }
+
+  /**
+   * 把一个已生成的摘要落盘、写索引、写回新鲜度（§9.2、§9.3）。
+   *
+   * 调用方必须持本目录的 `EXACT` 锁：这里是「写状态」，要与并发的目录写入 / 删除
+   * 互斥。`snapshotPending` 是第一段锁记下的 `pending` 快照，写回时
+   * `pending = max(pending - 快照, 0)`——慢操作期间到达的改动留在计数里
+   * （`consumeChanges`）。
+   *
+   * 返回 `changed` / `unchanged`（后者指 L0 与旧 `bodyDigest` 相同）。
+   */
+  async #persistSummary(
+    directoryUri: Uri,
+    summary: DirectorySummary,
+    snapshotPending: number,
+    previous: string | null,
+  ): Promise<'changed' | 'unchanged'> {
+    const baseline = stableDigest(summary.abstract);
 
     // 先写文件（真相），再改表（缓存）：§7「先写内容再更新索引」。写文件失败时
     // 索引与新鲜度都没有动过，不会出现「摘要宣称更新了、磁盘上还是旧的」。
-    await this.#metadata.writeSummary(directoryUri, abstract, overview, {
-      generatedBy: generated.degraded ? 'rule' : 'llm',
+    await this.#metadata.writeSummary(directoryUri, summary.abstract, summary.overview, {
+      generatedBy: summary.degraded ? 'rule' : 'llm',
       generatedAt: new Date().toISOString(),
-      degraded: generated.degraded,
+      degraded: summary.degraded,
     });
+
+    const children = await this.#store.list(directoryUri);
 
     await this.#runInTransaction(async () => {
       await this.#index.upsert([
         this.#indexRecord(directoryUri, summary, children.length, baseline),
       ]);
-      this.#consume(directoryUri.toString(), baseline, snapshot, children.length);
+      this.#consume(directoryUri.toString(), baseline, snapshotPending, children.length);
     });
 
     // §12.4 的「写时算」：归档子树是 `SessionService` 直接写 `ContentStore` 建出来的，
@@ -525,11 +597,14 @@ export class SummaryService {
     this.#logger.debug('目录摘要已生成', {
       uri: directoryUri.toString(),
       children: children.length,
-      abstractChars: abstract.length,
-      overviewChars: overview.length,
+      abstractChars: summary.abstract.length,
+      overviewChars: summary.overview.length,
       degraded: summary.degraded,
     });
-    return summary;
+
+    // §9.3 第 5 步：L0 没变就不往上传。父目录的输入（这个目录的 L0）没有变化，
+    // 重算父目录只会得到同一份摘要。
+    return previous !== null && previous === baseline ? 'unchanged' : 'changed';
   }
 
   /**
