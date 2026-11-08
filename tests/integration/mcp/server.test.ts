@@ -90,8 +90,11 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
   const tasks = new TaskService({ tasks: new TaskRepository({ db, logger }), logger });
   return {
     // 只有 health 会被调用；其余依赖按类型占位，避免为协议测试构造整套存储。
+    // health 额外读 `search.rerankHealth`（重排降级可见性），所以这一项不能是空对象。
     filesystem: {} as unknown as FileSystemService,
-    search: {} as unknown as SearchService,
+    search: {
+      rerankHealth: { configured: false, degraded: false, failures: 0, lastFailure: null },
+    } as unknown as SearchService,
     summary: {} as unknown as SummaryService,
     acl: new AllowAllAuthorizer(),
     session: {} as unknown as SessionService,
