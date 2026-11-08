@@ -13,6 +13,7 @@ import type { ComemConfig } from '../../../config/index.js';
 import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
+import type { ConsolidationService } from '../../../services/consolidation.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
 import type { IdentityService } from '../../../services/identity.js';
 import type { MemoryService } from '../../../services/memory.js';
@@ -67,6 +68,8 @@ export interface HttpRouteServices {
   /** 任务行的只读查询端口；由 bootstrap 注入 `TaskRepository`。 */
   readonly taskStore: TaskQueryStore;
   readonly memory: MemoryService;
+  /** 记忆合并（§11.8）。破坏性操作，只在 `POST /memories/consolidate` 上暴露。 */
+  readonly consolidation: ConsolidationService;
   readonly resource: ResourceService;
   readonly skill: SkillService;
   readonly search: SearchService;

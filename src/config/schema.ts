@@ -245,6 +245,25 @@ const configObjectSchema = z.object({
           sweepBatchSize: z.number().int().positive().default(100),
         })
         .prefault({}),
+      /**
+       * 记忆合并（架构文档 §11.8）。
+       *
+       * **默认关**：合并会 `delete`，是破坏性操作。关着的时候端点明确拒绝（不是
+       * 返回空结果——那会让「没开」看起来像「没有可合并的记忆」）。
+       */
+      consolidation: z
+        .object({
+          enabled: z.boolean().default(false),
+          /**
+           * 最大轮次。
+           *
+           * 10 是设计约定的上界（来源见 `services/consolidation.ts` 的
+           * `DEFAULT_MAX_ITERATIONS`）：每轮至少一次完整模型调用，10 轮已经足够
+           * 读完一个 scope 的主要记忆；再往上只会让一次合并烧掉几十次调用。
+           */
+          maxIterations: z.number().int().positive().default(10),
+        })
+        .prefault({}),
     })
     .prefault({}),
 
@@ -372,6 +391,27 @@ const configSchema = configObjectSchema.transform((config) => {
       {
         rerankType: config.providers.rerank.type,
         field: 'providers.rerank',
+      },
+    );
+  }
+
+  /**
+   * 交叉校验：开了记忆合并就必须有真的模型。
+   *
+   * 规则生成器（`summary.generator: rule`）产不出操作列表——它的存在是为了让没有
+   * 模型凭据的部署（以及不需要模型的测试）仍能生成摘要。开着合并却用它，端点的
+   * 每一次调用都会停在模型之前，看起来像「没有可合并的记忆」而实际是配置没生效。
+   * 这种错误在启动时抛，比在第一次合并时发现好。
+   *
+   * 与上面两条同一条理由、同一个写法（`transform` 而不是 `superRefine`）。
+   */
+  if (config.memory.consolidation.enabled && config.summary.generator !== 'llm') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      'memory.consolidation.enabled 需要 summary.generator 为 llm：规则生成器产不出合并操作列表，开启合并时必须配置模型。',
+      {
+        field: 'memory.consolidation.enabled',
+        summaryGenerator: config.summary.generator,
       },
     );
   }

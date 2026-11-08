@@ -90,6 +90,7 @@ import { ArchiveSummaryStep } from '../services/commit/steps/archive-summary.js'
 import { MemoryExtractStep } from '../services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../services/commit/steps/summary-invalidate.js';
+import { ConsolidationService } from '../services/consolidation.js';
 import { ContextAssembler } from '../services/context-assembler.js';
 import { EmbeddingService } from '../services/embedding.js';
 import { FileSystemService } from '../services/filesystem.js';
@@ -833,6 +834,23 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     logger,
   });
 
+  /**
+   * 记忆合并（§11.8）。
+   *
+   * 装配位置在 `MemoryService` 与 `SearchService` 之后：清单来自检索索引，写回走
+   * `MemoryService`。检索端口用**请求身份**而不是服务图身份（见
+   * `ConsolidateOptions.subject`）——合并是写操作，`restricted` 切断的节点不能
+   * 因为「scope 根是调用方」就被读出来。
+   */
+  const consolidation = new ConsolidationService({
+    memory,
+    search,
+    llm,
+    locks,
+    logger,
+    maxIterations: config.memory.consolidation.maxIterations,
+  });
+
   const resource = new ResourceService({
     store,
     locks,
@@ -1004,6 +1022,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     tasks: task,
     taskStore: taskRepository,
     memory,
+    consolidation,
     resource,
     skill,
     search,

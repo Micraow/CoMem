@@ -200,6 +200,46 @@ memory:
 已有的记忆保持原值。要追平存量，只有显式设过期时间（v1 没有对应的 HTTP 接口，见
 「已知限制」）。
 
+### 怎么开记忆合并
+
+```yaml
+memory:
+  consolidation:
+    enabled: true        # 默认关：合并会 delete，是破坏性操作，必须显式开启
+    maxIterations: 10    # 探索轮次上限；到上限还没给出操作就整次失败
+```
+
+`enabled: true` 而 `summary.generator` 不是 `llm` 时 `loadConfig` 抛
+`INVALID_ARGUMENT`：规则生成器产不出操作列表。关着的时候端点返回 403（不是空结果——
+那会让「没开」看起来像「没有可合并的记忆」）。
+
+**先预览，再执行。** 端点的 `dryRun` 默认 `true`：
+
+```bash
+# 预览：返回 {adds, updates, deletes, trace}，不写任何东西
+curl -s -X POST http://127.0.0.1:1933/api/v1/memories/consolidate \
+  -H 'content-type: application/json' \
+  -d '{"scope": "comem://user/alice"}'
+
+# 真的执行（不可逆）
+curl -s -X POST http://127.0.0.1:1933/api/v1/memories/consolidate \
+  -H 'content-type: application/json' \
+  -d '{"scope": "comem://user/alice", "dryRun": false}'
+```
+
+**成本**：一次合并至少一次模型调用，每多一个 `read` 轮就多一次，上限是
+`maxIterations + 1` 次。`trace` 记录每一轮做了什么（读了哪些 URI、产出哪些操作、每条
+操作的理由）；「为什么它删了这条」看 `trace`，删除同时进 `info` 日志。
+
+**它不做什么**：
+
+- 不展开组：`comem://group/eng/` 的记忆不会因为调用者有 `group:eng` 就被合并，
+  scope 必须显式传。
+- 不碰 `pending`（还在复核）与 `archived`（已被 TTL 归档）的记忆。
+- 没有回滚：写盘前的校验全部前置，但 I/O 或加锁失败时已应用的操作不回退，错误
+  `details` 里带清单（见「已知限制」）。
+- 不进 MCP（§3：16 个工具，不多不少）。
+
 ## 数据布局
 
 ```
@@ -541,7 +581,15 @@ COMEM_SERVER_PORT=8080 pnpm dev
     **十万节点会先撞上「候选集全量」这个假设**（按线性外推约 800ms）。届时要么把 scope
     过滤下推到 `vec0`（给 `uri` 加分区列），要么换 ANN——这是架构决策，不是调参能解决的。
 
-14. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
+14. **记忆合并没有回滚。** `MemoryService` 没有事务（一条记忆一个文件），`filesystem`
+    端口也拿不回逐字节前像（`created_at`、`status` 会在重写时被重新计算）。写盘前的
+    全部校验都在任何写入之前完成，把「中途失败」压到只剩 I/O 与加锁失败；真的中途失败
+    时错误 `details` 里带已经应用过的 `adds` / `updates` / `deletes`，按它收尾。
+
+15. **记忆合并的清单有 200 条上限。** 超过时只合并前 200 条，每次合并记一条 `warn`。
+    更多记忆应该先按目录拆 scope，而不是把清单撑到模型看不完。
+
+16. **`sqlite-vec` 的 `uri IN (...)` 有缺陷。** 候选集里只要有**一个** URI 不存在，
     整条 KNN 查询就返回空。而「权限候选集里的 URI 刚被并发删除」是正常竞态，静默返回
     空等于语义检索偶尔查不出东西。当前做法是先用全表主键扫描求交（1 万行 5.8ms）。
     **不要换成按候选集点查**：`vec0` 主键点查约 7µs/条，1 万条 70ms，比全表扫贵一个

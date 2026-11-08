@@ -1482,6 +1482,104 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 算成绝对时刻，且只对 `context_type = 'memory'` 生效。已有的记忆保持原值（包括 NULL）；
 要追平存量用 `TtlService.setExpiry` 批量设。
 
+### 11.8 记忆合并（agentic 循环）
+
+记忆只增不减时，同一个 scope 下会出现大量重复与互相矛盾的条目。合并把它们收敛成
+一份没有重复、没有矛盾的记忆库：**删除**被取代的、**更新**仍然有效但正文要改的、
+**新增**清单里还没有的。
+
+#### 为什么不是「相似度超阈值就合并」
+
+相似度只能回答「这两条像不像」，回答不了「这两条里是不是有一条已经被取代」。两条
+互相矛盾的约定同样相似，按阈值合并的两种结果都不对：都留下（矛盾仍在），或者不分
+青红地删一条（可能删掉仍然有效的那条）。判断需要读正文、需要说明理由，所以决策交给
+模型。
+
+#### 循环
+
+`LlmProvider` 只有 `complete` / `completeJson`，没有 tool calling（§4.4）。合并用
+**多轮 `completeJson`**，每一轮输出一个 JSON 对象：
+
+```json
+{ "action": "read", "uris": ["comem://user/alice/memories/preferences/code-style.md"] }
+{ "action": "finish", "operations": [
+  { "kind": "update", "uri": "comem://.../code-style.md", "content": "...", "reason": "..." },
+  { "kind": "delete", "uri": "comem://.../code-style-legacy.md", "content": null, "reason": "..." }
+] }
+```
+
+| 轮次动作 | 服务端行为 |
+|---|---|
+| `read` | 读这些 URI 的正文，塞进下一轮上下文（只允许 `memories/` 下、且确实存在的记忆） |
+| `finish` | 用 `operations` 结束循环；缺省是空列表（模型认为不需要改） |
+
+每轮的 prompt 含：scope 下**全部**生效中记忆的清单（URI + 类型 + 摘要 + 更新时间，
+**不带正文**）、已经读过的正文、当前轮次。
+
+| 配置 | 默认 | 语义 |
+|---|---|---|
+| `memory.consolidation.enabled` | `false` | 关着时 `POST /memories/consolidate` 明确拒绝（403），不返回空结果 |
+| `memory.consolidation.maxIterations` | `10` | 轮次上限。**来源是设计约定**：每轮至少一次模型调用，10 轮足够读完一个 scope 的主要记忆；收敛通常发生在前几轮 |
+
+到上限还没 `finish` 抛 `RESOURCE_EXHAUSTED`，**不做部分应用**：只合并了一半的记忆库
+比没合并更难解释。
+
+#### 校验：整批失败
+
+`validateOperations`（`domain/consolidation.ts`）逐条检查，**任意一条不满足就整批
+失败**，不逐条丢弃：
+
+| 拒绝条件 | 为什么 |
+|---|---|
+| `delete` / `update` 的 URI 不在清单里 | 模型幻觉出不存在的路径 |
+| `add` 的 URI 已存在 | 应该用 `update` |
+| URI 不在允许的 scope 内 | 隔离：只能操作显式给出的 scope |
+| `content` 为空而 `kind !== 'delete'` | 空正文等于删除，但走了 update 的路径 |
+| `reason` 为空 | 没有理由的删除不可接受 |
+| 同一个 URI 出现两次 | 同一批里 update 又 delete 是自相矛盾的；写盘阶段也会对同一条记忆重复加锁 |
+
+**为什么整批失败而不是逐条丢弃**：模型产出的一半操作被执行、一半被丢弃，得到的是一份
+自相矛盾的记忆库——比如「这条被那条取代了」的删除被丢掉，两条就都留下了。要么全做，
+要么全不做。
+
+#### 写回
+
+- 操作只带 URI，`MemoryService.upsertMemory` 要的是「记忆类型 + identity 值」。
+  中间这一步由 `resolveMemoryTarget`（`domain/consolidation.ts`）还原：**不切字符串**，
+  目录与文件名模板都来自记忆类型定义（`renderPath` 的逆运算）。`profile` 这类固定
+  文件名的类型 identity 不能由路径推出，所以只能 `update`，`add` 会被拒绝。
+- 写盘前完成全部校验，然后**按 URI 升序同时持有全部记忆文件的 `exact` 锁**再写：
+  两个并发的合并如果加锁顺序不同会互相等待。锁拿不到（`CONFLICT`）时还没写任何东西。
+- `delete` 必进日志，带模型给的 `reason`。
+
+#### 回滚语义
+
+`MemoryService` 没有事务（一条记忆一个文件），`filesystem` 端口也拿不回逐字节前像
+（`created_at`、`status` 会在重写时被重新计算）。所以**不做假回滚**：全部校验前置，
+把「中途失败」压到只剩 I/O 与加锁失败；真的中途失败时错误 `details` 里带上已经应用
+过的 `adds` / `updates` / `deletes`，由运维按这份清单收尾。
+
+#### 隔离
+
+- 只允许操作 `scope` 下的记忆（`validateOperations` 的 `allowedScopes`）。
+- **不展开组**：`comem://group/eng/` 的记忆不会因为调用者有 `group:eng` 就被合并。
+  合并是**写**操作，scope 必须显式指定。
+- 清单与正文用**调用方自己的 principals** 读取：`restricted` 切断的节点不能因为
+  「scope 根是调用方」就被读出来，然后删掉一条调用方本来无权看到的记忆。
+- **`pending` / `archived` 不是候选**：`pending` 还在复核（§11.6），删掉它等于绕过
+  复核闸门；`archived` 已被 TTL 归档（§11.7），清理要按 TTL 的策略走。清单过滤之外，
+  写回前还会再读一次状态：`add` 的 `existing` 用的是**全部**记忆文件，`update` /
+  `delete` 的目标必须是 `active`——模型可以凭空写出一条真实存在的路径（不算幻觉），
+  只靠清单过滤会让它通过「存在」校验然后被删掉。
+- 清单来自检索索引（文件是真相，索引是派生，§7）。文件写了但索引还没同步时不会出现
+  在清单里，也就不会被合并——漏合并比「合并了一份陈旧的正文」安全。
+
+#### 入口
+
+`POST /api/v1/memories/consolidate`，body `{ "scope": "...", "dryRun": true }`，
+需要 `manage`。**`dryRun` 默认 `true`**：合并会 `delete`，不传就等于预览，误点的代价
+不可逆。**不进 MCP**（§3：16 个工具，不多不少）。
+
 ## 12. 权限模型
 
 ### 12.1 基本元素
@@ -1651,7 +1749,7 @@ interface AddResourceInput {
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry` |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject` |
+| 记忆 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject` |
 | 资源/技能 | `POST /resources`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET|POST /admin/users`、`GET|POST /admin/groups`、`POST /admin/groups/{id}/members` |
 | 运维 | `GET /health`、`GET /metrics` |
@@ -2157,6 +2255,11 @@ memory:
   ttl:
     defaultDays: 0        # 记忆默认存活天数。0 = 永不过期（默认）
     sweepBatchSize: 100   # 每轮最多清扫多少条，防止一次清太多把库锁住
+  # 记忆合并（§11.8）。默认关：它会 delete，是破坏性操作，必须显式开启。
+  # 开启时 summary.generator 必须是 llm，否则 loadConfig 抛 INVALID_ARGUMENT。
+  consolidation:
+    enabled: false
+    maxIterations: 10     # 探索轮次上限；到上限还没给出操作就整次失败
 
 acl:
   groupDefaultLevel: write   # write | read

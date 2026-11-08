@@ -100,6 +100,7 @@ function expectedDefaults(dataDir: string): unknown {
       reviewRequired: ['experiences', 'rules'],
       workingMemory: { enabled: false },
       ttl: { defaultDays: 0, sweepBatchSize: 100 },
+      consolidation: { enabled: false, maxIterations: 10 },
     },
     acl: { groupDefaultLevel: 'write' },
     server: { host: '127.0.0.1', port: 1933 },
@@ -209,6 +210,7 @@ describe('loadConfig', () => {
           COMEM_LOGGING_FILE: '/var/log/comem/error.log',
           COMEM_RETRIEVAL_QUERY_FILTERS: '["^recall"]',
           COMEM_MEMORY_REVIEW_REQUIRED: '["rules"]',
+          COMEM_MEMORY_CONSOLIDATION_MAX_ITERATIONS: '5',
         }),
       });
 
@@ -219,6 +221,7 @@ describe('loadConfig', () => {
       expect(config.logging.file).toBe('/var/log/comem/error.log');
       expect(config.retrieval.queryFilters).toEqual(['^recall']);
       expect(config.memory.reviewRequired).toEqual(['rules']);
+      expect(config.memory.consolidation.maxIterations).toBe(5);
     });
 
     it('环境变量优先于配置文件', () => {
@@ -410,6 +413,51 @@ describe('loadConfig', () => {
 
       expect(config.providers.rerank.type).toBe('disabled');
       expect(config.retrieval.rerank.enabled).toBe(false);
+    });
+
+    it('memory.consolidation.enabled 为 true 而 summary.generator 是 rule 时抛 INVALID_ARGUMENT', () => {
+      const error = loadError({
+        path: writeConfig(
+          [
+            'summary:',
+            '  generator: rule',
+            'memory:',
+            '  consolidation:',
+            '    enabled: true',
+          ].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(error.code).toBe('INVALID_ARGUMENT');
+      expect(error.message).toContain('memory.consolidation.enabled');
+      expect(error.details).toMatchObject({
+        field: 'memory.consolidation.enabled',
+        summaryGenerator: 'rule',
+      });
+    });
+
+    it('summary.generator 是 llm 时记忆合并可用，maxIterations 真的生效', () => {
+      const config = loadConfig({
+        path: writeConfig(
+          [
+            'memory:',
+            '  consolidation:',
+            '    enabled: true',
+            '    maxIterations: 3',
+          ].join('\n'),
+        ),
+        env: testEnv(),
+      });
+
+      expect(config.summary.generator).toBe('llm');
+      expect(config.memory.consolidation).toEqual({ enabled: true, maxIterations: 3 });
+    });
+
+    it('记忆合并默认关：不写配置时 enabled 是 false', () => {
+      const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
+
+      expect(config.memory.consolidation).toEqual({ enabled: false, maxIterations: 10 });
     });
   });
 
