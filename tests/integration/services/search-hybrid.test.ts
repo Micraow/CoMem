@@ -223,6 +223,9 @@ describe('engine: fts5', () => {
         abstract: null,
         score: expect.any(Number),
         ranks: null,
+        // 热度默认关闭（`telemetry.hotness.weight = 0`）：这一列恒为 null，
+        // 分数与顺序与接线前一致。
+        hotness: null,
       },
     ]);
     expect(search).toHaveBeenCalledWith({

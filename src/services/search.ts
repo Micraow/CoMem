@@ -27,7 +27,7 @@
  * 不是按「索引实现看起来已经做了」。这是纵深防御，不是重复劳动。
  */
 
-import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
+import type { NodeAccessStats, NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { SqliteVectorIndex, VectorHit } from '../adapters/sqlite/vector-index.js';
 import { parsePrincipal } from '../domain/acl.js';
 import {
@@ -37,6 +37,7 @@ import {
   type QuotaPreset,
 } from '../domain/assembly.js';
 import { ComemError } from '../domain/errors.js';
+import { DEFAULT_HALF_LIFE_DAYS, hotnessScore } from '../domain/hotness.js';
 import type { Level } from '../domain/level.js';
 import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
@@ -143,6 +144,24 @@ export interface SearchServiceDeps {
   readonly nodes?: Pick<NodeRepository, 'get'>;
   /** §18 的 `retrieval.engine`，默认 `fts5`（与 schema 默认值一致）。 */
   readonly engine?: RetrievalEngine;
+  /**
+   * 热度对最终排序的影响（`telemetry.hotness.weight`）。
+   *
+   * `0`（默认）= 不参与排序，`hotness` 字段仍然是 `null`，行为与接线前完全一致。
+   * 非 0 时查询 `node.access_count` / `node.last_accessed_at` 并计算。
+   */
+  readonly hotnessWeight?: number;
+  /** 半衰期（小时）。`telemetry.hotness.halfLifeHours`，默认 168（一周）。 */
+  readonly hotnessHalfLifeHours?: number;
+  /** 读访问统计。缺省时不做热度计算（`hotness` 恒为 `null`）。 */
+  readonly accessStats?: (uris: readonly string[]) => readonly NodeAccessStats[];
+  /**
+   * 累加访问计数（`NodeRepository.recordAccess`）。
+   *
+   * 只在 `hotnessWeight !== 0` 且真的返回了命中时调用，**不 await**（见
+   * `#recordHits`）。缺省时不记：只读部署没有热度数据源，写不进去也不该报错。
+   */
+  readonly recordAccess?: (uris: readonly string[]) => unknown;
 }
 
 export interface FindOptions {
@@ -193,7 +212,20 @@ export interface ScoredHit {
  */
 export interface RankedScoredHit extends ScoredHit {
   readonly ranks: Readonly<Record<RetrievalEngine, number | null>> | null;
+  /**
+   * 热度分 `[0,1]`。
+   *
+   * `null` 表示「没有计算」——`telemetry.hotness.weight` 为 0、或者这个 URI 没有
+   * 访问记录。**不要把「没算」和「算出来是 0」混为一谈**：前者是配置关闭，后者是
+   * 从没被访问过，控制台要能区分。
+   */
+  readonly hotness: number | null;
 }
+
+/** 热度加权前的命中：`RankedScoredHit` 去掉 `hotness` 那一列。 */
+type PreHotnessHit = ScoredHit & {
+  readonly ranks: Readonly<Record<RetrievalEngine, number | null>> | null;
+};
 
 /**
  * `search` 合并后的命中。在 `SearchResultHit` 之上多带融合名次。
@@ -235,6 +267,17 @@ export type ContextAssembly = AssemblyResult;
  * 服务层取 20 给工具层留截断余量（工具可以再取前 10 条，反过来拿不到）。
  */
 const DEFAULT_RESULT_LIMIT = 20;
+
+/** 一天的小时数。`hotnessHalfLifeHours` 的单位是小时，`hotnessScore` 的输入是天。 */
+const HOURS_PER_DAY = 24;
+
+/**
+ * 默认半衰期（小时）：168。
+ *
+ * 从领域层的 `DEFAULT_HALF_LIFE_DAYS` 换算，而不是再写一遍 168：配置默认值与
+ * 公式默认值不一致时，同一条记忆会得到两个冷热分档。
+ */
+const DEFAULT_HALF_LIFE_HOURS = DEFAULT_HALF_LIFE_DAYS * HOURS_PER_DAY;
 
 /**
  * `grep` 的默认前后文行数。
@@ -352,6 +395,12 @@ export class SearchService {
    * 的静默降级。
    */
   readonly #vector: VectorRetrievalDeps | null;
+  /** 热度权重（`telemetry.hotness.weight`）。`0` 时整条热度路径不执行。 */
+  readonly #hotnessWeight: number;
+  /** 热度半衰期（天）。`hotnessScore` 的输入是天，配置里的单位是小时。 */
+  readonly #hotnessHalfLifeDays: number;
+  readonly #accessStats: SearchServiceDeps['accessStats'];
+  readonly #recordAccess: SearchServiceDeps['recordAccess'];
 
   constructor(deps: SearchServiceDeps) {
     this.#index = deps.index;
@@ -365,6 +414,24 @@ export class SearchService {
     this.#sessions = deps.sessions;
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
     this.#queryFilters = compileQueryFilters(deps.config.queryFilters);
+
+    const hotnessWeight = deps.hotnessWeight ?? 0;
+    const halfLifeHours = deps.hotnessHalfLifeHours ?? DEFAULT_HALF_LIFE_HOURS;
+    if (!Number.isFinite(hotnessWeight) || hotnessWeight < 0) {
+      throw new ComemError('INVALID_ARGUMENT', 'hotnessWeight 必须是非负有限数。', {
+        hotnessWeight: deps.hotnessWeight,
+      });
+    }
+    if (!Number.isFinite(halfLifeHours) || halfLifeHours <= 0) {
+      // 半衰期是除数：0 得到 Infinity，负数让「越旧越热」。都必须在装配期挡掉。
+      throw new ComemError('INVALID_ARGUMENT', 'hotnessHalfLifeHours 必须是正的有限数。', {
+        hotnessHalfLifeHours: deps.hotnessHalfLifeHours,
+      });
+    }
+    this.#hotnessWeight = hotnessWeight;
+    this.#hotnessHalfLifeDays = halfLifeHours / HOURS_PER_DAY;
+    this.#accessStats = deps.accessStats;
+    this.#recordAccess = deps.recordAccess;
 
     this.#engine = deps.engine ?? 'fts5';
     if (this.#engine === 'fts5') {
@@ -416,9 +483,14 @@ export class SearchService {
    * （`[-1, 1]`），融合是 RRF（约 `1/61` 到 `2/61`）。`scoreThreshold` 作用在
    * **本引擎最终排序分**上——单引擎是层级加权后的分（§8.5），`hybrid` 是融合分。
    * 同一个阈值在三种引擎下不可比，切换引擎时必须重新标定。
+   *
+   * 配了 `telemetry.hotness.weight` 时，阈值作用在**热度加权之前**的相关性分上：
+   * 热度只重排已经通过阈值的命中，不能把一条不相关的记忆「救」进来。
    */
   async find(query: string, options: FindOptions): Promise<readonly RankedScoredHit[]> {
     const outcome = await this.#findWithOutcome(query, options);
+    // 记的是「返回给调用方的命中」，不是候选集：截断与阈值都在 `#retrieve` 里做完。
+    this.#recordHits(outcome.hits);
     return outcome.hits;
   }
 
@@ -471,10 +543,12 @@ export class SearchService {
         limit,
       });
       return {
-        hits: this.#rank(hits, limit, options.scoreThreshold).map((hit) => ({
-          ...hit,
-          ranks: null,
-        })),
+        hits: this.#applyHotness(
+          this.#rank(hits, limit, options.scoreThreshold).map((hit) => ({
+            ...hit,
+            ranks: null,
+          })),
+        ),
         degradation: null,
       };
     }
@@ -522,10 +596,12 @@ export class SearchService {
     const enriched = this.#enrich(raw, options, vector.nodes);
     const ranked = this.#rank(enriched, limit, options.scoreThreshold);
     return {
-      hits: ranked.map((hit, index) => ({
-        ...hit,
-        ranks: { fts5: null, vector: index + 1, hybrid: null },
-      })),
+      hits: this.#applyHotness(
+        ranked.map((hit, index) => ({
+          ...hit,
+          ranks: { fts5: null, vector: index + 1, hybrid: null },
+        })),
+      ),
       degradation: null,
     };
   }
@@ -582,20 +658,22 @@ export class SearchService {
 
     return {
       // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
-      hits: fused
-        .filter(
-          (hit: FusedHit) =>
-            options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
-        )
-        .map((hit: FusedHit) => ({
-          uri: hit.uri,
-          contextType: hit.contextType,
-          memoryType: hit.memoryType,
-          level: hit.level,
-          abstract: hit.abstract,
-          score: hit.score,
-          ranks: hit.ranks,
-        })),
+      hits: this.#applyHotness(
+        fused
+          .filter(
+            (hit: FusedHit) =>
+              options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
+          )
+          .map((hit: FusedHit) => ({
+            uri: hit.uri,
+            contextType: hit.contextType,
+            memoryType: hit.memoryType,
+            level: hit.level,
+            abstract: hit.abstract,
+            score: hit.score,
+            ranks: hit.ranks,
+          })),
+      ),
       degradation,
     };
   }
@@ -750,6 +828,9 @@ export class SearchService {
     );
 
     const hits = mergeHits(ran, limit);
+    // 合并去重之后才是「返回给调用方的命中」。5 条 TypedQuery 各记一次会把
+    // 写放大乘上查询条数，同一条记忆被多条查询命中时也只该算一次访问。
+    this.#recordHits(hits);
     const plan: SearchPlan = {
       original: query,
       queries: analysis.queries,
@@ -1098,6 +1179,90 @@ export class SearchService {
     return toScoredHits(ranked, byHandle, scoreThreshold);
   }
 
+  /**
+   * 热度加权（架构文档 §17.5 的 `telemetry.hotness.weight`）。
+   *
+   * `finalScore = score × (1 + weight × hotnessAsFactor)`，`hotness ∈ [0, 1]`。
+   *
+   * **为什么是乘性而不是加性**：RRF 融合分是 `0.016–0.033` 量级，热度是 `[0,1]`。
+   * 加法会让热度完全压过相关性——一条 30 天没访问、只被单路命中的记忆，加 0.3 就
+   * 排到了双路第一前面。乘性保住「先按相关性排序，热度只在同档次内做区分」。
+   *
+   * **为什么不用归一化后线性混合**：RRF 分数没有绝对尺度，归一化等于每次查询按
+   * 当前结果集重新缩放；多返回一条结果就会改变所有分数，「为什么这条排第一」无法
+   * 复现。乘性不依赖结果集。
+   *
+   * `weight === 0`（默认）时**不查库**：默认部署是绝大多数，多一次 SQL 全是浪费。
+   * 此时 `hotness` 恒为 `null`，与接线前的行为逐字一致。
+   *
+   * 输入已经是「本引擎相关性排序并截断」的结果，这里只重排：热度不能把一条没进
+   * 候选集的记忆拉进来（那等于让热度决定相关性）。
+   */
+  #applyHotness(hits: readonly PreHotnessHit[]): RankedScoredHit[] {
+    const stats = this.#accessStats;
+    if (this.#hotnessWeight === 0 || stats === undefined) {
+      return hits.map((hit) => ({ ...hit, hotness: null }));
+    }
+    if (hits.length === 0) {
+      return [];
+    }
+
+    // 同一个 URI 可能同时命中 L0 与 L2 两条记录（见 `#rank`），去重后再查。
+    const uniqueUris = [...new Set(hits.map((hit) => hit.uri))];
+    const byUri = new Map(stats(uniqueUris).map((row) => [row.uri, row]));
+    const now = new Date();
+
+    const weighted: RankedScoredHit[] = hits.map((hit) => {
+      const row = byUri.get(hit.uri);
+      if (row === undefined) {
+        // 索引里有、`node` 表里没有：数据不一致。热度按「没算」处理，但分数保持
+        // 原样——不能因为少了一行统计就把这条命中从结果里抹掉。
+        return { ...hit, hotness: null };
+      }
+      const hotness = hotnessScore({
+        activeCount: row.accessCount,
+        lastAccessedAt: row.lastAccessedAt,
+        now,
+        halfLifeDays: this.#hotnessHalfLifeDays,
+      });
+      return { ...hit, score: hit.score * (1 + this.#hotnessWeight * hotness), hotness };
+    });
+
+    return weighted.sort(compareRankedHits);
+  }
+
+  /**
+   * 把「这次真正返回给调用方的命中」记一次访问（§17.5 的热度输入）。
+   *
+   * **不 await**：一次查询 50 条就是 50 次 UPDATE（`recordAccess` 一个写事务）。
+   * 检索是只读路径，让调用方等写入会把它变成写路径；写失败只记 warn，不该让检索
+   * 失败——热度是治理指标，不是检索正确性的一部分。
+   *
+   * **`weight === 0` 不写**：默认部署不承担写放大。`weight` 一旦为 0，热度本来
+   * 也不参与排序，记了没有任何读者。
+   *
+   * 入参是最终返回的命中（已去重、已截断），不是候选集全集。
+   */
+  #recordHits(hits: readonly { readonly uri: string }[]): void {
+    const record = this.#recordAccess;
+    if (this.#hotnessWeight === 0 || record === undefined || hits.length === 0) {
+      return;
+    }
+    const uris = [...new Set(hits.map((hit) => hit.uri))];
+    void (async () => {
+      try {
+        await record(uris);
+      } catch (error) {
+        const failure = ComemError.from(error);
+        this.#logger.warn('访问计数写入失败', {
+          uris: uris.length,
+          code: failure.code,
+          message: failure.message,
+        });
+      }
+    })();
+  }
+
   /** 跨轮去重：账本里 `dedupTurns` 轮内投过的 URI（§8.7）。 */
   async #excludedUris(
     delivered: ContextOptions['excludeDelivered'],
@@ -1117,6 +1282,30 @@ export class SearchService {
       maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
     });
   }
+}
+
+/**
+ * 热度加权后的排序比较器：`finalScore` 降序 → `hotness` 降序（`null` 最后）→ URI 升序。
+ *
+ * 后两级是**稳定性**：同分同热度的两条命中，不同次查询不能换顺序。URI 用码点序
+ * 比较（`<` / `>`），与 `domain/ranking.ts` 的 `compareCandidates` 同一套口径，
+ * 不依赖运行环境的 ICU 数据。
+ *
+ * `null` 用 `-1` 兜：热度分落在 `[0, 1]`，`-1` 比任何算出来的分都小。
+ */
+function compareRankedHits(left: RankedScoredHit, right: RankedScoredHit): number {
+  if (right.score !== left.score) {
+    return right.score - left.score;
+  }
+  const leftHotness = left.hotness ?? -1;
+  const rightHotness = right.hotness ?? -1;
+  if (rightHotness !== leftHotness) {
+    return rightHotness - leftHotness;
+  }
+  if (left.uri === right.uri) {
+    return 0;
+  }
+  return left.uri < right.uri ? -1 : 1;
 }
 
 function toScoredHits(

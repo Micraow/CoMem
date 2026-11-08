@@ -110,7 +110,7 @@ interface RequestOptions {
 }
 
 async function request<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   options: RequestOptions,
 ): Promise<T> {
@@ -188,6 +188,7 @@ export interface ApiClient {
   get<T>(path: string, query?: Record<string, unknown>): Promise<T>
   post<T>(path: string, body?: unknown): Promise<T>
   put<T>(path: string, body?: unknown): Promise<T>
+  patch<T>(path: string, body?: unknown): Promise<T>
   del<T>(path: string, query?: Record<string, unknown>): Promise<T>
 }
 
@@ -196,6 +197,7 @@ export function useApi(): ApiClient {
     get: (path, query) => request('GET', path, { query }),
     post: (path, body) => request('POST', path, { body }),
     put: (path, body) => request('PUT', path, { body }),
+    patch: (path, body) => request('PATCH', path, { body }),
     del: (path, query) => request('DELETE', path, { query }),
   }
 }

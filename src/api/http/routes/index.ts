@@ -14,6 +14,7 @@ import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
+import type { IdentityService } from '../../../services/identity.js';
 import type { MemoryService } from '../../../services/memory.js';
 import type { ObservabilityService } from '../../../services/observability.js';
 import type { ResourceService } from '../../../services/resource.js';
@@ -25,7 +26,7 @@ import type { TaskService } from '../../../services/task.js';
 import type { HttpRouteGroup } from '../server.js';
 
 import { createAclRoutes } from './acl.js';
-import { createAdminRoutes } from './admin.js';
+import { createAdminRoutes, type AdminAccess } from './admin.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
 import { createMemoryRoutes } from './memories.js';
@@ -69,6 +70,10 @@ export interface HttpRouteServices {
   readonly resource: ResourceService;
   readonly skill: SkillService;
   readonly search: SearchService;
+  /** 用户与组用例（`/admin/*`）。 */
+  readonly identity: IdentityService;
+  /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
+  readonly adminAccess: AdminAccess;
 }
 
 /** 按 §14 表格的顺序拼出全部路由分组。 */
@@ -85,7 +90,7 @@ export function createHttpRouteGroups(
     createMemoryRoutes(services),
     createResourceRoutes(services),
     createSkillRoutes(services),
-    createAdminRoutes(),
+    createAdminRoutes(services),
     createOpsRoutes(services),
     createTelemetryRoutes(services),
   ];

@@ -581,18 +581,13 @@ describe('MCP 挂载', () => {
 });
 
 describe('管理与遥测', () => {
-  it('admin 的五个端点返回 501 NOT_IMPLEMENTED', async () => {
-    const calls: InjectOptions[] = [
-      { method: 'GET', url: '/api/v1/admin/users' },
-      { method: 'POST', url: '/api/v1/admin/users', payload: {} },
-      { method: 'GET', url: '/api/v1/admin/groups' },
-      { method: 'POST', url: '/api/v1/admin/groups', payload: {} },
-      { method: 'POST', url: '/api/v1/admin/groups/eng/members', payload: {} },
-    ];
-    for (const call of calls) {
-      const response = await inject(call);
-      expect(response.statusCode, String(call.url)).toBe(501);
-      expect(errorOf(response)['code']).toBe('NOT_IMPLEMENTED');
+  it('admin 端点不再是 501 占位', async () => {
+    // 详细语义在 `tests/integration/api/admin.test.ts`；这里只钉住「控制台打开时
+    // 不会看到一片 501」这个部署事实。
+    for (const url of ['/api/v1/admin/users', '/api/v1/admin/groups']) {
+      const response = await inject({ method: 'GET', url });
+      expect(response.statusCode, url).toBe(200);
+      expect(json(response)['status']).toBe('ok');
     }
   });
 

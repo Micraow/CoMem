@@ -8,10 +8,11 @@
  * ## 构造顺序
  *
  * ```
- * 配置 → 日志 → 数据库/迁移 → 适配器 → 模型 → AclService → SummaryService
- *      → ContextAssembler → IndexObserver → FileSystemService → SearchService
- *      → TaskService → SessionService → MemoryService → ResourceService
- *      → SkillService → CommitRunner → ObservabilityService → MCP → HTTP 路由
+ * 配置 → 日志 → 数据库/迁移 → 适配器 → IdentityService → 模型 → AclService
+ *      → SummaryService → ContextAssembler → IndexObserver → FileSystemService
+ *      → SearchService → TaskService → SessionService → MemoryService
+ *      → ResourceService → SkillService → CommitRunner → ObservabilityService
+ *      → MCP → HTTP 路由
  * ```
  *
  * 三处顺序容易踩：
@@ -40,6 +41,10 @@
  * `options.subject`（默认 `user:local`）。HTTP 的 `x-comem-subject` 与它不一致时
  * 直接 401——让「换一个身份」静默降级成「用绑定的身份」就是冒充。多租户要的是
  * 每请求一份服务图，那是另一套装配，不在本 wave。
+ *
+ * 启动时把绑定主体写进用户目录（`app_user`），否则 `IdentityService.resolve`
+ * 返回 `null`，所有非公开端点都是 401。已存在时忽略 `CONFLICT`：启动不应该
+ * 覆盖管理员改过的显示名或状态。
  */
 
 import { constants as fsConstants, mkdirSync } from 'node:fs';
@@ -55,10 +60,12 @@ import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
-import { openDatabase, runMigrations } from '../adapters/sqlite/database.js';
+import { openDatabase, runMigrations, withWriteTransaction } from '../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js';
+import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
+import { UserRepository } from '../adapters/sqlite/user-repository.js';
 import { RequestLogRepository } from '../adapters/sqlite/request-log-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../adapters/sqlite/task-repository.js';
@@ -70,7 +77,7 @@ import type { HttpRouteGroup } from '../api/http/server.js';
 import { createHttpRouteGroups } from '../api/http/routes/index.js';
 import { DEFAULT_SUBJECT, type Identity, type IdentityHeaders, type IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
-import { parsePrincipal } from '../domain/acl.js';
+import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { RetrievalIndex } from '../domain/retrieval.js';
@@ -85,6 +92,7 @@ import { SummaryInvalidateStep } from '../services/commit/steps/summary-invalida
 import { ContextAssembler } from '../services/context-assembler.js';
 import { EmbeddingService } from '../services/embedding.js';
 import { FileSystemService } from '../services/filesystem.js';
+import { IdentityService } from '../services/identity.js';
 import { IndexObserver } from '../services/index-observer.js';
 import { LlmService } from '../services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../services/memory.js';
@@ -469,6 +477,13 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   });
   const nodes = new NodeRepository({ db, logger });
   const permissions = new PermissionRepository({ db, logger });
+  const userRepository = new UserRepository({ db, logger });
+  const groupRepository = new GroupRepository({ db, logger });
+  const identityService = new IdentityService({
+    users: userRepository,
+    groups: groupRepository,
+    logger,
+  });
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
   const embeddings = new EmbeddingRepository({ db, logger });
@@ -537,7 +552,36 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
 
   // ── 身份与服务图 ──
   const subject = options.subject ?? DEFAULT_SUBJECT;
-  const groups = [...(options.groups ?? [])];
+  const boundPrincipal = parsePrincipal(subject);
+  if (boundPrincipal.kind !== 'user') {
+    throw new ComemError('INVALID_ARGUMENT', `服务图身份必须是 user 主体：${subject}`, {
+      subject,
+    });
+  }
+
+  // 启动时确保配置的主体存在于用户目录（§12.6）。
+  //
+  // 没有这一行，`resolveIdentityOf` 第一次调 `IdentityService.resolve` 就拿到
+  // `null`，所有非公开端点都是 401——一个刚部署、还没通过控制台建过任何用户的
+  // 实例，连登录都做不到。已存在时 `createUser` 抛 `CONFLICT`，这是唯一可以忽略
+  // 的错误：用户目录里已经有这个主体，启动不需要改它的显示名或状态。
+  try {
+    identityService.createUser({ id: boundPrincipal.id, displayName: boundPrincipal.id });
+  } catch (error) {
+    if (!(error instanceof ComemError) || error.code !== 'CONFLICT') {
+      throw error;
+    }
+  }
+
+  // 服务图绑定的组来自配置与用户目录两处：前者是部署时静态声明的组身份，后者
+  // 是控制台维护的成员关系。启动后新加的成员关系要重启才进服务图——§12.5 的
+  // 「退组立即生效」靠的是 ACL 存组主体，不是每请求重读身份。
+  const groups = [
+    ...new Set([
+      ...(options.groups ?? []),
+      ...groupRepository.listGroupIdsOfUser(boundPrincipal.id).map(groupPrincipal),
+    ]),
+  ];
   const acl = new AclService({
     dataDir,
     db,
@@ -683,12 +727,6 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     list: (uri) => store.list(uri),
   };
 
-  const boundPrincipal = parsePrincipal(subject);
-  if (boundPrincipal.kind !== 'user') {
-    throw new ComemError('INVALID_ARGUMENT', `服务图身份必须是 user 主体：${subject}`, {
-      subject,
-    });
-  }
   const subjectScope = Uri.parse(`comem://user/${boundPrincipal.id}`);
   const principals = [subject, ...groups, 'user:*'];
 
@@ -788,7 +826,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
 
   const mcpRegistry = createToolRegistry();
   const resolveIdentity: IdentityResolver = async (headers: IdentityHeaders) =>
-    resolveIdentityOf(headers, subject, groups);
+    resolveIdentityOf(headers, subject, identityService);
 
   const mcp = new McpHttpServer({
     registry: mcpRegistry,
@@ -843,6 +881,14 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     resource,
     skill,
     search,
+    identity: identityService,
+    adminAccess: {
+      permissionCounts: (principals) => permissionCountsOf(db, principals),
+      memberCounts: (groupIds) => memberCountsOf(db, groupIds),
+      userCount: () => userRepository.count(),
+      groupCount: () => groupRepository.count(),
+      revoke: (principal, work) => revokePrincipalPermissions(db, principal, work),
+    },
   });
 
   let closed = false;
@@ -886,7 +932,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
 async function resolveIdentityOf(
   headers: IdentityHeaders,
   boundSubject: string,
-  groups: readonly string[],
+  identityService: IdentityService,
 ): Promise<Identity> {
   const raw = headers['x-comem-subject'];
   const subject = typeof raw === 'string' && raw !== '' ? raw : boundSubject;
@@ -908,7 +954,90 @@ async function resolveIdentityOf(
     );
   }
 
-  return { subject, principals: [subject, ...groups, 'user:*'] };
+  // 用户目录是身份的真相：不存在的用户、已禁用的用户都不该拿到 principals。
+  // 启动时已经预置了绑定主体（`createUser` 忽略 CONFLICT），所以这里对正常部署
+  // 不会返回 null；返回 null 只可能是控制台把当前用户删了或禁用了。
+  const identity = identityService.resolve(subject);
+  if (identity === null) {
+    throw new ComemError('UNAUTHENTICATED', `用户不存在或已禁用：${subject}`, { subject });
+  }
+
+  return {
+    subject,
+    principals: [...new Set([...identity.principals, 'user:*'])],
+  };
+}
+
+// ── 管理面的统计与 ACL 清理 ──
+//
+// `api/` 不能 import `adapters/`（架构文档 §4.2），所以 `AdminAccess` 的 SQL 实现
+// 留在这里。三个函数都是同步的：`node:sqlite` 是同步 API，事务边界也必须是同步
+// 回调，异步函数会让 `withWriteTransaction` 在 Promise 完成前提交。
+
+/** 每个主体在物化表里的行数。一次 `IN (...)` 查询，不按用户逐条查。 */
+function permissionCountsOf(
+  db: DatabaseSync,
+  principals: readonly string[],
+): ReadonlyMap<string, number> {
+  if (principals.length === 0) {
+    return new Map();
+  }
+  const list = principals.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `SELECT principal, COUNT(*) AS total FROM node_permission
+       WHERE principal IN (${list})
+       GROUP BY principal`,
+    )
+    .all(...principals);
+  return new Map(rows.map((row) => [String(row['principal']), Number(row['total'])]));
+}
+
+/** 每个组的成员数。一次 `IN (...)` 查询。 */
+function memberCountsOf(
+  db: DatabaseSync,
+  groupIds: readonly string[],
+): ReadonlyMap<string, number> {
+  if (groupIds.length === 0) {
+    return new Map();
+  }
+  const list = groupIds.map(() => '?').join(', ');
+  const rows = db
+    .prepare(
+      `SELECT group_id, COUNT(*) AS total FROM group_member
+       WHERE group_id IN (${list})
+       GROUP BY group_id`,
+    )
+    .all(...groupIds);
+  return new Map(rows.map((row) => [String(row['group_id']), Number(row['total'])]));
+}
+
+/**
+ * 删除主体的全部 ACL 行，并在同一事务里执行删除账号的回调。
+ *
+ * `acl_entry` 与 `node_permission` 都清：前者是授权反查的来源，留着会让控制台
+ * 列出一个不存在的主体；后者是求权实际读的表，留着会让同名用户重建后立即继承
+ * 旧授权。返回 `node_permission` 的删除行数——它才是「撤掉了多少个节点的授权」。
+ *
+ * 不碰 `.acl.json`：那是 ACL 的真相，不是账号的派生数据。删除账号不应该改写
+ * 用户留在目录里的授权文件；要彻底撤销需要管理员显式改 ACL。这个取舍写在
+ * `services/identity.ts` 的文件头，也写进了本 wave 的报告。
+ */
+function revokePrincipalPermissions(
+  db: DatabaseSync,
+  principal: string,
+  work: () => void,
+): number {
+  return withWriteTransaction(db, () => {
+    const row = db
+      .prepare('SELECT COUNT(*) AS total FROM node_permission WHERE principal = ?')
+      .get(principal);
+    const revoked = Number(row?.['total'] ?? 0);
+    db.prepare('DELETE FROM acl_entry WHERE principal = ?').run(principal);
+    db.prepare('DELETE FROM node_permission WHERE principal = ?').run(principal);
+    work();
+    return revoked;
+  });
 }
 
 /**
