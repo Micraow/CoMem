@@ -4,7 +4,16 @@ dataDir: ""
 providers:
   llm:
     default:
-      type: openai-compatible      # openai-compatible | anthropic
+      # openai-compatible | anthropic | disabled
+      #
+      # type: disabled 表示「没有模型，不产生任何调用」（与 embedding / rerank 的
+      # 同名档一致）。关掉时必须同时把 summary.generator 改成 rule、保持
+      # memory.consolidation.enabled: false——否则 loadConfig 在启动期抛
+      # INVALID_ARGUMENT，而不是让摘要静默失败。
+      type: openai-compatible
+      # 下面是**占位值**：api.example.com 是 IANA 保留域名（RFC 2606），永远不可达。
+      # 保持它启动时服务端会打一条 warn——摘要、记忆抽取、合并与检索改写都不会工作。
+      # 不需要模型就把 type 改成 disabled。
       baseUrl: https://api.example.com/v1
       model: gpt-4o-mini
       apiKey: ${COMEM_LLM_KEY}

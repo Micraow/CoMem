@@ -507,6 +507,23 @@ function readLimitOption(options: unknown): number | undefined {
 }
 
 /**
+ * 模板里的占位地址。`api.example.com` 是 IANA 保留域名（RFC 2606），永远不可达。
+ *
+ * 按**主机名**判断而不是整串相等：路径、端口、协议都可能被改成看起来更真实的
+ * 样子，但保留域名本身仍然是占位。`new URL` 解析失败时不算占位——那是另一种
+ * 配置错误，不该被这条 warn 掩盖。
+ */
+const PLACEHOLDER_LLM_BASE_URL_HOST = 'api.example.com';
+
+export function llmBaseUrlIsPlaceholder(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname === PLACEHOLDER_LLM_BASE_URL_HOST;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 构造整个后端。
  *
  * `await` 只用于启动自检（建目录、迁移）；所有服务构造都是同步的。异步是为了给
@@ -597,6 +614,15 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   // `type: disabled` 时构造桩：每个方法都抛 `INVALID_ARGUMENT`，保证「关掉模型」
   // 不会产生任何网络调用。选桩而不是 `null`，理由见 `adapters/llm/disabled-provider.ts`。
   const llmConfig = config.providers.llm.default;
+  if (llmConfig.type !== 'disabled' && llmBaseUrlIsPlaceholder(llmConfig.baseUrl)) {
+    // 模板里的 `https://api.example.com/v1` 是 IANA 保留域名（RFC 2606），永远
+    // 不可达。把它当默认值等于「默认配置下有一个功能静默不工作」——摘要失效投递
+    // 会失败、HTTP 仍然 200，用户只会看到「写成功了」。启动时明说比事后排查好。
+    logger.warn(
+      'providers.llm.default.baseUrl 是占位值 api.example.com（保留域名，永远不可达）：摘要、记忆抽取、合并与检索改写都不会工作。配置真实的 baseUrl；不需要模型时把 type 改成 disabled 并把 summary.generator 改成 rule。',
+      { baseUrl: llmConfig.baseUrl },
+    );
+  }
   const llmProvider =
     llmConfig.type === 'disabled'
       ? new DisabledLlmProvider()

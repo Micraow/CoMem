@@ -3,10 +3,14 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { currentVersion } from '../../../src/adapters/sqlite/database.js';
-import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import {
+  createContainer,
+  llmBaseUrlIsPlaceholder,
+  type Container,
+} from '../../../src/bootstrap/container.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 
@@ -166,5 +170,80 @@ describe('createContainer', () => {
     expect(container.observability.renderMetrics()).toContain(
       'comem_http_request_duration_seconds_count',
     );
+  });
+});
+
+/**
+ * 回归（W59）：`providers.llm.default.baseUrl` 的默认值 `https://api.example.com/v1`
+ * 是 IANA 保留域名（RFC 2606），永远不可达。把它当占位值留在默认配置里，等于
+ * 「默认配置下摘要功能静默不工作」——写文件成功、HTTP 200，但摘要从来没有生成过。
+ *
+ * 选 B（保留默认值 + 启动告警）而不是删掉默认值：删掉会让 `providers.llm.default`
+ * 变成必填，`loadConfig` 的「配置文件不存在时使用默认值」以及所有不配模型的
+ * 测试、`config.example.yaml` 之外的单用户部署全部启动失败，代价大于这条告警。
+ */
+describe('providers.llm.default.baseUrl 占位值', () => {
+  it('按主机名识别保留域名，不误伤真实域名', () => {
+    expect(llmBaseUrlIsPlaceholder('https://api.example.com/v1')).toBe(true);
+    expect(llmBaseUrlIsPlaceholder('http://api.example.com:8080/v1')).toBe(true);
+    expect(llmBaseUrlIsPlaceholder('https://api.example.com.evil.test/v1')).toBe(false);
+    expect(llmBaseUrlIsPlaceholder('http://127.0.0.1:3425/v1')).toBe(false);
+    expect(llmBaseUrlIsPlaceholder('not a url')).toBe(false);
+    expect(llmBaseUrlIsPlaceholder('')).toBe(false);
+  });
+
+  it('默认配置启动时打一条 warn，说明摘要等依赖模型的功能不会工作', async () => {
+    const warnDir = await mkdtemp(join(tmpdir(), 'comem-container-warn-'));
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    let created: Container | undefined;
+    try {
+      created = await createContainer({
+        configPath: join(warnDir, 'config.yaml'),
+        env: {
+          ...process.env,
+          COMEM_DATA_DIR: warnDir,
+          COMEM_SUMMARY_GENERATOR: 'rule',
+          COMEM_LOGGING_LEVEL: 'warn',
+        },
+      });
+
+      // `mockRestore()` 会清空 `mock.calls`，所以断言在恢复之前做。
+      const lines = writeSpy.mock.calls.map((call) => String(call[0]));
+      const warning = lines.find((line) => line.includes('providers.llm.default.baseUrl 是占位值'));
+      expect(warning).toBeDefined();
+      expect(warning).toContain('api.example.com');
+      expect(warning).toContain('"level":"warn"');
+    } finally {
+      writeSpy.mockRestore();
+      await created?.close();
+      await rm(warnDir, { recursive: true, force: true });
+    }
+  });
+
+  it('换成真实 baseUrl 后不再告警', async () => {
+    const quietDir = await mkdtemp(join(tmpdir(), 'comem-container-quiet-'));
+    const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    let created: Container | undefined;
+    try {
+      created = await createContainer({
+        configPath: join(quietDir, 'config.yaml'),
+        env: {
+          ...process.env,
+          COMEM_DATA_DIR: quietDir,
+          COMEM_SUMMARY_GENERATOR: 'rule',
+          COMEM_LOGGING_LEVEL: 'warn',
+          COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: 'http://127.0.0.1:3425/v1',
+        },
+      });
+
+      const lines = writeSpy.mock.calls.map((call) => String(call[0]));
+      expect(lines.some((line) => line.includes('providers.llm.default.baseUrl 是占位值'))).toBe(
+        false,
+      );
+    } finally {
+      writeSpy.mockRestore();
+      await created?.close();
+      await rm(quietDir, { recursive: true, force: true });
+    }
   });
 });
