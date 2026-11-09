@@ -427,10 +427,14 @@ describe('目录的 L1 概览行不是独立节点', () => {
     ]);
   });
 
-  it('setExpiry 写两行，sweepExpired 只按 URI 返回一次、归档两行', () => {
-    repository.setExpiry([DIR], new Date('2026-11-07T00:00:00.000Z'));
+  it('sweepExpired 只按 URI 返回一次、归档两行', () => {
+    // 两行的 updated_at 相同（目录自身与概览行是同一个节点的两条检索行），
+    // 截止时刻取在其后：两行都必须归档，但返回列表里只有一次。
+    const cutoff = new Date('2026-11-08T12:00:00.000Z');
 
-    expect(repository.sweepExpired(AT, 10)).toEqual([DIR]);
+    const expired = repository.sweepExpired(cutoff, AT, 10);
+    // 目录的两行是同一个节点：返回列表里只出现一次（子文件也在这轮过期，另算）。
+    expect(expired.filter((uri) => uri === DIR)).toEqual([DIR]);
     const statuses = db
       .prepare('SELECT status FROM node WHERE uri = ? ORDER BY level ASC')
       .all(DIR)

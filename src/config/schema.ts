@@ -299,13 +299,16 @@ const configObjectSchema = z.object({
         })
         .prefault({}),
       /**
-       * 记忆的 TTL（架构文档 §11.7；`0001_init.sql` 的 `node.expires_at` / `2026`）。
-       * **两段式**：`defaultDays` 到点先把 `status` 置 `archived`（只标不删）；
-       * 归档后超过 `retentionDays` 再物理删除文件与索引行。
+       * 记忆的 TTL（架构文档 §11.7）。
+       *
+       * **滑动窗口 + 两段式**：`defaultDays` 从「最后一次被使用」（写入或检索命中）起算，
+       * 到点先把 `status` 置 `archived`（只标不删）；归档后超过 `retentionDays` 再物理
+       * 删除文件与索引行。`profile` / `identity` / `soul` / `rules` 四类永不过期
+       * （`domain/memory-types/index.ts` 的 `TTL_EXEMPT_MEMORY_TYPES`，硬编码）。
        */
       ttl: z
         .object({
-          /** 记忆默认存活天数。0 = 永不过期（默认）。只影响之后写入的记忆。 */
+          /** 滑动窗口长度（天）。0 = 永不过期（默认）。改它对存量立即生效。 */
           defaultDays: z.number().int().nonnegative().default(0),
           /** 每轮最多清扫多少条，防止一次清太多把库锁住 */
           sweepBatchSize: z.number().int().positive().default(100),

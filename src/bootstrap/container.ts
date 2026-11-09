@@ -575,9 +575,6 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     db,
     logger,
     candidateMultiplier: config.retrieval.candidateMultiplier,
-    // `memory.ttl.defaultDays` 在**写入时**算成绝对时刻（`node.expires_at`，§11.7）。
-    // 装配层是唯一能把它接到索引写入点的位置。
-    defaultTtlDays: config.memory.ttl.defaultDays,
   });
   const nodes = new NodeRepository({ db, logger });
   // 记忆关联边（§11.10）：存一张 `memory_link` 表，不进检索索引。
@@ -1121,6 +1118,8 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     // node_permission）。`principals` 是调度器求权用的主体集合，与 API 请求同源。
     filesystem,
     principals,
+    // 滑动窗口：从 `max(updated_at, last_accessed_at)` 起算的天数（§11.7）。
+    ttlDays: config.memory.ttl.defaultDays,
     retentionDays: config.memory.ttl.retentionDays,
     logger,
   });

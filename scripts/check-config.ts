@@ -82,7 +82,6 @@ const EXAMPLE_FILE = join(ROOT, 'config.example.yaml');
  */
 const LEGACY_OPTIONAL_CONFIG_DEPS: ReadonlySet<string> = new Set([
   'SqliteFtsIndexOptions.candidateMultiplier',
-  'SqliteFtsIndexOptions.defaultTtlDays',
   'LlmServiceOptions.pricing',
   'LlmServiceOptions.model',
   'AiSdkProviderOptions.pricing',

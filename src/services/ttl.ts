@@ -1,25 +1,48 @@
 /**
- * 记忆的 TTL 与过期清扫（架构文档 §11.7、§8.1 的 `node.expires_at`、§12 的数据布局）。
+ * 记忆的 TTL 与过期清扫（架构文档 §11.7，数据布局 §8.1 的 `node` 表）。
+ *
+ * ## 判据是「最后一次被使用」，不是写入时间
+ *
+ * 一条记忆在 `max(updated_at, last_accessed_at) + defaultDays` 之前都算活着：被写入
+ * 或**被检索命中**都会把窗口往后推（`last_accessed_at` 与 `access_count` 由
+ * `NodeRepository.recordAccess` 在检索命中时累加）。天天被读到的偏好和从没被打开过的
+ * 事件，到期日不该一样。
+ *
+ * 判据在**清扫时**用 SQL 现算，不往 `node` 上存绝对过期时刻（`0005_sliding_ttl.sql`
+ * 删掉了 `expires_at` 列）：
+ *
+ * - 改 `memory.ttl.defaultDays` 立即对存量生效，不需要追平脚本，也不会留下一批按旧
+ *   配置算出的陈旧时刻；
+ * - 访问热路径（`recordAccess`）不用多写一列——它已经在写 `access_count` /
+ *   `last_accessed_at`。
+ *
+ * 代价是清扫每一轮现算一次，且列表按表达式排序、用不上普通索引；`node` 的行数在
+ * 万级时这是一次毫秒级扫描，`sweepBatchSize` 只限制每轮改多少行。
+ *
+ * ## 类型豁免
+ *
+ * `profile` / `identity` / `soul` / `rules` 四类**永不过期**，集合在领域层
+ * （`domain/memory-types/index.ts` 的 `TTL_EXEMPT_MEMORY_TYPES`）：它们承载「用户是谁、
+ * agent 是谁、遵循什么原则、约定过什么规则」。这类内容可能整月没有触发场景，但过期
+ * 等于让 agent 忘掉自己是谁、忘掉用户是谁、忘掉约定。TTL 要清理的是 `events` /
+ * `experiences` 这类时效性内容。
  *
  * ## 两段式
  *
  * TTL 分两段，中间隔一个「保留期」：
  *
- * 1. **归档**：`node.expires_at < now` → `status = 'archived'`（`sweepExpired` 的
- *    `UPDATE`）。只标不删——TTL 配错（把 7 天写成 7 秒）时归档还能改回来。
+ * 1. **归档**：最后使用时刻早于 `now - defaultDays` → `status = 'archived'`
+ *    （`sweepExpired` 的 `UPDATE`）。只标不删——TTL 配错（把 30 天写成 1 天）时归档
+ *    还能改回来。
  * 2. **物理删除**：归档后超过 `memory.ttl.retentionDays` 天 → 删文件 + 索引行。
  *    这一段重建在 `forget` 的删除路径上（`FileSystemService.remove`：先求 MANAGE、
  *    拿 TREE 锁、删文件、通知观察者删索引），**不另写一套删除逻辑**。
  *
- * 之前只有第一段：`memory.ttl.*` 让使用者以为能省磁盘，实际只剩软归档，archived
- * 行越积越多、磁盘一分没省（`AGENTS.md` §1「配置项必须真的生效」）。第二段才让
- * 「保留期」这个承诺兑现。
+ * ## 默认值：两个 0
  *
- * ## 保留期默认 0 = 永不物理删
- *
- * `retentionDays = 0`（默认）**关闭第二段**：归档就是终点，与旧行为一致。这是保守
- * 选择——物理删除不可逆，默认不能删任何东西。要省磁盘，使用者显式配一个正数保留
- * 期（例如 30），先观察一轮归档量再决定。
+ * `defaultDays = 0`（默认）关闭第一段：一条都不过期。`retentionDays = 0`（默认）关闭
+ * 第二段：归档就是终点。物理删除不可逆，默认不能删任何东西；要省磁盘，使用者显式配
+ * 一个正数保留期，先观察一轮归档量再决定。
  *
  * ## 幂等
  *
@@ -48,6 +71,11 @@ export interface TtlServiceDeps {
    */
   readonly principals: readonly string[];
   /**
+   * `memory.ttl.defaultDays`：滑动窗口长度（天），从**最后一次被使用**起算。
+   * `0` 关闭第一段（永不过期）。
+   */
+  readonly ttlDays: number;
+  /**
    * `memory.ttl.retentionDays`。归档后间隔多少天物理删除；`0` = 永不物理删除。
    */
   readonly retentionDays: number;
@@ -64,7 +92,7 @@ export interface TtlServiceDeps {
  */
 const DEFAULT_SWEEP_BATCH_SIZE = 100;
 
-/** 一天。保留期按「天」配置，换算成毫秒只此一处。 */
+/** 一天。`defaultDays` / `retentionDays` 按「天」配置，换算成毫秒只此一处。 */
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export class TtlService {
@@ -72,6 +100,7 @@ export class TtlService {
   readonly #filesystem: FileSystemService;
   readonly #logger: Logger;
   readonly #principals: readonly string[];
+  readonly #ttlDays: number;
   readonly #retentionDays: number;
   readonly #now: () => Date;
 
@@ -80,27 +109,9 @@ export class TtlService {
     this.#filesystem = deps.filesystem;
     this.#logger = deps.logger;
     this.#principals = deps.principals;
+    this.#ttlDays = deps.ttlDays;
     this.#retentionDays = deps.retentionDays;
     this.#now = deps.now ?? (() => new Date());
-  }
-
-  /**
-   * 给一批 URI 设过期时间。`null` 表示永不过期。
-   *
-   * 返回实际改到的行数：不存在的 URI（索引与磁盘不同步、刚被删掉）静默跳过，不抛错
-   * ——为一条正常的竞态让整批设置失败，调用方还得自己拆开重试。
-   */
-  async setExpiry(uris: readonly string[], expiresAt: Date | null): Promise<number> {
-    if (uris.length === 0) {
-      return 0;
-    }
-    const updated = this.#nodes.setExpiry(uris, expiresAt);
-    this.#logger.info('记忆过期时间已设置。', {
-      requested: uris.length,
-      updated,
-      expiresAt: expiresAt === null ? null : expiresAt.toISOString(),
-    });
-    return updated;
   }
 
   /**
@@ -108,6 +119,10 @@ export class TtlService {
    *
    * 返回两段的计数：`expired`（本轮归档数，保持旧字段名供调度器摘要沿用）、
    * `purged`（本轮物理删除数）。
+   *
+   * `ttlDays = 0` 时**整段跳过**第一段。不能把它换成「截止时刻 = 现在」：那会把所有
+   * 记忆一次归档光。跳过而不是早返回，是因为第二段与第一段是独立的两段——保留期
+   * 仍需清理上一段配置留下的归档。
    *
    * 第二段只在 `retentionDays > 0` 时执行。`retentionDays` 很小时（配小了）记
    * warn——危险操作不该静默删——但不拒跑：配置是使用者的显式意图，日志负责让它
@@ -118,7 +133,14 @@ export class TtlService {
   ): Promise<{ readonly expired: number; readonly purged: number }> {
     const limit = options.limit ?? DEFAULT_SWEEP_BATCH_SIZE;
     const now = this.#now();
-    const expired = this.#nodes.sweepExpired(now, limit);
+    const expired =
+      this.#ttlDays > 0
+        ? this.#nodes.sweepExpired(
+            new Date(now.getTime() - this.#ttlDays * MILLISECONDS_PER_DAY),
+            now,
+            limit,
+          )
+        : [];
     const purged = await this.#purge(now, limit);
     return { expired: expired.length, purged };
   }

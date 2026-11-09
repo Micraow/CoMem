@@ -216,25 +216,31 @@ describe('会话过期（container → tick）', () => {
   });
 });
 
-describe('记忆 TTL（container → 写入）', () => {
-  it('memory.ttl.defaultDays 真的落到 node.expires_at 上', async () => {
+describe('记忆 TTL（container → 清扫）', () => {
+  it('memory.ttl.defaultDays 是滑动窗口：超出窗口的记忆归档，窗口内的留下', async () => {
     const started = await startContainer(['memory:', '  ttl:', '    defaultDays: 30'].join('\n'));
     container = started;
     expect(started.scheduler.started).toBe(true);
 
-    const memory = Uri.parse(SCOPE).child('memories', 'preferences', 'code-style.md');
-    await started.services.filesystem.write(memory, '用户偏好 TypeScript 严格模式。', AUTH_PRINCIPALS);
+    const stale = Uri.parse(SCOPE).child('memories', 'preferences', 'stale.md');
+    const fresh = Uri.parse(SCOPE).child('memories', 'preferences', 'fresh.md');
+    await started.services.filesystem.write(stale, '很久以前写下的偏好。', AUTH_PRINCIPALS);
+    await started.services.filesystem.write(fresh, '刚写下的偏好。', AUTH_PRINCIPALS);
     await started.services.indexObserver.drain();
 
-    const row = started.db.prepare('SELECT expires_at FROM node WHERE uri = ?').get(memory.toString());
-    const expiresAt = row?.['expires_at'];
-    expect(typeof expiresAt).toBe('string');
+    // 把其中一条改成「31 天前写入、之后再没被访问」。判据就是索引里的
+    // `max(updated_at, last_accessed_at)`，改这一列等价于一条放置了 31 天的记忆
+    // （文件的 mtime 不方便构造，而 TTL 不读 mtime）。
+    started.db
+      .prepare('UPDATE node SET updated_at = ? WHERE uri = ?')
+      .run(new Date(Date.now() - 31 * MILLISECONDS_PER_DAY).toISOString(), stale.toString());
 
-    // 30 天后的**绝对时刻**（不是相对天数，也不是 NULL）。基准是写入时间，与断言
-    // 时刻相差不到一秒，用 29.9–30.1 天留出边界。
-    const deltaDays = (Date.parse(String(expiresAt)) - Date.now()) / MILLISECONDS_PER_DAY;
-    expect(deltaDays).toBeGreaterThan(29.9);
-    expect(deltaDays).toBeLessThan(30.1);
+    await expect(started.scheduler.tick()).resolves.toMatchObject({ ttlArchived: 1 });
+
+    const statusOf = (uri: Uri): string =>
+      String(started.db.prepare('SELECT status FROM node WHERE uri = ?').get(uri.toString())?.['status']);
+    expect(statusOf(stale)).toBe('archived');
+    expect(statusOf(fresh)).toBe('active');
   });
 });
 

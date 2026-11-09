@@ -301,3 +301,111 @@ describe('0004 升级路径（已有部署）', () => {
     ).toMatchObject({ total: 0 });
   });
 });
+
+/**
+ * 0005 删掉 `node.expires_at`：TTL 的判据改成清扫时现算的滑动窗口（架构文档
+ * §11.7），这一列没有读取方了。升级要在**已有数据**上可用——列没了，行还在。
+ */
+describe('0005 升级路径（删 node.expires_at）', () => {
+  const LEGACY_URI = 'comem://user/alice/memories/legacy.md';
+  const MIGRATIONS = new URL('../../../src/adapters/sqlite/migrations/', import.meta.url);
+
+  function applyPre0005(db: DatabaseSync): void {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const files = [
+      '0001_init.sql',
+      '0002_archived_at.sql',
+      '0003_memory_link.sql',
+      '0004_node_level_rows.sql',
+    ];
+    for (const [index, name] of files.entries()) {
+      db.exec(readFileSync(new URL(name, MIGRATIONS), 'utf8'));
+      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+        index + 1,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  function seedLegacyRow(db: DatabaseSync): void {
+    db.prepare(
+      `INSERT INTO node (
+         uri, parent_uri, scope, kind, context_type, memory_type, level,
+         abstract, body_digest, size, updated_at, status, access_count,
+         last_accessed_at, expires_at
+       ) VALUES (?, ?, 'user', 'document', 'memory', 'preferences', 'L2',
+         ?, ?, 12, ?, 'active', 3, ?, ?)`,
+    ).run(
+      LEGACY_URI,
+      'comem://user/alice/memories',
+      '一句话摘要',
+      'digest',
+      '2026-01-01T00:00:00.000Z',
+      '2026-02-01T00:00:00.000Z',
+      '2026-01-31T00:00:00.000Z',
+    );
+  }
+
+  function columnNames(db: DatabaseSync): string[] {
+    return db
+      .prepare("SELECT name FROM pragma_table_info('node') ORDER BY name")
+      .all()
+      .map((row) => String(row['name']));
+  }
+
+  it('列与旧索引消失，存量行的其它字段逐值保留', () => {
+    const db = open(':memory:');
+    applyPre0005(db);
+    seedLegacyRow(db);
+    expect(columnNames(db)).toContain('expires_at');
+    expect(currentVersion(db)).toBe(4);
+
+    expect(runMigrations(db)).toBe(LATEST_VERSION);
+
+    expect(columnNames(db)).not.toContain('expires_at');
+    const indexNames = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_node_expires'")
+      .all();
+    expect(indexNames).toEqual([]);
+
+    // 「删列」不能顺带删行或改掉其它列：TTL 的输入（最后一次写入 / 最后访问）还在。
+    expect(
+      db
+        .prepare(
+          `SELECT uri, memory_type, level, size, updated_at, status, access_count, last_accessed_at
+             FROM node WHERE uri = ?`,
+        )
+        .get(LEGACY_URI),
+    ).toEqual({
+      uri: LEGACY_URI,
+      memory_type: 'preferences',
+      level: 'L2',
+      size: 12,
+      updated_at: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      access_count: 3,
+      last_accessed_at: '2026-02-01T00:00:00.000Z',
+    });
+  });
+
+  it('升级后索引仍可写：upsert 不再提到 expires_at', () => {
+    const db = open(':memory:');
+    applyPre0005(db);
+
+    runMigrations(db);
+
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO node (
+             uri, parent_uri, scope, kind, context_type, memory_type, level,
+             abstract, body_digest, size, updated_at, status
+           ) VALUES (?, ?, 'user', 'document', 'memory', 'events', 'L2',
+             NULL, 'd', 1, ?, 'active')`,
+        )
+        .run('comem://user/alice/memories/events/new.md', 'comem://user/alice/memories/events', '2026-11-08T00:00:00.000Z'),
+    ).not.toThrow();
+  });
+});

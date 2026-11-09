@@ -12,6 +12,7 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
 import { ComemError } from '../../domain/errors.js';
 import type { Level } from '../../domain/level.js';
 import type { Logger } from '../../domain/log.js';
+import { TTL_EXEMPT_MEMORY_TYPES } from '../../domain/memory-types/index.js';
 import type { ContextType, NodeKind, NodeStatus } from '../../domain/node.js';
 import type { UriScope } from '../../domain/uri.js';
 import { withWriteTransaction } from './database.js';
@@ -70,6 +71,23 @@ const NODE_COLUMN_NAMES = [
 ] as const;
 
 const NODE_COLUMNS = NODE_COLUMN_NAMES.join(', ');
+
+/**
+ * 「最后一次被使用」的时刻（架构文档 §11.7）：`max(updated_at, last_accessed_at)`。
+ *
+ * 两个操作都算「用过这条记忆」：正文被写入（`updated_at`）与检索命中
+ * （`last_accessed_at`，由 `recordAccess` 写）。取最大值而不是 `COALESCE`：一条记忆
+ * 可能先被访问、之后正文又被改写，`COALESCE` 会挑那条更早的访问时刻，让刚改过的
+ * 记忆立刻出现在过期候选里。
+ *
+ * `COALESCE` 只为补 `last_accessed_at IS NULL`（从没被访问过）——SQL 标量 `max()`
+ * 遇到 NULL 会返回 NULL，不过滤掉整行。
+ *
+ * 没有为这个表达式建索引（`0005_sliding_ttl.sql`）：表达式索引会在 `recordAccess`
+ * 这条热路径上多维护一条索引项，且 `memory.ttl.defaultDays = 0`（默认）时完全不
+ * 需要它。第一段清扫每轮最多只有一次顺序扫描，代价见 `sweepExpired` 的注释。
+ */
+const LAST_USED_AT_SQL = 'MAX(updated_at, COALESCE(last_accessed_at, updated_at))';
 
 /**
  * 「节点自身那一行」的谓词（架构文档 §8.1、§8.5）。
@@ -342,49 +360,30 @@ export class NodeRepository {
   }
 
   /**
-   * 批量设置过期时间（`0001_init.sql` 的 `node.expires_at`、架构文档 §11.7）。
-   * 返回实际命中的行数。
+   * 清扫第一段：**最后一次被使用**早于 `cutoff` 的记忆 `status` 置 `archived`，
+   * 这里不删文件（软过期，架构文档 §11.7）。物理删除是第二段
+   * （`selectPurgeable` + 文件/索引删除），由 `TtlService` 编排——仓储不碰文件系统，
+   * 删文件需要 `FileSystemService`。
    *
-   * `expiresAt === null` 是**显式取消过期**，与「从没设过」在列上都是 NULL——这是
-   * 有意的：`expires_at` 只有「一个绝对时刻」和「没有」两种取值，不引入第三个哨兵
-   * 值（`'1970-01-01'` 会让「从没设过」和「已经过期」在 `WHERE` 里不可区分）。
+   * **判据是滑动窗口，不是写入时间**：`max(updated_at, last_accessed_at)` 早于
+   * `cutoff` 才算过期。天天被检索命中的记忆会不断把窗口往后推；`updated_at` 参与
+   * 取最大值，是为了让「先被访问、之后正文又被改写」的记忆从改写时刻重新计时——
+   * 只用 `COALESCE(last_accessed_at, updated_at)` 会在这种情况下用一条更早的访问
+   * 时刻去判一条刚写过的记忆。
    *
-   * **不动 `updated_at`**：设置过期时间不是内容修改。与 `recordAccess` 同一条理由
-   * ——热度衰减按 `updated_at` 算「这条记忆有多新」，把运维动作当成内容写入会让一条
-   * 从没改过的老记忆看起来刚被更新过。
+   * 两个时间串都是 `Date#toISOString()` 形态（定长、UTC、带毫秒），TEXT 的字典序
+   * 与时间顺序一致，所以 SQL 的 `max()` 与 `<` 直接对字符串成立。
    *
-   * 不存在的 URI 静默跳过（索引与磁盘不同步是正常状态，见 `recordAccess`）。
+   * **豁免稳定身份与约束**：`TTL_EXEMPT_MEMORY_TYPES`（领域层）里的类型永不过期。
+   * 只有这四类被排除，其余一切 `context_type = 'memory'` 的行都按最后使用时刻过期
+   * ——包括 `memory_type IS NULL` 的目录行（它只承载一个 URI 与概览行，没有正文）
+   * 和 frontmatter 读不出类型的历史行。它们不是「未知所以不敢动」的对象：第一段
+   * 只改 `status`，可逆；把它们留成永不过期才会让 TTL 失去意义。
    *
-   * **不加 `nodeSelfRowSql()`**：过期时间是节点级的属性，目录的 L1 概览行必须
-   * 跟着 L0 行一起过期——只给节点自身那一行设过期时间，会让一个已过期的目录继续
-   * 从概览正文里被检索到。返回值因此是**行数**：一个目录算 2 行。
-   */
-  setExpiry(uris: readonly string[], expiresAt: Date | null): number {
-    if (uris.length === 0) {
-      return 0;
-    }
-    if (expiresAt !== null && Number.isNaN(expiresAt.getTime())) {
-      throw new ComemError('INVALID_ARGUMENT', '过期时间不是合法的 Date。', {
-        at: expiresAt.toString(),
-      });
-    }
-
-    const timestamp = expiresAt === null ? null : expiresAt.toISOString();
-    const updated = withWriteTransaction(this.#db, () =>
-      this.#db
-        .prepare(`UPDATE node SET expires_at = ? WHERE uri IN (${placeholders(uris.length)})`)
-        .run(timestamp, ...uris).changes,
-    );
-    this.#logger.debug('节点的过期时间已设置', { uris: uris.length, updated, expiresAt: timestamp });
-    return Number(updated);
-  }
-
-  /**
-   * 清扫第一段：`expires_at < now` 的节点 `status` 置 `archived`，**这里不删文件**
-   * （软过期，架构文档 §11.7）。物理删除是第二段（`selectPurgeable` + 文件/索引删除），
-   * 由 `TtlService` 编排——仓储不碰文件系统，删文件需要 `FileSystemService`。
+   * **只对 `context_type = 'memory'` 生效**：`memory.ttl` 描述记忆的存活时间，
+   * `resources` / `skills` 不该被套上它。
    *
-   * 为什么第一段仍是软过期：TTL 配错（把 7 天写成 7 秒）时，`archived` 还能改回来；
+   * 为什么第一段仍是软过期：TTL 配错（把 30 天写成 1 天）时，`archived` 还能改回来；
    * 物理删除没有回滚。两段式让「配错」在 `retentionDays` 的宽度里可观测、可撤销。
    *
    * **同时写 `archived_at`**（`0002_archived_at.sql`）：第二段靠它算「归档了多久」。
@@ -395,27 +394,36 @@ export class NodeRepository {
    *
    * **幂等**：`status <> 'archived'` 让重复调用不重复计数（第二次返回空）。
    *
-   * **选候选排除 L1 概览行、改状态不排除**：`setExpiry` 把过期时间写在同一个 URI 的
-   * 两行上，选候选时不带 `nodeSelfRowSql()` 会让一个目录在返回列表里出现两次
-   * （第二段清扫与调用方计数都按 URI 解释它）；而归档本身是按 URI 的状态转移，
-   * 两行必须一起改，否则目录还能从概览正文里被检索到。
+   * **选候选排除 L1 概览行、改状态不排除**：选候选时不带 `nodeSelfRowSql()` 会让
+   * 一个目录在返回列表里出现两次（第二段清扫与调用方计数都按 URI 解释它）；而归档
+   * 本身是按 URI 的状态转移，同一个 URI 的两行必须一起改，否则目录还能从概览正文里
+   * 被检索到。
    *
-   * `ORDER BY expires_at ASC LIMIT ?` 让「积压很多」时先清最老的，同时给每轮一个上界
-   * （`memory.ttl.sweepBatchSize`）——一次更新整表会长时间持有写锁，把并发请求卡在
-   * `busy_timeout` 上。
+   * `ORDER BY <最后使用时刻> ASC LIMIT ?` 让「积压很多」时先清最久没用的，同时给每轮
+   * 一个上界（`memory.ttl.sweepBatchSize`）——一次更新整表会长时间持有写锁，把并发
+   * 请求卡在 `busy_timeout` 上。
+   *
+   * `archivedAt` 单独传入而不是复用 `cutoff`：`archived_at` 是第二段算保留期的起点，
+   * 用 `cutoff`（= 现在 - `defaultDays`）会让保留期提前 `defaultDays` 天走完——配了
+   * 「30 天过期、再保留 30 天」时，一条记忆归档当天就可能被物理删除。
    */
-  sweepExpired(now: Date, limit: number): readonly string[] {
-    const nowIso = now.toISOString();
+  sweepExpired(cutoff: Date, archivedAt: Date, limit: number): readonly string[] {
+    const cutoffIso = cutoff.toISOString();
+    const archivedIso = archivedAt.toISOString();
+    const exempt = TTL_EXEMPT_MEMORY_TYPES;
     const expired = withWriteTransaction(this.#db, () => {
       const rows = this.#db
         .prepare(
           `SELECT uri FROM node
-            WHERE expires_at IS NOT NULL AND expires_at < ? AND status <> 'archived'
+            WHERE context_type = 'memory'
+              AND COALESCE(memory_type, '') NOT IN (${placeholders(exempt.length)})
+              AND ${LAST_USED_AT_SQL} < ?
+              AND status <> 'archived'
               AND ${nodeSelfRowSql()}
-            ORDER BY expires_at ASC
+            ORDER BY ${LAST_USED_AT_SQL} ASC
             LIMIT ?`,
         )
-        .all(nowIso, limit);
+        .all(...exempt, cutoffIso, limit);
       const uris = rows.map((row) => text(row['uri']));
       if (uris.length === 0) {
         return uris;
@@ -424,7 +432,7 @@ export class NodeRepository {
         `UPDATE node SET status = 'archived', archived_at = ? WHERE uri = ?`,
       );
       for (const uri of uris) {
-        statement.run(nowIso, uri);
+        statement.run(archivedIso, uri);
       }
       return uris;
     });
