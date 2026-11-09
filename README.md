@@ -6,7 +6,7 @@
 
 **一个开源、自托管、可检查的 AI agent 上下文记忆数据库**
 
-[docs/architecture.md](docs/architecture.md) · [docs/operations.md](docs/operations.md) · [集成指南](integrations/README.md) · [问题反馈](https://github.com/Micraow/CoMem/issues)
+[docs/architecture.md](docs/architecture.md) · [docs/operations.md](docs/operations.md) · [docs/coverage-map.md](docs/coverage-map.md) · [集成指南](integrations/README.md) · [问题反馈](https://github.com/Micraow/CoMem/issues)
 
 <p>
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white">
@@ -351,6 +351,8 @@ pnpm verify     # typecheck + lint + check:config + 单元/集成测试 + Hook �
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | **唯一真相**：分层、数据布局、六条链路、错误模型、里程碑（21 节） |
 | [`docs/operations.md`](docs/operations.md) | 部署、配置、备份、监控、排障、已知限制 |
+| [`docs/coverage-map.md`](docs/coverage-map.md) | 按代码核对的能力全景图：每项能力给入口、实现 `file:line`、数据流、测试证据；另列已砍掉的东西与已知缺口 |
+| [`docs/ingest-prompt.md`](docs/ingest-prompt.md) | 历史会话导入提示词：整段复制给本机已接 CoMem MCP 的 Agent，由它盘点本机会话日志、解析成消息数组、用 `remember` 原样上传；抽取与复核在服务端，重跑按稳定 `sessionId` 幂等。与服务端适配器 `pnpm ingest` 互补——它覆盖 CoMem 进程读不到的导出目录 |
 | [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、六个 hook、MCP 接入、bypass、去重 |
 
 ---

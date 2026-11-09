@@ -3,7 +3,7 @@
 > 以代码为准。每个能力一行：**入口 → 实现 → 数据落到哪 → 哪条测试证明它成立**。
 > 行号是快照时刻的值，不是引文。`§x` 指 `docs/architecture.md` 的节号，那份文档定架构边界与数据布局，这份只回答「在哪、怎么流、谁证明」。
 >
-> **快照**：HEAD `90b6e70`，时刻 `2026-11-10T03:06+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
+> **快照**：HEAD `18526c5`，时刻 `2026-11-10T03:24+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
 
 ## 一、能力矩阵
 
@@ -156,21 +156,20 @@
 
 ## 二、代码写好了但没人用的地方
 
-`pnpm check:orphans` 在快照时刻的实测输出（exit 0）：
+**结论：无。**
+
+工作区当前状态下 `pnpm check:orphans` 的实测输出（exit 0）：
 
 ```
-目标 325 个（services/adapters 的 public 方法 246 个，domain 函数 79 个）
-孤儿 1 个，清单 1 条
-  ! EmbeddingRepository.iterMissingUris  src/adapters/sqlite/embedding-repository.ts:255  [只被测试引用]
-      生产 0 / 测试 5 / 同类 0
-      该接线：打开 embedding 后存量不回填，只能手动 reindex。
-新增孤儿 0 个 / 清单过期 0 个 / 清单指向不存在的目标 0 个
+目标 324 个（services/adapters 的 public 方法 245 个，domain 函数 79 个）
+孤儿 0 个，清单 0 条
+新增孤儿 0 个
+清单过期 0 个（已不再报孤儿，请删掉对应行）
+清单指向不存在的目标 0 个（拼写错误或方法已删除）
 ✓ 没有清单外的孤儿
 ```
 
-| 条目 | 事实 | 判断 |
-|---|---|---|
-| `EmbeddingRepository.iterMissingUris`（`adapters/sqlite/embedding-repository.ts:255`） | 唯一的「未嵌入 URI 游标」，只有 `tests/integration/sqlite/embedding-repository.test.ts:196` 在调。启动检查用的是另写的 `hasDocumentsMissingVectors`（`commands/reindex.ts:399`），补齐靠 `pnpm reindex` 从磁盘重算（`commands/reindex.ts:423`） | **该接线或该删**。接线 = 让「切到 vector/hybrid 后存量记忆搜不到」有个自动补齐路径（现在只有一行 warn，`bootstrap/main.ts:92`）；删 = 承认回填只有 reindex 一条路，两处缺向量判定留一处 |
+这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex.ts:399` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 复用它，补齐入口也只有一个（`pnpm reindex`）。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
 
 **关于 `check:orphans` 自身的两条限制**（判断上面结论时要扣除）：它只认「代码里提到了这个方法名」，不认字符串派发与默认关闭的分支（`scripts/check-orphans.ts:44`–`:70` 的「抓不到的那一类」）；它读的是磁盘上的源码文件，不是某个提交的树，所以清单跟着磁盘上的改动走。
 
@@ -209,7 +208,7 @@
 | 两个写路径只校验身份、没有目标资源求权 | `temp-upload` 只解析身份（没有目标）；`telemetry/hook` 同样只解析身份 | `routes/resources.ts:117`、`routes/telemetry.ts:66` |
 | 记忆关联边没有 HTTP 写入口 | 只有阶段二会写 `derived_from` 边（补丁合并与经验归纳两个写点）；手工改 `sources` 不会重算 `memory_link`，读端点会与文件不一致 | `routes/memories.ts:159`（只有读）、`memory-merge.ts:331`、`experience-distill.ts:220` |
 | `request_log` 只写不读 | 没有查询端点，控制台只列指标名；裁剪挂在调度器上，四个开关全关时只剩启动清理一次 | `services/observability.ts:499`、`bootstrap/scheduler.ts:736`、`bootstrap/container.ts:620` |
-| 切换检索引擎后存量记忆不回填 | 启动只记一行 warn，补齐靠手工 `pnpm reindex`；`iterMissingUris` 写了但没人调 | `bootstrap/main.ts:92`–`:105`、`adapters/sqlite/embedding-repository.ts:255` |
+| 切换检索引擎后存量记忆不回填 | 启动只记一行 warn，补齐靠手工 `pnpm reindex`；缺向量的判定只有一份（`commands/reindex.ts` 的 `hasDocumentsMissingVectors`，`bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 复用它）。**仍然没有自动回填**：切到 `vector` / `hybrid` 后旧记忆在人工跑 reindex 之前一条都搜不到 | `bootstrap/main.ts:92`–`:105`、`commands/reindex.ts:399`、`:423` |
 | 配置项只能手工核对 | `check:config` 四层都只证明「配置到达了代码」；3 处歧义匹配需人工看，17 处 `LEGACY_OPTIONAL_CONFIG_DEPS` 仍是可选属性 | `scripts/check-config.ts:272`、`docs/operations.md`「配置自检」 |
 | 控制台与 Hook 插件没有静态检查 | 根 `eslint` 不覆盖 `web/` 与 `integrations/`；控制台十个页面无自动化测试（只有身份合成 composable 的单测） | `eslint.config.js`、`tests/unit/web/console-identity.test.ts:49` |
 | 多进程写同一 `dataDir` 会漏计已归档消息 | `totalMessageCount` 与消息幂等索引共用「单进程持有全量缓存」的假设 | `services/session.ts:499`；覆盖用例 `tests/integration/services/session.test.ts:452`「keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3」 |
@@ -217,6 +216,6 @@
 
 ## 快照与漂移
 
-- 本文的行号对应 `2026-11-10T03:06+08:00` 的 HEAD `90b6e70`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
+- 本文的行号对应 `2026-11-10T03:24+08:00` 的 HEAD `18526c5`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
 - `tests/integration/services/commit-steps.test.ts` 被持续追加用例，行号最容易偏移；引用它时优先给用例名。
 - 引用顺序：先看本文定位入口与测试，细节回 `docs/architecture.md` 对应节号；两侧冲突时以代码为准，并同步改文档。

@@ -14,9 +14,9 @@ CoMem 是面向 AI agent 的上下文记忆数据库：给 agent 一个稳定地
 
 | 想改什么 | 先读 |
 |---|---|
-| 任何东西 | `docs/architecture.md`（20 节，架构边界、数据布局、六条链路） |
+| 任何东西 | `docs/architecture.md`（21 节，架构边界、数据布局、六条链路） |
 | 控制台 | `docs/architecture.md` §16 + `docs/design/variants/apple/` |
-| 不知道从哪下手 | `docs/architecture.md` §20 里程碑 |
+| 不知道从哪下手 | `docs/architecture.md` §21 里程碑 |
 
 **架构文档是唯一真相。** 代码和文档不一致时，先确认哪个对，再改另一个。不要默默按代码走。
 
