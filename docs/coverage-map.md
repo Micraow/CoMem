@@ -3,7 +3,7 @@
 > 以代码为准。每个能力一行：**入口 → 实现 → 数据落到哪 → 哪条测试证明它成立**。
 > 行号是快照时刻的值，不是引文。`§x` 指 `docs/architecture.md` 的节号，那份文档定架构边界与数据布局，这份只回答「在哪、怎么流、谁证明」。
 >
-> **快照**：HEAD `18526c5`，时刻 `2026-11-10T03:24+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
+> **快照**：HEAD `646f8d3`，时刻 `2026-11-10T03:44+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
 
 ## 一、能力矩阵
 
@@ -193,6 +193,8 @@
 | `comem_hook_async_seconds{event}` 的 `event` 标签 | 假维度：进程级快照被贴到每个事件上，同一份数据被复制成七份 | `services/observability.ts:755` 起按 `phase` 输出 |
 | `comem_llm_cost_usd_total` 的 `?? 0` | 「没配单价」被渲染成「确实花了 0 美元」 | 未配单价时整条序列不存在，另有 `comem_llm_pricing_configured`（`observability.ts:802`） |
 | 控制台的四样展示 | 读不到或永远默认：`/memories/pending` 预取改读 `/health`；任务重试按钮（列表只返回可认领任务）；文档节点的 L1 概览档；置信度徽章（字段不存在）；API Key「最后使用」列（从未记录） | `web/pages/monitor.vue:226` 起说明请求明细无端点；`web/pages/review.vue:12` 起说明复核页改读内容 |
+| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:399`），启动自检 `warnIfVectorsMissing` 转调它（`bootstrap/main.ts:105`），补齐入口只有 `pnpm reindex` 一条；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后 `check:orphans` 从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
+| 向量补全阶段的 `status !== 'active'` 复检 | 候选集来自 `#readableUris` → `index.glob`，而 glob 的 SQL 已经带 `ACTIVE_STATUS_PREDICATE`（与 FTS 臂同一条谓词，`adapters/sqlite/retrieval-index.ts:72`、`:537`）；`NodeRepository.get` 读的是同一行，`NodeStatus` 只有 `active` / `pending` / `archived` 三个成员（`domain/node.ts:19`），所以 SQL 的 `= 'active'` 与 TS 的 `!== 'active'` 对同一行等价，第二次判断不改变结果；`glob` 到 `nodes.get` 之间隔着一次 `vectors.search` 的 await，这期间状态被 TTL 清扫改掉时向量臂比 FTS 臂多挡一次，那是竞态窗口，不是第二份状态过滤的职责 | `5369219` 删前删后检索测试都是 57 passed、全量 2322 passed——「删了测试还绿」正是这处是兜底的证据（与接线类改动相反，接线类要求「删了测试变红」） |
 
 **没有砍、但两侧结论已统一**（`210a06f` 的「契约」段，逐条按代码复核）：`timeoutMs` 从覆盖值改成上限（`adapters/llm/rerank-provider.ts`）；MCP 与 HTTP 空查询统一 `INVALID_ARGUMENT`；`health` 两侧共用 `ObservabilityService.health()`；默认条数统一到 `services/search.ts:405` `DEFAULT_SEARCH_LIMIT = 10`；token 估算统一到 `domain`（`domain/session.ts:125` `estimateTokens`）；hook 事件名统一到 `integrations/lib/events.json`；`edit` 补上派生数据通知（`services/filesystem.ts:335` 起）。
 
@@ -216,6 +218,6 @@
 
 ## 快照与漂移
 
-- 本文的行号对应 `2026-11-10T03:24+08:00` 的 HEAD `18526c5`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
+- 本文的行号对应 `2026-11-10T03:44+08:00` 的 HEAD `646f8d3`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
 - `tests/integration/services/commit-steps.test.ts` 被持续追加用例，行号最容易偏移；引用它时优先给用例名。
 - 引用顺序：先看本文定位入口与测试，细节回 `docs/architecture.md` 对应节号；两侧冲突时以代码为准，并同步改文档。
