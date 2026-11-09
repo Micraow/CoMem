@@ -1156,12 +1156,18 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     ttlSweepBatchSize: config.memory.ttl.sweepBatchSize,
   });
 
-  // 三个开关全关时不起定时器：空转的 30 秒定时器是纯浪费，而且会让「调度器在跑」
+  // 开关全关时不起定时器：空转的 30 秒定时器是纯浪费，而且会让「调度器在跑」
   // 这条日志失去信息量。
+  //
+  // `retentionDays > 0` 也算一个开关：两段式里第一段（软归档）与第二段（物理删除）
+  // 是独立的，`defaultDays: 0` + `retentionDays: 30` 是「不再新增归档、只回收已有的」
+  // 这一种合法配法，漏判它就等于让物理删除永不发生。
+  const ttlPurgeEnabled = config.memory.ttl.retentionDays > 0;
   const schedulerEnabled =
     config.session.autoCommit.enabled ||
     config.session.expiry.idleTimeoutSeconds > 0 ||
-    config.memory.ttl.defaultDays > 0;
+    config.memory.ttl.defaultDays > 0 ||
+    ttlPurgeEnabled;
   if (schedulerEnabled) {
     scheduler.start();
     logger.info('调度器已启动。', {
@@ -1173,8 +1179,10 @@ async function ensureUserNamespace(userId: string): Promise<void> {
           : '关',
       ttl:
         config.memory.ttl.defaultDays > 0
-          ? `开（默认 ${String(config.memory.ttl.defaultDays)} 天）`
-          : '关',
+          ? `开（默认 ${String(config.memory.ttl.defaultDays)} 天${ttlPurgeEnabled ? `，归档满 ${String(config.memory.ttl.retentionDays)} 天物理删除` : ''}）`
+          : ttlPurgeEnabled
+            ? `只回收（不新增归档，归档满 ${String(config.memory.ttl.retentionDays)} 天物理删除）`
+            : '关',
     });
   } else {
     logger.info('调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。', {});

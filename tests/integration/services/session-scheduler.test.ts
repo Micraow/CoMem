@@ -8,7 +8,7 @@
  * 的地方。这里只信「起容器 → tick → 看磁盘」。
  */
 
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -65,6 +65,17 @@ function message(id: string): Omit<SessionMessage, 'turn'> {
 
 function sessionDirectory(sessionUri: Uri): string {
   return join(dataDir, 'user', 'local', 'sessions', sessionUri.name);
+}
+
+/**
+ * 相对此刻的一个 ISO 时刻。
+ *
+ * 用于把索引行伪装成「若干天前写入 / 归档」的记忆：TTL 的判据是索引里的
+ * `updated_at` / `archived_at`，不是文件的 mtime，而等真实时钟走过一天不现实。
+ * 这与本文件既有 TTL 用例的做法一致；改的是**时间输入**，不是被测逻辑。
+ */
+function daysAgo(days: number): string {
+  return new Date(Date.now() - days * MILLISECONDS_PER_DAY).toISOString();
 }
 
 beforeEach(async () => {
@@ -160,6 +171,49 @@ describe('自动提交（container → tick）', () => {
     const history = await session.listArchives(sessionUri);
     expect(history.map((uri) => uri.name)).toEqual(['archive_001']);
   });
+
+  /**
+   * `session.autoCommit.idleTimeoutSeconds` 默认 0（关）。此前只有
+   * `tests/unit/domain/session.test.ts` 直接调 `shouldAutoCommit` 纯函数，没有任何
+   * 测试证明「真实装配下空闲真的会触发提交」——判定函数写好了而没人按时调它，
+   * 正是这个开关能静默失效的地方。
+   */
+  it('idleTimeoutSeconds 到期后自动提交：archive_001 落盘，live 只剩 keepRecentCount 条', async () => {
+    const started = await startContainer(
+      [
+        'session:',
+        '  autoCommit:',
+        '    enabled: true',
+        '    pendingTokenThreshold: 1000000',
+        '    messageCountThreshold: 100000',
+        '    minCommitIntervalSeconds: 0',
+        '    idleTimeoutSeconds: 60',
+        '    keepRecentCount: 1',
+      ].join('\n'),
+    );
+    container = started;
+
+    const session = started.services.session;
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
+    // 两条消息的 createdAt 都固定在 2026-01-01：相对此刻早已超过 60 秒空闲。
+    // token / 消息数阈值刻意设得足够高，这一轮只能是「空闲」触发的。
+    await session.addMessage(sessionUri, message('m0'));
+    await session.addMessage(sessionUri, message('m1'));
+
+    await expect(started.scheduler.tick()).resolves.toMatchObject({
+      scanned: 1,
+      committed: 1,
+    });
+
+    const live = await session.load(sessionUri);
+    expect(live.messages.map((item) => item.id)).toEqual(['m1']);
+    const archiveDirectory = join(sessionDirectory(sessionUri), 'history', 'archive_001');
+    await expect(readdir(archiveDirectory)).resolves.toContain('messages.jsonl');
+    const archived = (await readFile(join(archiveDirectory, 'messages.jsonl'), 'utf8'))
+      .trimEnd()
+      .split('\n');
+    expect(archived).toHaveLength(1);
+  });
 });
 
 describe('会话过期（container → tick）', () => {
@@ -241,6 +295,166 @@ describe('记忆 TTL（container → 清扫）', () => {
       String(started.db.prepare('SELECT status FROM node WHERE uri = ?').get(uri.toString())?.['status']);
     expect(statusOf(stale)).toBe('archived');
     expect(statusOf(fresh)).toBe('active');
+  });
+
+  /**
+   * 滑动窗口的输入是「最后一次被使用」。检索命中也是使用——但记录访问在
+   * `SearchService.#recordHits` 里，曾经被 `telemetry.hotness.weight === 0` 门控挡住，
+   * 默认部署下 `last_accessed_at` 永远不刷新，TTL 对「只被 find 命中、没被 read」的
+   * 记忆失效（`src/services/search.ts` 的注释已按 TTL 的第二读者改写）。
+   *
+   * 这条从容器起：默认 `weight`（0）→ `search.find` 命中 → 清扫 → 被命中的留下、
+   * 没被命中的归档。它测的是用户可见结局，不是「`recordAccess` 被调用了」。
+   */
+  it('find 命中刷新 last_accessed_at（默认 weight=0）：被命中的不归档，没命中的归档', async () => {
+    const started = await startContainer(
+      ['memory:', '  ttl:', '    defaultDays: 30'].join('\n'),
+    );
+    container = started;
+
+    const caught = Uri.parse(SCOPE).child('memories', 'preferences', 'caught.md');
+    const cold = Uri.parse(SCOPE).child('memories', 'preferences', 'cold.md');
+    await started.services.filesystem.write(caught, '滑动窗口刷新访问时间。', AUTH_PRINCIPALS);
+    await started.services.filesystem.write(cold, '这条与查询无关。', AUTH_PRINCIPALS);
+    await started.services.indexObserver.drain();
+
+    // 两条都是 31 天前写入；窗口内只有「被检索命中」这一条活下来。
+    started.db
+      .prepare('UPDATE node SET updated_at = ? WHERE uri IN (?, ?)')
+      .run(daysAgo(31), caught.toString(), cold.toString());
+
+    const hits = await started.services.search.find('滑动窗口刷新', {
+      scopes: [`${SCOPE}/memories`],
+      subject: 'user:local',
+      principals: AUTH_PRINCIPALS,
+    });
+    expect(hits.map((hit) => hit.uri)).toEqual([caught.toString()]);
+
+    // `recordAccess` 是 fire-and-forget：等一个宏任务再清扫，不依赖实现细节。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const access = started.db
+      .prepare('SELECT last_accessed_at FROM node WHERE uri = ?')
+      .get(caught.toString());
+    expect(access?.['last_accessed_at']).not.toBeNull();
+
+    await expect(started.scheduler.tick()).resolves.toMatchObject({ ttlArchived: 1 });
+
+    const statusOf = (uri: Uri): string =>
+      String(started.db.prepare('SELECT status FROM node WHERE uri = ?').get(uri.toString())?.['status']);
+    expect(statusOf(caught)).toBe('active');
+    expect(statusOf(cold)).toBe('archived');
+  });
+
+  /**
+   * `memory.ttl.retentionDays` 默认 0（永不物理删除）。此前只有
+   * `tests/integration/services/ttl.test.ts` 直接 `new TtlService(...)` 传参测得第二段，
+   * 没有任何测试证明「配置里的 retentionDays 会经容器传到清扫里」——传丢了不会报错，
+   * 只会让磁盘永远不会被回收。
+   */
+  it('retentionDays 到期后物理删除：索引行与文件一起消失', async () => {
+    const started = await startContainer(
+      ['memory:', '  ttl:', '    defaultDays: 1', '    retentionDays: 1'].join('\n'),
+    );
+    container = started;
+    expect(started.scheduler.started).toBe(true);
+
+    const stale = Uri.parse(SCOPE).child('memories', 'preferences', 'stale.md');
+    await started.services.filesystem.write(stale, '很久没被使用的偏好。', AUTH_PRINCIPALS);
+    await started.services.indexObserver.drain();
+
+    // 第一段：两天的写入时间越过 1 天窗口 → 只软归档，文件还在。
+    started.db
+      .prepare('UPDATE node SET updated_at = ? WHERE uri = ?')
+      .run(daysAgo(2), stale.toString());
+    await expect(started.scheduler.tick()).resolves.toMatchObject({
+      ttlArchived: 1,
+      ttlPurged: 0,
+    });
+    await expect(started.services.filesystem.read(stale, AUTH_PRINCIPALS)).resolves.toBeDefined();
+
+    // 第二段：归档时刻也往前拨两天，越过 1 天保留期 → 物理删除。
+    started.db
+      .prepare('UPDATE node SET archived_at = ? WHERE uri = ?')
+      .run(daysAgo(2), stale.toString());
+    await expect(started.scheduler.tick()).resolves.toMatchObject({
+      ttlArchived: 0,
+      ttlPurged: 1,
+    });
+
+    expect(
+      started.db.prepare('SELECT uri FROM node WHERE uri = ?').get(stale.toString()),
+    ).toBeUndefined();
+    // 用户可见的结局：检索面再也列不出这条记忆（索引行已随文件删除）。
+    const remaining = await started.services.search.glob('**/*.md', {
+      scopes: [`${SCOPE}/memories`],
+      subject: 'user:local',
+      principals: AUTH_PRINCIPALS,
+    });
+    expect(remaining.map((uri) => uri.toString())).not.toContain(stale.toString());
+  });
+
+  /**
+   * 第二段是**独立**开关：`defaultDays: 0` + `retentionDays: 30` 是「不再新增归档、
+   * 只回收已有归档」的合法配法，`TtlService` 一直支持（ttl.test 的「第一段关着
+   * （ttlDays=0）时第二段照常清理已归档的行」）。但 `schedulerEnabled` 曾经只看第一段
+   * 与自动提交/过期，这种配置会被当成「全关」，调度器根本不起——物理删除永不发生。
+   *
+   * 造数据不经过第一段：直接写索引行成「已归档、归档时刻在保留期之外」。这样断言只
+   * 依赖 `retentionDays`。`autoCommit` 关、`expiry = 0`，调度器能启动的唯一原因就是
+   * `retentionDays > 0`。
+   */
+  it('只配 retentionDays（defaultDays=0）时调度器也启动，并物理删除已归档超期记忆', async () => {
+    const started = await startContainer(
+      [
+        'session:',
+        '  autoCommit:',
+        '    enabled: false',
+        'memory:',
+        '  ttl:',
+        '    defaultDays: 0',
+        '    retentionDays: 1',
+      ].join('\n'),
+    );
+    container = started;
+
+    expect(started.config.memory.ttl.defaultDays).toBe(0);
+    expect(started.config.memory.ttl.retentionDays).toBe(1);
+    // 唯一能让调度器起来的原因：retentionDays > 0。
+    expect(started.scheduler.started).toBe(true);
+
+    const archived = Uri.parse(SCOPE).child('memories', 'preferences', 'archived.md');
+    await started.services.filesystem.write(
+      archived,
+      '归档满一天，应当被回收。',
+      AUTH_PRINCIPALS,
+    );
+    await started.services.indexObserver.drain();
+
+    // 直接造「已归档且 archived_at 在保留期之外」，不依赖第一段。
+    started.db
+      .prepare("UPDATE node SET status = 'archived', archived_at = ? WHERE uri = ?")
+      .run(daysAgo(2), archived.toString());
+
+    await expect(started.scheduler.tick()).resolves.toMatchObject({
+      ttlArchived: 0,
+      ttlPurged: 1,
+    });
+
+    // 索引行没了。
+    expect(
+      started.db.prepare('SELECT uri FROM node WHERE uri = ?').get(archived.toString()),
+    ).toBeUndefined();
+    // 文件也没了：用户看到的是磁盘上的记忆真的被回收。
+    await expect(
+      stat(join(dataDir, 'user', 'local', 'memories', 'preferences', 'archived.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    // 检索面同样列不出来。
+    const remaining = await started.services.search.glob('**/*.md', {
+      scopes: [`${SCOPE}/memories`],
+      subject: 'user:local',
+      principals: AUTH_PRINCIPALS,
+    });
+    expect(remaining.map((uri) => uri.toString())).not.toContain(archived.toString());
   });
 });
 
