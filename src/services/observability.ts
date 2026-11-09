@@ -70,6 +70,16 @@ export interface ObservabilityDatabase {
   };
 }
 
+/**
+ * 「节点自身那一行」的谓词，与 `adapters/sqlite/node-repository.ts` 的
+ * `nodeSelfRowSql()` 是同一个不变量：目录的 L1 概览行是附加检索行，不是独立节点。
+ *
+ * 不复用那个函数：`services/` 只能 `import type` 引用适配层（§4.2），而这个文件
+ * 本来就直接对 `node` 表写 SQL（读端口是 `ObservabilityDatabase`）。两处的含义由
+ * `0004_node_level_rows.sql` 与 `SummaryService.#persistSummary` 共同约束。
+ */
+const NODE_SELF_ROW = "NOT (kind = 'directory' AND level = 'L1')";
+
 /** §17.2 的四个阻塞阶段。名字与 `phase()` 的调用参数一致。 */
 const BLOCKING_PHASES: readonly string[] = ['processStart', 'recall', 'serialize', 'capture'];
 
@@ -463,7 +473,10 @@ export class ObservabilityService {
   /** §17.5 记忆健康度。字段口径见各查询的注释。 */
   async health(): Promise<MemoryHealth> {
     const now = this.#now();
-    const pendingReview = this.#count('SELECT COUNT(*) AS total FROM node WHERE status = ?', 'pending');
+    const pendingReview = this.#count(
+      `SELECT COUNT(*) AS total FROM node WHERE status = ? AND ${NODE_SELF_ROW}`,
+      'pending',
+    );
     const staleSummaries = this.#count(
       `SELECT COUNT(*) AS total FROM node
         WHERE kind = 'directory' AND summary_pending > 0`,
@@ -476,7 +489,7 @@ export class ObservabilityService {
         WHERE status = 'running' AND (lease_until IS NULL OR lease_until < ?)`,
       now.toISOString(),
     );
-    const indexNodes = this.#count('SELECT COUNT(*) AS total FROM node');
+    const indexNodes = this.#count(`SELECT COUNT(*) AS total FROM node WHERE ${NODE_SELF_ROW}`);
     const oldestPendingAgeSeconds = this.#oldestPendingAgeSeconds(now);
     const degradedSummaries = await this.#countDegradedSummaries();
 
@@ -580,11 +593,16 @@ export class ObservabilityService {
     lines.push(
       '# HELP comem_index_nodes 索引节点数',
       '# TYPE comem_index_nodes gauge',
-      `comem_index_nodes ${metricValue(this.#count('SELECT COUNT(*) AS total FROM node'))}`,
+      `comem_index_nodes ${metricValue(
+        this.#count(`SELECT COUNT(*) AS total FROM node WHERE ${NODE_SELF_ROW}`),
+      )}`,
       '# HELP comem_pending_review 待复核的记忆条数',
       '# TYPE comem_pending_review gauge',
       `comem_pending_review ${metricValue(
-        this.#count('SELECT COUNT(*) AS total FROM node WHERE status = ?', 'pending'),
+        this.#count(
+          `SELECT COUNT(*) AS total FROM node WHERE status = ? AND ${NODE_SELF_ROW}`,
+          'pending',
+        ),
       )}`,
       '# HELP comem_llm_tokens_total 模型 token 累计',
       '# TYPE comem_llm_tokens_total counter',
@@ -639,7 +657,7 @@ export class ObservabilityService {
     const row = this.#db
       .prepare(
         `SELECT updated_at FROM node
-          WHERE status = 'pending'
+          WHERE status = 'pending' AND ${NODE_SELF_ROW}
           ORDER BY updated_at ASC
           LIMIT 1`,
       )
@@ -669,7 +687,7 @@ export class ObservabilityService {
     const rows = this.#db
       .prepare(
         `SELECT uri FROM node
-          WHERE kind = 'directory'
+          WHERE kind = 'directory' AND ${NODE_SELF_ROW}
           ORDER BY uri
           LIMIT ?`,
       )

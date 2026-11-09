@@ -38,11 +38,21 @@
  * `finally` 已经释放锁），并记进 `#pending`：`drain()` 给测试与 `close()` 一个确定的
  * 汇合点。归档 / 抽取 / 合并 / 摘要本来就算**异步阶段**（§17.2），不占阻塞开销。
  *
- * ## 目录行的 `level` 是 L0
+ * ## 这里只写「节点自身那一行」
  *
- * 目录没有 L2 正文，它可检索的文本就是 L0 摘要（§8.1）。`SummaryService` 的
- * `#indexRecord` 也用 L0 并保留已有行的 level，两边必须一致，否则第一次生成摘要
- * 之后 level 会从 L2 悄悄变成 L0。
+ * 一个目录在索引里最多两行（§8.5、`0004_node_level_rows.sql`）：L0 行是节点自身
+ * 的行（`abstract` = L0 摘要），L1 行是概览正文的附加检索行。观察者只写 L0 行——
+ * 它拿不到概览正文（概览由 `SummaryService` 生成、落盘、再写索引），写 L1 行等于
+ * 每次 `mkdir` 都把概览抹掉。
+ *
+ * 两条写入路径的 `level` 必须一致：`SummaryService.#indexRecord` 也写 L0 并保留
+ * 已有行的 level，否则第一次生成摘要之后 level 会从 L2 悄悄变成 L0，L1 行也会与
+ * 它错位。
+ *
+ * **移动会丢掉 L1 行**（`onNodeMoved` 按磁盘重建，磁盘上没有「概览已进索引」这件
+ * 事）。丢的是派生数据：目标目录的 L0 行同样在这一步被写成空摘要，两条都在下一次
+ * 摘要重算时恢复。索引是派生数据（§7），不在移动路径上读摘要文件，是为了让一次
+ * 移动不变成 N 次摘要在锁内重新落盘。
  *
  * ## 观察者抛错不能拖垮写操作
  *
@@ -894,7 +904,9 @@ export class IndexObserver implements NodeWriteObserver {
       contextType: existing?.contextType ?? contextType,
       memoryType: existing?.memoryType ?? null,
       level: DIRECTORY_LEVEL,
-      // 目录的可检索文本是它的 L0 摘要，由 `SummaryService` 写；目录本身没有正文。
+      // 目录自身这一行的可检索文本是它的 L0 摘要，由 `SummaryService` 写；目录本身
+      // 没有正文。概览正文走另一行（L1，见文件头），这里写空不会碰到它：
+      // `upsert` 的冲突键是 `(uri, level)`。
       abstract: null,
       content: '',
       bodyDigest: stableDigest(''),

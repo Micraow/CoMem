@@ -717,15 +717,16 @@ summary_state: fresh            # fresh | stale
 ### 8.1 SQLite 表
 
 ```sql
--- 节点索引：检索与 stat 的读模型
+-- 节点索引：检索与 stat 的读模型。一行 = 一条检索行，一个 URI 最多两行（见下表）
 CREATE TABLE node (
-  uri            TEXT PRIMARY KEY,
+  uri            TEXT NOT NULL,
   parent_uri     TEXT NOT NULL,
   scope          TEXT NOT NULL,      -- user | group
   kind           TEXT NOT NULL,      -- directory | document
   context_type   TEXT NOT NULL,      -- memory | resource | skill | session
   memory_type    TEXT,               -- profile | preferences | entities | ...
-  level          TEXT NOT NULL,      -- 'L0' | 'L1' | 'L2'，存字面量不存 0/1/2
+  -- 这一行**自己**的层级：'L0' | 'L1' | 'L2'，存字面量不存 0/1/2
+  level          TEXT NOT NULL,
   abstract       TEXT,
   body_digest    TEXT NOT NULL,
   size           INTEGER NOT NULL,
@@ -740,7 +741,8 @@ CREATE TABLE node (
   last_accessed_at TEXT,
   -- 记忆的过期时间。NULL = 永不过期；存**绝对时刻**而不是「N 天后」，
   -- 因为相对时长每次读都要重算「从什么时候开始算」（§11.7）
-  expires_at     TEXT
+  expires_at     TEXT,
+  PRIMARY KEY (uri, level)            -- 目录有 L0 与 L1 两行，主键必须是两者的组合
 );
 CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
@@ -753,6 +755,8 @@ CREATE INDEX idx_node_expires ON node(expires_at) WHERE expires_at IS NOT NULL;
 -- 注意 content / abstract 存的是「切分后」的文本，不是原文（见下面的中文切分）
 CREATE VIRTUAL TABLE node_fts USING fts5(
   uri UNINDEXED,
+  -- 与 `node` 行的层级对齐。一个 URI 两行时，只按 uri 关联会把两条匹配交叉成四条
+  level UNINDEXED,
   abstract,
   content,
   tokenize = 'unicode61 remove_diacritics 2'
@@ -871,11 +875,43 @@ CREATE TABLE api_key (
 CREATE INDEX idx_api_key_user ON api_key(user_id);
 ```
 
+**一个 URI 在索引里最多有几行。** `node` 的主键是 `(uri, level)`，因为「索引行」与
+「节点」不是一对一：目录可检索的文本有两段（L0 摘要、L1 概览），两段的信噪比不同，
+必须各自成为一条 FTS 行，§8.5 的层级权重才有作用对象。
+
+| 节点 | 行 | `level` | `abstract` | `content`（进 `node_fts`） | `levelWeight` |
+|---|---|---|---|---|---|
+| 文件 | 1 | `L2` | frontmatter 摘要 | 正文 | 1.00 |
+| 目录 | 1 | `L0` | L0 摘要 | 空 | 1.15 |
+| 目录 | 2 | `L1` | L0 摘要（展示用，与上一行相同） | L1 概览正文 | 1.05 |
+
+- **最多两行**，且只有目录有第二行。`SummaryService.#persistSummary` 在同一个事务里
+  写这两行（`src/services/summary.ts`），所以概览改了就同时改，不存在「摘要新、概览旧」。
+- **L1 行的 `node_fts.abstract` 列是空的**：L0 是从 L1 正文提取的（§9.1），概览正文
+  已经包含它；同一段文字进两列会让 `bm25()` 把同一处匹配算两遍（它按列累加词频）。
+  `node.abstract` 仍然存 L0 原文，检索结果展示的是那一列。
+- **「节点自身那一行」= `NOT (kind = 'directory' AND level = 'L1')`**，只在
+  `node-repository.ts` 的 `nodeSelfRowSql()` 定义一次。按 URI 读节点的路径（`get` /
+  `children` / `descendants` / `listByScope` / `count` / `stat` / 热度 / `glob` / TTL
+  候选）都带这条谓词，否则一个目录会变成两条节点：`tree` 出现重复、`metrics` 的
+  `comem_index_nodes` 虚高、`sweepExpired` 把同一个目录返回两次。
+- **归档、过期、删除是按 URI 的**：`setExpiry` / `sweepExpired` 的状态转移、`deleteByUri`
+  的删除都会覆盖同一个 URI 的两行——只改 L0 行会让已归档的目录继续从概览正文里被
+  检索到。
+- **概览行只在 FTS 臂上**：向量臂按 URI 一条（`node_embedding` 的主键是 `uri`），
+  目录本来就不产生向量，L1 也不会。代价是纯语义查询（`retrieval.engine: vector`）
+  命不中概览正文，只有 `fts5` / `hybrid` 的 BM25 臂能命中。要让概览参与语义检索，
+  需要把 `node_embedding` / `vec0` 的主键改成 `(uri, level)` 并给摘要服务接嵌入——那是
+  另一个迁移，不在本次范围内。
+
 **迁移清单**（`src/adapters/sqlite/migrations/`）：
 
 | 序号 | 文件 | 内容 |
 |---|---|---|
 | 0001 | `0001_init.sql` | 完整初始 schema（唯一建表脚本，版本号 1） |
+| 0002 | `0002_archived_at.sql` | `node.archived_at`（TTL 两段式，§11.7） |
+| 0003 | `0003_memory_link.sql` | `memory_link`（记忆之间的关联，§11.10） |
+| 0004 | `0004_node_level_rows.sql` | `node` 主键改 `(uri, level)`、`node_fts` 加 `level` 列：目录的 L1 概览行 |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -1006,13 +1042,28 @@ export interface RetrievalIndex {
   upsert(records: IndexRecord[]): Promise<void>;
   deleteByUri(uri: string, options?: { recursive?: boolean }): Promise<void>;
   search(query: SearchQuery): Promise<SearchHit[]>;
-  grep(query: GrepQuery): Promise<GrepHit[]>;
   glob(query: GlobQuery): Promise<string[]>;
   stat(uri: string): Promise<NodeStat | null>;
 }
 ```
 
-`SearchQuery` 带 `scopes`（路径前缀）、`principals`（调用方的权限主体）、`contextTypes`、`levels`、`limit`、`scoreThreshold`。`principals` 由 `Authorizer` 统一算好传进来，FTS5 实现和未来的向量实现共用同一套过滤条件。
+`SearchQuery` 的字段分两类：**范围与权限**（`text` / `scopes` / `principals`）与**过滤维度**：
+
+| 字段 | 语义 | 下推位置（`retrieval-index.ts`） |
+|---|---|---|
+| `contextTypes` | 上下文类型（memory / resource / skill / session） | `n.context_type IN (...)` |
+| `levels` | 层级 | `n.level IN (...)` |
+| `memoryTypes` | 记忆类型；`memory_type IS NULL` 的非记忆节点永远不命中 | `n.memory_type IN (...)` |
+| `updatedAfter` / `updatedBefore` | 更新时间**闭区间**（`updated_at >=` / `<=`） | `n.updated_at >= ? / <= ?` |
+| `scoreThreshold` | 分数下限，作用在排序分上 | 单引擎是比较取负后的分；`hybrid` 是融合分 |
+
+**所有过滤维度都进 SQL 的 `WHERE`、走 `LIMIT` 之前。** 先取候选再在 JS 里筛，会把「类型或时间匹配、但 bm25 / 向量距离排在 `limit × candidateMultiplier` 之后」的节点整批丢掉。`rule_search` 就踩过这个坑：先取 5 条通用命中再按 `memory_type = 'rules'` 过滤，前几条命中是偏好 / 实体时规则全部被挤掉，工具返回 `Found 0`，而库里明明有匹配的规则。
+
+**时间边界是闭区间，且先归一化再比较。** `updatedAfter` / `updatedBefore` 收 ISO 8601 绝对时刻；`node.updated_at` 一律由 `Date#toISOString()` 写入（定长、带 `Z`），所以过滤边界也要归一化成同一形态（`canonicalInstant`），带时区偏移的输入（`2026-11-08T08:00:00+08:00`）才不会被按字符串比较。区间为空（`updatedAfter` 晚于 `updatedBefore`）在进 SQL 之前报 `INVALID_ARGUMENT`。自然语言日期解析不在这一层，也不在当前接口里。
+
+**向量检索的候选集同样在 SQL 里过滤。** `vec0` 的输入是候选 URI 列表：`services/search.ts` 的 `#readableUris` 用 `GlobQuery` 枚举「路径 + 权限 + 上面三个过滤维度」之后的 URI，再交给 `SqliteVectorIndex.search`。因此 `hybrid` 的 RRF 融合发生在两路都已过滤之后——不是先融合、再截断、最后筛。`GlobQuery` 因此也带可选的 `memoryTypes` / `updatedAfter` / `updatedBefore`，它们只为向量候选集枚举存在，MCP / HTTP 的 `glob` 面不暴露。
+
+`principals` 由 `Authorizer` 统一算好传进来，FTS5 实现和向量实现共用同一套权限谓词。
 
 **为什么这个接口要留。** 这是 brief 里唯一一条明确要求预留的扩展点（「查找要做成接口，后续可能要做成向量库」）。其余抽象都按「只有一个实现就地写」处理。
 
@@ -1062,6 +1113,14 @@ export interface RetrievalIndex {
 | L1 | 1.05 | 概览，介于两者之间 |
 | L2 | 1.00 | 原文，未加工 |
 
+**三层都有真实的作用对象。** 目录写入摘要后，索引里有两行：L0 行（一句话摘要）与
+L1 行（概览正文，`overviewMaxChars` 默认 4000 字）。L1 行的 `content` 是概览正文、
+`abstract` 是该目录的 L0 摘要——所以「同一目录同时命中 L0 与 L1」是常态，而不是
+理论上的可能性（§8.6 第 3 步与 §8.1 的「一个 URI 最多几行」）。
+
+**L1 行只在 FTS 臂上。** 向量臂按 URI 一条、目录不产生向量，`retrieval.engine:
+vector` 命不中概览正文；`hybrid` 下这一臂的贡献是 0（§8.1 的最后一条说明）。
+
 **为什么权重这么小**：加权是为了在 BM25 分数接近时打破平局，不是为了压过词频。1.15 意味着 L0 只要词频不差太多就能赢 L2；如果 L2 的词频明显更高，它仍然应该赢。
 
 **混合检索下，权重乘在每个后端对融合分的贡献上**，不是先改后端名次：
@@ -1104,7 +1163,19 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 放不下就**降级**：`L2 → L1 → L0 → 只有 URI`。降到底还放不下就丢弃，计入 `dropped`。然后按分数做三轮**升级**：先升到 L1、再升到 L2、最后是无单条上限的 L2（只受总预算约束）。
 
-**3. 去重。** 渲染后正文完全相同的条目只留分数最高的（同一个文件可能同时命中 L0 和 L2 两条记录）。
+**3. 去重。** 渲染后正文完全相同的条目只留分数最高的。真实场景是同一个目录的两行：
+L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` 逐字相同（§8.1 的表格），
+渲染出来就是两段一样的正文。
+
+去重分两层，各自解决一层的问题：
+
+| 层 | 位置 | 键 | 作用 |
+|---|---|---|---|
+| 命中列表 | `find` 的 `#rank`（`services/search.ts`）、`search` 的 `mergeHits` | `(uri, abstract)` / `uri` | 不把同一句摘要返回两遍，也不让重复行占掉 `limit` 名额 |
+| 上下文组装 | `ranking.dedupeByRenderedText`（`domain/assembly.ts`） | 渲染后的正文 | 纯逻辑兜底：即使上游给出两条，也只投一条 |
+
+`(uri, abstract)` 而不是 `uri`：同一个 URI 的两行**如果**携带不同摘要（将来的其他层级
+组合），那是两条信息，不该合并；只有摘要逐字相同才算重复。
 
 **4. 配额。** 预设两套（`chat` / `coding`），按类别分配条目数：
 
@@ -1294,6 +1365,10 @@ L0 从 L1 正文提取（H1 标题之后、第一个 `##` 之前的段落），�
 
 **L0/L1 是目录级的**，不是文件级。文件摘要存在索引记录的 `abstract` 字段里，作为生成父目录 L1 的输入。
 
+两层都进检索索引，而且是同一个 URI 的两行（§8.1）：L0 行只索引摘要，L1 行索引概览
+正文。这不是冗余——摘要是一句话，概览是 4000 字，两者能回答的问题不同，`bm25 ×
+levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
+
 ### 9.2 生成
 
 自底向上。一个目录的 L1 输入是「直接子文件的摘要」+「直接子目录的 L0 正文」：
@@ -1308,6 +1383,11 @@ L0 从 L1 正文提取（H1 标题之后、第一个 `##` 之前的段落），�
 - `RuleSummarizer`：断网降级。取子节点名字 + 各自摘要首句拼接，不调模型
 
 两者实现同一个 `SummaryGenerator` 接口（`domain/summary.ts`），`services/summary.ts` 按配置选择。降级不是静默的：结果带 `degraded: true`，控制台显示，`health` 工具报告。
+
+**一次生成写两行索引。** L0 行与 L1 行在同一个事务里写（`SummaryService.#persistSummary`，
+那是摘要写索引的唯一入口），所以概览与摘要不会各自漂移；`node` 与 `node_fts` 两张表
+也在这个事务里，中途失败整批回滚（`SqliteFtsIndex.upsert` 检测到外层已有事务会直接
+复用，见 `services/summary.ts` 文件头）。
 
 **提示词不在代码里拼。** 静态骨架在仓库的 `prompts/summarize-system.md` 与 `prompts/summarize-user.md`，动态部分（目录地址、直接子节点、两个字数预算）由 `services/prompts/summarize.ts` 渲染成字符串后用 `{{name}}` 注入。模板可以在控制台修改（§18「提示词」），改完下一次摘要生成就生效，不需要重启。
 
@@ -2424,7 +2504,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 
 | 工具 | 参数 | 返回格式 |
 |---|---|---|
-| `find` | `query`、`targetUri?`、`limit=10`、`level?`、`contextType?` | 文本：`Found N item(s):` + 每条 `- [类型] uri` + 缩进摘要（**降序排列，不带分数**：四种引擎的分数量纲不可比，见 §8.4） |
+| `find` | `query`、`targetUri?`、`limit=10`、`level?`、`contextType?`、`memoryTypes?`、`updatedAfter?`、`updatedBefore?` | 文本：`Found N item(s):` + 每条 `- [类型] uri` + 缩进摘要（**降序排列，不带分数**：四种引擎的分数量纲不可比，见 §8.4） |
 | `search` | 同上 + `sessionId?` | 同上，末尾附 `Query plan` |
 | `rule_search` | `taskContext`、`threshold=0.65`（相对阈值） | 文本：适用规则的完整正文块 |
 | `read` | `uri` 或 `uris[]`、`offset=0`、`limit=-1` | 文本；图片/音频返回二进制块 |

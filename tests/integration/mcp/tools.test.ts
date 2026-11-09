@@ -849,6 +849,72 @@ describe('search / rule_search', () => {
     expect(text).toContain('提交前必须检查许可证。');
     expect(text).not.toContain(weak);
   });
+
+  it('rule_search 在通用检索前 5 条全是偏好时仍返回规则（类型下推，核心验收）', async () => {
+    // 缺陷现场：旧实现先 `find(limit: 5)` 再按 `memoryType === 'rules'` 过滤。
+    // 6 条偏好把查询短语写 3 遍，bm25 都高于规则，前 5 条全是偏好，规则被筛没。
+    const preferences = Array.from(
+      { length: 6 },
+      (_, index) => `${SCOPE}/memories/preferences/tone-${index}.md`,
+    );
+    for (const uri of preferences) {
+      const content = '提交前必须检查许可证。'.repeat(3);
+      await harness.filesystem.write(Uri.parse(uri), content, PRINCIPALS);
+      await seed(uri, content, { memoryType: 'preferences', abstract: '偏好' });
+    }
+    const ruleUri = `${SCOPE}/memories/rules/pushdown/rule.md`;
+    await harness.filesystem.write(Uri.parse(ruleUri), '提交前必须检查许可证。', PRINCIPALS);
+    await seed(ruleUri, '提交前必须检查许可证', {
+      memoryType: 'rules',
+      abstract: '许可证规则',
+    });
+
+    // 先钉住场景本身：不带 memoryTypes 的通用检索前 5 条确实是偏好，
+    // 否则这条用例可能在旧实现下也碰巧通过。
+    const generic = await harness.context.search.find('提交前必须检查许可证', {
+      scopes: [SCOPE],
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+      limit: 5,
+      contextTypes: ['memory'],
+    });
+    expect(generic).toHaveLength(5);
+    expect(generic.every((hit) => hit.memoryType === 'preferences')).toBe(true);
+
+    const text = await callText('rule_search', { taskContext: '提交前必须检查许可证' });
+
+    expect(text).toContain(ruleUri);
+    expect(text).toContain('提交前必须检查许可证。');
+  });
+
+  it('find 的 memoryTypes 只返回指定记忆类型', async () => {
+    const preference = `${MEM}/memories/preferences/tone.md`;
+    const rule = `${MEM}/memories/rules/rule.md`;
+    await seed(preference, '许可证检查', { memoryType: 'preferences' });
+    await seed(rule, '许可证检查', { memoryType: 'rules' });
+
+    const text = await callText('find', { query: '许可证', memoryTypes: ['rules'] });
+
+    expect(text).toContain(rule);
+    expect(text).not.toContain(preference);
+  });
+
+  it('find 的 updatedAfter / updatedBefore 是闭区间', async () => {
+    const boundary = '2026-11-08T00:00:00.000Z';
+    const old = `${MEM}/old.md`;
+    const fresh = `${MEM}/fresh.md`;
+    await seed(old, '许可证检查', {});
+    await seed(fresh, '许可证检查', {});
+    harness.db.prepare('UPDATE node SET updated_at = ? WHERE uri = ?').run(
+      '2026-11-01T00:00:00.000Z',
+      old,
+    );
+
+    const text = await callText('find', { query: '许可证', updatedAfter: boundary });
+
+    expect(text).toContain(fresh);
+    expect(text).not.toContain(old);
+  });
 });
 
 describe('remember / download', () => {

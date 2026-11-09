@@ -18,6 +18,7 @@ import {
   optionalContextType,
   optionalLevel,
   optionalString,
+  optionalStringArray,
   positiveInteger,
   readScopes,
   requiredString,
@@ -109,6 +110,21 @@ export const searchTool: McpToolDefinition = {
       limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT },
       level: { type: 'string', enum: ['L0', 'L1', 'L2'] },
       contextType: { type: 'string', enum: ['memory', 'resource', 'skill', 'session'] },
+      memoryTypes: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '只看这些记忆类型（如 rules / preferences / entities）；省略表示不限',
+      },
+      updatedAfter: {
+        type: 'string',
+        format: 'date-time',
+        description: '只返回该时刻之后（含）更新的节点，ISO 8601',
+      },
+      updatedBefore: {
+        type: 'string',
+        format: 'date-time',
+        description: '只返回该时刻之前（含）更新的节点，ISO 8601',
+      },
       sessionId: { type: 'string', description: '可选：提供最近消息用于解析指代' },
       mode: {
         type: 'string',
@@ -129,6 +145,10 @@ export const searchTool: McpToolDefinition = {
     const contextType = optionalContextType(args, 'contextType', 'search');
     const sessionId = optionalString(args, 'sessionId', 'search');
     const mode = parseMode(optionalString(args, 'mode', 'search'));
+    // 记忆类型 / 时间范围是**过滤维度**，不是新的检索面：两种 mode 都下推给索引。
+    const memoryTypes = optionalStringArray(args, 'memoryTypes', 'search');
+    const updatedAfter = optionalString(args, 'updatedAfter', 'search');
+    const updatedBefore = optionalString(args, 'updatedBefore', 'search');
     const scopes = await readScopes(context, targetUri);
 
     if (mode === 'context') {
@@ -141,6 +161,9 @@ export const searchTool: McpToolDefinition = {
         sessionId,
         levels: level === undefined ? undefined : [level],
         contextTypes: contextType === undefined ? undefined : [contextType],
+        memoryTypes,
+        updatedAfter,
+        updatedBefore,
       });
 
       context.logger.debug('MCP search（context）完成', {
@@ -163,6 +186,9 @@ export const searchTool: McpToolDefinition = {
       sessionId,
       levels: level === undefined ? undefined : [level],
       contextTypes: contextType === undefined ? undefined : [contextType],
+      memoryTypes,
+      updatedAfter,
+      updatedBefore,
     });
 
     context.logger.debug('MCP search 完成', {

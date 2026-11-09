@@ -80,7 +80,7 @@ import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js'
 import { ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { MemoryLinkRepository } from '../adapters/sqlite/memory-link-repository.js';
-import { NodeRepository } from '../adapters/sqlite/node-repository.js';
+import { NodeRepository, nodeSelfRowSql } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { PromptRepository } from '../adapters/sqlite/prompt-repository.js';
 import { UserRepository } from '../adapters/sqlite/user-repository.js';
@@ -1388,6 +1388,10 @@ function memberCountsOf(
  * 冷热统计。`status <> 'archived'` 不排除：已归档的记忆仍是「存在且可能占磁盘」的
  * 治理对象，把它藏起来会让「清理」看不到真正该清的那批。
  *
+ * 只取节点自身那一行（`nodeSelfRowSql`）：`memories/` 下的目录同样是
+ * `context_type = 'memory'`，生成了概览之后它会多出一行 L1。两行都算会让同一份
+ * 目录在冷热分布里占两个样本，而 `size` / `access_count` 是节点级的量。
+ *
  * **不排序**：调用方要的是整体分布，顺序无意义；SQLite 的顺序扫描比带 ORDER BY 的
  * 索引扫描在整表聚合上更快（实测见提交说明的 `EXPLAIN QUERY PLAN`）。
  */
@@ -1405,6 +1409,7 @@ function memoryStatsRowsOf(
       `SELECT n.memory_type, n.access_count, n.last_accessed_at, n.updated_at, n.size
          FROM node n
         WHERE n.context_type = 'memory'
+          AND ${nodeSelfRowSql('n')}
           AND EXISTS (
             SELECT 1 FROM node_permission p
              WHERE p.node_uri = n.uri

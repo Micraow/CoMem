@@ -7,10 +7,11 @@
  * 带 1 万条 `uris` 约 78ms（`vec0` 的 `uri IN (...)` 是逐条主键点查）；同一份数据
  * 用 JS 标量循环按 128 维实测 38ms 外推约 300ms。
  *
- * **`uris` 是候选集，过滤下推到 SQL。** 调用方传的是权限过滤后的可读 URI；
- * `model` / `minScore` / `uris` 全部进 `WHERE`，**距离只对候选算**。唯一在 JS 里
- * 做的一步是「与库中真实存在的主键求交」——那是 `vec0` 0.1.9 的缺陷绕行，
- * 见 `#existingUris`。
+ * **`uris` 是候选集，过滤在 SQL 里做。** 调用方传的是权限过滤后的可读 URI；
+ * `model` / `minScore` / `uris` 全部进 `WHERE`。`vec0` 的 `k` 是**先于 `uri IN`**
+ * 生效的全局最近邻个数（`#nearest` 有实测），所以有候选集时 `k` 取全库行数，
+ * 否则候选可能被更近的非候选行挤出 `k` 而静默返回不足。唯一在 JS 里做的一步是
+ * 「与库中真实存在的主键求交」——那是 `vec0` 0.1.9 的缺陷绕行，见 `#existingUris`。
  *
  * **`uris` 为空数组返回空结果**，不是全库扫描。权限过滤后为空就是没有候选——
  * 退化成全库扫描既慢又是越权：调用方传空数组的意思正是「一个都不许看」。
@@ -119,22 +120,22 @@ export class SqliteVectorIndex {
    * KNN 查询。`distanceLimit` 是 `1 - minScore`：分数下限换算成距离上限，过滤在
    * SQL 里做，不把不相关的行读出来再丢。
    *
+   * **`k` 是 `WHERE uri IN (...)` 之前的全局最近邻个数。** 传 `limit` 时，被 `k`
+   * 截断的行里只要有候选集之外的 URI，候选就永远等不到距离计算：实测两个向量、
+   * 候选集只含较远的那个、`limit = 1` 时结果为空。按记忆类型 / 时间范围收窄候选
+   * 之后这条路径会被频繁踩到（规则只剩几条、最近邻全是偏好），所以有候选集时把
+   * `k` 取**全库行数**——所有行都进最近邻集合，`uri IN` 再从中保留候选。代价与
+   * `#existingUris` 已经在付的全表扫描同阶（1 万行 5.8ms / 10 万行 58ms）。
+   *
    * 候选集超过 `URI_CHUNK_SIZE` 时分批查（SQLite 的绑定变量上限），每批各取
-   * `limit` 条再合并——全局前 `limit` 名一定落在某一批的前 `limit` 名里。
+   * `k` 条再合并——合并在 `search` 里按分数排序、截断。
    */
   #nearest(query: VectorSearchQuery, distanceLimit: number): VectorHit[] {
     const uris = query.uris;
-    const params: SQLInputValue[] = [
-      toVectorBlob(query.vector),
-      query.limit,
-      query.model,
-      distanceLimit,
-    ];
-
     if (uris === undefined) {
       return this.#db
         .prepare(`${KNN_SQL} ORDER BY distance`)
-        .all(...params)
+        .all(toVectorBlob(query.vector), query.limit, query.model, distanceLimit)
         .map(toHit);
     }
 
@@ -144,6 +145,14 @@ export class SqliteVectorIndex {
     if (candidates.length === 0) {
       return [];
     }
+
+    const knnLimit = Math.max(query.limit, existing.size);
+    const params: SQLInputValue[] = [
+      toVectorBlob(query.vector),
+      knnLimit,
+      query.model,
+      distanceLimit,
+    ];
 
     const hits: VectorHit[] = [];
     for (let start = 0; start < candidates.length; start += URI_CHUNK_SIZE) {

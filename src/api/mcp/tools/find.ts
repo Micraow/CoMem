@@ -9,6 +9,7 @@ import {
   optionalContextType,
   optionalLevel,
   optionalString,
+  optionalStringArray,
   positiveInteger,
   readScopes,
   requiredString,
@@ -41,6 +42,21 @@ export const findTool: McpToolDefinition = {
         enum: ['memory', 'resource', 'skill', 'session'],
         description: '只看某类上下文',
       },
+      memoryTypes: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '只看这些记忆类型（如 rules / preferences / entities）；省略表示不限',
+      },
+      updatedAfter: {
+        type: 'string',
+        format: 'date-time',
+        description: '只返回该时刻之后（含）更新的节点，ISO 8601',
+      },
+      updatedBefore: {
+        type: 'string',
+        format: 'date-time',
+        description: '只返回该时刻之前（含）更新的节点，ISO 8601',
+      },
     },
     required: ['query'],
   },
@@ -60,6 +76,9 @@ export const findTool: McpToolDefinition = {
       limit,
       levels: level === undefined ? undefined : [level],
       contextTypes: contextType === undefined ? undefined : [contextType],
+      memoryTypes: optionalStringArray(args, 'memoryTypes', 'find'),
+      updatedAfter: optionalString(args, 'updatedAfter', 'find'),
+      updatedBefore: optionalString(args, 'updatedBefore', 'find'),
     });
     return textResult(formatHits(hits));
   },

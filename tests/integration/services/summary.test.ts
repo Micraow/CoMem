@@ -24,6 +24,7 @@ import {
   type SummaryGenerator,
   type SummaryInput,
 } from '../../../src/domain/summary.js';
+import { segmentCjk } from '../../../src/domain/text.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { AclService } from '../../../src/services/acl.js';
 import { LlmService } from '../../../src/services/llm.js';
@@ -649,5 +650,146 @@ describe('read', () => {
       overview: '# 概览\n\n正文',
       degraded: false,
     });
+  });
+});
+
+/**
+ * 目录的 L1 概览行（§8.5）。
+ *
+ * 目录在索引里有两行：L0 行只索引 L0 摘要（一句话），L1 行索引概览正文
+ * （`overviewMaxChars`，默认 4000 字）。`levelWeights.l1` 在此之前没有任何行可乘，
+ * `SearchQuery.levels: ['L1']` 也恒为空。
+ */
+describe('目录的 L1 概览行', () => {
+  /** `node` 表里这个 URI 的全部层级（升序）。 */
+  function levelsOf(uri: string): readonly string[] {
+    return db
+      .prepare('SELECT level FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(uri)
+      .map((item) => String(item['level']));
+  }
+
+  /** `node_fts` 里某一行（按 level 定位）的切分后文本。 */
+  function ftsRow(uri: string, level: string): { abstract: string; content: string } | null {
+    const row = db
+      .prepare('SELECT abstract, content FROM node_fts WHERE uri = ? AND level = ?')
+      .get(uri, level);
+    return row === undefined
+      ? null
+      : { abstract: String(row['abstract']), content: String(row['content']) };
+  }
+
+  /** 固定概览：L0 从 H1 之后、第一个 H2 之前提取（§9.1）。 */
+  const OVERVIEW = [
+    '# preferences',
+    '',
+    '这个目录放代码风格偏好。',
+    '',
+    '## 快速导航',
+    '',
+    '- `code-style.md`：提交前跑完整测试',
+  ].join('\n');
+
+  async function regenerateWith(overview: string): Promise<void> {
+    const generator: SummaryGenerator = {
+      async generate(): Promise<DirectorySummary> {
+        return { abstract: '', overview, degraded: false };
+      },
+    };
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n');
+    await createService({ generator }).regenerate(Uri.parse(PREFERENCES));
+  }
+
+  it('写入摘要后有两行：L0 摘要行与 L1 概览行', async () => {
+    await regenerateWith(OVERVIEW);
+    const summary = await summaryFiles(PREFERENCES);
+
+    expect(levelsOf(PREFERENCES)).toEqual(['L0', 'L1']);
+
+    // L0 行：一句话摘要进 `abstract` 列，`content` 留空。
+    expect(ftsRow(PREFERENCES, 'L0')).toEqual({
+      abstract: segmentCjk(summary.abstract),
+      content: '',
+    });
+    // L1 行：`content` 是概览正文的切分文本；`abstract` 留空——概览正文已经包含
+    // L0 摘要，同一段文字进两列会让 bm25 把同一处匹配算两遍。
+    expect(ftsRow(PREFERENCES, 'L1')).toEqual({
+      abstract: '',
+      content: segmentCjk(summary.overview),
+    });
+  });
+
+  it('两行的 abstract 相同：检索结果展示的是 L0 摘要，去重按它比较', async () => {
+    await regenerateWith(OVERVIEW);
+    const summary = await summaryFiles(PREFERENCES);
+
+    const rows = db
+      .prepare('SELECT level, abstract FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(PREFERENCES)
+      .map((item) => [String(item['level']), String(item['abstract'])]);
+    expect(rows).toEqual([
+      ['L0', summary.abstract],
+      ['L1', summary.abstract],
+    ]);
+  });
+
+  it('重算摘要后 L1 行的概览正文跟着更新', async () => {
+    const { generator } = spyGenerator((_input, call) =>
+      call === 1 ? '第一版摘要。' : '第二版摘要。',
+    );
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n');
+    const service = createService({ generator });
+
+    await service.regenerate(Uri.parse(PREFERENCES));
+    expect(ftsRow(PREFERENCES, 'L1')?.content).toContain(segmentCjk('第一版摘要。'));
+
+    await service.regenerate(Uri.parse(PREFERENCES));
+    const updated = ftsRow(PREFERENCES, 'L1');
+    expect(updated?.content).toContain(segmentCjk('第二版摘要。'));
+    expect(updated?.content).not.toContain(segmentCjk('第一版摘要。'));
+  });
+
+  it('概览正文里独有的文本能命中 L1 行（L0 摘要里没有它）', async () => {
+    await regenerateWith(OVERVIEW);
+
+    const hits = await index.search({
+      text: '提交前跑完整测试',
+      scopes: [MEMORIES],
+      principals: ['user:alice'],
+      levels: ['L1'],
+      limit: 10,
+    });
+
+    expect(hits.map((hit) => [hit.uri, hit.level])).toEqual([[PREFERENCES, 'L1']]);
+  });
+
+  it('目录行被索引重建写成空摘要（观察者路径）时，L1 行不会被抹掉', async () => {
+    await regenerateWith(OVERVIEW);
+    // 观察者写目录自身那一行时 `abstract` / `content` 都是空的（它不生成摘要），
+    // 走的是 `index.upsert`（同时写 `node` 与 `node_fts`）。
+    await index.upsert([
+      {
+        uri: PREFERENCES,
+        parentUri: MEMORIES,
+        scope: 'user',
+        kind: 'directory',
+        contextType: 'memory',
+        memoryType: null,
+        level: 'L0',
+        abstract: null,
+        content: '',
+        bodyDigest: stableDigest(''),
+        size: 1,
+        updatedAt: UPDATED_AT,
+        status: 'active',
+      },
+    ]);
+
+    expect(levelsOf(PREFERENCES)).toEqual(['L0', 'L1']);
+    expect(ftsRow(PREFERENCES, 'L1')?.content).toBe(segmentCjk(OVERVIEW));
+    // ...而 L0 行按观察者的写法被清空，等下一次摘要重算恢复。
+    expect(ftsRow(PREFERENCES, 'L0')).toEqual({ abstract: '', content: '' });
   });
 });

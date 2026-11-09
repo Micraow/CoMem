@@ -117,8 +117,11 @@ const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
  */
 const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
 
+/** 文件是 L2 原文；目录自身是 L0 摘要（§8.5）。 */
 const DOCUMENT_LEVEL = 'L2';
 const DIRECTORY_LEVEL = 'L0';
+/** 目录概览行的层级（§8.5）：概览正文作为一条独立的检索行重建。 */
+const OVERVIEW_LEVEL = 'L1';
 const ACTIVE_STATUS: NodeStatus = 'active';
 
 interface DiskNode {
@@ -243,13 +246,23 @@ async function walkDataDir(dataDir: string, logger: Logger): Promise<readonly Di
   });
 }
 
-/** 从磁盘重建一条 `IndexRecord`。失败抛 `ComemError`（坏 frontmatter 等）。 */
-async function buildRecord(
+/**
+ * 从磁盘重建一个节点的 `IndexRecord`（目录可能两条）。失败抛 `ComemError`
+ * （坏 frontmatter 等）。
+ *
+ * 目录有摘要文件时返回两行：L0（`abstract` = L0 摘要）与 L1（`content` = 概览正文）。
+ * 与写路径一致——概览正文是目录最丰富的那段可检索文本，重建索引时它同样从
+ * `.overview.md` 里读出来，不能让 `reindex` 之后只有写路径生成过的目录才搜得到概览。
+ *
+ * 没有摘要文件时只返回 L0 行。此时磁盘上就没有概览可索引，残留的 L1 行会在下一次
+ * 摘要生成时被覆盖（`SummaryService.#persistSummary` 两行一起写）。
+ */
+async function buildRecords(
   store: ContentStore,
   metadata: MetadataFileStore,
   node: DiskNode,
   existing: NodeRow | null,
-): Promise<IndexRecord> {
+): Promise<readonly IndexRecord[]> {
   const stat = await store.stat(node.uri);
   if (stat === null) {
     throw new ComemError('NOT_FOUND', `磁盘上的节点已不可寻址：${node.uri.toString()}`, {
@@ -262,7 +275,7 @@ async function buildRecord(
 
   if (node.kind === 'directory') {
     const summary = await metadata.readSummary(node.uri);
-    return {
+    const base: IndexRecord = {
       uri: node.uri.toString(),
       parentUri,
       scope: node.uri.scope,
@@ -277,6 +290,18 @@ async function buildRecord(
       updatedAt: stat.updatedAt,
       status: existing?.status ?? ACTIVE_STATUS,
     };
+    if (summary.overview === '') {
+      return [base];
+    }
+    return [
+      base,
+      {
+        ...base,
+        level: OVERVIEW_LEVEL,
+        content: summary.overview,
+        bodyDigest: stableDigest(summary.overview),
+      },
+    ];
   }
 
   const raw = Buffer.from(await store.readBytes(node.uri)).toString('utf8');
@@ -284,22 +309,24 @@ async function buildRecord(
   const fields = readFrontmatterFields(document.data);
   const summary = document.data['summary'];
 
-  return {
-    uri: node.uri.toString(),
-    parentUri,
-    scope: node.uri.scope,
-    kind: 'document',
-    contextType,
-    // frontmatter 是记忆类型的唯一真相；读不出来时保留索引里的旧值。
-    memoryType: fields.memoryType ?? existing?.memoryType ?? null,
-    level: DOCUMENT_LEVEL,
-    abstract: typeof summary === 'string' && summary !== '' ? summary : null,
-    content: document.body,
-    bodyDigest: stableDigest(document.body),
-    size: stat.size,
-    updatedAt: stat.updatedAt,
-    status: fields.status ?? existing?.status ?? ACTIVE_STATUS,
-  };
+  return [
+    {
+      uri: node.uri.toString(),
+      parentUri,
+      scope: node.uri.scope,
+      kind: 'document',
+      contextType,
+      // frontmatter 是记忆类型的唯一真相；读不出来时保留索引里的旧值。
+      memoryType: fields.memoryType ?? existing?.memoryType ?? null,
+      level: DOCUMENT_LEVEL,
+      abstract: typeof summary === 'string' && summary !== '' ? summary : null,
+      content: document.body,
+      bodyDigest: stableDigest(document.body),
+      size: stat.size,
+      updatedAt: stat.updatedAt,
+      status: fields.status ?? existing?.status ?? ACTIVE_STATUS,
+    },
+  ];
 }
 
 function progress(
@@ -480,7 +507,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
       try {
         // 1) 检索索引：按磁盘内容重建 `node` + `node_fts`。
         if (only === 'index' || only === 'all') {
-          await index.upsert([await buildRecord(store, metadata, node, existing)]);
+          await index.upsert(await buildRecords(store, metadata, node, existing));
           wrote = true;
         }
 

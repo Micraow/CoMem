@@ -151,8 +151,20 @@ export interface InvalidationResult {
   readonly stoppedAt: string;
 }
 
-/** 目录行在 `node.level` 上存的值：目录的可检索正文是它的 L0 摘要。 */
+/** 目录自身那一行在 `node.level` 上存的值：目录的可检索正文是它的 L0 摘要。 */
 const DIRECTORY_LEVEL = 'L0';
+
+/**
+ * 目录概览行在 `node.level` 上存的值（§8.5）。
+ *
+ * 同一个目录因此在索引里有两行：L0 行（一句话摘要）与 L1 行（`overviewMaxChars`
+ * 的概览正文）。两行的文本长度与信噪比不同，`bm25 × levelWeight` 才有意义——
+ * 在此之前 `levelWeights.l1` 没有任何行可乘。
+ */
+const OVERVIEW_LEVEL = 'L1';
+
+/** 摘要新鲜度三列只在目录的 L0 行上有意义（`0004_node_level_rows.sql`）。 */
+const FRESHNESS_ROW_SQL = `level = '${DIRECTORY_LEVEL}'`;
 
 /** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
 const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
@@ -575,8 +587,12 @@ export class SummaryService {
     const children = await this.#store.list(directoryUri);
 
     await this.#runInTransaction(async () => {
+      // 两行一起写：目录的 L0 摘要行（检索一句话）与 L1 概览行（检索概览正文）。
+      // L1 行必须跟着摘要失效 / 重算同步更新，否则「概览改了、检索还是旧内容」
+      // 会变成一条没有任何报错的陈旧数据。
       await this.#index.upsert([
         this.#indexRecord(directoryUri, summary, children.length, baseline),
+        this.#overviewRecord(directoryUri, summary, children.length),
       ]);
       this.#consume(directoryUri.toString(), baseline, snapshotPending, children.length);
     });
@@ -628,11 +644,12 @@ export class SummaryService {
   }
 
   /**
-   * 目录行要写进索引的内容（§8.1 的 `node` 行）。
+   * 目录自身那一行（L0）要写进索引的内容（§8.1 的 `node` 行）。
    *
-   * 目录没有 L2 正文，可检索的文本就是 L0 摘要：`abstract` 存 L0 原文，`content` 留空
-   * （`node_fts` 只索引 `abstract`，同一段文本写两列只会让 bm25 把同一处匹配算两遍）。
-   * `body_digest` 是 L0 正文的摘要——失效传播靠它判断「L0 变了没有」（§9.3）。
+   * 目录没有 L2 正文，这一行可检索的文本就是 L0 摘要：`abstract` 存 L0 原文，
+   * `content` 留空（`node_fts` 的 `content` 列留给 L1 行，同一段文本写两列只会让
+   * bm25 把同一处匹配算两遍）。`body_digest` 是 L0 正文的摘要——失效传播靠它判断
+   * 「L0 变了没有」（§9.3）。
    *
    * 已有行里的 `context_type` / `memory_type` / `level` / `status` 原样保留：这些字段
    * 是索引重建时由内容决定的，摘要生成不该改写它们。
@@ -662,12 +679,49 @@ export class SummaryService {
     };
   }
 
+  /**
+   * 目录的概览行（L1）要写进索引的内容（§8.5、§8.6）。
+   *
+   * 与 L0 行的差别只有两列：`level` 是 `L1`，`content` 是概览正文（L0 行的 `content`
+   * 留空）。`abstract` 与 L0 行相同——检索结果里展示的就是这条命中对应的 L0 摘要，
+   * 而「同一目录的 L0 行与 L1 行同时命中时只留高分那条」要靠它比较（§8.6 第 3 步
+   * 按渲染后正文去重，`services/search.ts` 的 `#rank` 按 `(uri, abstract)` 去重）。
+   *
+   * `body_digest` 是概览正文的摘要，不是节点正文的摘要。它只有一个读者
+   * （`#bodyChanged` 比的是节点自身那一行），把概览的 digest 写在这里是让这一行
+   * 描述自己检索的是什么文本，而不是冒充节点。
+   */
+  #overviewRecord(
+    directoryUri: Uri,
+    summary: DirectorySummary,
+    entries: number,
+  ): IndexRecord {
+    const uri = directoryUri.toString();
+    const existing: NodeRow | null = this.#nodes.get(uri);
+    return {
+      uri,
+      parentUri: directoryUri.parent()?.toString() ?? '',
+      scope: directoryUri.scope,
+      kind: 'directory',
+      contextType: existing?.contextType ?? contextTypeOf(directoryUri),
+      memoryType: existing?.memoryType ?? null,
+      level: OVERVIEW_LEVEL,
+      abstract: summary.abstract,
+      content: summary.overview,
+      bodyDigest: stableDigest(summary.overview),
+      size: entries,
+      updatedAt: new Date().toISOString(),
+      status: existing?.status ?? 'active',
+    };
+  }
+
   // ── 新鲜度（`node` 表的三列） ──
 
   #readFreshness(uri: string): SummaryFreshness {
     const row = this.#db
       .prepare(
-        'SELECT summary_baseline, summary_pending, summary_entries FROM node WHERE uri = ?',
+        `SELECT summary_baseline, summary_pending, summary_entries
+           FROM node WHERE uri = ? AND ${FRESHNESS_ROW_SQL}`,
       )
       .get(uri);
     return {
@@ -680,7 +734,7 @@ export class SummaryService {
   /** 只更新计数器，不动基线（§9.3 第 4 步的 else 分支）。 */
   #writePending(uri: string, pendingChanges: number): void {
     this.#db
-      .prepare('UPDATE node SET summary_pending = ? WHERE uri = ?')
+      .prepare(`UPDATE node SET summary_pending = ? WHERE uri = ? AND ${FRESHNESS_ROW_SQL}`)
       .run(pendingChanges, uri);
   }
 
@@ -702,7 +756,7 @@ export class SummaryService {
             SET summary_baseline = ?,
                 summary_pending = ?,
                 summary_entries = ?
-          WHERE uri = ?`,
+          WHERE uri = ? AND ${FRESHNESS_ROW_SQL}`,
       )
       .run(baseline, consumed.pendingChanges, entries, uri);
   }

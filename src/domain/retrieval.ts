@@ -37,7 +37,33 @@ export interface SearchQuery {
   /** 调用方权限主体，如 `user:alice`、`group:eng`、`user:*` */
   readonly principals: readonly string[];
   readonly contextTypes?: readonly ContextType[];
+  /**
+   * 只看这些层级。**过滤的是检索行，不是节点**：目录在索引里有 L0（摘要）与 L1
+   * （概览正文）两行（§8.5），`['L1']` 命中的是概览行——它返回的 `abstract` 仍是
+   * 该目录的 L0 摘要。
+   *
+   * 省略或空数组 = 不按层级过滤。三层的权重不同（`ranking.levelWeights`），所以
+   * 这个维度既影响「能不能命中」，也影响排序分。
+   */
   readonly levels?: readonly Level[];
+  /**
+   * 只看这些记忆类型（`node.memory_type`）。
+   *
+   * 省略或空数组 = 不按类型过滤。**非记忆节点的 `memory_type` 是 `NULL`**，因此
+   * 一旦给了类型，它们永远不出现——`rule_search` 的 `['rules']` 正是靠这一点
+   * 在 SQL 里把偏好 / 实体挡在候选之外，而不是先取 5 条再筛。
+   */
+  readonly memoryTypes?: readonly string[];
+  /**
+   * 更新时间下界，**闭区间**：`updated_at >= updatedAfter`。
+   *
+   * ISO 8601 绝对时刻。比较前用 `canonicalInstant` 归一化成 `Date#toISOString()`
+   * 的 UTC 形态——`node.updated_at` 就是那个形态（定长、带 `Z`），TEXT 比较才与
+   * 时间顺序一致；带偏移的输入（`+08:00`）不归一化会按字符串比较出错。
+   */
+  readonly updatedAfter?: string;
+  /** 更新时间上界，**闭区间**：`updated_at <= updatedBefore`。语义同上。 */
+  readonly updatedBefore?: string;
   readonly limit: number;
   readonly scoreThreshold?: number;
 }
@@ -233,8 +259,11 @@ export function reciprocalRankFusion(
 
   const fused: FusedHit[] = [];
   for (const [uri, accumulator] of byUri) {
-    // 层级是文档的属性（见上），同一 URI 在两个后端出现时层级相同；取第一次
-    // 出现的那条，保证「融合分的权重」与「结果里展示的 level」是同一个值。
+    // 取第一次出现的那条，保证「融合分的权重」与「结果里展示的 level / abstract」
+    // 是同一个值。**一个 URI 可能有多条命中行**：目录有 L0 摘要行与 L1 概览行
+    // （§8.5），FTS 臂会同时返回两者，而向量臂按 URI 一条。首次出现的通常是名次
+    // 更高（分数更好）的那一行，所以融合用的层级先验就是「这次匹配最好的行」的
+    // 层级——与单引擎路径 `score × levelWeight[命中行]` 同一口径。
     const weight =
       options.levelWeights === undefined
         ? 1
@@ -277,10 +306,25 @@ export interface GrepHit {
   readonly after: readonly string[];
 }
 
+/**
+ * 路径通配查询。
+ *
+ * 除「路径 + 权限」外还带元数据过滤，因为它同时是**向量检索的候选集来源**
+ * （`services/search.ts` 的 `#readableUris`）：`vec0` 只接受候选 URI 列表，
+ * 记忆类型与时间范围必须在枚举候选时就下推到 SQL，否则先取最近邻再在 JS 里过滤，
+ * 会白白丢掉「最近邻排在后面、但类型匹配」的候选。MCP / HTTP 的 `glob` 面不暴露
+ * 后面三个字段，它们只为候选集枚举存在。
+ */
 export interface GlobQuery {
   readonly pattern: string;
   readonly scopes: readonly string[];
   readonly principals: readonly string[];
+  /** 同 `SearchQuery.memoryTypes` */
+  readonly memoryTypes?: readonly string[];
+  /** 同 `SearchQuery.updatedAfter` */
+  readonly updatedAfter?: string;
+  /** 同 `SearchQuery.updatedBefore` */
+  readonly updatedBefore?: string;
   readonly limit: number;
 }
 
@@ -347,6 +391,56 @@ function validateText(text: string, field: string): void {
 }
 
 /**
+ * ISO 8601 时间 → 规范化的 UTC 串（`Date#toISOString()`）。
+ *
+ * 索引里的 `node.updated_at` 一律由 `Date#toISOString()` 写入（目录行的 mtime），
+ * 定长且带 `Z`，所以按 TEXT 比较与按时间比较等价——**前提是过滤边界也归一化成
+ * 同一形态**。带偏移的输入（`2026-11-08T08:00:00+08:00`）不归一化会按字符串比较
+ * 得到错误结果，而「时间检索」最不能容忍的就是边界悄悄漂移。
+ *
+ * 解析失败抛 `INVALID_ARGUMENT`：把 `updatedAfter=昨天` 这种自然语言输入交给
+ * SQL 比较只会得到空结果，比报错更难查。自然语言日期解析是另一个任务。
+ */
+export function canonicalInstant(value: string, field: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw invalidArgument(`${field} 必须是 ISO 8601 时间串。`, { field, value });
+  }
+  return new Date(timestamp).toISOString();
+}
+
+/**
+ * 元数据过滤维度（记忆类型、更新时间范围）的校验。
+ *
+ * 空 `memoryTypes` 与省略同义（`contextTypes` / `levels` 也是这个语义）：调用方
+ * 从配置里拿到空数组时不该被迫分支。区间为空（`updatedAfter > updatedBefore`）
+ * 报错而不是静默返回空集——那是调用方写错了参数，不是「没有匹配」。
+ */
+function validateMetadataFilter(query: {
+  readonly memoryTypes?: readonly string[];
+  readonly updatedAfter?: string;
+  readonly updatedBefore?: string;
+}): void {
+  if (query.memoryTypes?.some((memoryType) => memoryType === '') === true) {
+    throw invalidArgument('memoryTypes 里不能有空字符串。', { memoryTypes: query.memoryTypes });
+  }
+  const after =
+    query.updatedAfter === undefined
+      ? undefined
+      : canonicalInstant(query.updatedAfter, 'updatedAfter');
+  const before =
+    query.updatedBefore === undefined
+      ? undefined
+      : canonicalInstant(query.updatedBefore, 'updatedBefore');
+  if (after !== undefined && before !== undefined && after > before) {
+    throw invalidArgument('updatedAfter 不能晚于 updatedBefore：这个时间区间永远为空。', {
+      updatedAfter: query.updatedAfter,
+      updatedBefore: query.updatedBefore,
+    });
+  }
+}
+
+/**
  * 校验检索查询。合法返回 `undefined`，非法抛 `INVALID_ARGUMENT`。
  *
  * 在进索引实现之前挡掉不可能成立的查询：空 `scopes` 会退化成全库扫描，
@@ -355,6 +449,7 @@ function validateText(text: string, field: string): void {
 export function validateSearchQuery(query: SearchQuery): void {
   validateQueryEnvelope(query);
   validateText(query.text, 'text');
+  validateMetadataFilter(query);
 }
 
 /** 校验 `grep` 查询；正则本身也要能编译。 */
@@ -424,4 +519,5 @@ function clampConfidence(value: number): number {
 export function validateGlobQuery(query: GlobQuery): void {
   validateQueryEnvelope(query);
   validateText(query.pattern, 'pattern');
+  validateMetadataFilter(query);
 }

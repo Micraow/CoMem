@@ -71,6 +71,26 @@ const NODE_COLUMN_NAMES = [
 const NODE_COLUMNS = NODE_COLUMN_NAMES.join(', ');
 
 /**
+ * 「节点自身那一行」的谓词（架构文档 §8.1、§8.5）。
+ *
+ * 一个目录在 `node` 里最多两行：L0 摘要行（节点自身）与 L1 概览行
+ * （`0004_node_level_rows.sql`）。L1 是**附加的检索行**——它只携带概览正文，不携带
+ * 节点身份。按 URI 读一个节点（`get` / `children` / `descendants` / `listByScope` /
+ * `count` / `stat` / 热度 / TTL）都必须带上这条谓词，否则一个目录会变成两条节点：
+ * `tree` 里出现重复、计数翻倍、`sweepExpired` 把同一个目录返回两次。
+ *
+ * 条件是「目录 + L1」而不是「任何 L1」：附加行的定义就是「目录的概览行」（由
+ * `SummaryService` 写）。文件不会出现在 L1（它只有 L2 原文），而把谓词写成纯层级
+ * 会在将来出现「文件级概览」时把合法的节点行一起藏掉。
+ *
+ * `alias` 是 `node` 在外层查询里的别名；省略时不加前缀（`UPDATE` / 单表查询）。
+ */
+export function nodeSelfRowSql(alias?: string): string {
+  const prefix = alias === undefined ? '' : `${alias}.`;
+  return `NOT (${prefix}kind = 'directory' AND ${prefix}level = 'L1')`;
+}
+
+/**
  * 子树前缀模式：把前缀里的 GLOB 元字符转义后补 `/*`。
  *
  * 用 `GLOB` 而不是 `LIKE`：URI 的根标识与大写敏感（§6.2 只做 NFC，不做大小写折叠），
@@ -143,7 +163,9 @@ export class NodeRepository {
   }
 
   get(uri: string): NodeRow | null {
-    const row = this.#db.prepare(`SELECT ${NODE_COLUMNS} FROM node WHERE uri = ?`).get(uri);
+    const row = this.#db
+      .prepare(`SELECT ${NODE_COLUMNS} FROM node WHERE uri = ? AND ${nodeSelfRowSql()}`)
+      .get(uri);
     return row === undefined ? null : toNodeRow(row);
   }
 
@@ -155,7 +177,11 @@ export class NodeRepository {
    */
   children(parentUri: string): readonly NodeRow[] {
     return this.#db
-      .prepare(`SELECT ${NODE_COLUMNS} FROM node WHERE parent_uri = ? ORDER BY uri ASC`)
+      .prepare(
+        `SELECT ${NODE_COLUMNS} FROM node
+          WHERE parent_uri = ? AND ${nodeSelfRowSql()}
+          ORDER BY uri ASC`,
+      )
       .all(parentUri)
       .map(toNodeRow);
   }
@@ -163,7 +189,11 @@ export class NodeRepository {
   /** 子树全部节点（不含自身），按 uri 升序。 */
   descendants(uri: string): readonly NodeRow[] {
     return this.#db
-      .prepare(`SELECT ${NODE_COLUMNS} FROM node WHERE uri GLOB ? ORDER BY uri ASC`)
+      .prepare(
+        `SELECT ${NODE_COLUMNS} FROM node
+          WHERE uri GLOB ? AND ${nodeSelfRowSql()}
+          ORDER BY uri ASC`,
+      )
       .all(globPrefixPattern(uri))
       .map(toNodeRow);
   }
@@ -171,8 +201,9 @@ export class NodeRepository {
   /**
    * 批量 upsert，单事务。
    *
-   * 用 `ON CONFLICT(uri) DO UPDATE` 而不是先查后写：重建索引时同一批里可能既有
-   * 新节点又有旧节点，逐条分支会把一次写入变成 N 次读 + N 次写。
+   * 用 `ON CONFLICT(uri, level) DO UPDATE` 而不是先查后写：重建索引时同一批里可能
+   * 既有新节点又有旧节点，逐条分支会把一次写入变成 N 次读 + N 次写。冲突键是
+   * `(uri, level)`——目录的 L0 行与 L1 行是两个独立的行，写一个不该覆盖另一个。
    */
   upsert(rows: readonly NodeRow[]): void {
     if (rows.length === 0) {
@@ -181,7 +212,7 @@ export class NodeRepository {
     withWriteTransaction(this.#db, () => {
       const statement = this.#db.prepare(
         `INSERT INTO node (${NODE_COLUMNS}) VALUES (${placeholders(NODE_COLUMN_NAMES.length)})
-         ON CONFLICT(uri) DO UPDATE SET
+         ON CONFLICT(uri, level) DO UPDATE SET
            parent_uri = excluded.parent_uri,
            scope = excluded.scope,
            kind = excluded.kind,
@@ -244,8 +275,12 @@ export class NodeRepository {
     const limit = options.limit;
     const sql =
       limit === undefined
-        ? `SELECT ${NODE_COLUMNS} FROM node WHERE uri = ? OR uri GLOB ? ORDER BY uri ASC`
-        : `SELECT ${NODE_COLUMNS} FROM node WHERE uri = ? OR uri GLOB ? ORDER BY uri ASC LIMIT ?`;
+        ? `SELECT ${NODE_COLUMNS} FROM node
+            WHERE (uri = ? OR uri GLOB ?) AND ${nodeSelfRowSql()}
+            ORDER BY uri ASC`
+        : `SELECT ${NODE_COLUMNS} FROM node
+            WHERE (uri = ? OR uri GLOB ?) AND ${nodeSelfRowSql()}
+            ORDER BY uri ASC LIMIT ?`;
     if (limit !== undefined) {
       params.push(limit);
     }
@@ -256,7 +291,9 @@ export class NodeRepository {
   }
 
   count(): number {
-    const row = this.#db.prepare('SELECT COUNT(*) AS total FROM node').get();
+    const row = this.#db
+      .prepare(`SELECT COUNT(*) AS total FROM node WHERE ${nodeSelfRowSql()}`)
+      .get();
     return Number(row?.['total'] ?? 0);
   }
 
@@ -272,6 +309,9 @@ export class NodeRepository {
    * **不去重**：同一个 URI 在入参里出现两次就是两次访问。合并检索结果时按 URI
    * 去重是调用方的职责（§8.4 的合并规则），这里再做一次会让「命中两次」这件事
    * 在计数上消失。
+   *
+   * **只记节点自身那一行**：目录的 L1 概览行不是独立节点，命中它也是命中那个目录；
+   * 两行各加一次会让 `readAccessStats` 的取值依赖行序（L0 已加、L1 还是 0）。
    */
   recordAccess(uris: readonly string[], at: Date): number {
     if (uris.length === 0) {
@@ -286,7 +326,8 @@ export class NodeRepository {
     const timestamp = at.toISOString();
     const updated = withWriteTransaction(this.#db, () => {
       const statement = this.#db.prepare(
-        'UPDATE node SET access_count = access_count + 1, last_accessed_at = ? WHERE uri = ?',
+        `UPDATE node SET access_count = access_count + 1, last_accessed_at = ?
+          WHERE uri = ? AND ${nodeSelfRowSql()}`,
       );
       let changes = 0;
       for (const uri of uris) {
@@ -311,6 +352,10 @@ export class NodeRepository {
    * 从没改过的老记忆看起来刚被更新过。
    *
    * 不存在的 URI 静默跳过（索引与磁盘不同步是正常状态，见 `recordAccess`）。
+   *
+   * **不加 `nodeSelfRowSql()`**：过期时间是节点级的属性，目录的 L1 概览行必须
+   * 跟着 L0 行一起过期——只给节点自身那一行设过期时间，会让一个已过期的目录继续
+   * 从概览正文里被检索到。返回值因此是**行数**：一个目录算 2 行。
    */
   setExpiry(uris: readonly string[], expiresAt: Date | null): number {
     if (uris.length === 0) {
@@ -348,6 +393,11 @@ export class NodeRepository {
    *
    * **幂等**：`status <> 'archived'` 让重复调用不重复计数（第二次返回空）。
    *
+   * **选候选排除 L1 概览行、改状态不排除**：`setExpiry` 把过期时间写在同一个 URI 的
+   * 两行上，选候选时不带 `nodeSelfRowSql()` 会让一个目录在返回列表里出现两次
+   * （第二段清扫与调用方计数都按 URI 解释它）；而归档本身是按 URI 的状态转移，
+   * 两行必须一起改，否则目录还能从概览正文里被检索到。
+   *
    * `ORDER BY expires_at ASC LIMIT ?` 让「积压很多」时先清最老的，同时给每轮一个上界
    * （`memory.ttl.sweepBatchSize`）——一次更新整表会长时间持有写锁，把并发请求卡在
    * `busy_timeout` 上。
@@ -359,6 +409,7 @@ export class NodeRepository {
         .prepare(
           `SELECT uri FROM node
             WHERE expires_at IS NOT NULL AND expires_at < ? AND status <> 'archived'
+              AND ${nodeSelfRowSql()}
             ORDER BY expires_at ASC
             LIMIT ?`,
         )
@@ -424,7 +475,8 @@ export class NodeRepository {
 
     const rows = this.#db
       .prepare(
-        `SELECT uri, access_count, last_accessed_at FROM node WHERE uri IN (${placeholders(uris.length)})`,
+        `SELECT uri, access_count, last_accessed_at FROM node
+          WHERE uri IN (${placeholders(uris.length)}) AND ${nodeSelfRowSql()}`,
       )
       .all(...uris);
 

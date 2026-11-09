@@ -1140,6 +1140,11 @@ pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
   `--data-dir <path>`。两个路径参数和环境变量 `COMEM_DATA_DIR` 走同一套
   `loadCommandConfig`（`src/commands/config.ts`），不会静默回落到当前目录的
   `config.yaml`。
+- **目录的两行都重建。** 有 `.overview.md` 的目录写 L0 摘要行 + L1 概览行（§8.1），
+  概览正文从磁盘读，不从旧索引读；没有摘要文件的目录只写 L0 行。所以 `reindex`
+  之后概览正文照样能被 `find` 命中，不需要先等一次摘要重算。`reindex` 不清理孤儿
+  行（删掉的 `.overview.md` 留下的 L1 行会一直到下次摘要重算或删除该节点为止）——
+  与它本来就不清理「文件已删除」的孤儿节点是同一条边界，删除走 `deleteByUri`。
 - **只从磁盘读，不信任 SQLite。** 索引坏了才是要重建的理由，拿 `node` 表当输入
   等于假设「坏掉的东西还能用」。
 - **断点续跑。** 按 URI 升序幂等 upsert；嵌入按 `content_digest` 判定「没变」直接

@@ -562,3 +562,35 @@ export function stringArray(
     return item;
   });
 }
+
+/**
+ * 可省缺的字符串数组（`find` / `search` 的 `memoryTypes`）。
+ *
+ * 与 HTTP 侧同名参数是同一个类型（字符串数组、可选），省略时返回 `undefined`；
+ * 空数组合法，语义与省略相同（不按类型过滤）。元素内容由索引层当作不透明字符串
+ * 比较，不认识的值只是查不到——与 `contextTypes` 的枚举校验不同，因为记忆类型
+ * 可以来自 frontmatter，不是闭集。
+ */
+export function optionalStringArray(
+  input: Record<string, unknown>,
+  field: string,
+  tool: McpToolName,
+): readonly string[] | undefined {
+  if (input[field] === undefined) {
+    return undefined;
+  }
+  const value = input[field];
+  if (!Array.isArray(value)) {
+    throw invalidArgument(`${tool} 的 ${field} 必须是字符串数组。`, { tool, field });
+  }
+  return value.map((item, index) => {
+    if (typeof item !== 'string') {
+      throw invalidArgument(`${tool} 的 ${field}[${index}] 必须是字符串。`, {
+        tool,
+        field,
+        index,
+      });
+    }
+    return item;
+  });
+}

@@ -64,26 +64,23 @@ export const ruleSearchTool: McpToolDefinition = {
 
     // 先取够候选，**不把阈值下推给 `search.find`**：阈值作用在最终排序分上，
     // `hybrid` 的 RRF 分（约 0.03）会被 0.65 全部丢掉，结果在过滤之前就被截成 0。
+    //
+    // `memoryTypes: ['rules']` 是**下推**，不是事后过滤：索引在 SQL 的 WHERE 里
+    // 排除其它记忆类型，所以「前 5 条命中都是偏好 / 实体」不会再把规则挤掉
+    // （§8.3 的 `SearchQuery.memoryTypes`）。
     const hits = await context.search.find(taskContext, {
       scopes,
       subject: context.subject,
       principals: context.principals,
       limit: RULE_LIMIT,
       contextTypes: ['memory'],
+      memoryTypes: ['rules'],
     });
 
-    // 先解析记忆类型再过滤：`SearchHit.memoryType` 由 `RetrievalIndex.search` 透传；
-    // 若索引实现没带这一列，用 `stat` 补一次（只查 SQL，不读文件）。少了它，规则会
-    // 退化成「所有记忆」。相对阈值的基准取**规则**里的最高分——非规则记忆不参与。
-    const ruleHits: { readonly uri: string; readonly score: number }[] = [];
-    for (const hit of hits) {
-      const memoryType = hit.memoryType ?? (await context.index.stat(hit.uri))?.memoryType ?? null;
-      if (memoryType !== 'rules') {
-        continue;
-      }
-      ruleHits.push({ uri: hit.uri, score: hit.score });
-    }
-
+    // 相对阈值的基准取**规则**里的最高分：类型过滤已经保证 `hits` 全是规则，
+    // 不需要再逐条 `stat` 补记忆类型（那会多一次 SQL，而且旧的「先取 N 条再筛」
+    // 正是本工具返回空结果的根因）。
+    const ruleHits = hits.map((hit) => ({ uri: hit.uri, score: hit.score }));
     const topScore = Math.max(...ruleHits.map((hit) => hit.score));
     const cutoff = topScore * threshold;
 

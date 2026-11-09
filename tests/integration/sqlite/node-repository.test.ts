@@ -368,3 +368,81 @@ describe('readAccessStats', () => {
     prepare.mockRestore();
   });
 });
+
+/**
+ * 一个目录在 `node` 里最多两行：L0 摘要行（节点自身）与 L1 概览行
+ * （`0004_node_level_rows.sql`）。按 URI 读节点的路径必须只看到节点自身那一行，
+ * 否则「一个目录」会变成两条节点。
+ */
+describe('目录的 L1 概览行不是独立节点', () => {
+  const DIR = 'comem://user/alice/mem';
+  const CHILD = `${DIR}/a.md`;
+  const AT = new Date('2026-11-08T12:00:00.000Z');
+
+  function directoryRow(level: 'L0' | 'L1', abstract: string | null): NodeRow {
+    return row(DIR, { kind: 'directory', level, abstract });
+  }
+
+  beforeEach(() => {
+    repository.upsert([
+      directoryRow('L0', '团队约定'),
+      directoryRow('L1', '团队约定'),
+      row(CHILD),
+    ]);
+  });
+
+  it('两行同时存在：conflict 键是 (uri, level)，写一行不覆盖另一行', () => {
+    const levels = db
+      .prepare('SELECT level FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(DIR)
+      .map((item) => String(item['level']));
+    expect(levels).toEqual(['L0', 'L1']);
+  });
+
+  it('get 返回节点自身那一行（L0）', () => {
+    expect(repository.get(DIR)?.level).toBe('L0');
+    expect(repository.get(DIR)?.abstract).toBe('团队约定');
+  });
+
+  it('children / descendants / listByScope / count 都只算一个节点', () => {
+    expect(uris(repository.children(DIR))).toEqual([CHILD]);
+    expect(uris(repository.descendants('comem://user/alice'))).toEqual([CHILD, DIR].sort());
+    expect(uris(repository.listByScope('comem://user/alice'))).toEqual([CHILD, DIR].sort());
+    expect(repository.count()).toBe(2);
+  });
+
+  it('recordAccess 只累加节点自身那一行', () => {
+    repository.recordAccess([DIR], AT);
+
+    const counts = db
+      .prepare('SELECT level, access_count FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(DIR)
+      .map((item) => [String(item['level']), Number(item['access_count'])]);
+    expect(counts).toEqual([
+      ['L0', 1],
+      ['L1', 0],
+    ]);
+    expect(repository.readAccessStats([DIR])).toEqual([
+      { uri: DIR, accessCount: 1, lastAccessedAt: AT.toISOString() },
+    ]);
+  });
+
+  it('setExpiry 写两行，sweepExpired 只按 URI 返回一次、归档两行', () => {
+    repository.setExpiry([DIR], new Date('2026-11-07T00:00:00.000Z'));
+
+    expect(repository.sweepExpired(AT, 10)).toEqual([DIR]);
+    const statuses = db
+      .prepare('SELECT status FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(DIR)
+      .map((item) => String(item['status']));
+    // 只归档 L0 会让目录继续从概览正文里被检索到。
+    expect(statuses).toEqual(['archived', 'archived']);
+  });
+
+  it('deleteTree 连子项一起删，目录的两行都在其中', () => {
+    // 2 行目录 + 1 个子文件
+    expect(repository.deleteTree(DIR)).toBe(3);
+    expect(repository.get(DIR)).toBeNull();
+    expect(repository.get(CHILD)).toBeNull();
+  });
+});

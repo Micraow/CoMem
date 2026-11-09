@@ -95,6 +95,8 @@ interface RecordOverrides {
   readonly level?: Level;
   readonly contextType?: ContextType;
   readonly abstract?: string | null;
+  readonly memoryType?: string | null;
+  readonly updatedAt?: string;
 }
 
 function record(uri: string, content: string, overrides: RecordOverrides = {}): IndexRecord {
@@ -104,13 +106,13 @@ function record(uri: string, content: string, overrides: RecordOverrides = {}): 
     scope: 'user',
     kind: 'document',
     contextType: overrides.contextType ?? 'memory',
-    memoryType: null,
+    memoryType: overrides.memoryType ?? null,
     level: overrides.level ?? 'L2',
     abstract: overrides.abstract ?? null,
     content,
     bodyDigest: '0000000000000000',
     size: Buffer.byteLength(content),
-    updatedAt: CREATED_AT,
+    updatedAt: overrides.updatedAt ?? CREATED_AT,
     status: 'active',
   };
 }
@@ -278,6 +280,50 @@ describe('engine: vector', () => {
     expect(ftsSearch).not.toHaveBeenCalled();
     expect(hits.map((hit) => hit.uri)).toEqual([MATCHING]);
     expect(hits[0]?.ranks).toEqual({ fts5: null, vector: 1, hybrid: null });
+  });
+
+  it('memoryTypes 预过滤向量候选集：非规则候选不参加 KNN', async () => {
+    const RULE = 'comem://user/alice/mem/rules/vector-rule.md';
+    const PREFERENCE = 'comem://user/alice/mem/preferences/vector-tone.md';
+    await seed(RULE, '规则 记忆', { memoryType: 'rules' });
+    await seed(PREFERENCE, '偏好 记忆', { memoryType: 'preferences' });
+    // 偏好比规则更接近查询向量：若先取最近邻再在 JS 里过滤，`limit: 1` 会因为
+    // 名额被偏好占掉而返回空——下推的意义正是在 KNN 之前把候选收窄。
+    storeVector(PREFERENCE, [1, 0]);
+    storeVector(RULE, [0.8, 0.6]);
+
+    const service = createService({ engine: 'vector', embedding: semanticEmbedding() });
+    const vectorSearch = vi.spyOn(vectors, 'search');
+
+    const hits = await service.find('语义', findOptions({ memoryTypes: ['rules'], limit: 1 }));
+
+    expect(hits.map((hit) => hit.uri)).toEqual([RULE]);
+    // 下推的证据：候选 URI 在进 `vec0` 之前就已经只剩规则。
+    const [query] = vectorSearch.mock.calls[0] ?? [];
+    expect(query?.uris).toEqual([RULE]);
+  });
+
+  it('更新时间范围同样预过滤向量候选集（闭区间，含边界）', async () => {
+    const OLD = 'comem://user/alice/mem/old-vector.md';
+    const NEW = 'comem://user/alice/mem/new-vector.md';
+    await seed(OLD, '语义 记忆', { updatedAt: '2026-11-01T00:00:00.000Z' });
+    await seed(NEW, '语义 记忆', { updatedAt: '2026-11-09T00:00:00.000Z' });
+    storeVector(OLD, [1, 0]);
+    storeVector(NEW, [1, 0]);
+
+    const service = createService({ engine: 'vector', embedding: semanticEmbedding() });
+
+    const hits = await service.find(
+      '语义',
+      findOptions({ updatedAfter: '2026-11-01T00:00:00.000Z' }),
+    );
+    expect(hits.map((hit) => hit.uri)).toEqual([NEW, OLD]);
+
+    const boundary = await service.find(
+      '语义',
+      findOptions({ updatedAfter: '2026-11-09T00:00:00.000Z' }),
+    );
+    expect(boundary.map((hit) => hit.uri)).toEqual([NEW]);
   });
 
   it('降级时返回空命中，并有说明', async () => {

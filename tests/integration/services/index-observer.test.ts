@@ -707,3 +707,61 @@ describe('IndexObserver 批量嵌入', () => {
     }
   });
 });
+
+/**
+ * 目录的 L1 概览行（§8.5）：概览正文作为一条独立检索行，观察者写目录自身那一行
+ * 时不能把它抹掉。
+ */
+describe('目录的 L1 概览行', () => {
+  const MEMORIES_URI = `${ROOT}/memories`;
+
+  function levelsOf(uri: string): readonly string[] {
+    return harness.db
+      .prepare('SELECT level FROM node WHERE uri = ? ORDER BY level ASC')
+      .all(uri)
+      .map((item) => String(item['level']));
+  }
+
+  function ftsContent(uri: string, level: string): string {
+    const row = harness.db
+      .prepare('SELECT content FROM node_fts WHERE uri = ? AND level = ?')
+      .get(uri, level);
+    return String(row?.['content'] ?? '');
+  }
+
+  it('写文件触发摘要后，目录有两行，概览正文能按 L1 命中', async () => {
+    const file = Uri.parse(`${MEMORIES_URI}/note.md`);
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
+    await harness.observer.drain();
+
+    expect(levelsOf(MEMORIES_URI)).toEqual(['L0', 'L1']);
+
+    // 概览正文是一级标题 + 子项列表。标题「memories」只出现在概览里（L0 摘要从
+    // 概览里提取时丢掉了 H1），所以它只能命中 L1 行。
+    const hits = await harness.index.search({
+      text: 'memories',
+      scopes: [ROOT],
+      principals: PRINCIPALS,
+      levels: ['L1'],
+      limit: 10,
+    });
+    expect(hits.map((hit) => hit.uri)).toContain(MEMORIES_URI);
+    expect(ftsContent(MEMORIES_URI, 'L1')).toContain('memories');
+    // L0 行只索引摘要，不索引概览正文。
+    expect(ftsContent(MEMORIES_URI, 'L0')).toBe('');
+  });
+
+  it('观察者重写目录自身那一行不会删掉 L1 行', async () => {
+    const file = Uri.parse(`${MEMORIES_URI}/note.md`);
+    await harness.filesystem.write(file, '正文。', PRINCIPALS);
+    await harness.observer.drain();
+    const before = ftsContent(MEMORIES_URI, 'L1');
+    expect(before).not.toBe('');
+
+    await harness.observer.onNodeWritten(Uri.parse(MEMORIES_URI), 'directory');
+    await harness.observer.drain();
+
+    expect(levelsOf(MEMORIES_URI)).toEqual(['L0', 'L1']);
+    expect(ftsContent(MEMORIES_URI, 'L1')).toBe(before);
+  });
+});

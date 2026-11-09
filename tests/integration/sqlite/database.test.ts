@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -200,5 +200,104 @@ describe('withWriteTransaction', () => {
     ).toThrow('rollback');
 
     expect(db.prepare('SELECT COUNT(*) AS total FROM sample').get()).toMatchObject({ total: 0 });
+  });
+});
+
+/**
+ * 0004 是一次**真实迁移**：已有部署升级后不能丢数据，也不能让存量节点在中文检索上
+ * 退化成搜不到。
+ *
+ * 这里手工建一份「升级前」的库（0001–0003 已应用、版本记录也在），写入旧格式的
+ * `node` / `node_fts` 行（`node_fts` 存的是**已切分**的中文），再跑升级。
+ */
+describe('0004 升级路径（已有部署）', () => {
+  const LEGACY_URI = 'comem://user/alice/memories/legacy.md';
+  const MIGRATIONS = new URL('../../../src/adapters/sqlite/migrations/', import.meta.url);
+
+  function applyPre0004(db: DatabaseSync): void {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const files = ['0001_init.sql', '0002_archived_at.sql', '0003_memory_link.sql'];
+    for (const [index, name] of files.entries()) {
+      db.exec(readFileSync(new URL(name, MIGRATIONS), 'utf8'));
+      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+        index + 1,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  function seedLegacyRow(db: DatabaseSync): void {
+    db.prepare(
+      `INSERT INTO node (
+         uri, parent_uri, scope, kind, context_type, memory_type, level,
+         abstract, body_digest, size, updated_at, status
+       ) VALUES (?, ?, 'user', 'document', 'memory', NULL, 'L2', ?, ?, 12, ?, 'active')`,
+    ).run(LEGACY_URI, 'comem://user/alice/memories', '一句话摘要', 'digest', '2026-11-08T00:00:00.000Z');
+    // 旧行存的是切分后的文本（`segmentCjk` 的产物），不是原文。
+    db.prepare('INSERT INTO node_fts (uri, abstract, content) VALUES (?, ?, ?)').run(
+      LEGACY_URI,
+      '一 句 话 摘 要',
+      '记 忆 数 据 库',
+    );
+  }
+
+  it('存量行保留，node 的主键变成 (uri, level)', () => {
+    const db = open(':memory:');
+    applyPre0004(db);
+    seedLegacyRow(db);
+    expect(currentVersion(db)).toBe(3);
+
+    expect(runMigrations(db)).toBe(LATEST_VERSION);
+
+    expect(db.prepare('SELECT level, abstract, size FROM node WHERE uri = ?').all(LEGACY_URI)).toEqual([
+      { level: 'L2', abstract: '一句话摘要', size: 12 },
+    ]);
+
+    // 同一个 URI 可以再有一行，但同一层级仍然唯一。
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO node (
+             uri, parent_uri, scope, kind, context_type, memory_type, level,
+             abstract, body_digest, size, updated_at, status
+           ) VALUES (?, ?, 'user', 'directory', 'memory', NULL, 'L1', NULL, 'd', 0, ?, 'active')`,
+        )
+        .run(LEGACY_URI, 'comem://user/alice/memories', '2026-11-08T00:00:00.000Z'),
+    ).not.toThrow();
+    expect(() => seedLegacyRow(db)).toThrow();
+  });
+
+  it('node_fts 的切分文本原样搬过去，不需要回头 reindex 才能搜中文', () => {
+    const db = open(':memory:');
+    applyPre0004(db);
+    seedLegacyRow(db);
+
+    runMigrations(db);
+
+    const rows = db
+      .prepare('SELECT level, abstract, content FROM node_fts WHERE uri = ?')
+      .all(LEGACY_URI);
+    expect(rows).toEqual([{ level: 'L2', abstract: '一 句 话 摘 要', content: '记 忆 数 据 库' }]);
+
+    // 升级后立刻按切分后的短语检索，仍然命中。
+    const hits = db
+      .prepare('SELECT uri FROM node_fts WHERE node_fts MATCH ?')
+      .all('"记 忆"')
+      .map((row) => String(row['uri']));
+    expect(hits).toEqual([LEGACY_URI]);
+  });
+
+  it('升级不会凭空造出 L1 行：概览行只在摘要重算后出现', () => {
+    const db = open(':memory:');
+    applyPre0004(db);
+    seedLegacyRow(db);
+
+    runMigrations(db);
+
+    expect(
+      db.prepare("SELECT COUNT(*) AS total FROM node WHERE level = 'L1'").get(),
+    ).toMatchObject({ total: 0 });
   });
 });

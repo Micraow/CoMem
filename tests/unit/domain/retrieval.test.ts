@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ComemError } from '../../../src/domain/errors.js';
 import {
+  canonicalInstant,
   reciprocalRankFusion,
   validateGlobQuery,
   validateGrepQuery,
@@ -86,6 +87,70 @@ describe('validateSearchQuery', () => {
   it('text 不能为空', () => {
     expectInvalidArgument(() => {
       validateSearchQuery({ ...SEARCH, text: '' });
+    });
+  });
+});
+
+describe('validateSearchQuery：记忆类型与更新时间过滤', () => {
+  it('memoryTypes 可省略，空数组与省略同义', () => {
+    for (const memoryTypes of [undefined, []]) {
+      expect(() => {
+        validateSearchQuery({ ...SEARCH, memoryTypes });
+      }).not.toThrow();
+    }
+  });
+
+  it('memoryTypes 里不能有空字符串', () => {
+    expectInvalidArgument(() => {
+      validateSearchQuery({ ...SEARCH, memoryTypes: ['rules', ''] });
+    });
+  });
+
+  it('更新时间的上下界必须是 ISO 8601', () => {
+    for (const field of ['updatedAfter', 'updatedBefore'] as const) {
+      expectInvalidArgument(() => {
+        validateSearchQuery({ ...SEARCH, [field]: '昨天' });
+      });
+    }
+  });
+
+  it('updatedAfter 晚于 updatedBefore 报错；相等合法（闭区间退化成单个时刻）', () => {
+    expectInvalidArgument(() => {
+      validateSearchQuery({
+        ...SEARCH,
+        updatedAfter: '2026-11-09T00:00:00.000Z',
+        updatedBefore: '2026-11-08T00:00:00.000Z',
+      });
+    });
+    expect(() => {
+      validateSearchQuery({
+        ...SEARCH,
+        updatedAfter: '2026-11-08T00:00:00.000Z',
+        updatedBefore: '2026-11-08T00:00:00.000Z',
+      });
+    }).not.toThrow();
+  });
+
+  it('glob 的候选集过滤共享同一套元数据校验', () => {
+    expectInvalidArgument(() => {
+      validateGlobQuery({ ...GLOB, updatedAfter: '不是时间' });
+    });
+    expectInvalidArgument(() => {
+      validateGlobQuery({ ...GLOB, memoryTypes: [''] });
+    });
+  });
+});
+
+describe('canonicalInstant', () => {
+  it('把带时区偏移的时刻归一化成 UTC（否则 TEXT 比较会漂）', () => {
+    expect(canonicalInstant('2026-11-08T08:00:00+08:00', 'updatedAfter')).toBe(
+      '2026-11-08T00:00:00.000Z',
+    );
+  });
+
+  it('非法输入抛 INVALID_ARGUMENT', () => {
+    expectInvalidArgument(() => {
+      canonicalInstant('2026-13-40', 'updatedAfter');
     });
   });
 });

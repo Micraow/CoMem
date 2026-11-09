@@ -142,6 +142,25 @@ describe('候选集', () => {
     expect(hits.map((hit) => hit.uri)).toEqual([uriFor('b'), uriFor('c')]);
   });
 
+  it('候选集收窄后仍返回候选：k 不会先于 uri 过滤截断', async () => {
+    openIndex(2);
+    // `a` 是全局最近邻但不在候选集里；`b` 是唯一候选，且比 `a` 远。
+    // `k` 是 uri 过滤之前的全局最近邻个数：k = limit = 1 时 vec0 只会取出 `a`，
+    // 再被 `uri IN` 丢掉，候选集不为空却返回空。类型 / 时间下推收窄候选之后这是
+    // 常态（最近邻全是偏好，规则只剩几条）。
+    store(uriFor('a'), angle(0));
+    store(uriFor('b'), angle(30));
+
+    const hits = await index.search({
+      vector: [1, 0],
+      model: MODEL,
+      uris: [uriFor('b')],
+      limit: 1,
+    });
+
+    expect(hits.map((hit) => hit.uri)).toEqual([uriFor('b')]);
+  });
+
   it('uris 为空数组返回空，不是全库扫描', async () => {
     openIndex(2);
     store(uriFor('a'), angle(0));

@@ -26,6 +26,7 @@ import type { ContextType } from '../../domain/node.js';
 import type { Level } from '../../domain/level.js';
 import type { Logger } from '../../domain/log.js';
 import {
+  canonicalInstant,
   validateGlobQuery,
   validateSearchQuery,
   type GlobQuery,
@@ -37,7 +38,7 @@ import {
 } from '../../domain/retrieval.js';
 import { segmentCjk } from '../../domain/text.js';
 import { withWriteTransaction } from './database.js';
-import { globPrefixPattern, placeholders } from './node-repository.js';
+import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
 
 export interface SqliteFtsIndexOptions {
   readonly db: DatabaseSync;
@@ -98,6 +99,22 @@ function text(value: SQLOutputValue | undefined): string {
 
 function nullableText(value: SQLOutputValue | undefined): string | null {
   return value === null || value === undefined ? null : String(value);
+}
+
+/**
+ * 一行索引记录的 FTS `abstract` 列原文。
+ *
+ * 目录的 L1 概览行（`kind = 'directory'` 且 `level = 'L1'`）返回空串：L0 是从 L1 正文里提取的
+ * （`domain/summary.ts` 的 `extractAbstract`），概览正文**已经包含**同一段文字。
+ * 再把它写进 `abstract` 列，FTS5 会把同一处匹配的词频算两遍（`bm25()` 按列累加
+ * 词频），这一行仅凭「摘要里出现过」就能压过真正的原文命中，层级权重（1.05）也
+ * 就失去意义。
+ *
+ * 展示用的摘要不受影响：`node.abstract` 仍然存 L0 原文，`search` 返回的是那一列。
+ */
+function ftsAbstract(record: IndexRecord): string {
+  const isOverviewRow = record.kind === 'directory' && record.level === 'L1';
+  return isOverviewRow ? '' : (record.abstract ?? '');
 }
 
 /**
@@ -175,6 +192,41 @@ function globToRegExp(pattern: string): RegExp {
     source += char.replace(REGEXP_SPECIAL, '\\$&');
   }
   return new RegExp(`^${source}$`);
+}
+
+/**
+ * 记忆类型 + 更新时间范围 → SQL 条件（架构文档 §8.3 的过滤维度）。
+ *
+ * 这三个条件**必须在 `LIMIT` 之前进 `WHERE`**：先取候选再在 JS 里过滤，会把
+ * 「类型 / 时间匹配、但 bm25（或向量距离）排在 `limit × candidateMultiplier`
+ * 之后」的节点整批丢掉——`rule_search` 曾经就是这样把规则全筛没的。
+ *
+ * `updated_at` 归一化成 `Date#toISOString()` 形态后与 `node.updated_at` 同形，
+ * TEXT 比较即时间比较（`canonicalInstant` 的注释）。两端都是**闭区间**。
+ *
+ * 空 `memoryTypes` 与省略同义；`memory_type` 为 `NULL` 的行不命中任何 `IN` 列表，
+ * 因此给了类型就自动排除非记忆节点。
+ */
+function metadataConditions(query: {
+  readonly memoryTypes?: readonly string[];
+  readonly updatedAfter?: string;
+  readonly updatedBefore?: string;
+}): { readonly sql: readonly string[]; readonly params: readonly string[] } {
+  const sql: string[] = [];
+  const params: string[] = [];
+  if (query.memoryTypes !== undefined && query.memoryTypes.length > 0) {
+    sql.push(`n.memory_type IN (${placeholders(query.memoryTypes.length)})`);
+    params.push(...query.memoryTypes);
+  }
+  if (query.updatedAfter !== undefined) {
+    sql.push('n.updated_at >= ?');
+    params.push(canonicalInstant(query.updatedAfter, 'updatedAfter'));
+  }
+  if (query.updatedBefore !== undefined) {
+    sql.push('n.updated_at <= ?');
+    params.push(canonicalInstant(query.updatedBefore, 'updatedBefore'));
+  }
+  return { sql, params };
 }
 
 /**
@@ -307,9 +359,11 @@ export class SqliteFtsIndex implements RetrievalIndex {
   /**
    * 批量 upsert，单事务。
    *
-   * FTS5 虚拟表不支持 `ON CONFLICT`，也没有主键约束（`uri` 是 `UNINDEXED` 列），
-   * 所以先 `DELETE FROM node_fts WHERE uri = ?` 再插入。两条语句在同一事务里，
-   * 中途失败会一起回滚，不会留下「node 有、fts 没有」的空洞。
+   * FTS5 虚拟表不支持 `ON CONFLICT`，所以 `node_fts` 先按 `(uri, level)` 删再插。
+   * 两条语句在同一事务里，中途失败会一起回滚，不会留下「node 有、fts 没有」的空洞。
+   *
+   * 冲突键是 `(uri, level)`：目录的 L0 摘要行与 L1 概览行是两个独立的检索行
+   * （`0004_node_level_rows.sql`），写一行不能覆盖另一行。
    *
    * `abstract` 与 `content` 都写切分后的文本（§8.1）；`node` 表的 `abstract` 存原文，
    * 检索返回值取的是后者，所以摘要里的空格不会出现在用户可见内容里。
@@ -324,7 +378,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
            uri, parent_uri, scope, kind, context_type, memory_type, level,
            abstract, body_digest, size, updated_at, status, expires_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(uri) DO UPDATE SET
+         ON CONFLICT(uri, level) DO UPDATE SET
            parent_uri = excluded.parent_uri,
            scope = excluded.scope,
            kind = excluded.kind,
@@ -337,9 +391,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
            updated_at = excluded.updated_at,
            status = excluded.status`,
       );
-      const deleteFts = this.#db.prepare('DELETE FROM node_fts WHERE uri = ?');
+      const deleteFts = this.#db.prepare('DELETE FROM node_fts WHERE uri = ? AND level = ?');
       const insertFts = this.#db.prepare(
-        'INSERT INTO node_fts (uri, abstract, content) VALUES (?, ?, ?)',
+        'INSERT INTO node_fts (uri, level, abstract, content) VALUES (?, ?, ?, ?)',
       );
 
       for (const record of records) {
@@ -358,8 +412,13 @@ export class SqliteFtsIndex implements RetrievalIndex {
           record.status,
           this.#defaultExpiresAt(record),
         );
-        deleteFts.run(record.uri);
-        insertFts.run(record.uri, segmentCjk(record.abstract ?? ''), segmentCjk(record.content));
+        deleteFts.run(record.uri, record.level);
+        insertFts.run(
+          record.uri,
+          record.level,
+          segmentCjk(ftsAbstract(record)),
+          segmentCjk(record.content),
+        );
       }
     });
     this.#logger.debug('FTS5 索引写入', { count: records.length });
@@ -386,9 +445,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
   /**
    * 全文检索。
    *
-   * 过滤顺序：FTS5 匹配 → 路径范围（段边界）→ `contextTypes` / `levels` → 状态
-   * `active` → 权限 `EXISTS`。权限用相关子查询而不是先取候选再过滤，避免「取回的
-   * 候选全无权限，最终返回不足 limit 条」（§8.2）。
+   * 过滤顺序：FTS5 匹配 → 路径范围（段边界）→ `contextTypes` / `levels` /
+   * `memoryTypes` → 更新时间范围 → 状态 `active` → 权限 `EXISTS`。权限用相关子查询
+   * 而不是先取候选再过滤，避免「取回的候选全无权限，最终返回不足 limit 条」（§8.2）。
    *
    * 排序用 `bm25()` 升序（越负越相关），返回时取负。`LIMIT` 是
    * `limit × candidateMultiplier`（§18），`scoreThreshold` 在取负之后比较。
@@ -418,14 +477,20 @@ export class SqliteFtsIndex implements RetrievalIndex {
       conditions.push(`n.level IN (${placeholders(query.levels.length)})`);
       params.push(...query.levels);
     }
+    const metadata = metadataConditions(query);
+    conditions.push(...metadata.sql);
+    params.push(...metadata.params);
 
     const permission = permissionPredicate(query.principals);
     conditions.push(permission.sql);
     params.push(...permission.params);
 
+    // `level` 也要参与 join：一个 URI 现在可能有两行 FTS（目录的 L0 与 L1），
+    // 只按 `uri` 关联会让匹配行与另一层的行交叉成两条结果（同一次匹配被报两次，
+    // 其中一条的 level / abstract 还是另一层的）。
     const sql = `SELECT n.uri, n.level, n.abstract, n.context_type, n.memory_type, bm25(node_fts) AS rank
        FROM node_fts
-       JOIN node n ON n.uri = node_fts.uri
+       JOIN node n ON n.uri = node_fts.uri AND n.level = node_fts.level
        WHERE ${conditions.join('\n         AND ')}
        ORDER BY bm25(node_fts) ASC
        LIMIT ?`;
@@ -475,12 +540,22 @@ export class SqliteFtsIndex implements RetrievalIndex {
     validateGlobQuery(query);
 
     const alternatives = globAlternatives(query.pattern, query.scopes);
-    const conditions = [`(${alternatives.map(() => 'n.uri GLOB ?').join(' OR ')})`];
+    // 只返回节点自身那一行：目录的 L1 概览行与 L0 行同 URI，不排除会让同一个目录
+    // 在 `glob` 结果里出现两次（向量检索的候选集也来自这里，重复候选会白占名额）。
+    const conditions = [
+      `(${alternatives.map(() => 'n.uri GLOB ?').join(' OR ')})`,
+      nodeSelfRowSql('n'),
+    ];
     const params: SQLInputValue[] = alternatives.map((alternative) => alternative.sqlPattern);
 
     const scopes = scopeClause('n.uri', query.scopes);
     conditions.push(scopes.sql);
     params.push(...scopes.params);
+
+    // 向量检索的候选集同样在 SQL 里按元数据过滤（见 `GlobQuery` 的注释）。
+    const metadata = metadataConditions(query);
+    conditions.push(...metadata.sql);
+    params.push(...metadata.params);
 
     const permission = permissionPredicate(query.principals);
     conditions.push(permission.sql);
@@ -506,11 +581,18 @@ export class SqliteFtsIndex implements RetrievalIndex {
     return uris;
   }
 
+  /**
+   * 一个节点的读模型（`node` 表的一行）。
+   *
+   * 只取节点自身那一行：目录的 L1 概览行与它同 URI，两个都取会让「这个目录多大、
+   * 什么状态」变成两行互相矛盾的数据（`size` 是子项数、`abstract` 是 L0 摘要，
+   * 只有 L0 行上才是节点自身的口径）。
+   */
   async stat(uri: string): Promise<NodeStat | null> {
     const row = this.#db
       .prepare(
         `SELECT uri, kind, context_type, memory_type, size, updated_at, status, abstract
-         FROM node WHERE uri = ?`,
+         FROM node WHERE uri = ? AND ${nodeSelfRowSql()}`,
       )
       .get(uri);
     if (row === undefined) {

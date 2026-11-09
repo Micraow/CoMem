@@ -9,7 +9,7 @@ exports[`检索 mode = context > mode 缺省时响应形状与改动前一致（
       "level": "L2",
       "matchedQuery": "记忆",
       "memoryType": null,
-      "score": 0.4573671282555964,
+      "score": 0.9889034332116552,
       "uri": "comem://user/local/memories/context-note.md",
     },
   ],

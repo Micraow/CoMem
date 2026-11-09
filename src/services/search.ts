@@ -239,6 +239,17 @@ export interface FindOptions {
   readonly principals: readonly string[];
   readonly contextTypes?: readonly ContextType[];
   readonly levels?: readonly Level[];
+  /**
+   * 只看这些记忆类型（`node.memory_type`），**下推到索引的 SQL**。
+   *
+   * 省略或空数组 = 不按类型过滤。给了类型就没有候选被「先取 limit 条再筛」挤掉：
+   * `rule_search` 传 `['rules']`，偏好与实体在 SQL 里就被排除。
+   */
+  readonly memoryTypes?: readonly string[];
+  /** 更新时间下界，闭区间（`updated_at >= updatedAfter`），ISO 8601。同样下推到 SQL。 */
+  readonly updatedAfter?: string;
+  /** 更新时间上界，闭区间（`updated_at <= updatedBefore`），ISO 8601。 */
+  readonly updatedBefore?: string;
   readonly limit?: number;
   readonly scoreThreshold?: number;
 }
@@ -693,6 +704,9 @@ export class SearchService {
         principals: options.principals,
         contextTypes: options.contextTypes,
         levels: options.levels,
+        memoryTypes: options.memoryTypes,
+        updatedAfter: options.updatedAfter,
+        updatedBefore: options.updatedBefore,
         limit: candidateLimit,
       });
       const ranked = this.#rank(hits, candidateLimit, options.scoreThreshold).map((hit) => ({
@@ -791,6 +805,9 @@ export class SearchService {
         principals: options.principals,
         contextTypes: options.contextTypes,
         levels: options.levels,
+        memoryTypes: options.memoryTypes,
+        updatedAfter: options.updatedAfter,
+        updatedBefore: options.updatedBefore,
         limit: candidateLimit,
       }),
       vector.embedding.embed([text]),
@@ -857,12 +874,20 @@ export class SearchService {
    * 权限过滤在这里完成（`glob` 的 SQL 里就是 `node_permission` 的 allow/deny
    * 谓词），所以传进 `SqliteVectorIndex.search` 的已经是可读集合——向量索引不需要
    * 再查一次权限。
+   *
+   * **`memoryTypes` / 时间范围也在这里下推。** `vec0` 的 `uris` 就是候选集过滤：
+   * 先取最近邻再在 JS 里按类型丢掉，等于把「距离排第 20、但类型匹配」的候选浪费掉。
+   * 把它们交给 `GlobQuery` 的元数据条件，KNN 只在匹配的候选上算距离；hybrid 的
+   * 融合因此发生在两路都已过滤之后，而不是融合后才筛。
    */
   async #readableUris(options: FindOptions): Promise<readonly string[]> {
     return this.#index.glob({
       pattern: VECTOR_CANDIDATE_PATTERN,
       scopes: options.scopes,
       principals: options.principals,
+      memoryTypes: options.memoryTypes,
+      updatedAfter: options.updatedAfter,
+      updatedBefore: options.updatedBefore,
       limit: VECTOR_CANDIDATE_LIMIT,
     });
   }
@@ -877,6 +902,11 @@ export class SearchService {
    *
    * `contextTypes` / `levels` / `status` 在这里过滤：FTS5 在 SQL 里做，向量后端
    * 没有这些列，过滤必须落在补全之后。
+   *
+   * **层级取的是节点自身那一行（`NodeRepository.get` 的口径）**：向量按 URI 一条，
+   * 没有「这一条命中的是概览行还是摘要行」这回事——目录本来就不产生向量，所以
+   * `levels: ['L1']` 在向量臂上恒为空，与 §8.1 的「概览行只在 FTS 臂上」一致。
+   * `vector` 引擎下这是预期行为，不是降级。
    */
   #enrich(
     hits: readonly VectorHit[],
@@ -990,6 +1020,9 @@ export class SearchService {
           principals: options.principals,
           contextTypes: options.contextTypes,
           levels: options.levels,
+          memoryTypes: options.memoryTypes,
+          updatedAfter: options.updatedAfter,
+          updatedBefore: options.updatedBefore,
           limit,
           scoreThreshold: options.scoreThreshold,
         }),
@@ -1141,9 +1174,9 @@ export class SearchService {
    * 文件数超过 `GREP_CANDIDATE_LIMIT` 时记 warn 并截断——截断必须留痕，否则
    * 用户会以为「没有更多命中」。
    *
-   * `contextTypes` / `levels` 不生效：`GlobQuery` 只有「路径 + 权限」两个过滤维度，
-   * 而 `NodeStat` 不带层级。要支持它们得给索引加一个「按元数据取 URI」的查询，
-   * 超出本服务的职责。
+   * `contextTypes` / `levels` / `memoryTypes` / 时间范围不生效：`grep` 的候选集
+   * 是「路径下全部文件」，按元数据收窄会把「正则明明匹配、只是类型不同」的文件
+   * 从结果里静默拿掉。那三个维度只给检索用（`#readableUris` 与 FTS5 的 SQL）。
    */
   async grep(
     pattern: string,
@@ -1549,12 +1582,23 @@ export class SearchService {
   }
 
   /**
-   * 层级加权 + 截断（§8.5），再做 `scoreThreshold` 过滤。
+   * 层级加权 + 截断（§8.5），再做 `scoreThreshold` 过滤，最后按「同一 URI 的同一段
+   * 摘要」去重（§8.6 第 3 步在命中列表这一层的对应物）。
    *
    * `rankCandidates` 只排序不去重，所以用「下标当身份」把排名结果映射回原始命中：
-   * 同一个 URI 可能同时命中 L0 与 L2 两条记录，用 URI 当键会把它们合并成一条。
-   * 索引返回的条数已经不超过 `limit`，因此「先截断再按阈值过滤」与「先过滤再截断」
-   * 结果相同。
+   * 同一个 URI 可能同时命中两条记录（目录的 L0 行与 L1 行，§8.5），用 URI 当键会把
+   * 它们合并成一条、只剩下其中一层的分数与层级。
+   *
+   * **去重键是 `(uri, abstract)` 而不是 `uri`**：L0 行与 L1 行的 `abstract` 是同一份
+   * L0 摘要，两条命中渲染给用户的内容逐字相同——留两条就是同一句话出现两遍；
+   * 将来某个 URI 的两条记录若携带不同摘要，两条都保留，因为那不是同一条信息。
+   * `ranked` 已按分数降序，先出现的即高分那条。
+   *
+   * 截断口径：`rankCandidates` 先按候选上限（`limit × candidateMultiplier`）截断，
+   * 去重发生在它之后、调用方切 `limit` 之前。**重复行仍占候选名额**——候选池按行
+   * 计不按 URI 计，所以「命中几乎全是同一批目录的两行」时返回条数会少于 `limit`。
+   * 没有为它扩大候选数：那等于给所有引擎加检索开销，而 4× 余量下 `pnpm eval` 的
+   * R@10 逐位不变（见 `local/notes/decisions.md`）。
    */
   #rank(
     hits: readonly SearchHit[],
@@ -1577,7 +1621,18 @@ export class SearchService {
       byHandle.set(String(index), hit);
     }
 
-    return toScoredHits(ranked, byHandle, scoreThreshold);
+    const scored = toScoredHits(ranked, byHandle, scoreThreshold);
+    const seen = new Set<string>();
+    const unique: ScoredHit[] = [];
+    for (const hit of scored) {
+      const key = `${hit.uri}\n${hit.abstract ?? ''}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      unique.push(hit);
+    }
+    return unique;
   }
 
   /**
@@ -1608,7 +1663,8 @@ export class SearchService {
       return [];
     }
 
-    // 同一个 URI 可能同时命中 L0 与 L2 两条记录（见 `#rank`），去重后再查。
+    // 同一个 URI 可能有多条命中行（目录的 L0 摘要行与 L1 概览行，见 `#rank` 与
+    // §8.5），去重后再查访问统计——两行都查只是同一份 stats 查两遍。
     const uniqueUris = [...new Set(hits.map((hit) => hit.uri))];
     const byUri = new Map(stats(uniqueUris).map((row) => [row.uri, row]));
     const now = new Date();

@@ -283,6 +283,92 @@ describe('search：范围与权限', () => {
   });
 });
 
+describe('search：记忆类型与更新时间（SQL 下推）', () => {
+  it('memoryTypes 在 LIMIT 之前下推：前几条命中全是偏好时规则仍返回', async () => {
+    // 12 条偏好，每条把查询短语写 3 遍，bm25 严格高于规则。
+    // 若实现是「先取 limit × candidateMultiplier 条再按类型筛」，limit=2 时
+    // 候选集（8 条）会全是偏好，规则一条都回不来——这正是 rule_search 的缺陷。
+    const preferences = Array.from(
+      { length: 12 },
+      (_, index) => `comem://user/alice/mem/preferences/${index}.md`,
+    );
+    for (const uri of preferences) {
+      await seed(uri, '许可证 许可证 许可证', { memoryType: 'preferences' });
+    }
+    const rule = 'comem://user/alice/mem/rules/license.md';
+    await seed(rule, '许可证', { memoryType: 'rules' });
+
+    // 先钉住场景：不带类型过滤时前两条确实是偏好。
+    const unfiltered = await search('许可证', { limit: 2 });
+    expect(unfiltered).toHaveLength(2);
+    expect(unfiltered.every((hit) => hit.memoryType === 'preferences')).toBe(true);
+
+    expect(uris(await search('许可证', { limit: 2, memoryTypes: ['rules'] }))).toEqual([rule]);
+  });
+
+  it('memoryTypes 排除非记忆节点（memory_type 为 NULL）', async () => {
+    const memory = 'comem://user/alice/mem/rules/rule.md';
+    const plain = 'comem://user/alice/plain.md';
+    await seed(memory, '记忆', { memoryType: 'rules' });
+    await seed(plain, '记忆');
+
+    expect(uris(await search('记忆', { memoryTypes: ['rules'] }))).toEqual([memory]);
+    // 空数组与省略同义。
+    expect(uris(await search('记忆', { memoryTypes: [] })).sort()).toEqual([memory, plain].sort());
+  });
+
+  describe('更新时间闭区间', () => {
+    const T0 = '2026-11-01T00:00:00.000Z';
+    const T1 = '2026-11-05T12:00:00.000Z';
+    const T2 = '2026-11-09T00:00:00.000Z';
+    const OLD = 'comem://user/alice/old.md';
+    const MIDDLE = 'comem://user/alice/middle.md';
+    const NEW = 'comem://user/alice/new.md';
+
+    beforeEach(async () => {
+      await seed(OLD, '记忆', { updatedAt: T0 });
+      await seed(MIDDLE, '记忆', { updatedAt: T1 });
+      await seed(NEW, '记忆', { updatedAt: T2 });
+    });
+
+    it('updatedAfter 是闭区间：等于边界的节点命中', async () => {
+      expect(uris(await search('记忆', { updatedAfter: T1 })).sort()).toEqual(
+        [MIDDLE, NEW].sort(),
+      );
+    });
+
+    it('updatedBefore 是闭区间：等于边界的节点命中', async () => {
+      expect(uris(await search('记忆', { updatedBefore: T1 })).sort()).toEqual([OLD, MIDDLE].sort());
+    });
+
+    it('两端相等时只命中恰好这个时刻的节点', async () => {
+      expect(
+        uris(await search('记忆', { updatedAfter: T1, updatedBefore: T1 })),
+      ).toEqual([MIDDLE]);
+    });
+
+    it('带时区偏移的边界先归一化，再按同一形态比较', async () => {
+      // `2026-11-05T20:00:00+08:00` 就是 `T1`；不归一化会按字符串比较出错。
+      expect(
+        uris(await search('记忆', { updatedAfter: '2026-11-05T20:00:00+08:00' })).sort(),
+      ).toEqual([MIDDLE, NEW].sort());
+    });
+
+    it('区间为空（after 晚于 before）在进 SQL 之前被拒绝', async () => {
+      await expect(
+        index.search({
+          text: '记忆',
+          scopes: [SCOPE],
+          principals: ['user:alice'],
+          limit: 10,
+          updatedAfter: T2,
+          updatedBefore: T0,
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    });
+  });
+});
+
 describe('search：分数', () => {
   const MANY = 'comem://user/alice/many.md';
   const ONCE = 'comem://user/alice/once.md';
@@ -449,6 +535,28 @@ describe('glob', () => {
     expect(await glob('**', { limit: 1 })).toEqual(['comem://user/alice/a.md']);
   });
 
+  it('记忆类型与更新时间过滤在 SQL 里生效（向量检索的候选集来源）', async () => {
+    const rule = 'comem://user/alice/mem/rules/rule.md';
+    const preference = 'comem://user/alice/mem/preferences/tone.md';
+    await seed(rule, '规则', {
+      memoryType: 'rules',
+      updatedAt: '2026-11-05T12:00:00.000Z',
+    });
+    await seed(preference, '偏好', {
+      memoryType: 'preferences',
+      updatedAt: '2026-11-09T00:00:00.000Z',
+    });
+
+    expect(await glob('**/mem/**', { memoryTypes: ['rules'] })).toEqual([rule]);
+    // 闭区间：等于边界的节点命中。
+    expect(
+      await glob('**/mem/**', { updatedAfter: '2026-11-05T12:00:00.000Z' }),
+    ).toEqual([preference, rule]);
+    expect(
+      await glob('**/mem/**', { updatedBefore: '2026-11-05T12:00:00.000Z' }),
+    ).toEqual([rule]);
+  });
+
   it('deny 压掉 user:* 的 allow：路径被排除', async () => {
     const uri = 'comem://user/alice/a.md';
     db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(uri);
@@ -479,5 +587,70 @@ describe('stat', () => {
       abstract: '架构',
     });
     expect(await index.stat('comem://user/alice/missing.md')).toBeNull();
+  });
+});
+
+/**
+ * 目录的两行索引（L0 摘要行 + L1 概览行，`0004_node_level_rows.sql`）。
+ *
+ * 这两行的 URI 相同、只有 `level` 不同，所以 `node` 与 `node_fts` 的 join 必须带上
+ * `level`：只按 uri 关联时一次匹配会被报成两条（其中一条的 level / abstract 是另一
+ * 层的），而按 URI 读节点的路径（`stat` / `glob`）也不能把两行当成两个节点。
+ */
+describe('同一 URI 的 L0 与 L1 行', () => {
+  const DIR = 'comem://user/alice/mem';
+  const OVERVIEW = '团队约定的详细说明：提交前跑完整测试';
+
+  async function seedTwoRows(): Promise<void> {
+    await seed(DIR, '', { kind: 'directory', level: 'L0', abstract: '团队约定' });
+    await index.upsert([
+      record(DIR, OVERVIEW, { kind: 'directory', level: 'L1', abstract: '团队约定' }),
+    ]);
+  }
+
+  it('各自的文本各成一条检索行，命中时 level 与文本对得上', async () => {
+    await seedTwoRows();
+
+    // 概览独有 → 只有 L1 行命中。
+    const overviewHits = await search('提交前跑完整测试');
+    expect(overviewHits.map((hit) => hit.level)).toEqual(['L1']);
+
+    // L0 摘要 → 两行都命中：L1 行的概览正文包含 L0 摘要（L0 是从概览里提取的，
+    // §9.1）。两行返回的 `abstract` 相同，这正是 §8.6 去重面对的输入。
+    const abstractHits = await search('团队约定');
+    expect(abstractHits.map((hit) => hit.level).sort()).toEqual(['L0', 'L1']);
+    expect(new Set(abstractHits.map((hit) => hit.abstract))).toEqual(new Set(['团队约定']));
+  });
+
+  it('levels 过滤作用在检索行上', async () => {
+    await seedTwoRows();
+
+    expect((await search('团队约定', { levels: ['L1'] })).map((hit) => hit.abstract)).toEqual([
+      '团队约定',
+    ]);
+    expect(await search('提交前跑完整测试', { levels: ['L0'] })).toEqual([]);
+  });
+
+  it('stat 只返回节点自身那一行（L0 摘要），不是概览行', async () => {
+    await seedTwoRows();
+
+    const stat = await index.stat(DIR);
+    expect(stat?.abstract).toBe('团队约定');
+    expect(stat?.kind).toBe('directory');
+  });
+
+  it('glob 对同一个目录只返回一次', async () => {
+    await seedTwoRows();
+
+    expect(await glob('comem://user/alice/*')).toEqual([DIR]);
+  });
+
+  it('deleteByUri 删掉两行', async () => {
+    await seedTwoRows();
+
+    await index.deleteByUri(DIR);
+
+    expect(countRows('SELECT COUNT(*) AS total FROM node WHERE uri = ?', DIR)).toBe(0);
+    expect(countRows('SELECT COUNT(*) AS total FROM node_fts WHERE uri = ?', DIR)).toBe(0);
   });
 });

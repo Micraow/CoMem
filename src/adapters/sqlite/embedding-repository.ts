@@ -30,7 +30,7 @@ import type { Logger } from '../../domain/log.js';
 import { normalizeVector } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import { withWriteTransaction } from './database.js';
-import { globPrefixPattern, placeholders } from './node-repository.js';
+import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
 
 /** `node_embedding` 表的一行。 */
 export interface EmbeddingRow {
@@ -280,9 +280,14 @@ export class EmbeddingRepository {
     const cursorClause = after === undefined ? '' : 'AND n.uri > ?';
     const params: SQLInputValue[] =
       after === undefined ? [model, options.limit] : [model, after, options.limit];
-    const sql = `SELECT n.uri AS uri
+    // 向量是**按节点**一条（`vec0` 的主键是 `uri`），所以只看节点自身那一行：
+    // 目录的 L1 概览行与 L0 行同 URI，两行都进候选会让回填对同一个 URI 做两遍。
+    // `DISTINCT` 再兜一层：一个 URI 同时留下 L0 与 L2 行（节点类型变过、旧行没清）
+    // 时，也不会把同一个 URI 报两次——调用方按「前 limit 个未嵌入 URI」翻页。
+    const sql = `SELECT DISTINCT n.uri AS uri
        FROM node n
-       WHERE NOT EXISTS (
+       WHERE ${nodeSelfRowSql('n')}
+         AND NOT EXISTS (
            SELECT 1 FROM node_embedding e
            WHERE e.uri = n.uri AND e.model = ?
          )

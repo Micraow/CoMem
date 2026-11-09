@@ -9,6 +9,7 @@ import { MCP_TOOL_NAMES } from '../../../src/api/mcp/registry.js';
 import { createDownloadUrl } from '../../../src/api/mcp/tools/download.js';
 import { createHttpServer, PROMETHEUS_CONTENT_TYPE } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
@@ -569,6 +570,45 @@ describe('检索', () => {
       }),
     );
     expect(glob['files']).toContain(file);
+  });
+
+  it('memoryTypes 是可选过滤维度（参数名与 MCP find / search 一致）', async () => {
+    const created = await container.services.memory.upsertMemory(
+      Uri.parse(ROOT),
+      preferencesMemoryType,
+      { topic: 'license-tone', content: '许可证检查' },
+    );
+
+    const matched = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/search/find',
+        payload: { query: '许可证', memoryTypes: ['preferences'] },
+      }),
+    );
+    expect((matched['hits'] as { uri: string }[]).map((hit) => hit.uri)).toEqual([
+      created.uri.toString(),
+    ]);
+
+    const otherType = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/search/find',
+        payload: { query: '许可证', memoryTypes: ['rules'] },
+      }),
+    );
+    expect(otherType['hits']).toEqual([]);
+  });
+
+  it('updatedAfter 非法时 400 INVALID_ARGUMENT（HTTP 与 MCP 共用领域校验）', async () => {
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/search/find',
+      payload: { query: '记忆', updatedAfter: '昨天' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
   });
 });
 

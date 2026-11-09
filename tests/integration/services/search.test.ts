@@ -774,3 +774,61 @@ describe('SearchService 构造', () => {
     ).toThrow(ComemError);
   });
 });
+
+/**
+ * 目录的 L1 概览行在检索面上的行为（§8.5、§8.6）。
+ *
+ * 同一个目录有两行：L0 行（只索引 L0 摘要）与 L1 行（索引概览正文）。两行的
+ * `abstract` 相同，所以「同时命中」时要靠 `(uri, abstract)` 去重——否则模型会拿到
+ * 两段逐字相同的摘要。
+ */
+describe('目录的 L1 概览行', () => {
+  const DIR = 'comem://user/alice/mem';
+  /** 只出现在概览正文里的句子（L0 摘要里没有）。 */
+  const OVERVIEW_ONLY = '提交前跑完整测试';
+  const L0 = '团队约定';
+
+  async function seedDirectoryRows(): Promise<void> {
+    await seed(DIR, '', { kind: 'directory', level: 'L0', abstract: L0 });
+    await index.upsert([
+      record(DIR, `${L0}的详细说明：${OVERVIEW_ONLY}`, {
+        kind: 'directory',
+        level: 'L1',
+        abstract: L0,
+      }),
+    ]);
+  }
+
+  it('find(levels: [L1]) 命中概览正文，返回的层级是 L1', async () => {
+    await seedDirectoryRows();
+    const service = await createService();
+
+    const hits = await service.find(OVERVIEW_ONLY, findOptions({ levels: ['L1'] }));
+
+    expect(hits.map((hit) => [hit.uri, hit.level])).toEqual([[DIR, 'L1']]);
+    // 展示的仍是 L0 摘要：命中概览行不代表把 4000 字概览塞进结果列表。
+    expect(hits[0]?.abstract).toBe(L0);
+  });
+
+  it('同一目录的 L0 与 L1 同时命中时只返回一条（摘要逐字相同）', async () => {
+    await seedDirectoryRows();
+    const service = await createService();
+
+    const hits = await service.find(L0, findOptions());
+
+    const forDirectory = hits.filter((hit) => hit.uri === DIR);
+    expect(forDirectory).toHaveLength(1);
+    // 留下的是分数高的那条：L1 行的权重 1.05 低于 L0 的 1.15，匹配位置也相同，
+    // 所以这里通常是 L0 行；断言不断言具体层级，只断言「只有一条」。
+    expect(forDirectory[0]?.abstract).toBe(L0);
+  });
+
+  it('find(levels: [L0]) 不会命中 L1 行：层级过滤作用在检索行上', async () => {
+    await seedDirectoryRows();
+    const service = await createService();
+
+    const hits = await service.find(OVERVIEW_ONLY, findOptions({ levels: ['L0'] }));
+
+    expect(hits).toEqual([]);
+  });
+});

@@ -197,6 +197,9 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
           principals: context.principals,
           contextTypes: parseContextTypes(optionalStringArray(body, 'contextTypes')),
           levels: parseLevels(optionalStringArray(body, 'levels')),
+          memoryTypes: optionalStringArray(body, 'memoryTypes'),
+          updatedAfter: optionalString(body, 'updatedAfter'),
+          updatedBefore: optionalString(body, 'updatedBefore'),
           limit,
         });
         return ok({ hits: hits.map(serializeHit) });
@@ -210,6 +213,11 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
         const levels = parseLevels(optionalStringArray(body, 'levels'));
+        // 记忆类型 / 更新时间范围：与 MCP `find` / `search` 同名、同类型、同为可选。
+        // 它们只收窄候选，不改变出参形状，因此两种 mode 都透传。
+        const memoryTypes = optionalStringArray(body, 'memoryTypes');
+        const updatedAfter = optionalString(body, 'updatedAfter');
+        const updatedBefore = optionalString(body, 'updatedBefore');
         // 会话只用于解析指代（§8.4）；不传也能检索，只是历史为空。
         const sessionId = optionalString(body, 'sessionId');
         const mode = parseMode(optionalString(body, 'mode'));
@@ -223,6 +231,9 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
             principals: context.principals,
             contextTypes,
             levels,
+            memoryTypes,
+            updatedAfter,
+            updatedBefore,
             limit,
             sessionId,
           });
@@ -240,6 +251,9 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
           principals: context.principals,
           contextTypes,
           levels,
+          memoryTypes,
+          updatedAfter,
+          updatedBefore,
           limit,
           sessionId,
         });
