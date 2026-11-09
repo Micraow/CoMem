@@ -116,12 +116,10 @@ function observabilityUris(): string[] {
 
 function createLogger(): Logger {
   const mock: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => mock,
   };
   return mock;
 }

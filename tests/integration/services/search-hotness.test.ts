@@ -21,6 +21,7 @@ import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { createContainer } from '../../../src/bootstrap/container.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -61,12 +62,10 @@ let authorizer: AllowAllAuthorizer;
 
 function createLogger(): Logger {
   const created: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => created,
   };
   return created;
 }
@@ -133,9 +132,14 @@ function nodeRow(uri: string): NodeRow {
   };
 }
 
+/** 用生产写路径建 `node` 行：`node` 表由 `SqliteFtsIndex.upsert` 维护。 */
+async function seed(rows: readonly NodeRow[]): Promise<void> {
+  await new SqliteFtsIndex({ db, logger }).upsert(rows.map((row) => ({ ...row, content: '' })));
+}
+
 /** 建 `node` 行（`access_count` 从 0 起），再把访问时间写成 `at`。 */
-function seedAccess(uris: readonly string[], at: Date): void {
-  nodes.upsert(uris.map((uri) => nodeRow(uri)));
+async function seedAccess(uris: readonly string[], at: Date): Promise<void> {
+  await seed(uris.map((uri) => nodeRow(uri)));
   nodes.recordAccess(uris, at);
 }
 
@@ -189,7 +193,7 @@ describe('weight = 0（默认）', () => {
   const DOC = 'comem://user/alice/mem/design.md';
 
   it('hotness 恒为 null，accessStats 不调，但访问仍然照记', async () => {
-    seedAccess([DOC], new Date());
+    await seedAccess([DOC], new Date());
     const accessStats = vi.fn(() => []);
     const recordAccess = vi.fn();
 
@@ -209,7 +213,7 @@ describe('weight = 0（默认）', () => {
   });
 
   it('weight = 0 时同样不查访问统计（默认值就是 0）', async () => {
-    seedAccess([DOC], new Date());
+    await seedAccess([DOC], new Date());
     const accessStats = vi.fn(() => []);
 
     const service = createService(fakeIndex([{ uri: DOC, score: 0.5 }]), { accessStats });
@@ -233,7 +237,7 @@ describe('weight > 0', () => {
     const COLD = 'comem://user/alice/mem/cold.md';
     const HOT = 'comem://user/alice/mem/hot.md';
     // HOT 刚被访问 100 次，COLD 从没被访问过；两条相关性分数相同。
-    nodes.upsert([nodeRow(COLD), nodeRow(HOT)]);
+    await seed([nodeRow(COLD), nodeRow(HOT)]);
     nodes.recordAccess(new Array<string>(100).fill(HOT), new Date());
 
     const service = createService(
@@ -258,7 +262,7 @@ describe('weight > 0', () => {
   it('乘性：热度让低分命中不能超过高分命中', async () => {
     const RELEVANT = 'comem://user/alice/mem/relevant.md';
     const HOT_BUT_WEAK = 'comem://user/alice/mem/hot-but-weak.md';
-    nodes.upsert([nodeRow(RELEVANT), nodeRow(HOT_BUT_WEAK)]);
+    await seed([nodeRow(RELEVANT), nodeRow(HOT_BUT_WEAK)]);
     nodes.recordAccess(new Array<string>(100).fill(HOT_BUT_WEAK), new Date());
 
     const service = createService(
@@ -280,7 +284,7 @@ describe('weight > 0', () => {
   it('同分同热度时按 URI 升序，重复查询顺序不变', async () => {
     const A = 'comem://user/alice/mem/a.md';
     const B = 'comem://user/alice/mem/b.md';
-    nodes.upsert([nodeRow(A), nodeRow(B)]);
+    await seed([nodeRow(A), nodeRow(B)]);
 
     const service = createService(
       fakeIndex([
@@ -300,7 +304,7 @@ describe('weight > 0', () => {
   it('hotnessHalfLifeHours 传下去：1 小时半衰期下，一小时前的访问热度减半', async () => {
     const OLD = 'comem://user/alice/mem/old.md';
     const FRESH = 'comem://user/alice/mem/fresh.md';
-    nodes.upsert([nodeRow(OLD), nodeRow(FRESH)]);
+    await seed([nodeRow(OLD), nodeRow(FRESH)]);
     nodes.recordAccess([OLD], new Date(Date.now() - HOUR_MS));
     nodes.recordAccess([FRESH], new Date());
 
@@ -340,7 +344,7 @@ describe('hotness 的 null 与 0 不是一回事', () => {
 
   it('从没被访问过的记忆算出来是 0（不是 null）', async () => {
     const DOC = 'comem://user/alice/mem/never-accessed.md';
-    nodes.upsert([nodeRow(DOC)]);
+    await seed([nodeRow(DOC)]);
 
     const service = createService(fakeIndex([{ uri: DOC, score: 0.5 }]), {
       weight: 1,
@@ -356,7 +360,7 @@ describe('访问计数', () => {
   const DOC = 'comem://user/alice/mem/design.md';
 
   it('find 之后 recordAccess 被调用，且不等它完成', async () => {
-    nodes.upsert([nodeRow(DOC)]);
+    await seed([nodeRow(DOC)]);
     let release: (() => void) | undefined;
     const pending = new Promise<void>((resolve) => {
       release = resolve;
@@ -378,7 +382,7 @@ describe('访问计数', () => {
   });
 
   it('一次 find 之后 access_count 真的涨了', async () => {
-    nodes.upsert([nodeRow(DOC)]);
+    await seed([nodeRow(DOC)]);
     expect(nodes.readAccessStats([DOC])[0]?.accessCount).toBe(0);
 
     const service = createService(fakeIndex([{ uri: DOC, score: 0.5 }]), {
@@ -395,7 +399,7 @@ describe('访问计数', () => {
   });
 
   it('search 只按合并去重后的命中记一次', async () => {
-    nodes.upsert([nodeRow(DOC)]);
+    await seed([nodeRow(DOC)]);
     const recordAccess = vi.fn(() => undefined);
 
     const service = createService(fakeIndex([{ uri: DOC, score: 0.5 }]), {
@@ -461,7 +465,7 @@ describe('「使用」= 进入调用方上下文（§11.7）', () => {
   }
 
   it('mode=context 只记注入的条目：被组装丢弃的 last_accessed_at 不变', async () => {
-    seedAccess(URIS, OLD_ACCESS);
+    await seedAccess(URIS, OLD_ACCESS);
     const recordAccess = vi.fn((uris: readonly string[]) => nodes.recordAccess(uris, new Date()));
     // 6 条候选活下来 3 条：`coding` 预设给 memory 3 条配额（§8.6 第 4 步），
     // 600 token 只够 1 条摘要、另外 2 条降到「只剩 URI」。配额与预算丢弃都算没进上下文。

@@ -14,9 +14,6 @@ import { renderAll, renderItem } from '../../../src/domain/render.js';
 import type { ContextDetail } from '../../../src/domain/render.js';
 
 class TestLogger implements Logger {
-  trace(): void {
-    // 测试里不记录。
-  }
   debug(): void {
     // 测试里不记录。
   }
@@ -28,9 +25,6 @@ class TestLogger implements Logger {
   }
   error(): void {
     // 测试里不记录。
-  }
-  child(): Logger {
-    return this;
   }
 }
 

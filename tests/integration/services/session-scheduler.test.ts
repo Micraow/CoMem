@@ -8,7 +8,7 @@
  * 的地方。这里只信「起容器 → tick → 看磁盘」。
  */
 
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -270,7 +270,42 @@ describe('会话过期（container → tick）', () => {
   });
 });
 
+describe('临时上传清理（container → tick）', () => {
+  it('超过 24 小时的上传被清理，新的留下，条数进轮次摘要', async () => {
+    const started = await startContainer(['session:', '  autoCommit:', '    enabled: true'].join('\n'));
+    container = started;
+    expect(started.scheduler.started).toBe(true);
+
+    const tmpDir = join(dataDir, '_meta', 'tmp');
+    await mkdir(tmpDir, { recursive: true });
+    const oldId = 'staged_old';
+    const oldPath = join(tmpDir, oldId);
+    await writeFile(oldPath, new Uint8Array([1]));
+    await writeFile(
+      `${oldPath}.meta.json`,
+      JSON.stringify({
+        uploadId: oldId,
+        fileName: 'old.pdf',
+        size: 1,
+        // 比 24 小时阈值再早一秒：直接写元数据，不依赖 sleep。
+        stagedAtMs: Date.now() - 24 * 60 * 60 * 1000 - 1000,
+      }),
+      'utf8',
+    );
+    const fresh = await started.services.resource.stageUpload(new Uint8Array([2]), {
+      fileName: 'fresh.pdf',
+    });
+
+    const result = await started.scheduler.tick();
+
+    expect(result).toMatchObject({ stagedSwept: 1 });
+    await expect(readFile(oldPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(fresh.tempPath)).toBeInstanceOf(Buffer);
+  });
+});
+
 describe('记忆 TTL（container → 清扫）', () => {
+
   it('memory.ttl.defaultDays 是滑动窗口：超出窗口的记忆归档，窗口内的留下', async () => {
     const started = await startContainer(['memory:', '  ttl:', '    defaultDays: 30'].join('\n'));
     container = started;

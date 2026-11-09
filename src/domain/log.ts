@@ -10,11 +10,15 @@ export interface LogFields {
 }
 
 export interface Logger {
-  trace(message: string, fields?: LogFields): void;
   debug(message: string, fields?: LogFields): void;
   info(message: string, fields?: LogFields): void;
   warn(message: string, fields?: LogFields): void;
   error(message: string, fields?: LogFields): void;
-  /** 派生一个带固定字段的子 logger，例如 `child({ requestId })`。不改变父 logger。 */
-  child(bindings: LogFields): Logger;
+  /**
+   * 等已排队的日志写入落盘（优雅退出用）。
+   *
+   * **可选**：`ConsoleLogger` 同步写、`NullLogger` 丢弃，都不需要无意义的空实现；
+   * 带写队列的实现（`FileLogger`）提供它。关闭序列统一调 `logger.flush?.()`。
+   */
+  flush?(): Promise<void>;
 }

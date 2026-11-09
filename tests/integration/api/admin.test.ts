@@ -1210,12 +1210,10 @@ describe('授权', () => {
     const db = openDatabase(':memory:');
     runMigrations(db);
     const logger: Logger = {
-      trace: () => {},
       debug: () => {},
       info: () => {},
       warn: () => {},
       error: () => {},
-      child: () => logger,
     };
     const identity = new IdentityService({
       users: new UserRepository({ db, logger }),

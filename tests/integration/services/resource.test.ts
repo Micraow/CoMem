@@ -58,7 +58,6 @@ function createLogger(): RecordingLogger {
   const warnings: string[] = [];
   const errors: string[] = [];
   const logger: RecordingLogger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn((message: string) => {
@@ -67,7 +66,6 @@ function createLogger(): RecordingLogger {
     error: vi.fn((message: string) => {
       errors.push(message);
     }),
-    child: () => logger,
     warnings,
     errors,
   };
@@ -415,6 +413,16 @@ describe('addResource', () => {
     expect(await readFile(fresh.tempPath)).toBeInstanceOf(Buffer);
     expect(await storage.readStaged('old')).toBeNull();
     expect(await storage.readStaged(fresh.uploadId)).not.toBeNull();
+    expect(logger.info).toHaveBeenCalledWith(
+      '已清理超时的临时上传',
+      expect.objectContaining({ removed: 1, olderThanSeconds: 60 }),
+    );
+  });
+
+  it('_meta/tmp 不存在时 sweepStaged 返回 0，不抛错', async () => {
+    // 全新部署或刚清理过：目录还没被 `stage()` 建出来。清理是维护动作，不该因为
+    // 「没有可清的东西」变成一轮 error。
+    await expect(service.sweepStaged(60)).resolves.toBe(0);
   });
 
   it('部分失败：写失败进 skipped，其余成功，reconcile.log 有记录', async () => {

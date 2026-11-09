@@ -160,12 +160,10 @@ function createTestContainer(options: CreateContainerOptions = {}): Promise<Cont
 
 function createTestLogger(): Logger {
   const created: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => created,
   };
   return created;
 }

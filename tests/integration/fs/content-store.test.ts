@@ -21,12 +21,10 @@ beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-store-'));
   debugLog = vi.fn();
   const logger: Logger = {
-    trace: vi.fn(),
     debug: debugLog,
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   store = new ContentStore({ dataDir, logger });
 });

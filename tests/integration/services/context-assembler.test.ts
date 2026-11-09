@@ -31,12 +31,10 @@ const BODY = 'comem://user/alice/memories/m1';
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-assembler-'));
   logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   store = new ContentStore({ dataDir, logger });
   metadata = new MetadataFileStore({ dataDir, logger });

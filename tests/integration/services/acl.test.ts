@@ -52,12 +52,10 @@ afterEach(async () => {
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return logger;
 }
@@ -144,12 +142,15 @@ function nodeRow(uri: string, kind: NodeKind = 'directory'): NodeRow {
   };
 }
 
-function seed(...uris: readonly string[]): void {
-  nodes.upsert(uris.map((uri) => nodeRow(uri)));
+/** 用生产写路径建 `node` 行：`node` 表由 `SqliteFtsIndex.upsert` 维护。 */
+async function seed(...uris: readonly string[]): Promise<void> {
+  await new SqliteFtsIndex({ db, logger }).upsert(
+    uris.map((uri) => ({ ...nodeRow(uri), content: '' })),
+  );
 }
 
-function seedDocument(uri: string): void {
-  nodes.upsert([nodeRow(uri, 'document')]);
+async function seedDocument(uri: string): Promise<void> {
+  await new SqliteFtsIndex({ db, logger }).upsert([{ ...nodeRow(uri, 'document'), content: '' }]);
 }
 
 function aclEntriesOf(uri: string): readonly { uri: string; principal: string; level: number; effect: string }[] {
@@ -347,7 +348,7 @@ describe('组 owner 主体校验', () => {
 
 describe('继承与切断', () => {
   it('深层节点没有 .acl.json 时继承到根', async () => {
-    seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
+    await seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('group:eng', 1)] }, 'user:alice');
@@ -359,7 +360,7 @@ describe('继承与切断', () => {
   });
 
   it('restricted 切断继承：祖先 allow 不生效', async () => {
-    seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
+    await seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('group:eng', 1)] }, 'user:alice');
@@ -375,7 +376,7 @@ describe('继承与切断', () => {
   });
 
   it('restricted 下本节点直接授权仍然生效', async () => {
-    seed(ROOT, `${ROOT}/memories`);
+    await seed(ROOT, `${ROOT}/memories`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -392,7 +393,7 @@ describe('继承与切断', () => {
 
 describe('求值不变量', () => {
   it('同节点 deny 优先：allow write + deny write → 无权限', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -407,7 +408,7 @@ describe('求值不变量', () => {
   });
 
   it('owner 不可收回：owner 节点上有 user:alice = deny，alice 依然 manage', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -424,7 +425,7 @@ describe('求值不变量', () => {
   });
 
   it('多层叠加：不同层级的 allow 合并后取最高', async () => {
-    seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
+    await seed(ROOT, `${ROOT}/memories`, `${ROOT}/memories/deep`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('user:bob', 1)] }, 'user:alice');
@@ -443,7 +444,7 @@ describe('求值不变量', () => {
 
 describe('退组立即生效', () => {
   it('组身份每次重新展开：去掉组后同一份物化表立即失去权限', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('group:eng', 3)] }, 'user:alice');
@@ -460,7 +461,7 @@ describe('退组立即生效', () => {
 describe('物化', () => {
   it('setAcl 重算整棵子树', async () => {
     const targets = [ROOT, `${ROOT}/a`, `${ROOT}/a/b`, `${ROOT}/c`];
-    seed(...targets);
+    await seed(...targets);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
 
@@ -481,7 +482,7 @@ describe('物化', () => {
   });
 
   it('段边界：alice 的 setAcl 不影响 alice2 的子树', async () => {
-    seed(ROOT, `${ROOT}/a`, 'comem://user/alice2', 'comem://user/alice2/a');
+    await seed(ROOT, `${ROOT}/a`, 'comem://user/alice2', 'comem://user/alice2/a');
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.ensureRootPreset(Uri.parse('comem://user/alice2'));
@@ -493,8 +494,8 @@ describe('物化', () => {
   });
 
   it('文档节点继承所在目录的权限', async () => {
-    seed(ROOT, `${ROOT}/memories`);
-    seedDocument(`${ROOT}/memories/note.md`);
+    await seed(ROOT, `${ROOT}/memories`);
+    await seedDocument(`${ROOT}/memories/note.md`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -508,8 +509,8 @@ describe('物化', () => {
   });
 
   it('ACL 只能设在目录上', async () => {
-    seed(ROOT, `${ROOT}/memories`);
-    seedDocument(`${ROOT}/memories/note.md`);
+    await seed(ROOT, `${ROOT}/memories`);
+    await seedDocument(`${ROOT}/memories/note.md`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
 
@@ -527,7 +528,7 @@ describe('物化', () => {
 
 describe('权限检查', () => {
   it('setAcl 无 manage 抛 PERMISSION_DENIED', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     await createService().ensureRootPreset(Uri.parse(ROOT));
 
     await expectComemError(
@@ -542,7 +543,7 @@ describe('权限检查', () => {
   });
 
   it('getAcl 无 manage 抛 PERMISSION_DENIED', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     await createService().ensureRootPreset(Uri.parse(ROOT));
 
     await expectComemError(
@@ -557,7 +558,7 @@ describe('权限检查', () => {
 
   it('filterReadable 批量：10 个 URI 只查一次', async () => {
     const uris = Array.from({ length: 10 }, (_, index) => `${ROOT}/m${index}`);
-    seed(ROOT, ...uris);
+    await seed(ROOT, ...uris);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
 
@@ -577,7 +578,7 @@ describe('权限检查', () => {
 
 describe('事务与反查表', () => {
   it('aclFile.write 抛错时 node_permission 未变', async () => {
-    seed(ROOT, `${ROOT}/a`);
+    await seed(ROOT, `${ROOT}/a`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     const before = permissionsOf(`${ROOT}/a`);
@@ -592,7 +593,7 @@ describe('事务与反查表', () => {
   });
 
   it('acl_entry 与 node_permission 同步更新', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
 
@@ -608,7 +609,7 @@ describe('事务与反查表', () => {
   });
 
   it('getAcl 的 effective 与 check 结果一致', async () => {
-    seed(ROOT, `${ROOT}/a`);
+    await seed(ROOT, `${ROOT}/a`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('group:eng', 1)] }, 'user:alice');
@@ -642,7 +643,7 @@ describe('回归：deny 必须被物化', () => {
   const RESTRICTED = `${BOB_ROOT}/restricted`;
 
   async function seedRestricted(): Promise<void> {
-    seed(BOB_ROOT, RESTRICTED);
+    await seed(BOB_ROOT, RESTRICTED);
     const bob = createService({ subject: 'user:bob' });
     await bob.ensureRootPreset(Uri.parse(BOB_ROOT));
     await bob.setAcl(
@@ -706,7 +707,7 @@ describe('回归：deny 必须被物化', () => {
 describe('通配与 deny 物化', () => {
   it('user:* = allow 且没有 deny 时任何人可读', async () => {
     const target = `${ROOT}/public`;
-    seed(ROOT, target);
+    await seed(ROOT, target);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -725,7 +726,7 @@ describe('通配与 deny 物化', () => {
 
   it('user:* = deny 时任何人不可读，owner 仍然 manage', async () => {
     const target = `${ROOT}/secret`;
-    seed(ROOT, target);
+    await seed(ROOT, target);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -744,7 +745,7 @@ describe('通配与 deny 物化', () => {
 
   it('同一主体 allow + deny：物化结果是 deny，查询与链式求值一致', async () => {
     const target = `${ROOT}/mixed`;
-    seed(ROOT, target);
+    await seed(ROOT, target);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -767,7 +768,7 @@ describe('通配与 deny 物化', () => {
   it('materializeNode：新建节点继承父目录的有效权限', async () => {
     const parent = `${ROOT}/memories`;
     const target = `${parent}/note.md`;
-    seed(ROOT, parent);
+    await seed(ROOT, parent);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -775,7 +776,7 @@ describe('通配与 deny 物化', () => {
       { mode: 'inherit', entries: [allow('group:eng', 3)] },
       'user:alice',
     );
-    seedDocument(target);
+    await seedDocument(target);
     expect(permissionsOf(target)).toEqual([]);
 
     await service.materializeNode(Uri.parse(target));
@@ -795,7 +796,7 @@ describe('通配与 deny 物化', () => {
   it('materializeNode 从父目录继承 deny（父目录被 deny 的主体在子节点也不可读）', async () => {
     const parent = `${ROOT}/blocked`;
     const child = `${parent}/note.md`;
-    seed(ROOT, parent);
+    await seed(ROOT, parent);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -803,7 +804,7 @@ describe('通配与 deny 物化', () => {
       { mode: 'restricted', entries: [allow('user:*', 1), deny('user:bob', 1)] },
       'user:alice',
     );
-    seedDocument(child);
+    await seedDocument(child);
 
     await service.materializeNode(Uri.parse(child));
 
@@ -842,7 +843,7 @@ describe('并发写入不丢条目（§10.6 锁契约回归）', () => {
   }
 
   it('两个并发 setAcl 到同一目录，两个条目都保留', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
 
@@ -873,7 +874,7 @@ describe('并发写入不丢条目（§10.6 锁契约回归）', () => {
   });
 
   it('并发 ensureRootPreset 不会丢条目', async () => {
-    seed(GROUP_ROOT);
+    await seed(GROUP_ROOT);
     const service = createService({ subject: 'user:alice' });
 
     // 先建立 manage（组根预置），再把文件改回「预置尚未应用」但 alice 仍有 manage 的
@@ -910,7 +911,7 @@ describe('并发写入不丢条目（§10.6 锁契约回归）', () => {
 
   it('purgeSubtree 与 setAcl 并发不死锁', async () => {
     const subtree = [ROOT, `${ROOT}/a`, `${ROOT}/a/b`];
-    seed(...subtree);
+    await seed(...subtree);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -964,7 +965,7 @@ describe('撤权回滚：磁盘已写、索引写失败', () => {
   }
 
   it('purgeSubtree：物化写入失败时恢复 .acl.json，node_permission 维持原状', async () => {
-    seed(ROOT, `${ROOT}/a`);
+    await seed(ROOT, `${ROOT}/a`);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(
@@ -997,7 +998,7 @@ describe('撤权回滚：磁盘已写、索引写失败', () => {
   });
 
   it('purgePrincipal：索引行删除失败时恢复 .acl.json，node_permission 维持原状', async () => {
-    seed(ROOT);
+    await seed(ROOT);
     const service = createService();
     await service.ensureRootPreset(Uri.parse(ROOT));
     await service.setAcl(

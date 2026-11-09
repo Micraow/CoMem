@@ -69,10 +69,6 @@ export class FileLogger implements Logger {
     this.#maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   }
 
-  trace(message: string, fields?: LogFields): void {
-    this.#inner.trace(message, fields);
-  }
-
   debug(message: string, fields?: LogFields): void {
     this.#inner.debug(message, fields);
   }
@@ -92,12 +88,8 @@ export class FileLogger implements Logger {
     this.#enqueue(`${JSON.stringify(record)}\n`);
   }
 
-  child(bindings: LogFields): Logger {
-    return new BoundFileLogger(this, bindings);
-  }
-
   /**
-   * 等已排队的写入落盘。测试与优雅退出用。
+   * 等已排队的写入落盘（`Logger.flush` 的可选方法，优雅退出用）。
    *
    * 永远 resolve：写日志失败不是调用方的错误（失败已经在 `#degrade` 里记过）。
    */
@@ -155,46 +147,5 @@ export class FileLogger implements Logger {
       filePath: this.#filePath,
       error: error instanceof Error ? error.message : String(error),
     });
-  }
-}
-
-/**
- * `FileLogger.child()` 的产物：所有调用转给同一个 `FileLogger`，只把 bindings 合并
- * 进字段。
- *
- * 不另建 `FileLogger` 实例：那样每个子 logger 各有一条写队列和一份轮转状态，
- * 父 logger 的 `flush()` 等不到子 logger 的写入，优雅退出会丢日志。
- */
-class BoundFileLogger implements Logger {
-  readonly #sink: FileLogger;
-  readonly #bindings: LogFields;
-
-  constructor(sink: FileLogger, bindings: LogFields) {
-    this.#sink = sink;
-    this.#bindings = bindings;
-  }
-
-  trace(message: string, fields?: LogFields): void {
-    this.#sink.trace(message, { ...this.#bindings, ...fields });
-  }
-
-  debug(message: string, fields?: LogFields): void {
-    this.#sink.debug(message, { ...this.#bindings, ...fields });
-  }
-
-  info(message: string, fields?: LogFields): void {
-    this.#sink.info(message, { ...this.#bindings, ...fields });
-  }
-
-  warn(message: string, fields?: LogFields): void {
-    this.#sink.warn(message, { ...this.#bindings, ...fields });
-  }
-
-  error(message: string, fields?: LogFields): void {
-    this.#sink.error(message, { ...this.#bindings, ...fields });
-  }
-
-  child(bindings: LogFields): Logger {
-    return new BoundFileLogger(this.#sink, { ...this.#bindings, ...bindings });
   }
 }

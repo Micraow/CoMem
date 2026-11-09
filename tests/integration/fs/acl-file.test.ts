@@ -29,12 +29,10 @@ let logger: Logger;
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-acl-file-'));
   logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   store = new AclFileStore({ dataDir, logger });
 });

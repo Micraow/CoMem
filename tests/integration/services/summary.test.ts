@@ -86,12 +86,10 @@ afterEach(async () => {
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return logger;
 }
@@ -141,9 +139,9 @@ interface SeedOptions {
 }
 
 /** 写入一行索引，并顺带设置新鲜度三列（它们不在 `NodeRow` 上）。 */
-function seedRow(uri: string, options: SeedOptions = {}): void {
+async function seedRow(uri: string, options: SeedOptions = {}): Promise<void> {
   const parsed = Uri.parse(uri);
-  nodes.upsert([
+  await index.upsert([
     {
       uri,
       parentUri: parsed.parent()?.toString() ?? '',
@@ -157,6 +155,7 @@ function seedRow(uri: string, options: SeedOptions = {}): void {
       size: 0,
       updatedAt: UPDATED_AT,
       status: 'active',
+      content: '',
     },
   ]);
   db.prepare(
@@ -210,7 +209,7 @@ describe('regenerate', () => {
     await makeDirectory(PREFERENCES);
     await makeDirectory(TEAM);
     await writeText(CONVENTIONS, '# 约定\n\n团队约定正文。\n');
-    seedRow(TEAM, { abstract: '团队约定。' });
+    await seedRow(TEAM, { abstract: '团队约定。' });
 
     const { generator, inputs } = spyGenerator((input) => `${input.uri.name} 摘要`);
     const service = createService({ generator });
@@ -227,9 +226,9 @@ describe('regenerate', () => {
     await writeText(CONVENTIONS, '# 约定\n\n团队约定正文。\n');
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
     // 文件摘要来自索引（§9.1）；目录摘要来自它自己的 .abstract.md。
-    seedRow(TEAM, { kind: 'directory', abstract: '团队约定。' });
-    seedRow(CONVENTIONS, { abstract: '约定摘要。' });
-    seedRow(STYLE, { abstract: '代码风格摘要。' });
+    await seedRow(TEAM, { kind: 'directory', abstract: '团队约定。' });
+    await seedRow(CONVENTIONS, { abstract: '约定摘要。' });
+    await seedRow(STYLE, { abstract: '代码风格摘要。' });
 
     const { generator, inputs } = spyGenerator((input) => `${input.uri.name} 摘要`);
     await createService({ generator }).regenerate(Uri.parse(PREFERENCES));
@@ -247,7 +246,7 @@ describe('regenerate', () => {
   it('L0 从 L1 提取：模型给的 abstract 被忽略，取 H1 之后的第一段', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n');
-    seedRow(STYLE, { abstract: '代码风格摘要。' });
+    await seedRow(STYLE, { abstract: '代码风格摘要。' });
 
     const generator: SummaryGenerator = {
       async generate(): Promise<DirectorySummary> {
@@ -303,7 +302,7 @@ describe('regenerate', () => {
   it('生成期间到达的改动保留：pending 从 5 变 8，消费后是 3', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n');
-    seedRow(PREFERENCES, { kind: 'directory', baseline: null, pending: 5, entries: 100 });
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, pending: 5, entries: 100 });
 
     const generator: SummaryGenerator = {
       async generate(): Promise<DirectorySummary> {
@@ -357,7 +356,7 @@ describe('degraded', () => {
   it('降级标记写进摘要文件的 frontmatter', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n');
-    seedRow(STYLE, { abstract: '代码风格。' });
+    await seedRow(STYLE, { abstract: '代码风格。' });
 
     await createService({ generator: new RuleSummarizer() }).regenerate(Uri.parse(PREFERENCES));
 
@@ -423,8 +422,8 @@ describe('markStale', () => {
 
   it('正文没变不传播：digest 与索引一致时 recomputed 与 markedStale 都为空', async () => {
     const content = await store.readText(Uri.parse(STYLE));
-    seedRow(PREFERENCES, { kind: 'directory', baseline: stableDigest(STABLE_ABSTRACT), entries: 100 });
-    seedRow(STYLE, { bodyDigest: stableDigest(content.text) });
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: stableDigest(STABLE_ABSTRACT), entries: 100 });
+    await seedRow(STYLE, { bodyDigest: stableDigest(content.text) });
 
     const service = createService({ generator: new RuleSummarizer() });
 
@@ -439,13 +438,13 @@ describe('markStale', () => {
   });
 
   it('无基线 → 立刻重算', async () => {
-    seedRow(PREFERENCES, {
+    await seedRow(PREFERENCES, {
       kind: 'directory',
       baseline: null,
       entries: 100,
       bodyDigest: stableDigest(STABLE_ABSTRACT),
     });
-    seedRow(STYLE);
+    await seedRow(STYLE);
 
     const { generator } = spyGenerator(() => STABLE_ABSTRACT);
     const result = await createService({ generator }).invalidate(Uri.parse(STYLE));
@@ -456,13 +455,13 @@ describe('markStale', () => {
   });
 
   it('entries <= 32 → 立刻重算', async () => {
-    seedRow(PREFERENCES, {
+    await seedRow(PREFERENCES, {
       kind: 'directory',
       baseline: 'old-baseline',
       entries: 32,
       bodyDigest: stableDigest(STABLE_ABSTRACT),
     });
-    seedRow(STYLE);
+    await seedRow(STYLE);
 
     const { generator } = spyGenerator(() => STABLE_ABSTRACT);
     const result = await createService({ generator }).invalidate(Uri.parse(STYLE));
@@ -472,13 +471,13 @@ describe('markStale', () => {
   });
 
   it('pending / entries >= 0.10 → 立刻重算', async () => {
-    seedRow(PREFERENCES, {
+    await seedRow(PREFERENCES, {
       kind: 'directory',
       baseline: 'old-baseline',
       entries: 10,
       bodyDigest: stableDigest(STABLE_ABSTRACT),
     });
-    seedRow(STYLE);
+    await seedRow(STYLE);
 
     const { generator } = spyGenerator(() => STABLE_ABSTRACT);
     const result = await createService({ generator }).invalidate(Uri.parse(STYLE));
@@ -488,13 +487,13 @@ describe('markStale', () => {
   });
 
   it('否则只记脏：recomputed 为空，markedStale 含 P', async () => {
-    seedRow(PREFERENCES, {
+    await seedRow(PREFERENCES, {
       kind: 'directory',
       baseline: 'old-baseline',
       entries: 40,
       bodyDigest: stableDigest(STABLE_ABSTRACT),
     });
-    seedRow(STYLE);
+    await seedRow(STYLE);
 
     const { generator, inputs } = spyGenerator(() => STABLE_ABSTRACT);
     const result = await createService({ generator }).invalidate(Uri.parse(STYLE));
@@ -508,19 +507,19 @@ describe('markStale', () => {
 
   it('L0 没变就不往上传：祖先不算脏', async () => {
     await makeDirectory(MEMORIES);
-    seedRow(MEMORIES, {
+    await seedRow(MEMORIES, {
       kind: 'directory',
       baseline: 'root-baseline',
       entries: 5,
       bodyDigest: 'root-digest',
     });
-    seedRow(PREFERENCES, {
+    await seedRow(PREFERENCES, {
       kind: 'directory',
       baseline: 'old-baseline',
       entries: 5,
       bodyDigest: stableDigest(STABLE_ABSTRACT),
     });
-    seedRow(STYLE);
+    await seedRow(STYLE);
 
     const { generator, inputs } = spyGenerator(() => STABLE_ABSTRACT);
     const result = await createService({ generator }).invalidate(Uri.parse(STYLE));
@@ -538,11 +537,11 @@ describe('markStale', () => {
     await makeDirectory(TEAM);
     await writeText(CONVENTIONS, '# 约定\n\n团队约定正文。\n');
 
-    seedRow(SCOPE_ROOT, { kind: 'directory', baseline: 'root', entries: 5 });
-    seedRow(MEMORIES, { kind: 'directory', baseline: 'memories', entries: 5 });
-    seedRow(PREFERENCES, { kind: 'directory', baseline: 'preferences', entries: 0 });
-    seedRow(TEAM, { kind: 'directory', baseline: 'team', entries: 0 });
-    seedRow(CONVENTIONS);
+    await seedRow(SCOPE_ROOT, { kind: 'directory', baseline: 'root', entries: 5 });
+    await seedRow(MEMORIES, { kind: 'directory', baseline: 'memories', entries: 5 });
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: 'preferences', entries: 0 });
+    await seedRow(TEAM, { kind: 'directory', baseline: 'team', entries: 0 });
+    await seedRow(CONVENTIONS);
 
     // 每次重算都给不同的 L0，保证 L0 一直在变、传播走到底。
     const { generator } = spyGenerator((_input, call) => `第 ${call} 次摘要`);
@@ -558,9 +557,9 @@ describe('锁内不得跨越慢操作（§10.6）', () => {
   it('摘要生成（慢 LLM）期间，另一个写者能拿到子树锁', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
-    seedRow(STYLE);
+    await seedRow(STYLE);
     // 目录自己：无基线 → 立刻重算，会走 `#summarize`（慢 LLM）。
-    seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
 
     let markEntered!: () => void;
     let markFinished!: () => void;
@@ -608,8 +607,8 @@ describe('锁内不得跨越慢操作（§10.6）', () => {
   it('慢生成期间到达的改动不被吞：pending 归零后再次加回，下一轮再重算', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
-    seedRow(STYLE);
-    seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
+    await seedRow(STYLE);
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 0 });
 
     const slowGenerator: SummaryGenerator = {
       async generate(): Promise<DirectorySummary> {

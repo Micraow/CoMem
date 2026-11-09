@@ -1,7 +1,8 @@
 /**
  * 节点读模型仓储（架构文档 §8.1 的 `node` 表、§6 的路径语义）。
  *
- * 只负责 `node` 表：路径前缀匹配、子节点枚举、批量写入与子树删除。全文索引与
+ * 只负责 `node` 表的读取与状态维护：路径前缀匹配、子节点枚举、访问计数、TTL
+ * 归档与物理删除候选。写入由 `SqliteFtsIndex.upsert` 负责（生产唯一写路径）。全文索引与
  * 物化权限分别在 `retrieval-index.ts` 与 `permission-repository.ts`，它们复用这里的
  * 两个 SQL 片段（`globPrefixPattern` / `placeholders`）——转义规则只能有一份，
  * 否则某个仓储漏转义 `*` 就会在「带星号的目录名」上产生越权候选。
@@ -152,7 +153,7 @@ function integer(value: SQLOutputValue | undefined): number {
 /**
  * 数据库行 → `NodeRow`。
  *
- * 枚举列用 `as` 收窄：写入路径（`upsert`）只接受领域类型，表里出现的值一定是枚举
+ * 枚举列用 `as` 收窄：写入路径（`SqliteFtsIndex.upsert`）只接受领域类型，表里出现的值一定是枚举
  * 成员；这里再写一遍校验只会给每个字段加一个不可能走到的分支。
  */
 function toNodeRow(row: Record<string, SQLOutputValue>): NodeRow {
@@ -188,7 +189,6 @@ export class NodeRepository {
     return row === undefined ? null : toNodeRow(row);
   }
 
-
   descendants(uri: string): readonly NodeRow[] {
     return this.#db
       .prepare(
@@ -198,53 +198,6 @@ export class NodeRepository {
       )
       .all(globPrefixPattern(uri))
       .map(toNodeRow);
-  }
-
-  /**
-   * 批量 upsert，单事务。
-   *
-   * 用 `ON CONFLICT(uri, level) DO UPDATE` 而不是先查后写：重建索引时同一批里可能
-   * 既有新节点又有旧节点，逐条分支会把一次写入变成 N 次读 + N 次写。冲突键是
-   * `(uri, level)`——目录的 L0 行与 L1 行是两个独立的行，写一个不该覆盖另一个。
-   */
-  upsert(rows: readonly NodeRow[]): void {
-    if (rows.length === 0) {
-      return;
-    }
-    withWriteTransaction(this.#db, () => {
-      const statement = this.#db.prepare(
-        `INSERT INTO node (${NODE_COLUMNS}) VALUES (${placeholders(NODE_COLUMN_NAMES.length)})
-         ON CONFLICT(uri, level) DO UPDATE SET
-           parent_uri = excluded.parent_uri,
-           scope = excluded.scope,
-           kind = excluded.kind,
-           context_type = excluded.context_type,
-           memory_type = excluded.memory_type,
-           level = excluded.level,
-           abstract = excluded.abstract,
-           body_digest = excluded.body_digest,
-           size = excluded.size,
-           updated_at = excluded.updated_at,
-           status = excluded.status`,
-      );
-      for (const row of rows) {
-        statement.run(
-          row.uri,
-          row.parentUri,
-          row.scope,
-          row.kind,
-          row.contextType,
-          row.memoryType,
-          row.level,
-          row.abstract,
-          row.bodyDigest,
-          row.size,
-          row.updatedAt,
-          row.status,
-        );
-      }
-    });
-    this.#logger.debug('节点索引写入', { count: rows.length });
   }
 
   /**

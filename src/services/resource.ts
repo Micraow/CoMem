@@ -480,9 +480,16 @@ export class ResourceService {
   }
 
   /**
-   * 清理超时未使用的临时上传。
+   * 清理超过 `olderThanSeconds` 的临时上传。返回删除数量。
    *
-   * 启动扫描与定时任务共用：两者都只需要「比某个年龄更旧的删掉」。返回删除数量。
+   * **判定只看 `stagedAtMs`（`stage()` 写入时记录的毫秒时间戳）。** 没有「正在使用」
+   * 标记：服务端收到 `uploadId` 后到 `addResource` 读取之间，不存在可以查询的租约。
+   * 因此不能「立刻全删干净」——那会把客户端刚拿到、还没引用的上传一起删掉。按年龄
+   * 删除是这里唯一能证明安全的判据：超过阈值还没被引用的上传按废弃处理。
+   *
+   * 阈值由调用方给：生产调用点是 `bootstrap/scheduler.ts` 的调度轮次，取
+   * `STAGED_UPLOAD_MAX_AGE_SECONDS`（24 小时，来源见那个常数）。`_meta/tmp/` 不存在
+   * 时 `listStaged` 返回空数组，这里返回 0，不报错。
    */
   async sweepStaged(olderThanSeconds: number): Promise<number> {
     if (!Number.isFinite(olderThanSeconds) || olderThanSeconds < 0) {

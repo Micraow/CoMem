@@ -23,6 +23,7 @@
 import { pathToFileURL } from 'node:url';
 
 import { startHttpServer } from '../api/http/server.js';
+import type { Logger } from '../domain/log.js';
 
 import { assertDataDirWritable, createContainer } from './container.js';
 
@@ -36,6 +37,39 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 /** 1 秒 = 1000 毫秒；日志里换算成秒更直观。 */
 const MILLISECONDS_PER_SECOND = 1000;
+
+/** 优雅退出时要按序关闭的组件。生产传容器里的实例，测试传替身。 */
+export interface ShutdownTargets {
+  readonly server: { close(): Promise<void> };
+  readonly commitRunner: { stop(): Promise<void> };
+  readonly container: { close(): Promise<void> };
+  readonly logger: Logger;
+}
+
+/**
+ * 关闭序列：停收新请求 → 停在途任务 → 关容器（调度器 / 执行器 / 数据库）→
+ * 记最后一行 → 等日志队列落盘。
+ *
+ * **顺序不能换**：
+ * - 先关 HTTP 再关数据库：反过来的话在途请求会撞上已关闭的连接，错误从「服务
+ *   不可用」变成「内部错误」。
+ * - `flush` 必须是最后一步：前面每一步都可能写日志（停调度器、关数据库），提前
+ *   flush 只能保证那一刻之前的行落盘，后面的照样丢。
+ * - `flush` 之后不再调用 `logger`：那句日志自己也没有落盘机会。
+ *
+ * `flush` 是 `Logger` 的可选方法：`ConsoleLogger` 同步写、`NullLogger` 丢弃，都不
+ * 需要实现它。
+ */
+export async function shutdownGracefully(
+  targets: ShutdownTargets,
+  signal: NodeJS.Signals,
+): Promise<void> {
+  await targets.server.close();
+  await targets.commitRunner.stop();
+  await targets.container.close();
+  targets.logger.info('CoMem 已退出。', { signal });
+  await targets.logger.flush?.();
+}
 
 /**
  * 启动服务，等待退出信号。
@@ -104,16 +138,22 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
         // 先停收新请求（`app.close()`），再停在途提交任务，最后关数据库：反过来的
         // 话在途请求会撞上已关闭的连接，错误从「服务不可用」变成「内部错误」。
         // `container.close()` 里也会 `stop()`，两处都调要幂等（它确实幂等）。
-        await server.close();
-        await container.commitRunner.stop();
-        await container.close();
-        logger.info('CoMem 已退出。', { signal });
+        //
+        // 最后一行日志与 `flush` 在 `shutdownGracefully` 里：flush 之后不再打日志，
+        // 否则那一行会留在写队列里随进程退出丢掉。
+        await shutdownGracefully(
+          { server, commitRunner: container.commitRunner, container, logger },
+          signal,
+        );
         process.exit(0);
       } catch (error) {
         logger.error('关闭失败，强制退出。', {
           signal,
           error: error instanceof Error ? error.message : String(error),
         });
+        // 关闭序列中途失败时也尽力把已排队的日志写出去；失败原因已经记过，这里
+        // 不再覆盖退出码。
+        await logger.flush?.();
         process.exit(1);
       }
     })();

@@ -17,14 +17,12 @@ interface RecordingLogger extends Logger {
 function createLogger(): RecordingLogger {
   const warnings: string[] = [];
   const logger: RecordingLogger = {
-    trace: () => undefined,
     debug: () => undefined,
     info: () => undefined,
     warn: (message) => {
       warnings.push(message);
     },
     error: () => undefined,
-    child: () => logger,
     warnings,
   };
   return logger;

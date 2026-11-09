@@ -39,12 +39,10 @@ function collector(): LineCollector {
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return logger;
 }
@@ -82,7 +80,7 @@ describe('ConsoleLogger', () => {
   it('bindings 出现在每一行，保留键不会被同名字段改写', () => {
     const sink = collector();
     const logger = new ConsoleLogger({
-      level: 'trace',
+      level: 'debug',
       write: sink.write,
       now: () => FIXED_NOW,
       bindings: { service: 'comem' },
@@ -98,26 +96,12 @@ describe('ConsoleLogger', () => {
     expect(second['time']).toBe(FIXED_NOW.toISOString());
   });
 
-  it('child 合并 bindings 而不是覆盖，且不改变父 logger', () => {
-    const sink = collector();
-    const logger = new ConsoleLogger({ level: 'info', write: sink.write, now: () => FIXED_NOW });
-
-    logger.child({ a: 1 }).child({ b: 2 }).info('合并');
-    logger.info('父');
-
-    expect(parseLast([sink.lines[0] ?? ''])).toMatchObject({ a: 1, b: 2 });
-    const parentLine = parseLast(sink.lines);
-    expect(parentLine).not.toHaveProperty('a');
-    expect(parentLine).not.toHaveProperty('b');
-  });
-
   it('级别以下的调用不产生输出，也不做序列化（热路径）', () => {
     const sink = collector();
     const logger = new ConsoleLogger({ level: 'warn', write: sink.write, now: () => FIXED_NOW });
     const stringify = vi.spyOn(JSON, 'stringify');
 
     try {
-      logger.trace('t');
       logger.debug('d');
       logger.info('i');
       expect(sink.lines).toHaveLength(0);
@@ -157,19 +141,17 @@ describe('ConsoleLogger', () => {
 });
 
 describe('NullLogger', () => {
-  it('丢弃一切日志，child 返回自己', () => {
+  it('丢弃一切日志', () => {
     // 按接口使用：`NullLogger` 的方法不声明参数（没有可用的东西），调用方一律看
     // `Logger` 接口，否则会以为它连参数都不收。
     const logger: Logger = new NullLogger();
 
     expect(() => {
-      logger.trace('t');
       logger.debug('d');
       logger.info('i');
       logger.warn('w');
       logger.error('e', { requestId: 'req_1' });
     }).not.toThrow();
-    expect(logger.child({ requestId: 'req_1' })).toBe(logger);
   });
 });
 
@@ -240,19 +222,5 @@ describe('FileLogger', () => {
       expect.stringContaining('失败'),
       expect.objectContaining({ filePath }),
     );
-  });
-
-  it('child 的 bindings 进文件行，且父 logger 的 flush 能等到它', async () => {
-    const dir = await tempDir();
-    const filePath = join(dir, 'error.log');
-    const logger = new FileLogger({ inner: new NullLogger(), filePath });
-
-    logger.child({ requestId: 'req_2' }).child({ op: 'summary.generate' }).error('x');
-    await logger.flush();
-
-    const content = await readFile(filePath, 'utf8');
-    expect(content).toContain('"requestId":"req_2"');
-    expect(content).toContain('"op":"summary.generate"');
-    expect(content).toContain('"level":"error"');
   });
 });

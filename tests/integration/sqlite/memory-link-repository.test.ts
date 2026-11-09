@@ -14,12 +14,10 @@ let repository: MemoryLinkRepository;
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return logger;
 }

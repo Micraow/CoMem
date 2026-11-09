@@ -41,9 +41,6 @@ class MemoryLedgerStore implements LedgerStore {
 class RecordingLogger implements Logger {
   readonly warnings: string[] = [];
 
-  trace(): void {
-    // 测试里不记录。
-  }
   debug(): void {
     // 测试里不记录。
   }
@@ -55,9 +52,6 @@ class RecordingLogger implements Logger {
   }
   error(): void {
     // 测试里不记录。
-  }
-  child(): Logger {
-    return this;
   }
 }
 

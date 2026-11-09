@@ -21,12 +21,10 @@ async function seed(rows: readonly NodeRow[]): Promise<void> {
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return logger;
 }
@@ -57,11 +55,6 @@ function uris(rows: readonly NodeRow[]): string[] {
   return rows.map((item) => item.uri);
 }
 
-/** `node` 表的物理行数（目录的 L0/L1 是两行）。 */
-function total(): number {
-  return Number(db.prepare('SELECT COUNT(*) AS total FROM node').get()?.['total'] ?? 0);
-}
-
 function urisOf(stats: readonly NodeAccessStats[]): string[] {
   return stats.map((item) => item.uri);
 }
@@ -77,55 +70,9 @@ afterEach(() => {
   db.close();
 });
 
-describe('upsert / get', () => {
-  it('写入后按 uri 读回全部字段', () => {
-    const input = row('comem://user/alice/mem/design.md', {
-      contextType: 'memory',
-      memoryType: 'entities',
-      level: 'L1',
-      abstract: '数据库设计',
-      bodyDigest: 'abcdef0123456789',
-      size: 42,
-      status: 'pending',
-    });
-
-    repository.upsert([input]);
-
-    expect(repository.get(input.uri)).toEqual(input);
-  });
-
-  it('同一 URI 写两次是覆盖，不是插入', () => {
-    repository.upsert([row('comem://user/alice/a.md', { abstract: '第一版' })]);
-    repository.upsert([row('comem://user/alice/a.md', { abstract: '第二版', status: 'archived' })]);
-
-    expect(total()).toBe(1);
-    expect(repository.get('comem://user/alice/a.md')).toMatchObject({
-      abstract: '第二版',
-      status: 'archived',
-    });
-  });
-
-  it('空数组是合法的空操作', () => {
-    repository.upsert([]);
-
-    expect(total()).toBe(0);
-  });
-
+describe('get', () => {
   it('不存在的 URI 返回 null', () => {
     expect(repository.get('comem://user/alice/missing.md')).toBeNull();
-  });
-
-  it('批量写入在一个事务里：中途失败整批回滚', () => {
-    // `level` 是 NOT NULL 列。故意传 null 让第二条写入失败，验证第一条也被回滚。
-    const failing = row('comem://user/alice/b.md', {
-      level: null as unknown as NodeRow['level'],
-    });
-
-    expect(() => {
-      repository.upsert([row('comem://user/alice/a.md'), failing]);
-    }).toThrow();
-
-    expect(total()).toBe(0);
   });
 });
 

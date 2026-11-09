@@ -417,7 +417,7 @@ const configObjectSchema = z.object({
 
   logging: z
     .object({
-      level: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+      level: z.enum(['debug', 'info', 'warn', 'error', 'fatal']).default('info'),
       /** 留空只写 stdout；填路径则额外写 error.log */
       file: z.string().default(''),
     })

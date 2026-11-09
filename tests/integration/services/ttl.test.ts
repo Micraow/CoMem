@@ -105,18 +105,19 @@ function createSearch(hotnessWeight: number): SearchService {
 
 function createLogger(): Logger {
   const mock: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => mock,
   };
   return mock;
 }
 
-/** 写入一行节点。过期判据由 `updated_at` / `last_accessed_at` 决定，不存绝对时刻。 */
-function insertNode(uri: string, overrides: Partial<NodeRow> = {}): void {
+/**
+ * 写入一行节点（走生产写路径 `SqliteFtsIndex.upsert`）。过期判据由 `updated_at` /
+ * `last_accessed_at` 决定，不存绝对时刻。
+ */
+async function insertNode(uri: string, overrides: Partial<NodeRow> = {}): Promise<void> {
   const row: NodeRow = {
     uri,
     parentUri: PREFERENCES,
@@ -132,14 +133,14 @@ function insertNode(uri: string, overrides: Partial<NodeRow> = {}): void {
     status: 'active',
     ...overrides,
   };
-  nodes.upsert([row]);
+  await fts.upsert([{ ...row, content: '' }]);
 }
 
 /** 在磁盘上写一个真实文件并给它建索引行，模拟一条「被 TTL 管理的记忆」。 */
 async function createMemoryFile(uri: string): Promise<void> {
   const parsed = Uri.parse(uri);
   await store.writeBytes(parsed, Uint8Array.from(Buffer.from('# 记忆正文\n', 'utf8')));
-  insertNode(uri);
+  await insertNode(uri);
 }
 
 function createTtl(options: { readonly ttlDays: number; readonly retentionDays?: number }): TtlService {
@@ -217,8 +218,8 @@ afterEach(async () => {
 
 describe('sweep 第一段：滑动窗口归档', () => {
   it('从未被访问过的记忆：按 updated_at 起算，超出窗口归档', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
-    insertNode(FRESH, { updatedAt: daysAgo(TTL_DAYS - 1) });
+    await insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
+    await insertNode(FRESH, { updatedAt: daysAgo(TTL_DAYS - 1) });
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
 
@@ -227,8 +228,8 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('窗口内被访问过：不归档（两条写入时间相同，只有被访问的那条活下来）', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(100) });
-    insertNode(COLD, { updatedAt: daysAgo(100) });
+    await insertNode(OLD, { updatedAt: daysAgo(100) });
+    await insertNode(COLD, { updatedAt: daysAgo(100) });
     // 100 天前写入，但 2 天前被检索命中过：窗口从访问时刻重新起算。
     nodes.recordAccess([OLD], atDaysAgo(2));
 
@@ -322,7 +323,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('访问时刻早于内容更新时间：从内容更新时间起算（取最大值，不是「有访问就用访问」）', async () => {
-    insertNode(FRESH, { updatedAt: daysAgo(2) });
+    await insertNode(FRESH, { updatedAt: daysAgo(2) });
     nodes.recordAccess([FRESH], atDaysAgo(100));
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
@@ -338,7 +339,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
       rules: 'comem://user/alice/memories/rules/license-review/must-locate-license.md',
     };
     for (const [memoryType, uri] of Object.entries(uris)) {
-      insertNode(uri, { memoryType, updatedAt: daysAgo(3650) });
+      await insertNode(uri, { memoryType, updatedAt: daysAgo(3650) });
     }
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
@@ -350,7 +351,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
 
   it('events 在同样条件下会归档（豁免只覆盖四类稳定身份与约束）', async () => {
     const event = 'comem://user/alice/memories/events/2025-01-01-decision.md';
-    insertNode(event, { memoryType: 'events', level: 'L2', updatedAt: daysAgo(3650) });
+    await insertNode(event, { memoryType: 'events', level: 'L2', updatedAt: daysAgo(3650) });
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
 
@@ -358,7 +359,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('memory_type 为 NULL 的记忆行按普通记忆处理（豁免名单只认那四类）', async () => {
-    insertNode(OLD, { memoryType: null, updatedAt: daysAgo(3650) });
+    await insertNode(OLD, { memoryType: null, updatedAt: daysAgo(3650) });
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
 
@@ -367,7 +368,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
 
   it('resources 不参与记忆 TTL（context_type 不是 memory）', async () => {
     const resource = 'comem://user/alice/resources/spec.md';
-    insertNode(resource, {
+    await insertNode(resource, {
       parentUri: 'comem://user/alice/resources',
       contextType: 'resource',
       memoryType: null,
@@ -380,8 +381,8 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('defaultDays = 0（默认）时一条都不归档，再老的记忆也留着', async () => {
-    insertNode(OLD, { memoryType: 'experiences', updatedAt: daysAgo(3650) });
-    insertNode(COLD, { memoryType: 'events', updatedAt: daysAgo(3650) });
+    await insertNode(OLD, { memoryType: 'experiences', updatedAt: daysAgo(3650) });
+    await insertNode(COLD, { memoryType: 'events', updatedAt: daysAgo(3650) });
 
     await expect(createTtl({ ttlDays: 0 }).sweep()).resolves.toEqual({ expired: 0, purged: 0 });
 
@@ -390,7 +391,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('软过期：retentionDays=0 时节点行还在（不删除），只是 status 变了', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
+    await insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
 
     await ttl.sweep();
 
@@ -399,7 +400,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('归档时写 archived_at（= 清扫时刻），不动 updated_at', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
+    await insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
     const beforeUpdated = db.prepare('SELECT updated_at FROM node WHERE uri = ?').get(OLD);
 
     await ttl.sweep();
@@ -409,7 +410,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('不动 node_permission：归档节点仍要能按权限查到', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
+    await insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
     db.prepare(
       'INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)',
     ).run(OLD, 'user:alice', 1);
@@ -421,7 +422,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
   });
 
   it('幂等：重复清扫不重复计数', async () => {
-    insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
+    await insertNode(OLD, { updatedAt: daysAgo(TTL_DAYS + 1) });
 
     await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
     await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
@@ -432,7 +433,7 @@ describe('sweep 第一段：滑动窗口归档', () => {
     const uris = [0, 1, 2].map((index) => `comem://user/alice/memories/events/e${String(index)}.md`);
     for (const [index, uri] of uris.entries()) {
       // e0 最久没用（40 天），e2 最接近窗口边界（31 天）。
-      insertNode(uri, { memoryType: 'events', updatedAt: daysAgo(40 - index) });
+      await insertNode(uri, { memoryType: 'events', updatedAt: daysAgo(40 - index) });
     }
 
     await expect(ttl.sweep({ limit: 2 })).resolves.toEqual({ expired: 2, purged: 0 });
@@ -503,7 +504,7 @@ describe('sweep 第二段：归档超保留期物理删除', () => {
 
   it('只删叶子文档：目录节点不入选（即便它 archived 且超期）', async () => {
     // 目录行存在但磁盘上没有子项；它不该被删除逻辑盯上。
-    insertNode('comem://user/alice/memories/old', {
+    await insertNode('comem://user/alice/memories/old', {
       kind: 'directory',
       memoryType: null,
       level: 'L0',

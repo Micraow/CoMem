@@ -16,6 +16,7 @@ import {
   ObservabilityService,
   type HookOverheadReport,
   type ObservabilityServiceDeps,
+  type RequestLogEntry,
 } from '../../../src/services/observability.js';
 
 const NOW = new Date('2026-11-08T00:00:00.000Z');
@@ -29,9 +30,6 @@ const ACTIVE = `${DOCS}/active.md`;
 
 /** §17.2 的四个阻塞阶段。 */
 const BLOCKING = ['processStart', 'recall', 'serialize', 'capture'] as const;
-/** §17.2 的后台阶段。 */
-const ASYNC = ['archive', 'extract', 'merge', 'summary'] as const;
-
 let dataDir: string;
 let db: DatabaseSync;
 let logger: Logger;
@@ -45,14 +43,38 @@ function requestRows(): number {
   return Number(db.prepare('SELECT COUNT(*) AS total FROM request_log').get()?.['total'] ?? 0);
 }
 
+/** 一次请求的默认入参；只覆盖用例关心的字段。 */
+function requestEntry(
+  requestId: string,
+  overrides: Partial<Omit<RequestLogEntry, 'requestId'>> = {},
+): RequestLogEntry {
+  return {
+    requestId,
+    method: 'GET',
+    path: '/health',
+    statusCode: 200,
+    durationMs: 1,
+    errorCode: null,
+    subject: null,
+    ...overrides,
+  };
+}
+
+/** `request_log.phases` 反序列化；没有这一行或 NULL 时返回 `null`。 */
+function phasesOf(requestId: string): Record<string, number> | null {
+  const raw = db.prepare('SELECT phases FROM request_log WHERE request_id = ?').get(requestId)?.['phases'];
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  return JSON.parse(raw) as Record<string, number>;
+}
+
 function createLogger(): Logger {
   const mock: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => mock,
   };
   return mock;
 }
@@ -156,22 +178,21 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
   return service.withRequestScope(fn);
 }
 
-describe('phase / attribute', () => {
-  it('同名阶段累加，accountedMs 等于阶段之和', async () => {
-    const report = await inScope(async () => {
+describe('phase / 归因（通过 recordRequest 观察）', () => {
+  it('同名阶段累加：request_log.phases 是两条 recall 之和', async () => {
+    await inScope(async () => {
       await service.phase('recall', async () => {
         await sleep(5);
       });
       await service.phase('recall', async () => {
         await sleep(1);
       });
-      return service.attribute('req_1');
+      await service.recordRequest(requestEntry('req_1', { durationMs: 104 }));
     });
 
-    expect(report.requestId).toBe('req_1');
-    expect(report.phases['recall']).toBeGreaterThanOrEqual(5);
-    expect(report.accountedMs).toBe(report.phases['recall'] ?? 0);
-    expect(report.totalMs).toBe(report.accountedMs);
+    const phases = phasesOf('req_1');
+    expect(phases?.['recall']).toBeGreaterThanOrEqual(6);
+    // 总耗时 104ms 大于阶段之和：差额是未归因间隙，不是错误信号。
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -194,26 +215,21 @@ describe('phase / attribute', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
-  it('阶段之和不超过测量总耗时，差额是未归因间隙（§20 的验收点）', async () => {
-    const report = await inScope(async () => {
+  it('阶段之和不超过测量总耗时时不告警（§20 的验收点）', async () => {
+    await inScope(async () => {
       for (const name of BLOCKING) {
         await service.phase(name, async () => {
           await sleep(1);
         });
       }
-      // 外部量到的总耗时比阶段之和多 7ms：身份解析、路由、响应编码没有计时。
-      const accounted = service.attribute('req_2').accountedMs;
-      return service.attribute('req_2', accounted + 7);
+      // 外部量到的总耗时远大于阶段之和：身份解析、路由、响应编码没有计时。
+      await service.recordRequest(requestEntry('req_2', { durationMs: 1000 }));
     });
-    const sum = BLOCKING.reduce((total, name) => total + (report.phases[name] ?? 0), 0);
 
-    expect(report.accountedMs).toBe(sum);
-    expect(report.totalMs).toBeCloseTo(sum + 7, 6);
-    expect(report.unattributedMs).toBeCloseTo(7, 6);
-    expect(sum).toBeLessThanOrEqual(report.totalMs);
-    expect(report.blockingMs).toBe(sum);
-    expect(report.asyncMs).toBe(0);
-    // 间隙是正常的，不是「有阶段没计时」的错误信号。
+    const phases = phasesOf('req_2');
+    const sum = BLOCKING.reduce((total, name) => total + (phases?.[name] ?? 0), 0);
+    expect(sum).toBeGreaterThan(0);
+    expect(sum).toBeLessThanOrEqual(1000);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -222,41 +238,38 @@ describe('phase / attribute', () => {
       await service.phase('recall', async () => {
         await sleep(2);
       });
-      const accounted = service.attribute('req_3').accountedMs;
-      expect(accounted).toBeGreaterThan(1);
-
-      // 容差以内不记：0.4ms 的偏差是浮点计时的正常范围。
-      service.attribute('req_4', accounted - 0.4);
-      expect(logger.warn).not.toHaveBeenCalled();
-
-      // 总耗时不到阶段之和的一半：同一段被套了两层 `phase()`，或者读到的是别的请求的账。
-      const report = service.attribute('req_5', accounted / 3);
-      expect(report.unattributedMs).toBe(0);
-      expect(logger.warn).toHaveBeenCalledTimes(1);
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('超过请求总耗时'),
-        expect.objectContaining({ requestId: 'req_5' }),
-      );
+      // 总耗时 0ms，阶段之和 ≥2ms：同一段被套了两层 `phase()`，或者读到的是别
+      // 的请求的账。观测代码不该让请求失败，所以只记 warn。
+      await service.recordRequest(requestEntry('req_3', { durationMs: 0 }));
     });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('超过请求总耗时'),
+      expect.objectContaining({ requestId: 'req_3' }),
+    );
   });
 
-  it('阻塞与异步分开统计（§17.2 的表格）', async () => {
-    const report = await inScope(async () => {
-      for (const name of [...BLOCKING, ...ASYNC]) {
-        await service.phase(name, async () => {
-          await sleep(1);
-        });
-      }
-      return service.attribute('req_5');
+  it('后台阶段只在进程级记账，不写进请求的 phases', async () => {
+    // `archive` 不在请求作用域里也不 warn；它是进程级 gauge（§17.2 的后台阶段）。
+    await service.phase('archive', async () => {
+      await sleep(1);
     });
-    const blocking = BLOCKING.reduce((total, name) => total + (report.phases[name] ?? 0), 0);
-    const asyncMs = ASYNC.reduce((total, name) => total + (report.phases[name] ?? 0), 0);
+    await inScope(async () => {
+      await service.phase('recall', async () => {
+        await sleep(1);
+      });
+      await service.recordRequest(requestEntry('req_async', { durationMs: 100 }));
+    });
 
-    expect(report.blockingMs).toBe(blocking);
-    expect(report.asyncMs).toBe(asyncMs);
-    expect(report.blockingMs).toBeGreaterThan(0);
-    expect(report.asyncMs).toBeGreaterThan(0);
-    expect(report.blockingMs + report.asyncMs).toBe(report.accountedMs);
+    expect(Object.keys(phasesOf('req_async') ?? {})).toEqual(['recall']);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('attribute 是内部实现，不出现在公开面', () => {
+    // 它只服务同类 `recordRequest`；留在原型上会诱使调用方绕过 `request_log`
+    // 直接读阶段账，而那个账在请求结束时已经随作用域丢弃。
+    expect(Object.getOwnPropertyNames(ObservabilityService.prototype)).not.toContain('attribute');
   });
 });
 
@@ -373,7 +386,7 @@ describe('recordRequest', () => {
 
   it('并发请求的阶段不互相污染', async () => {
     // 实例字段版本会让 A 的 recall 记到 B 的账上，recordRequest 还会清掉 A 没写完
-    // 的阶段。归因报告是「这一轮花了多少」的唯一证据，混了就没有意义。
+    // 的阶段。`request_log.phases` 是「这一轮花了多少」的唯一证据，混了就没有意义。
     await Promise.all([
       inScope(async () => {
         await service.phase('recall', async () => {
@@ -387,23 +400,23 @@ describe('recordRequest', () => {
       }),
     ]);
 
-    const [first, second] = await Promise.all([
+    await Promise.all([
       inScope(async () => {
         await service.phase('recall', async () => {
           await sleep(2);
         });
-        return service.attribute('req_a');
+        await service.recordRequest(requestEntry('req_a', { durationMs: 100 }));
       }),
       inScope(async () => {
         await service.phase('capture', async () => {
           await sleep(2);
         });
-        return service.attribute('req_b');
+        await service.recordRequest(requestEntry('req_b', { durationMs: 100 }));
       }),
     ]);
 
-    expect(Object.keys(first.phases)).toEqual(['recall']);
-    expect(Object.keys(second.phases)).toEqual(['capture']);
+    expect(Object.keys(phasesOf('req_a') ?? {})).toEqual(['recall']);
+    expect(Object.keys(phasesOf('req_b') ?? {})).toEqual(['capture']);
   });
 
   it('采样率 0 时成功请求不落库，错误请求永远全量', async () => {

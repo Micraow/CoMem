@@ -20,7 +20,7 @@
  *
  * ## 2. 阶段之和不超过总耗时（§20 的验收点）
  *
- * `attribute()` 把阶段累加值与测量总耗时对比：**差额（`unattributedMs`）是正常的**，
+ * `#attribute()` 把阶段累加值与测量总耗时对比：**差额（`unattributedMs`）是正常的**，
  * 它覆盖身份解析、路由、请求体解析、响应编码这些没有被计时的部分。只有阶段之和
  * **超过**总耗时（`ATTRIBUTION_TOLERANCE_MS` 之外）才记 `warn`——那说明同一段被记了
  * 两次，或者这些阶段不是这次请求的。**不抛错**：观测代码不该让请求失败（§19「错误
@@ -110,7 +110,7 @@ const BLOCKING_PHASES: readonly string[] = ['processStart', 'recall', 'serialize
 const ASYNC_PHASES: readonly string[] = ['archive', 'extract', 'merge', 'summary'];
 
 /**
- * `attribute()` 的容差：0.5ms。
+ * `#attribute()` 的容差：0.5ms。
  *
  * 它只用来判断「阶段之和是否**超过**总耗时」——超过说明同一段被 `phase()` 套了两层，
  * 不是未归因间隙。半毫秒是浮点计时（`performance.now()` 的微秒分辨率 + 阶段边界）
@@ -455,7 +455,7 @@ export class ObservabilityService {
    * 解析、响应编码都不计时（见文件头 2.1 的表格）。所以这里只在阶段之和**超过**总耗时
    * 时记 `warn`——那是重复计时，不是间隙。
    */
-  attribute(requestId: string, measuredTotalMs?: number): LatencyAttribution {
+  #attribute(requestId: string, measuredTotalMs?: number): LatencyAttribution {
     const phases: Record<string, number> = {};
     let accountedMs = 0;
     for (const [name, elapsed] of this.#scope.getStore() ?? new Map<string, number>()) {
@@ -499,10 +499,10 @@ export class ObservabilityService {
     }
 
     // 作用域随请求结束一起被丢弃，不需要（也不能）在这里清空——清空会抹掉同进程
-    // 里另一个正在跑的请求的阶段。归因顺手在这里跑一次：`attribute()` 的超额检查
+    // 里另一个正在跑的请求的阶段。归因顺手在这里跑一次：`#attribute()` 的超额检查
     // 只有在真实请求上才有意义，悬空的方法永远发现不了重复计时。空 Map 写 NULL
     // （§17.6：没有计时时为 NULL）。
-    const attribution = this.attribute(entry.requestId, entry.durationMs);
+    const attribution = this.#attribute(entry.requestId, entry.durationMs);
     const phases = Object.keys(attribution.phases).length === 0 ? null : attribution.phases;
 
     if (!this.#policy.enabled) {

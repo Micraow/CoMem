@@ -189,10 +189,11 @@ export interface Container {
    */
   readonly commitRunner: CommitRunner;
   /**
-   * 后台调度器（§10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL）。
+   * 后台调度器（§10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL、`_meta/tmp/`
+   * 的临时上传清理）。
    *
    * 三个配置全关时**不启动定时器**（`createContainer` 里判断）——空转的 30 秒定时器
-   * 是纯浪费。`close()` 里先停它再关数据库：它会写 `.meta.json`、建任务。
+   * 是纯浪费。`close()` 里先停它再关数据库：它会写 `.meta.json`、建任务、删临时上传。
    */
   readonly scheduler: Scheduler;
   readonly services: ContainerServices;
@@ -1147,6 +1148,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     dataDir,
     sessions: session,
     ttl,
+    staged: resource,
     reconcile,
     memories: { read: (uri) => memory.read(uri) },
     expiry: {
@@ -1162,6 +1164,11 @@ async function ensureUserNamespace(userId: string): Promise<void> {
   // `retentionDays > 0` 也算一个开关：两段式里第一段（软归档）与第二段（物理删除）
   // 是独立的，`defaultDays: 0` + `retentionDays: 30` 是「不再新增归档、只回收已有的」
   // 这一种合法配法，漏判它就等于让物理删除永不发生。
+  //
+  // **临时上传清理（`_meta/tmp/`）也挂在调度轮次上，不单独计时。** 因此它跟着
+  // 这里的开关走：三个开关全关时调度器不启动，超时的上传要等下次打开任一开关
+  // （或手工删除）。这是有意的取舍——不为一个低频清理再起一个定时器；这条限制
+  // 需要写进运维文档的「已知限制」。
   const ttlPurgeEnabled = config.memory.ttl.retentionDays > 0;
   const schedulerEnabled =
     config.session.autoCommit.enabled ||

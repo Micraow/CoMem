@@ -57,14 +57,12 @@ interface RecordingLogger extends Logger {
 function createLogger(): RecordingLogger {
   const errors: { message: string; details: unknown }[] = [];
   const logger: RecordingLogger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn((message: string, details: unknown) => {
       errors.push({ message, details });
     }),
-    child: () => logger,
     errors,
   };
   return logger;

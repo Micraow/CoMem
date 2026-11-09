@@ -67,12 +67,10 @@ let authorizer: Authorizer;
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-search-'));
   logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   db = openDatabase(':memory:');
   runMigrations(db);

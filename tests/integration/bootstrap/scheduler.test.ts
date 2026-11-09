@@ -21,6 +21,7 @@ import { createPathLockManager, type PathLockManager } from '../../../src/adapte
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import {
   Scheduler,
@@ -28,6 +29,7 @@ import {
   type ReconcilePort,
   type SchedulerExpiry,
   type SessionAutoCommitPort,
+  type StagedUploadSweepPort,
   type TtlPort,
 } from '../../../src/bootstrap/scheduler.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -77,12 +79,10 @@ let ttl: TtlService;
 
 function createLogger(): Logger {
   const mock: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => mock,
   };
   return mock;
 }
@@ -103,6 +103,7 @@ interface SchedulerHarness {
   readonly scheduler: Scheduler;
   readonly sessions: SessionAutoCommitPort;
   readonly ttlPort: TtlPort;
+  readonly staged: StagedUploadSweepPort;
   readonly memories: PendingMemoryPort;
   readonly reconcile: ReconcilePort;
 }
@@ -112,11 +113,13 @@ function createScheduler(options: {
   readonly expiry?: Partial<SchedulerExpiry>;
   readonly memories?: PendingMemoryPort;
   readonly ttl?: TtlPort;
+  readonly staged?: StagedUploadSweepPort;
   readonly reconcile?: ReconcilePort;
   readonly ttlSweepBatchSize?: number;
 } = {}): SchedulerHarness {
   const sessions = options.sessions ?? createSession();
   const ttlPort = options.ttl ?? ttl;
+  const staged = options.staged ?? { sweepStaged: async () => 0 };
   const memories: PendingMemoryPort = options.memories ?? { read: async () => null };
   const reconcile: ReconcilePort = options.reconcile ?? {
     replay: async () => ({ resolved: 0, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 }),
@@ -126,12 +129,13 @@ function createScheduler(options: {
     dataDir,
     sessions,
     ttl: ttlPort,
+    staged,
     reconcile,
     memories,
     expiry: { ...EXPIRY_OFF, ...options.expiry },
     ttlSweepBatchSize: options.ttlSweepBatchSize ?? 100,
   });
-  return { scheduler, sessions, ttlPort, memories, reconcile };
+  return { scheduler, sessions, ttlPort, staged, memories, reconcile };
 }
 
 function message(id: string, text = '消息正文'): Omit<SessionMessage, 'turn'> {
@@ -458,7 +462,7 @@ describe('会话过期', () => {
 describe('TTL 清扫', () => {
   it('每轮清扫的条数进摘要，节点被软过期', async () => {
     const memory = `${SCOPE}/memories/preferences/code-style.md`;
-    nodes.upsert([
+    await new SqliteFtsIndex({ db, logger }).upsert([
       {
         uri: memory,
         parentUri: `${SCOPE}/memories/preferences`,
@@ -473,6 +477,7 @@ describe('TTL 清扫', () => {
         // 31 天前写入、之后再没被访问：超出 `ttlDays = 30` 的滑动窗口。
         updatedAt: daysAgo(31),
         status: 'active',
+        content: '',
       },
     ]);
 
@@ -501,6 +506,45 @@ describe('TTL 清扫', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('TTL 清扫失败'),
       expect.objectContaining({ error: '数据库被锁' }),
+    );
+  });
+});
+
+describe('临时上传清理', () => {
+  it('每轮清理一次，条数进轮次摘要', async () => {
+    const sweepStaged = vi.fn(async () => 2);
+    const { scheduler, staged } = createScheduler({ staged: { sweepStaged } });
+
+    const result = await scheduler.tick();
+
+    // 86400 秒（24 小时）的来源见 `scheduler.ts` 的 `STAGED_UPLOAD_MAX_AGE_SECONDS`。
+    expect(staged.sweepStaged).toHaveBeenCalledWith(86_400);
+    expect(result).toMatchObject({ stagedSwept: 2 });
+    expect(logger.info).toHaveBeenCalledWith(
+      '调度轮次完成。',
+      expect.objectContaining({ stagedSwept: 2 }),
+    );
+  });
+
+  it('清理失败只记日志，不影响这一轮的其它动作', async () => {
+    const session = createSession({ messageCountThreshold: 0 });
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS);
+    await session.addMessage(sessionUri, message('m1'));
+
+    const { scheduler } = createScheduler({
+      sessions: session,
+      staged: {
+        sweepStaged: async () => {
+          throw new Error('tmp 目录被锁');
+        },
+      },
+    });
+    const result = await scheduler.tick();
+
+    expect(result).toMatchObject({ committed: 1, stagedSwept: 0 });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('临时上传清理失败'),
+      expect.objectContaining({ error: 'tmp 目录被锁' }),
     );
   });
 });

@@ -57,12 +57,10 @@ const ARCHIVE_META: ArchiveMeta = {
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-metadata-'));
   logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   store = new MetadataFileStore({ dataDir, logger });
 });

@@ -60,12 +60,10 @@ let nodes: NodeRepository;
 
 function createLogger(): Logger {
   const created: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => created,
   };
   return created;
 }

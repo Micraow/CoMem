@@ -27,7 +27,6 @@ function createLogger(): RecordingLogger {
   const warnings: string[] = [];
   const errors: string[] = [];
   const logger: RecordingLogger = {
-    trace: () => undefined,
     debug: () => undefined,
     info: () => undefined,
     warn: (message) => {
@@ -36,7 +35,6 @@ function createLogger(): RecordingLogger {
     error: (message) => {
       errors.push(message);
     },
-    child: () => logger,
     warnings,
     errors,
   };

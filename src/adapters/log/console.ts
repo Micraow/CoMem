@@ -13,9 +13,6 @@
  *    传同名字段时以骨架为准——一行日志的级别与时间不能由业务字段改写。
  * 2. **级别过滤不做序列化**（§17.8）。`JSON.stringify` 是热路径的主要成本，级别
  *    不够时连字段合并都不做。测试用 `vi.spyOn(JSON, 'stringify')` 断言这一点。
- * 3. **`child` 合并而不是覆盖**：`parent.child({a}).child({b})` 得到
- *    `{...parentBindings, a, b}`，父 logger 自身不变（§17.7 的 `requestId` 就是这样
- *    一路带到底的）。
  *
  * `level` 是 `config.logging.level` 的全集：配置里允许 `fatal`（§18），而 `Logger`
  * 接口没有 `fatal` 方法，所以设成 `fatal` 时一条也不输出——这是「级别更高」的直接
@@ -24,8 +21,13 @@
 
 import type { LogFields, Logger } from '../../domain/log.js';
 
-/** 日志级别，与架构文档 §18 的 `logging.level` 一致。 */
-export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+/**
+ * 日志级别，与架构文档 §18 的 `logging.level` 一致。
+ *
+ * **没有 `trace`**：`Logger` 上不存在 `trace()` 方法（生产代码零调用），枚举里留着它
+ * 就等于接受一个不产生任何行为的配置值。真要按 trace 级别排查时，先加方法再加级别。
+ */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 /**
  * 级别排序值。只用于比较，不写进日志——日志里的 `level` 是字面量。
@@ -33,7 +35,6 @@ export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
  * 级别」不用改所有数字。
  */
 const LEVEL_RANK: Readonly<Record<LogLevel, number>> = Object.freeze({
-  trace: 10,
   debug: 20,
   info: 30,
   warn: 40,
@@ -56,22 +57,16 @@ function defaultWrite(line: string): void {
 }
 
 export class ConsoleLogger implements Logger {
-  readonly #level: LogLevel;
   readonly #threshold: number;
   readonly #write: (line: string) => void;
   readonly #bindings: LogFields;
   readonly #now: () => Date;
 
   constructor(options: ConsoleLoggerOptions) {
-    this.#level = options.level;
     this.#threshold = LEVEL_RANK[options.level];
     this.#write = options.write ?? defaultWrite;
     this.#bindings = options.bindings ?? {};
     this.#now = options.now ?? (() => new Date());
-  }
-
-  trace(message: string, fields?: LogFields): void {
-    this.#log('trace', message, fields);
   }
 
   debug(message: string, fields?: LogFields): void {
@@ -88,15 +83,6 @@ export class ConsoleLogger implements Logger {
 
   error(message: string, fields?: LogFields): void {
     this.#log('error', message, fields);
-  }
-
-  child(bindings: LogFields): Logger {
-    return new ConsoleLogger({
-      level: this.#level,
-      write: this.#write,
-      bindings: { ...this.#bindings, ...bindings },
-      now: this.#now,
-    });
   }
 
   #log(level: LogLevel, message: string, fields?: LogFields): void {

@@ -56,14 +56,12 @@ function createLogger(): Logger & {
 } {
   const warnCalls: { message: string; fields: Record<string, unknown> | undefined }[] = [];
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: (message, fields) => {
       warnCalls.push({ message, fields });
     },
     error: vi.fn(),
-    child: () => logger,
   };
   return Object.assign(logger, { warnCalls });
 }

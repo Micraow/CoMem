@@ -23,14 +23,12 @@ interface LoggedCall {
 function createLogger(): Logger & { readonly infoCalls: LoggedCall[] } {
   const infoCalls: LoggedCall[] = [];
   const logger: Logger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: (message, fields) => {
       infoCalls.push({ message, fields });
     },
     warn: vi.fn(),
     error: vi.fn(),
-    child: () => logger,
   };
   return Object.assign(logger, { infoCalls });
 }

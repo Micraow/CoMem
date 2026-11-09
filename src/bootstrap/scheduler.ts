@@ -12,21 +12,22 @@
  * 单元测试看不出来：它们直接构造服务再同步 `await`，绕过了「谁在什么时候调它」
  * （`local/notes/decisions.md` 的 W10 一条，同一个结构性盲区）。
  *
- * ## 四个职责
+ * ## 五个职责
  *
  * | 职责 | 判定 | 动作 |
  * |---|---|---|
  * | 自动提交 | `SessionService.shouldAutoCommit`（token / 消息数 / 空闲） | 走**现有的**阶段一 `commitPhase1` |
  * | 会话过期 | `now - 最后活动时间 >= session.expiry.idleTimeoutSeconds` | `archive`（默认）或 `delete` |
  * | TTL 清扫 | `max(updated_at, last_accessed_at) < now - memory.ttl.defaultDays` | `status = 'archived'`（软过期） |
+ * | 临时上传清理 | `stagedAtMs < now - 24 小时` | 删除 `_meta/tmp/` 下的文件与元数据 |
  * | 对账重放 | `_meta/reconcile.log` 里有未解决记录 | 重做 `index` / `permission`，成功后原子清理日志（§10.6） |
  *
  * ## 幂等
  *
- * 四个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
+ * 五个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
  * `commitPhase1` 用路径锁 + 归档序号单调（§10.2），`archive` 对已归档的会话是空操作，
- * `sweep` 的 `status <> 'archived'` 让同一条过期记忆只计数一次，`reconcile` 的索引与权限
- * 物化都是 upsert。间隔与重叠保护是
+ * `sweep` 的 `status <> 'archived'` 让同一条过期记忆只计数一次，`sweepStaged` 删掉的行
+ * 下一轮自然不再出现，`reconcile` 的索引与权限物化都是 upsert。间隔与重叠保护是
  * 「省一次扫描」，不是正确性前提。
  *
  * ## 为什么定时器 `unref`
@@ -67,6 +68,19 @@ import type { CommitPhase1Result, SessionRemoval } from '../services/session.js'
  */
 export const DEFAULT_INTERVAL_MS = 30_000;
 
+/**
+ * `_meta/tmp/` 里临时上传的最长保留时间：24 小时（86400 秒）。
+ *
+ * **来源**：`auth.sessionTtlSeconds` 的默认值 86400 秒（一天），该值的文档依据是
+ * 「一天是 agent 长任务跑得完」的窗口。临时上传由一次 agent 工作流产生、在
+ * `addResource` 里被消费；超过一个 agent 长任务的窗口仍没有被引用，就按废弃处理。
+ *
+ * **为什么不直接读配置**：`auth.sessionTtlSeconds` 是登录凭据的有效期，运维为了
+ * 安全把它调到 15 分钟时，不应该让正在等待引用的上传提前失效。这里只借同一个
+ * 时间尺度，不建立配置耦合。
+ */
+const STAGED_UPLOAD_MAX_AGE_SECONDS = 24 * 60 * 60;
+
 /** 秒 → 毫秒。空闲时长按秒配置（§18 的 `session.expiry.idleTimeoutSeconds`）。 */
 const MILLISECONDS_PER_SECOND = 1000;
 
@@ -88,6 +102,7 @@ const SKIPPED_RESULT: SchedulerTickResult = Object.freeze({
   deleted: 0,
   ttlArchived: 0,
   ttlPurged: 0,
+  stagedSwept: 0,
   reconcileResolved: 0,
   reconcileFailed: 0,
   reconcileRemaining: 0,
@@ -112,6 +127,17 @@ export interface SessionAutoCommitPort {
 /** TTL 清扫端口（`TtlService` 的结构子集）。 */
 export interface TtlPort {
   sweep(options?: { readonly limit?: number }): Promise<{ readonly expired: number; readonly purged: number }>;
+}
+
+/**
+ * 临时上传清理端口（`ResourceService` 的结构子集）。
+ *
+ * `_meta/tmp/` 只有写入口时，失败的上传会一直留着。清理挂在调度轮次上，不新建
+ * 定时机制；调度器因三个主开关全关而不启动时，这里也不会跑（见容器里的
+ * `schedulerEnabled`）。
+ */
+export interface StagedUploadSweepPort {
+  sweepStaged(olderThanSeconds: number): Promise<number>;
 }
 
 /**
@@ -150,6 +176,7 @@ export interface SchedulerOptions {
   readonly dataDir: string;
   readonly sessions: SessionAutoCommitPort;
   readonly ttl: TtlPort;
+  readonly staged: StagedUploadSweepPort;
   readonly reconcile: ReconcilePort;
   readonly memories: PendingMemoryPort;
   readonly expiry: SchedulerExpiry;
@@ -173,6 +200,8 @@ export interface SchedulerTickResult {
   readonly ttlArchived: number;
   /** 这一轮被 TTL 物理删除（归档超保留期）的节点数 */
   readonly ttlPurged: number;
+  /** 这一轮清理掉的超时临时上传数（`_meta/tmp/`） */
+  readonly stagedSwept: number;
   /** 这一轮对账重放成功（或目标已不存在）的记录数 */
   readonly reconcileResolved: number;
   /** 这一轮重放失败的记录数，仍留在 `reconcile.log` */
@@ -246,6 +275,7 @@ export class Scheduler {
   readonly #dataDir: string;
   readonly #sessions: SessionAutoCommitPort;
   readonly #ttl: TtlPort;
+  readonly #staged: StagedUploadSweepPort;
   readonly #reconcile: ReconcilePort;
   readonly #memories: PendingMemoryPort;
   readonly #expiry: SchedulerExpiry;
@@ -264,6 +294,7 @@ export class Scheduler {
     this.#dataDir = options.dataDir;
     this.#sessions = options.sessions;
     this.#ttl = options.ttl;
+    this.#staged = options.staged;
     this.#reconcile = options.reconcile;
     this.#memories = options.memories;
     this.#expiry = options.expiry;
@@ -364,6 +395,7 @@ export class Scheduler {
     }
 
     const { archived: ttlArchived, purged: ttlPurged } = await this.#sweepTtl();
+    const stagedSwept = await this.#sweepStaged();
     const reconcile = await this.#replayReconcile();
 
     const result: SchedulerTickResult = {
@@ -374,6 +406,7 @@ export class Scheduler {
       deleted,
       ttlArchived,
       ttlPurged,
+      stagedSwept,
       reconcileResolved: reconcile.resolved,
       reconcileFailed: reconcile.failed,
       reconcileRemaining: reconcile.remaining,
@@ -586,6 +619,22 @@ export class Scheduler {
   }
 
   /**
+   * 清理 `_meta/tmp/` 里超过保留期的临时上传。
+   *
+   * 与 TTL 清扫同样兜底：失败只记 error，下一轮再试；已经完成的会话处理不受影响。
+   * 判定是「上传时间早于截止时刻」，不是「立刻全删」——刚上传、正在被
+   * `addResource` 引用的文件不会被这一轮碰到。
+   */
+  async #sweepStaged(): Promise<number> {
+    try {
+      return await this.#staged.sweepStaged(STAGED_UPLOAD_MAX_AGE_SECONDS);
+    } catch (error) {
+      this.#logger.error('临时上传清理失败，下一轮重试。', { error: errorMessage(error) });
+      return 0;
+    }
+  }
+
+  /**
    * 数据根下所有会话的 URI，按字符串升序。
    *
    * 两层目录：`{user,group}/<rootId>/sessions/<sessionId>`。`rootId` 与 `sessionId`
@@ -656,7 +705,8 @@ export class Scheduler {
    * 每轮的摘要。
    *
    * 空转记 `debug`：30 秒一轮，一天 2880 轮，全打 `info` 会把真正的动作埋掉。有动作
-   * 时（提交了、过期了、清了 TTL、重放了对账记录）记 `info`——那条才是运维要看的。
+   * 时（提交了、过期了、清了 TTL、清了临时上传、重放了对账记录）记 `info`——那条才是
+   * 运维要看的。
    */
   #logRound(result: SchedulerTickResult): void {
     const summary = {
@@ -666,6 +716,7 @@ export class Scheduler {
       deleted: result.deleted,
       ttlArchived: result.ttlArchived,
       ttlPurged: result.ttlPurged,
+      stagedSwept: result.stagedSwept,
       reconcileResolved: result.reconcileResolved,
       reconcileFailed: result.reconcileFailed,
       reconcileRemaining: result.reconcileRemaining,
@@ -675,6 +726,7 @@ export class Scheduler {
         result.expired +
         result.ttlArchived +
         result.ttlPurged +
+        result.stagedSwept +
         result.reconcileResolved +
         result.reconcileFailed ===
       0

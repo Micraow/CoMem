@@ -88,7 +88,6 @@ function createLogger(): RecordingLogger {
   const warnings: string[] = [];
   const errors: string[] = [];
   const logger: RecordingLogger = {
-    trace: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn((message: string) => {
@@ -97,7 +96,6 @@ function createLogger(): RecordingLogger {
     error: vi.fn((message: string) => {
       errors.push(message);
     }),
-    child: () => logger,
     warnings,
     errors,
   };

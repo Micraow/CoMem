@@ -83,12 +83,10 @@ const POLICY: AutoCommitPolicy = {
 
 function createLogger(): Logger {
   const logger: Logger = {
-    trace: () => undefined,
     debug: () => undefined,
     info: () => undefined,
     warn: () => undefined,
     error: () => undefined,
-    child: () => logger,
   };
   return logger;
 }
