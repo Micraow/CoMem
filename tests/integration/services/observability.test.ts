@@ -58,6 +58,8 @@ function createService(overrides: Partial<ObservabilityServiceDeps> = {}): Obser
     db,
     metadata,
     llm,
+    // 默认没有任何画像：健康度里的 profileFormat 全 0，与空库语义一致。
+    profileBodies: { readContent: async () => null },
     logger,
     now: () => NOW,
     ...overrides,
@@ -76,6 +78,8 @@ interface NodeSeed {
   readonly status: 'active' | 'pending' | 'archived';
   readonly updatedAt: string;
   readonly summaryPending?: number;
+  /** `node.memory_type`；普通文档为 `null` */
+  readonly memoryType?: string | null;
 }
 
 function insertNode(seed: NodeSeed): void {
@@ -84,8 +88,16 @@ function insertNode(seed: NodeSeed): void {
     `INSERT INTO node
        (uri, parent_uri, scope, kind, context_type, memory_type, level, abstract,
         body_digest, size, updated_at, status, summary_pending)
-     VALUES (?, ?, 'user', ?, 'memory', NULL, 'L2', NULL, 'digest', 1, ?, ?, ?)`,
-  ).run(seed.uri, parent, seed.kind, seed.updatedAt, seed.status, seed.summaryPending ?? 0);
+     VALUES (?, ?, 'user', ?, 'memory', ?, 'L2', NULL, 'digest', 1, ?, ?, ?)`,
+  ).run(
+    seed.uri,
+    parent,
+    seed.kind,
+    seed.memoryType ?? null,
+    seed.updatedAt,
+    seed.status,
+    seed.summaryPending ?? 0,
+  );
 }
 
 interface TaskSeed {
@@ -420,6 +432,7 @@ describe('health', () => {
       indexNodes: 5,
       // 最老的 pending 是 2026-11-07T22:00:00Z，距今 2 小时。
       oldestPendingAgeSeconds: 2 * 60 * 60,
+      profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
     });
   });
 
@@ -431,6 +444,7 @@ describe('health', () => {
       orphanTasks: 0,
       indexNodes: 0,
       oldestPendingAgeSeconds: null,
+      profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
     });
   });
 
@@ -453,6 +467,80 @@ describe('health', () => {
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('上限'),
       expect.objectContaining({ limit: 1000 }),
+    );
+  });
+});
+
+describe('profileFormatHealth（§11.1）', () => {
+  it('合规与不合规画像分别计数，非画像节点不参与', async () => {
+    insertNode({
+      uri: `${SCOPE_ROOT}/memories/profile`,
+      kind: 'document',
+      status: 'active',
+      updatedAt: NOW.toISOString(),
+      memoryType: 'profile',
+    });
+    insertNode({
+      uri: `${SCOPE_ROOT}/projects/p/memories/profile`,
+      kind: 'document',
+      status: 'active',
+      updatedAt: NOW.toISOString(),
+      memoryType: 'profile',
+    });
+    insertNode({
+      uri: `${SCOPE_ROOT}/memories/preferences/style`,
+      kind: 'document',
+      status: 'active',
+      updatedAt: NOW.toISOString(),
+      memoryType: 'preferences',
+    });
+
+    const bodies = new Map<string, string>([
+      [`${SCOPE_ROOT}/memories/profile`, '- 后端工程师 (as of 2026-11-09)'],
+      [`${SCOPE_ROOT}/projects/p/memories/profile`, '# 标题\n这是一段散文。'],
+    ]);
+    const local = createService({
+      profileBodies: {
+        readContent: async (uri) => bodies.get(uri.toString()) ?? null,
+      },
+    });
+
+    const health = await local.health();
+
+    // 两份画像：一份合规、一份 2 条违规（标题 + 非 bullet）。
+    expect(health.profileFormat).toEqual({
+      checked: 2,
+      invalid: 1,
+      violations: 2,
+      truncated: false,
+    });
+  });
+
+  it('超过 200 份画像时截断，并记 warn 说明上限', async () => {
+    db.exec('BEGIN');
+    for (let index = 0; index <= 200; index += 1) {
+      insertNode({
+        uri: `${SCOPE_ROOT}/scope-${index}/memories/profile`,
+        kind: 'document',
+        status: 'active',
+        updatedAt: NOW.toISOString(),
+        memoryType: 'profile',
+      });
+    }
+    db.exec('COMMIT');
+
+    const local = createService({
+      profileBodies: {
+        readContent: async () => '- 后端工程师 (as of 2026-11-09)',
+      },
+    });
+
+    const format = await local.profileFormatHealth();
+
+    expect(format).toEqual({ checked: 200, invalid: 0, violations: 0, truncated: true });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('上限'),
+      expect.objectContaining({ limit: 200 }),
     );
   });
 });

@@ -33,7 +33,8 @@
  * ## 4. 健康度是诊断端点，不是全库扫描（§17.5）
  *
  * `degradedSummaries` 要读每个目录的 `.abstract.md`，目录数上界 `DEGRADED_DIRECTORY_LIMIT`；
- * 超了记 `warn` 并返回已统计数。
+ * 超了记 `warn` 并返回已统计数。画像格式自查（`profileFormatHealth`）同样要读文件
+ * 正文，上界 `PROFILE_CHECK_LIMIT`，超了 `truncated: true` 并记 `warn`。
  *
  * ## 5. 为什么这里能直接写 SQL
  *
@@ -53,6 +54,7 @@ import type {
   RequestLogRow,
 } from '../adapters/sqlite/request-log-repository.js';
 import type { Logger } from '../domain/log.js';
+import { validateProfileBody } from '../domain/profile-format.js';
 import { Uri } from '../domain/uri.js';
 
 import type { LlmCallStats, LlmService } from './llm.js';
@@ -77,8 +79,12 @@ export interface ObservabilityDatabase {
  * 不复用那个函数：`services/` 只能 `import type` 引用适配层（§4.2），而这个文件
  * 本来就直接对 `node` 表写 SQL（读端口是 `ObservabilityDatabase`）。两处的含义由
  * `0004_node_level_rows.sql` 与 `SummaryService.#persistSummary` 共同约束。
+ *
+ * 导出是给一致性测试用的（`tests/integration/sqlite/node-self-row-consistency.test.ts`）：
+ * 两份谓词必须对同一批 `kind × level` 行判定相同，否则 `health()` / `/metrics` 的
+ * 节点数会把目录的 L1 概览行算进去。导出常量不改变运行期语义。
  */
-const NODE_SELF_ROW = "NOT (kind = 'directory' AND level = 'L1')";
+export const NODE_SELF_ROW = "NOT (kind = 'directory' AND level = 'L1')";
 
 /** §17.2 的四个阻塞阶段。名字与 `phase()` 的调用参数一致。 */
 const BLOCKING_PHASES: readonly string[] = ['processStart', 'recall', 'serialize', 'capture'];
@@ -102,6 +108,17 @@ const ATTRIBUTION_TOLERANCE_MS = 0.5;
  * 1000 个目录约 2000 次读；健康检查是诊断端点，不该因为库大就把请求拖成秒级。
  */
 const DEGRADED_DIRECTORY_LIMIT = 1000;
+
+/**
+ * 一次健康检查最多校验的画像份数：200。
+ *
+ * 画像一个 scope 只有一份，每份一次读，所以 200 份约等于 200 次文件读取。
+ * 来源：经验值，没有实测。§17.5 把健康检查定为诊断端点（500ms 级），200 次
+ * 本地读在这个预算内；画像更多的部署应该用专门的巡检脚本，而不是让 `/health`
+ * 与 `/stats/memories` 把磁盘读穿。达到上限时返回值 `truncated: true` 并记一条
+ * `warn`，**不静默截断**。
+ */
+const PROFILE_CHECK_LIMIT = 200;
 
 /** 1 秒 = 1000 毫秒。`durationMs` 换成 Prometheus 的秒。 */
 const MILLISECONDS_PER_SECOND = 1000;
@@ -177,6 +194,39 @@ export interface MemoryHealth {
   readonly orphanTasks: number;
   readonly indexNodes: number;
   readonly oldestPendingAgeSeconds: number | null;
+  /** 画像格式契约的自查结果（§11.1） */
+  readonly profileFormat: ProfileFormatHealth;
+}
+
+/**
+ * 画像格式契约的自查结果（§11.1）。
+ *
+ * 画像一个 scope 只有一份，代价是「一份文件一次读」，所以可以按 scope 逐个校验。
+ * 与 `pendingReview` 等索引统计不同，它读的是**文件正文**：索引里的
+ * `memory_type` 只说明这是一条画像，说明不了它是否符合格式契约。
+ */
+export interface ProfileFormatHealth {
+  /** 成功读取并校验的画像份数（索引有节点但文件读不到的不算） */
+  readonly checked: number;
+  /** 至少有一条违规的画像份数（不是违规条数） */
+  readonly invalid: number;
+  /** 违规条数合计（一份画像可以有多条） */
+  readonly violations: number;
+  /**
+   * 是否因为上限只检查了一部分。为 `true` 时 `checked` / `invalid` /
+   * `violations` 都是**下界**，不能当成全库结论。
+   */
+  readonly truncated: boolean;
+}
+
+/**
+ * 画像正文读取（§11.1 的格式自查）。
+ *
+ * `services/` 不能读盘（§4.2），由 bootstrap 用 `MemoryService.read` 注入。
+ */
+export interface ProfileBodyReader {
+  /** 返回画像正文；索引里有节点但文件不在时返回 `null`（跳过，不计入 `checked`）。 */
+  readContent(uri: Uri): Promise<string | null>;
 }
 
 /** `recordRequest` 的入参：一次已完成的 HTTP 请求（§17.6）。 */
@@ -215,6 +265,11 @@ export interface ObservabilityServiceDeps {
   readonly metadata: Pick<MetadataFileStore, 'readSummary'>;
   /** §17.4 的模型用量；`LlmService.stats` 是累加器 */
   readonly llm: Pick<LlmService, 'stats'>;
+  /**
+   * 画像正文读取。必须有：缺了它 `/stats/memories` 与 `/health` 会永远报 0 违规，
+   * 「服务端校验画像」就变成假实现。
+   */
+  readonly profileBodies: ProfileBodyReader;
   readonly logger: Logger;
   /**
    * 是否记录 Hook 阻塞开销（`telemetry.hookOverhead.enabled`）。
@@ -268,6 +323,7 @@ export class ObservabilityService {
   readonly #db: ObservabilityDatabase;
   readonly #metadata: Pick<MetadataFileStore, 'readSummary'>;
   readonly #llm: Pick<LlmService, 'stats'>;
+  readonly #profileBodies: ProfileBodyReader;
   readonly #logger: Logger;
   readonly #now: () => Date;
   readonly #policy: RequestLogPolicy;
@@ -323,6 +379,7 @@ export class ObservabilityService {
     this.#db = deps.db;
     this.#metadata = deps.metadata;
     this.#llm = deps.llm;
+    this.#profileBodies = deps.profileBodies;
     this.#logger = deps.logger;
     this.#now = deps.now ?? (() => new Date());
     this.#policy = deps.requestLogPolicy ?? DEFAULT_REQUEST_LOG_POLICY;
@@ -492,6 +549,7 @@ export class ObservabilityService {
     const indexNodes = this.#count(`SELECT COUNT(*) AS total FROM node WHERE ${NODE_SELF_ROW}`);
     const oldestPendingAgeSeconds = this.#oldestPendingAgeSeconds(now);
     const degradedSummaries = await this.#countDegradedSummaries();
+    const profileFormat = await this.profileFormatHealth();
 
     const health: MemoryHealth = {
       pendingReview,
@@ -500,9 +558,75 @@ export class ObservabilityService {
       orphanTasks,
       indexNodes,
       oldestPendingAgeSeconds,
+      profileFormat,
     };
     this.#logger.debug('记忆健康度统计完成。', { ...health });
     return health;
+  }
+
+  /**
+   * 画像格式契约自查（§11.1）。
+   *
+   * 索引里 `memory_type = 'profile'` 的节点就是全部画像（画像单文件类型，一个
+   * scope 一份）。逐个读正文跑 `validateProfileBody`，只统计、不修改文件。
+   *
+   * **独立成公开方法**：`/stats/memories` 只关心画像格式，不应该为了它把
+   * `health()` 的目录摘要读盘（最多 1000 个目录）也跑一遍。`health()` 内部调用
+   * 同一个方法，两条路径的统计口径只有一份。
+   */
+  async profileFormatHealth(): Promise<ProfileFormatHealth> {
+    // 多取一行判断是否还有更多，避免再跑一次 COUNT。
+    const rows = this.#db
+      .prepare(
+        `SELECT uri FROM node
+          WHERE memory_type = 'profile'
+          ORDER BY uri
+          LIMIT ?`,
+      )
+      .all(PROFILE_CHECK_LIMIT + 1);
+
+    const truncated = rows.length > PROFILE_CHECK_LIMIT;
+    if (truncated) {
+      this.#logger.warn('画像格式检查达到上限，只检查了一部分画像。', {
+        limit: PROFILE_CHECK_LIMIT,
+      });
+    }
+
+    let checked = 0;
+    let invalid = 0;
+    let violations = 0;
+    for (const row of rows.slice(0, PROFILE_CHECK_LIMIT)) {
+      const raw = row['uri'];
+      if (typeof raw !== 'string') {
+        continue;
+      }
+      const uri = Uri.tryParse(raw);
+      if (uri === null) {
+        continue;
+      }
+      // 单份画像读失败不能把整个健康检查打成 500：跳过并记一条 warn。
+      let body: string | null;
+      try {
+        body = await this.#profileBodies.readContent(uri);
+      } catch (error) {
+        this.#logger.warn('读取画像正文失败，跳过格式检查。', {
+          uri: raw,
+          error: errorMessage(error),
+        });
+        continue;
+      }
+      if (body === null) {
+        continue;
+      }
+      checked += 1;
+      const found = validateProfileBody(body);
+      if (found.length > 0) {
+        invalid += 1;
+        violations += found.length;
+      }
+    }
+
+    return { checked, invalid, violations, truncated };
   }
 
   /** §17.4 模型用量与成本。返回 `LlmService` 的累加器快照。 */

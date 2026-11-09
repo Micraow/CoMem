@@ -1721,6 +1721,26 @@ export const preferencesMemoryType = {
 
 **格式契约**：正文是一组 bullet（不带小标题），每条以 `(as of YYYY-MM-DD)` 结尾、单条不超过 30 字（日期后缀不算），同一可变状态只留最新值。
 
+**哪些契约由服务端执行，哪些只靠提示词。** `domain/profile-format.ts` 的 `validateProfileBody` 是纯函数，只做字面判定；`MemoryService.upsertMemory` 在写盘成功后调用它。
+
+| 契约条目 | 服务端校验 | 判据 |
+|---|---|---|
+| 不带小标题 | 是 | 非空行以 `#` 开头 → `heading` |
+| 不用代码块 | 是 | 行首 ``` → `code-fence` |
+| 一行一条 bullet | 是 | 不以 `- ` / `* ` 开头 → `not-bullet` |
+| 以 `(as of YYYY-MM-DD)` 结尾 | 是 | 缺后缀 → `missing-date-suffix`。**全角括号同样接受**（`（as of …）`）：中文输入法与中文写作的模型会给出这种形态，它在中文语境下是同一个后缀，判成违规只会让这条 warn 被忽略 |
+| 日期是真实归档日 | 是 | `Date.parse` 成功、年份在 2000–2100、回写后与原文逐字相同 → 否则 `invalid-date-suffix`。回写比对是为了拒绝 `2026-02-30` 这类被 `Date.parse` 归一化成 3 月 2 日的日期 |
+| 单条不超过 30 字 | 是 | 按 Unicode 码点数（不是显示宽度、不是 UTF-16 码元），日期后缀不计入 → `entry-too-long` |
+| 同一可变状态只留最新值 | 否 | 需要判断两条 bullet 是否在说同一个状态，正则做不到 |
+| 陈述事实，不写评价与推断 | 否 | 需要语义判断；硬做会把「用户是后端工程师」这类事实误报 |
+| 收录范围与路由表 | 否 | 需要理解内容属于哪个记忆类型，只能由提示词约束 |
+
+**校验结果是警告，不是拒绝。** 不合规的写入**照常落盘**，只记一条 `warn`：日志带 `scope`（哪个 scope 的画像，如 `comem://user/alice`）、`uri`、`memoryType`、`violationCount` 与去重后的 `rules`，**不带正文**——画像可能含个人信息。丢弃不合规写入比接受更糟：那是把模型抽到的事实直接扔掉，而用户永远不知道。
+
+**为什么按字符数而不是显示宽度。** 契约与成本都以字符/token 计，列宽不参与；东亚宽字符按 2 算会让 15 个汉字就撞线，等于把中文画像的上限砍半，而契约对中英文是同一个 30。`String.length` 数的是 UTF-16 码元（emoji 算 2），所以用 `Array.from` 数码点。组合字符（如国旗 emoji）仍可能算多个码点，这是已知边界。
+
+**健康度自查。** `GET /stats/memories` 的 `profileFormat` 与 `GET /health` 的 `memory.profileFormat` 返回 `{checked, invalid, violations, truncated}`：按索引里 `memory_type = 'profile'` 的节点逐个读正文跑一次校验。`invalid` 是**至少有 1 条违规的画像份数**，`violations` 是违规条数合计。一次最多检查 200 份（`PROFILE_CHECK_LIMIT`，经验值），达到上限时 `truncated: true` 并记一条 `warn`，三个计数都只应读作下界。`GET /stats/memories` 直接调用 `ObservabilityService.profileFormatHealth()`，不重跑 `health()` 的目录摘要读盘。
+
 **超阈值重写。** `memory.profile.maxChars`（默认 800）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
 
 800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。
@@ -2979,9 +2999,12 @@ comem_llm_errors_total{purpose, code}
   "byCategory": { "preferences": 42, "entities": 31, "events": 24, "experiences": 18, "rules": 13 },
   "hotness": { "hot": 12, "warm": 45, "cold": 71 },
   "staleness": { "notAccessed7d": 50, "notAccessed30d": 20, "oldestMemoryAgeDays": 90 },
-  "avgSizeBytes": 1840
+  "avgSizeBytes": 1840,
+  "profileFormat": { "checked": 3, "invalid": 1, "violations": 2, "truncated": false }
 }
 ```
+
+**`profileFormat` 不按身份过滤。** 它回答的是「这个部署有多少份画像写坏了」，与「当前身份能看到多少记忆」是两个问题（后者才是 `total` / `byCategory` / `hotness` 的口径）。画像一个 scope 只有一份，逐个读正文跑 `validateProfileBody`（§11.1）；最多检查 200 份，达到上限时 `truncated: true` 且三个计数都是下界，不静默截断。
 
 **只统计当前身份可见的记忆**（`node_permission` 上 allow 且无 deny 的 `context_type =
 'memory'` 节点，§12.3 的物化表）。全库视角看 `GET /health` 的 `index.totalNodes`——
@@ -3077,6 +3100,7 @@ comem_llm_errors_total{purpose, code}
 | `rerank.failures` | 进程启动以来重排失败的累计次数（间歇性失败看得出来） |
 | `rerank.lastFailure` | 最近一次失败的 `reason` / `durationMs` / `topN`；从未失败时为 `null` |
 | `overhead.p50Ms` | 最近 5 分钟阻塞开销中位数 |
+| `memory.profileFormat` | 仅 `GET /health`：画像格式自查（§11.1），`checked` / `invalid` / `violations` / `truncated`；`truncated` 为真时前三个计数是下界 |
 | `version` | 服务版本 |
 
 **`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。**索引条数是唯一的例外**：`GET /health` 的 `index.totalNodes` 是 `node` 表全量（运维要知道库有多大），MCP `health` 的 `index.visibleNodes` 是权限过滤后当前身份可见的条数（工具不能绕过权限数别人的节点）。两者**不同名**，因为它们是两个不同的问题；同名会让「库有 19 条、我能看到 12 条」被误读成同一个数在漂移。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。

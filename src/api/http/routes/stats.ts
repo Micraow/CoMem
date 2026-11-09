@@ -136,7 +136,7 @@ function stalenessOf(rows: readonly MemoryStatsRow[], now: Date): StalenessRepor
 }
 
 export function createStatsRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { memoryStats, config } = services;
+  const { memoryStats, config, observability } = services;
   // 半衰期：与 `telemetry.hotness.halfLifeHours` 同一个配置项（§17.5）。单位小时，
   // `hotnessScore` 的输入是天。
   const halfLifeDays = config.telemetry.hotness.halfLifeHours / 24;
@@ -163,6 +163,9 @@ export function createStatsRoutes(services: HttpRouteServices): HttpRouteGroup {
         }
 
         const total = rows.length;
+        // 画像格式契约自查（§11.1）。它是**进程级**的诊断量，不是当前身份的可见
+        // 记忆统计：画像一个 scope 一份，违规数是「这个部署有多少份画像写坏了」。
+        const profileFormat = await observability.profileFormatHealth();
         return ok({
           total,
           byCategory: byCategoryOf(rows),
@@ -170,6 +173,7 @@ export function createStatsRoutes(services: HttpRouteServices): HttpRouteGroup {
           staleness: stalenessOf(rows, now),
           // 与 §17.5 示例一致的附带指标：平均大小帮助判断「清理能省多少磁盘」。
           avgSizeBytes: total === 0 ? 0 : Math.round(sizeTotal / total),
+          profileFormat,
         });
       });
     },

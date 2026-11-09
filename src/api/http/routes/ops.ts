@@ -137,6 +137,9 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             pendingReview: health.pendingReview,
             orphanTasks: health.orphanTasks,
             oldestPendingAgeSeconds: health.oldestPendingAgeSeconds,
+            // 画像格式契约自查（§11.1）：`warn` 级、不拒绝写入；`truncated` 为真时
+            // 三个计数都是下界。
+            profileFormat: health.profileFormat,
           },
           version: SERVICE_VERSION,
         });

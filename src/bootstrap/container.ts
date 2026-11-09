@@ -1144,6 +1144,17 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     db,
     metadata,
     llm,
+    // 画像格式自查（§11.1）读正文：索引只说明「这是一条画像」，说明不了格式。
+    profileBodies: {
+      readContent: async (uri) => {
+        const record = await memory.read(uri);
+        if (record === null) {
+          return null;
+        }
+        const content = record.fields['content'];
+        return typeof content === 'string' ? content : '';
+      },
+    },
     logger,
     hookOverheadEnabled: config.telemetry.hookOverhead.enabled,
     includeAccountLabel: config.telemetry.metrics.includeAccountLabel,

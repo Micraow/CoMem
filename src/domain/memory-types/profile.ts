@@ -1,6 +1,14 @@
 import type { MemoryTypeSchema } from '../memory-type.js';
 
 /**
+ * 单条画像正文的字符上限（格式契约「单条不超过 30 字」，日期后缀不算）。
+ *
+ * 导出给 `domain/profile-format.ts` 的校验器：契约数字只在这一处，提示词与
+ * 服务端校验用同一个常量。30 来自 §11.1 的既有格式契约，不是这里新定的。
+ */
+export const PROFILE_ENTRY_MAX_CHARS = 30;
+
+/**
  * 用户画像（架构文档 §11.1、§6.5 的 `memories/profile.md`）。
  *
  * 单文件类型：整个 scope 只有一条，filename 里没有占位符，identity 只作为
@@ -40,7 +48,7 @@ export const profileMemoryType = {
     '**格式契约**：',
     '- 正文是一组 bullet，不带小标题，一条一个事实；',
     '- 每条以 `(as of YYYY-MM-DD)` 结尾，日期用今天；',
-    '- 单条不超过 30 字（日期后缀不算）；',
+    '- 单条不超过 ' + String(PROFILE_ENTRY_MAX_CHARS) + ' 字（日期后缀不算）；',
     '- 同一个可变状态只保留最新值，不留历史：职业变了就替换，不写「之前是 X，现在是 Y」；',
     '- 陈述事实，不写评价与推断。',
     '',

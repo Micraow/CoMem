@@ -59,7 +59,8 @@ import type { PathLockManager } from '../adapters/fs/lock.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { identityFields, renderPath, type MemoryTypeSchema } from '../domain/memory-type.js';
-import { getMemoryType } from '../domain/memory-types/index.js';
+import { getMemoryType, profileMemoryType } from '../domain/memory-types/index.js';
+import { validateProfileBody } from '../domain/profile-format.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
@@ -795,6 +796,13 @@ export class MemoryService {
           created: existing === null,
         });
 
+        // 画像的格式契约（§11.1）能由字面判定的部分在这里执行。**只告警，不拒绝**：
+        // 拒绝或丢弃等于把模型抽到的事实直接扔掉，而且用户永远不知道。日志带
+        // scope / URI / 违规类型与条数，**不带正文**——画像可能含个人信息。
+        if (schema.type === profileMemoryType.type) {
+          this.#warnProfileFormat(scopeUri, target.uri, fields[CONTENT_FIELD]);
+        }
+
         return {
           uri: target.uri,
           memoryType: schema.type,
@@ -952,6 +960,29 @@ export class MemoryService {
       }
     }
     return records;
+  }
+
+  /**
+   * 画像正文不符合格式契约时记一条 warn（§11.1）。
+   *
+   * 调用点在写入成功之后：告警描述的是**已经落盘**的内容，写入失败时不该出现
+   * 「画像不合规」的记录。
+   *
+   * 字段口径：`scope` 是画像所属的 scope 根（同一个 scope 只有一份画像），
+   * `uri` 是具体文件，`rules` 是去重后的违规类型。正文与摘要都不进日志。
+   */
+  #warnProfileFormat(scopeUri: Uri, uri: Uri, content: unknown): void {
+    const violations = validateProfileBody(typeof content === 'string' ? content : '');
+    if (violations.length === 0) {
+      return;
+    }
+    this.#logger.warn('画像正文不符合格式契约，已写入（仅告警）。', {
+      scope: scopeUri.toString(),
+      uri: uri.toString(),
+      memoryType: profileMemoryType.type,
+      violationCount: violations.length,
+      rules: [...new Set(violations.map((violation) => violation.kind))],
+    });
   }
 
   async #readDocument(uri: Uri): Promise<MemoryDocument | null> {
