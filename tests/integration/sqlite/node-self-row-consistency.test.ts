@@ -24,9 +24,12 @@ import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { NodeKind, NodeStatus } from '../../../src/domain/node.js';
+import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import { segmentCjk } from '../../../src/domain/text.js';
 import { LlmService } from '../../../src/services/llm.js';
 import { NODE_SELF_ROW, ObservabilityService } from '../../../src/services/observability.js';
 
@@ -224,5 +227,174 @@ describe('ObservabilityService.health() 与仓储谓词', () => {
         )
         .get(),
     ).toMatchObject({ total: 1 });
+  });
+});
+
+/**
+ * `node_fts.abstract` 的 blank 规则（`adapters/sqlite/retrieval-index.ts` 的
+ * `ftsAbstract`）是「节点自身那一行」的**第三份**实现。
+ *
+ * 前两份谓词（`nodeSelfRowSql()` 与 `services/observability.ts` 的
+ * `NODE_SELF_ROW`）回答「按 URI 读节点 / 计数时哪一行是节点自身」。第三份回答
+ * 「哪一行的 `abstract` 不写摘要」：目录的 L1 概览行与 L0 行的摘要重复（L0 是从
+ * L1 正文里提取的，`domain/summary.ts` 的 `extractAbstract`），两行都写摘要会让
+ * FTS5 把同一处匹配的词频算两遍（`bm25()` 按列累加），概览行仅凭「摘要里出现过」
+ * 就能压过真正的原文命中，层级权重（§8.5 的 1.05）也就失去作用对象。
+ *
+ * 第三份漂移的后果是**静默的**：概览摘要被算两遍词频，排名被概览行压过，而
+ * `tests/integration/sqlite/retrieval-index.test.ts` 发现不了——它只断言 L0 / L1
+ * 都能命中，`abstract` 被 blank 了也照样命中（`content` 才是概览正文）。
+ *
+ * 这里按 `kind × level × 有无摘要` 写入 `node_fts`，读回 `node_fts.abstract`，
+ * 断言「被 blank 的行」与「被 `nodeSelfRowSql()` 排除的行」是同一批。
+ * **比较行为，不比较字符串**：不导出 `ftsAbstract` 的常量，也不断言它的写法；
+ * 判定结果变了才该红。
+ */
+interface FtsMatrixEntry {
+  readonly kind: NodeKind;
+  readonly level: Level;
+  readonly abstract: string | null;
+}
+
+const MATRIX_ABSTRACT = '团队约定';
+const FTS_DIR = `${CASE_DIR}/fts`;
+
+/**
+ * 全部 `kind × level × 有无摘要` 组合。每格一条独立 URI，这样「某一格被 blank 或
+ * 被保留」在集合比较里能直接看出来。
+ *
+ * `document × L1` 当前不该出现（文件只有 L2），放进矩阵是因为它是最容易漂的一格：
+ * 把 blank 条件放宽成「所有 L1」会正好落在这里。
+ */
+const FTS_MATRIX: readonly FtsMatrixEntry[] = (['document', 'directory'] as const).flatMap(
+  (kind) =>
+    (['L0', 'L1', 'L2'] as const).flatMap((level) =>
+      [MATRIX_ABSTRACT, null].map((abstract) => ({ kind, level, abstract })),
+    ),
+);
+
+function ftsUri(entry: FtsMatrixEntry): string {
+  const suffix = entry.abstract === null ? 'no-abstract' : 'abstract';
+  return `${FTS_DIR}/${entry.kind}-${entry.level}-${suffix}`;
+}
+
+function ftsRecord(uri: string, entry: FtsMatrixEntry): IndexRecord {
+  return {
+    uri,
+    parentUri: FTS_DIR,
+    scope: 'user',
+    kind: entry.kind,
+    contextType: entry.kind === 'directory' ? 'resource' : 'memory',
+    memoryType: entry.kind === 'document' ? 'preferences' : null,
+    level: entry.level,
+    abstract: entry.abstract,
+    content: '正文内容',
+    bodyDigest: 'digest',
+    size: 4,
+    updatedAt: NOW.toISOString(),
+    status: 'active',
+  };
+}
+
+interface FtsRow {
+  readonly uri: string;
+  readonly level: string;
+  readonly abstract: string;
+}
+
+function ftsRows(): FtsRow[] {
+  return db
+    .prepare('SELECT uri, level, abstract FROM node_fts ORDER BY uri, level')
+    .all()
+    .map((row) => ({
+      uri: String(row['uri']),
+      level: String(row['level']),
+      abstract: row['abstract'] === null ? '' : String(row['abstract']),
+    }));
+}
+
+describe('node_fts 的 blank 规则与「节点自身那一行」谓词', () => {
+  it('矩阵下被 blank 的摘要行集合与被 nodeSelfRowSql() 排除的行集合相同', async () => {
+    const index = new SqliteFtsIndex({ db, logger });
+    await index.upsert(FTS_MATRIX.map((entry) => ftsRecord(ftsUri(entry), entry)));
+
+    const rows = ftsRows();
+    expect(rows).toHaveLength(FTS_MATRIX.length);
+
+    const entryByUri = new Map(FTS_MATRIX.map((entry) => [ftsUri(entry), entry]));
+    const withAbstract = new Set(
+      FTS_MATRIX.filter((entry) => entry.abstract !== null).map((entry) => ftsUri(entry)),
+    );
+    const excluded = db
+      .prepare(`SELECT uri FROM node WHERE NOT (${nodeSelfRowSql()}) ORDER BY uri`)
+      .all()
+      .map((row) => String(row['uri']));
+
+    // 「被谓词排除」= 目录的 L1 概览行：矩阵里两条（有摘要 / 无摘要）都在里面。
+    expect(excluded).toEqual([
+      ftsUri({ kind: 'directory', level: 'L1', abstract: MATRIX_ABSTRACT }),
+      ftsUri({ kind: 'directory', level: 'L1', abstract: null }),
+    ]);
+
+    // 没有摘要的行输出本来就是空串，判定不了 blank 规则（它证明不了什么，也不能
+    // 当成「被 blank」）。集合比较只看输入带摘要的那一半。
+    const excludedWithAbstract = excluded.filter((uri) => withAbstract.has(uri));
+    const blankedWithAbstract = rows
+      .filter((row) => withAbstract.has(row.uri) && row.abstract === '')
+      .map((row) => row.uri)
+      .sort();
+    expect(excludedWithAbstract).toEqual([
+      ftsUri({ kind: 'directory', level: 'L1', abstract: MATRIX_ABSTRACT }),
+    ]);
+    expect(blankedWithAbstract).toEqual(excludedWithAbstract);
+
+    // 完整口径：一行是空串，要么输入本来就没有摘要，要么它被谓词排除了。这条把
+    // 「哪些行被 blank」说全，也挡住「额外的行被 blank」（比如文件行的 L1）。
+    const noAbstractUris = FTS_MATRIX.filter((entry) => entry.abstract === null).map(ftsUri);
+    const blanked = rows.filter((row) => row.abstract === '').map((row) => row.uri);
+    expect(blanked.sort()).toEqual([...new Set([...excluded, ...noAbstractUris])].sort());
+
+    // 保留摘要的行写的是切分后的摘要本身，不是空串，也不是别的列。
+    for (const row of rows) {
+      const entry = entryByUri.get(row.uri);
+      if (entry === undefined || entry.abstract === null || row.abstract === '') {
+        continue;
+      }
+      expect(row.abstract, `${entry.kind}-${entry.level}`).toBe(segmentCjk(entry.abstract));
+    }
+
+    // 最容易漂的一格：文件行的 L1 摘要必须保留。现有用例矩阵里没有这一行，
+    // 而「blank 所有 L1」这种放宽会正好在这里变红。
+    const documentL1 = ftsUri({ kind: 'document', level: 'L1', abstract: MATRIX_ABSTRACT });
+    expect(rows.find((row) => row.uri === documentL1)?.abstract).toBe(
+      segmentCjk(MATRIX_ABSTRACT),
+    );
+  });
+
+  it('同一目录的 L0 / L1 两行：只 blank 概览行', async () => {
+    const directory = `${CASE_DIR}/memories`;
+    const overview = '团队约定的详细说明：提交前跑完整测试';
+    const index = new SqliteFtsIndex({ db, logger });
+    await index.upsert([
+      ftsRecord(directory, { kind: 'directory', level: 'L0', abstract: MATRIX_ABSTRACT }),
+      {
+        ...ftsRecord(directory, { kind: 'directory', level: 'L1', abstract: MATRIX_ABSTRACT }),
+        content: overview,
+      },
+    ]);
+
+    const rows = ftsRows();
+    expect(rows.map((row) => row.level)).toEqual(['L0', 'L1']);
+    // L0 摘要留着（它是这一层的检索文本），概览行的摘要清空（正文已经包含它）。
+    expect(rows[0]?.abstract).toBe(segmentCjk(MATRIX_ABSTRACT));
+    expect(rows[1]?.abstract).toBe('');
+
+    const blankedLevels = rows.filter((row) => row.abstract === '').map((row) => row.level);
+    const excludedLevels = db
+      .prepare(`SELECT level FROM node WHERE uri = ? AND NOT (${nodeSelfRowSql()}) ORDER BY level`)
+      .all(directory)
+      .map((row) => String(row['level']));
+    expect(blankedLevels).toEqual(excludedLevels);
+    expect(excludedLevels).toEqual(['L1']);
   });
 });
