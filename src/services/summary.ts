@@ -65,8 +65,8 @@ import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import type { NodeRepository, NodeRow } from '../adapters/sqlite/node-repository.js';
 import type { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
 import type { Logger } from '../domain/log.js';
-import type { ContextType, NodeKind } from '../domain/node.js';
-import { stableDigest } from '../domain/node.js';
+import type { NodeKind } from '../domain/node.js';
+import { contextTypeOf, stableDigest } from '../domain/node.js';
 import type { IndexRecord } from '../domain/retrieval.js';
 import {
   ABSTRACT_MAX_CHARS,
@@ -166,14 +166,6 @@ const OVERVIEW_LEVEL = 'L1';
 /** 摘要新鲜度三列只在目录的 L0 行上有意义（`0004_node_level_rows.sql`）。 */
 const FRESHNESS_ROW_SQL = `level = '${DIRECTORY_LEVEL}'`;
 
-/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
-const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
-  memories: 'memory',
-  resources: 'resource',
-  skills: 'skill',
-  sessions: 'session',
-};
-
 /**
  * 首句终止符：中英文句号、叹号、问号与换行（§9.2 的「各自摘要首句」）。
  *
@@ -203,23 +195,6 @@ function nullableText(value: unknown): string | null {
 function integer(value: unknown): number {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * 目录行的 `context_type`（§8.1）。
- *
- * §6.5 的磁盘布局把上下文固定在根下的第一段（`memories/` `resources/` `skills/`
- * `sessions/`），项目作用域在最前面多一段 `projects/{pid}/`。目录行第一次写入索引
- * 时按这一段定种类；认不出来的（例如 scope 根自己）按 `resource`——§6.5 里
- * `resources/` 之外的任意目录都是资料。
- */
-function contextTypeOf(uri: Uri): ContextType {
-  const segments = uri.segments[0] === 'projects' ? uri.segments.slice(2) : uri.segments;
-  const head = segments[0];
-  if (head === undefined) {
-    return 'resource';
-  }
-  return CONTEXT_TYPE_BY_DIRECTORY[head] ?? 'resource';
 }
 
 /** 取一段摘要的首句；没有终止符时返回整段。 */

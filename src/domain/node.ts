@@ -18,6 +18,43 @@ export type ContextType = 'memory' | 'resource' | 'skill' | 'session';
 /** 索引里的 `status`（架构文档 §8.1）。`pending` 是复核闸门未通过的记忆（§11.6）。 */
 export type NodeStatus = 'active' | 'pending' | 'archived';
 
+/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
+const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
+  memories: 'memory',
+  resources: 'resource',
+  skills: 'skill',
+  sessions: 'session',
+};
+
+/**
+ * 认不出的路径（包括 scope 根与 `projects/{pid}` 自身）按 `resource` 处理。
+ *
+ * 为什么不是 `memory`：`memory` 会进复核闸门与记忆合并的输入（§11.6），普通目录
+ * 被当成记忆比被当成资料更危险；`memory` 还是 `memory.ttl.*` 的唯一作用对象
+ * （§11.7），误归会顺带改变过期语义。
+ */
+const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
+
+/**
+ * URI → 索引里的 `context_type`（架构文档 §6.3、§6.5、§8.1）。
+ *
+ * 只看路径的第一段：§6.5 把上下文固定在根下的 `memories/` `resources/` `skills/`
+ * `sessions/`，项目作用域在最前面多一段 `projects/{pid}/`，所以先剥掉这一段再看
+ * 下一段。更深的段名不参与判断（`memories/archive/resources/x` 仍是记忆）。
+ *
+ * 纯函数：只读 `uri.segments` 与上表，不碰磁盘、不看环境。索引观察者、摘要服务与
+ * `reindex` 共用这一份——三处各写一份时，`reindex` 会按自己的规则重写整张
+ * `context_type` 列，漂移要等到有人跑重建才会暴露。
+ */
+export function contextTypeOf(uri: Uri): ContextType {
+  const segments = uri.segments[0] === 'projects' ? uri.segments.slice(2) : uri.segments;
+  const head = segments[0];
+  if (head === undefined) {
+    return DEFAULT_CONTEXT_TYPE;
+  }
+  return CONTEXT_TYPE_BY_DIRECTORY[head] ?? DEFAULT_CONTEXT_TYPE;
+}
+
 /**
  * FNV-1a 64 位。
  *

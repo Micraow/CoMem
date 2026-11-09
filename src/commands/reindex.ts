@@ -46,8 +46,8 @@ import type { NodeRow } from '../adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
-import type { ContextType, NodeStatus } from '../domain/node.js';
-import { stableDigest } from '../domain/node.js';
+import type { NodeStatus } from '../domain/node.js';
+import { contextTypeOf, stableDigest } from '../domain/node.js';
 import type { IndexRecord } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { EmbeddingService } from '../services/embedding.js';
@@ -103,20 +103,6 @@ const PROGRESS_INTERVAL = 100;
 /** 秒 → 毫秒。`providers.embedding.timeoutSeconds` 是秒。 */
 const MILLISECONDS_PER_SECOND = 1000;
 
-/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
-const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
-  memories: 'memory',
-  resources: 'resource',
-  skills: 'skill',
-  sessions: 'session',
-};
-
-/**
- * 认不出的目录按 `resource` 处理，与 `IndexObserver` / `SummaryService` 的兜底
- * 一致：把普通目录当记忆比当资料更危险。
- */
-const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
-
 /** 文件是 L2 原文；目录自身是 L0 摘要（§8.5）。 */
 const DOCUMENT_LEVEL = 'L2';
 const DIRECTORY_LEVEL = 'L0';
@@ -148,16 +134,6 @@ function fsErrorCode(error: unknown): string | null {
   }
   const code: unknown = error.code;
   return typeof code === 'string' ? code : null;
-}
-
-/** §6.3：`projects/{pid}/` 先剥一层，再按段名推 `context_type`。 */
-function contextTypeOf(uri: Uri): ContextType {
-  const segments = uri.segments[0] === 'projects' ? uri.segments.slice(2) : uri.segments;
-  const head = segments[0];
-  if (head === undefined) {
-    return DEFAULT_CONTEXT_TYPE;
-  }
-  return CONTEXT_TYPE_BY_DIRECTORY[head] ?? DEFAULT_CONTEXT_TYPE;
 }
 
 /** 记忆文件的 `memory_type` / `status`（`IndexObserver` 的同一份映射）。 */

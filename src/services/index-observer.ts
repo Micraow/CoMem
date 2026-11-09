@@ -70,7 +70,7 @@ import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType, NodeStatus } from '../domain/node.js';
-import { stableDigest } from '../domain/node.js';
+import { contextTypeOf, stableDigest } from '../domain/node.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 
@@ -78,22 +78,6 @@ import type { AclService } from './acl.js';
 import type { EmbeddingService } from './embedding.js';
 import type { NodeWriteObserver } from './filesystem.js';
 import type { SummaryService } from './summary.js';
-
-/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
-const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
-  memories: 'memory',
-  resources: 'resource',
-  skills: 'skill',
-  sessions: 'session',
-};
-
-/**
- * 认不出的目录按 `resource` 处理（与 `SummaryService.contextTypeOf` 同一份兜底）。
- *
- * 为什么不是 `memory`：`memory` 会进复核闸门与记忆合并的输入，一个普通的
- * `projects/` 目录被当成记忆比被当成资料更危险。
- */
-const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
 
 /** 文件是可检索的原文（§8.5 的 L2）；目录是它的 L0 摘要（见文件头）。 */
 const DOCUMENT_LEVEL = 'L2';
@@ -234,16 +218,6 @@ function parseFrontmatterFields(raw: string): FrontmatterFields {
     memoryType: memoryType === undefined || memoryType === '' ? null : memoryType,
     status: status !== undefined && isNodeStatus(status) ? status : null,
   };
-}
-
-/** §6.3：`projects/{pid}/` 先剥一层，再按段名推 `context_type`。 */
-function contextTypeOf(uri: Uri): ContextType {
-  const segments = uri.segments[0] === 'projects' ? uri.segments.slice(2) : uri.segments;
-  const head = segments[0];
-  if (head === undefined) {
-    return DEFAULT_CONTEXT_TYPE;
-  }
-  return CONTEXT_TYPE_BY_DIRECTORY[head] ?? DEFAULT_CONTEXT_TYPE;
 }
 
 function errorMessage(error: unknown): string {
