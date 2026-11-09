@@ -3,7 +3,7 @@
 > 以代码为准。每个能力一行：**入口 → 实现 → 数据落到哪 → 哪条测试证明它成立**。
 > 行号是快照时刻的值，不是引文。`§x` 指 `docs/architecture.md` 的节号，那份文档定架构边界与数据布局，这份只回答「在哪、怎么流、谁证明」。
 >
-> **快照**：HEAD `646f8d3`，时刻 `2026-11-10T03:44+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
+> **快照**：HEAD `a3abaa2`，时刻 `2026-11-10T03:57+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
 
 ## 一、能力矩阵
 
@@ -213,11 +213,12 @@
 | 切换检索引擎后存量记忆不回填 | 启动只记一行 warn，补齐靠手工 `pnpm reindex`；缺向量的判定只有一份（`commands/reindex.ts` 的 `hasDocumentsMissingVectors`，`bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 复用它）。**仍然没有自动回填**：切到 `vector` / `hybrid` 后旧记忆在人工跑 reindex 之前一条都搜不到 | `bootstrap/main.ts:92`–`:105`、`commands/reindex.ts:399`、`:423` |
 | 配置项只能手工核对 | `check:config` 四层都只证明「配置到达了代码」；3 处歧义匹配需人工看，17 处 `LEGACY_OPTIONAL_CONFIG_DEPS` 仍是可选属性 | `scripts/check-config.ts:272`、`docs/operations.md`「配置自检」 |
 | 控制台与 Hook 插件没有静态检查 | 根 `eslint` 不覆盖 `web/` 与 `integrations/`；控制台十个页面无自动化测试（只有身份合成 composable 的单测） | `eslint.config.js`、`tests/unit/web/console-identity.test.ts:49` |
+| 「可读」的判定有两套 SQL 谓词，读路径另有一套位测试 | 列表与检索用 `level >= 1`（`permissionPredicate`、`readableUris`），单节点读权限用 `MAX(level)` 再交给 `levelSatisfies` 的位测试。规范级别 1 / 3 / 7 下同结论；库里出现 2 / 4 / 6 这类非规范级别时两边分叉——列表可见而读被拒。这种行 API 写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手工 SQL 或旧数据 | `adapters/sqlite/retrieval-index.ts:255`、`adapters/sqlite/permission-repository.ts:143`、`services/acl.ts:962`、`:967` |
 | 多进程写同一 `dataDir` 会漏计已归档消息 | `totalMessageCount` 与消息幂等索引共用「单进程持有全量缓存」的假设 | `services/session.ts:499`；覆盖用例 `tests/integration/services/session.test.ts:452`「keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3」 |
 | 阶段二终态失败不写 `ArchivePhaseStatus.failed` | 归档停在 `ready`，只能从 `task.status=failed` 看出失败 | `services/commit/pipeline.ts:185`、`domain/archive.ts:20` |
 
 ## 快照与漂移
 
-- 本文的行号对应 `2026-11-10T03:44+08:00` 的 HEAD `646f8d3`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
+- 本文的行号对应 `2026-11-10T03:57+08:00` 的 HEAD `a3abaa2`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
 - `tests/integration/services/commit-steps.test.ts` 被持续追加用例，行号最容易偏移；引用它时优先给用例名。
 - 引用顺序：先看本文定位入口与测试，细节回 `docs/architecture.md` 对应节号；两侧冲突时以代码为准，并同步改文档。
