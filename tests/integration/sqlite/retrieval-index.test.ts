@@ -531,6 +531,19 @@ describe('glob', () => {
     ]);
   });
 
+  it('已归档节点不出现（归档只影响检索面，§11.7）', async () => {
+    const archived = 'comem://user/alice/archived.md';
+    await seed(archived, 'a', { status: 'archived' });
+
+    expect(await glob('**/*.md')).toEqual([
+      'comem://user/alice/a.md',
+      'comem://user/alice/sub/b.md',
+      'comem://user/alice/sub/deep/c.md',
+    ]);
+    // 归档只影响检索面：内容还在，`stat` 读得到，`read` / `download` 按路径仍可用。
+    expect((await index.stat(archived))?.status).toBe('archived');
+  });
+
   it('limit 生效', async () => {
     expect(await glob('**', { limit: 1 })).toEqual(['comem://user/alice/a.md']);
   });

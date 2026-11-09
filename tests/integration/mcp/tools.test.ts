@@ -28,7 +28,7 @@ import { configSchema } from '../../../src/config/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
-import type { ContextType } from '../../../src/domain/node.js';
+import type { ContextType, NodeStatus } from '../../../src/domain/node.js';
 import type { IndexRecord, RetrievalEngine } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
@@ -369,6 +369,7 @@ interface SeedOverrides {
   readonly memoryType?: string | null;
   readonly abstract?: string | null;
   readonly kind?: IndexRecord['kind'];
+  readonly status?: NodeStatus;
 }
 
 function record(uri: string, content: string, overrides: SeedOverrides = {}): IndexRecord {
@@ -385,7 +386,7 @@ function record(uri: string, content: string, overrides: SeedOverrides = {}): In
     bodyDigest: '0000000000000000',
     size: Buffer.byteLength(content),
     updatedAt: '2026-11-08T00:00:00.000Z',
-    status: 'active',
+    status: overrides.status ?? 'active',
   };
 }
 
@@ -554,6 +555,16 @@ describe('list', () => {
       '[dir] dirA',
     );
   });
+
+  it('已归档文件仍然看得见（list 是目录浏览，不是检索面）', async () => {
+    const archived = `${ROOT}/archived.md`;
+    await harness.filesystem.write(Uri.parse(archived), 'x', PRINCIPALS);
+    await seed(archived, 'x', { status: 'archived' });
+
+    const text = await callText('list', { uri: ROOT });
+
+    expect(text.split('\n')).toContain('[file] archived.md');
+  });
 });
 
 describe('tree', () => {
@@ -567,6 +578,16 @@ describe('tree', () => {
 
     const level2 = await callText('tree', { uri: MEM, levelLimit: 2 });
     expect(level2).toContain('    c.md');
+  });
+
+  it('已归档文件仍然看得见（tree 是目录浏览，不是检索面）', async () => {
+    const archived = `${MEM}/archived.md`;
+    await harness.filesystem.write(Uri.parse(archived), 'x', PRINCIPALS);
+    await seed(archived, 'x', { status: 'archived' });
+
+    const text = await callText('tree', { uri: MEM, levelLimit: 2 });
+
+    expect(text).toContain('archived.md');
   });
 });
 
@@ -603,6 +624,16 @@ describe('grep', () => {
 
     expect(text).toContain('Found 1 match(es):');
   });
+
+  it('已归档文件不出现（候选集来自 glob，§11.7）', async () => {
+    const archived = `${MEM}/archived.ts`;
+    await harness.filesystem.write(Uri.parse(archived), 'needle\n', PRINCIPALS);
+    await seed(archived, 'needle', { status: 'archived' });
+
+    expect(await callText('grep', { uri: MEM, pattern: 'needle' })).toContain(
+      'Found 0 match(es):',
+    );
+  });
 });
 
 describe('glob', () => {
@@ -621,6 +652,15 @@ describe('glob', () => {
 
     const limited = await callText('glob', { pattern: '**/*.md', uri: DIR, nodeLimit: 1 });
     expect(limited).toContain('Found 1 file(s):');
+  });
+
+  it('已归档节点不出现（归档只影响检索面，§11.7）', async () => {
+    await seed(`${DIR}/archived.md`, 'x', { status: 'archived' });
+
+    const text = await callText('glob', { pattern: '**/*.md', uri: DIR, nodeLimit: 10 });
+
+    expect(text).toContain('Found 2 file(s):');
+    expect(text).not.toContain(`${DIR}/archived.md`);
   });
 });
 

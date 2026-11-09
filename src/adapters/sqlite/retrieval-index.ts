@@ -3,7 +3,7 @@
  *
  * 索引侧：`upsert` 把 `abstract` 与 `content` 用 `segmentCjk` 切分后写进 `node_fts`，
  * 同时维护 `node` 读模型。查询侧：`search` 把查询串同样切分、包成 FTS5 短语，
- * 一次 SQL 完成「匹配 + 路径范围 + 元数据过滤 + 权限」。
+ * 一次 SQL 完成「匹配 + 路径范围 + 元数据过滤 + 状态 + 权限」。
  *
  * **分数约定**：FTS5 的 `bm25()` 返回负数，越负越相关。这一层把分数取负后返回，
  * 于是「越大越相关」与 `domain/ranking.ts` 的排序方向一致，调用方不需要记住符号。
@@ -74,6 +74,15 @@ const READ_LEVEL = 1;
  * 支撑，调参时应该用真实查询对比「返回条数」与「查询成本」。
  */
 const DEFAULT_CANDIDATE_MULTIPLIER = 4;
+
+/**
+ * 归档只影响检索面（§11.7）。`search` 与 `glob` 的 SQL 都带这条谓词。
+ *
+ * 收成一个常量而不是各写一份字面量：`glob` 同时是 `grep` 与向量检索的候选集来源
+ * （`services/search.ts` 的两条路径都调 `index.glob`），「已归档不出现」必须由
+ * 同一条谓词保证，否则三个检索面会漂移。
+ */
+const ACTIVE_STATUS_PREDICATE = "n.status = 'active'";
 
 /**
  * 一天的毫秒数。`memory.ttl.defaultDays` 是「天」，`node.expires_at` 是 ISO 8601
@@ -462,7 +471,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
       return [];
     }
 
-    const conditions: string[] = ['node_fts MATCH ?', "n.status = 'active'"];
+    const conditions: string[] = ['node_fts MATCH ?', ACTIVE_STATUS_PREDICATE];
     const params: SQLInputValue[] = [phrase];
 
     const scopes = scopeClause('n.uri', query.scopes);
@@ -531,7 +540,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
    *
    * SQL 侧用 GLOB 过近似（见 `globToSqlGlob`），精确匹配在 JS 侧做；两者之间用
    * `iterate()` 惰性读取，凑满 `limit` 就停，不会把整库结果全部读进内存。
-   * 权限与路径范围仍然由 SQL 过滤——不能把没有权限的 URI 读到内存再丢。
+   * 权限、路径范围、元数据与归档状态仍然由 SQL 过滤——不能把没有权限或已归档的
+   * URI 读到内存再丢。归档状态与 `search` 用同一条谓词（`ACTIVE_STATUS_PREDICATE`），
+   * 因为 `glob` 也是 `grep` 与向量检索的候选集来源。
    *
    * 排序按 uri 升序（`*` 的精确过滤不改变顺序），`LIMIT` 语义是「前 limit 条精确
    * 命中」，不是「前 limit 条过近似命中」。
@@ -545,6 +556,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
     const conditions = [
       `(${alternatives.map(() => 'n.uri GLOB ?').join(' OR ')})`,
       nodeSelfRowSql('n'),
+      ACTIVE_STATUS_PREDICATE,
     ];
     const params: SQLInputValue[] = alternatives.map((alternative) => alternative.sqlPattern);
 

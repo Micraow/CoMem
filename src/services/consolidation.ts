@@ -200,8 +200,10 @@ type ConsolidationOutput = z.infer<typeof consolidationOutputSchema>;
  * scope 下的记忆清单。
  *
  * `candidates` 进 prompt（**不带正文**，正文要模型显式 `read`）；`uris` 是 scope 下
- * **全部**记忆文件的 URI，用作 `validateOperations` 的 `existing`——`add` 不能覆盖
- * 一条 `pending` / `archived` 的记忆（它不在清单里，但文件真的存在）。
+ * **active** 记忆文件的 URI，用作 `validateOperations` 的 `existing`。`glob` 是
+ * 检索面（§8.4），只返回 `status = 'active'` 的节点（§11.7），所以 `pending` /
+ * `archived` 的记忆不在 `uris` 里——它们由 `#plan` 在写盘前按路径复查（见那里的
+ * 注释），不能靠清单兜住。
  */
 interface ScopeInventory {
   readonly candidates: readonly InventoryEntry[];
@@ -402,8 +404,9 @@ export class ConsolidationService {
     );
 
     const validation = validateOperations(operations, {
-      // 用**全部**记忆文件的 URI，不是清单里的：`add` 一条已存在但不在清单里的
-      // 记忆（pending / archived）会覆盖它，等于绕过复核闸门或 TTL 策略。
+      // 用索引枚举到的**全部 active** 记忆文件 URI。`add` 一条已存在的 active
+      // 记忆会覆盖它，这一步先整批拒绝；pending / archived 不在 `glob` 的结果里
+      // （它是检索面），由 `#plan` 按路径复查。
       existing: inventory.uris,
       allowedScopes: [memoriesDirectory.toStringAsDirectory()],
     });
@@ -672,6 +675,18 @@ export class ConsolidationService {
             'INVALID_ARGUMENT',
             `${target.schema.type} 的 identity 字段 ${missing.join('、')} 不能由路径推出，不能用 add；修改已有记忆请用 update。`,
             { uri: operation.uri, memoryType: target.schema.type, fields: missing },
+          );
+        }
+        // `glob` 是检索面（§8.4），只返回 `status = 'active'` 的节点（§11.7）。
+        // `pending` / `archived` 的记忆不在清单里，但文件真实存在；模型可以凭空
+        // 写出这条路径（不算幻觉）。写盘前按路径复读一次状态：`add` 覆盖它们
+        // 等于绕过复核闸门（§11.6）或 TTL 策略（§11.7）。
+        const existing = await this.#memory.read(uri);
+        if (existing !== null) {
+          throw new ComemError(
+            'INVALID_ARGUMENT',
+            `记忆 ${operation.uri} 已存在（status=${existing.status}），add 会覆盖它：pending 还在复核（§11.6），archived 已被 TTL 归档（§11.7）。`,
+            { uri: operation.uri, status: existing.status },
           );
         }
         plans.push({
