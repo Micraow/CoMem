@@ -180,7 +180,7 @@ function serializeAssembledItem(item: AssembledItem): Record<string, unknown> {
 }
 
 export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { search, authorizer } = services;
+  const { search, authorizer, observability } = services;
 
   return {
     prefix: '/search',
@@ -191,17 +191,27 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         const query = requireString(body, 'query');
         const scope = optionalStringArray(body, 'scopes') ?? [scopeOfSubject(context.subject)];
         const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
-        const hits = await search.find(query, {
-          scopes: scope,
-          subject: context.subject,
-          principals: context.principals,
-          contextTypes: parseContextTypes(optionalStringArray(body, 'contextTypes')),
-          levels: parseLevels(optionalStringArray(body, 'levels')),
-          memoryTypes: optionalStringArray(body, 'memoryTypes'),
-          updatedAfter: optionalString(body, 'updatedAfter'),
-          updatedBefore: optionalString(body, 'updatedBefore'),
-          limit,
-        });
+        // 参数校验放在计时之前：非法输入不是检索耗时，它该落进未归因间隙。
+        const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
+        const levels = parseLevels(optionalStringArray(body, 'levels'));
+        const memoryTypes = optionalStringArray(body, 'memoryTypes');
+        const updatedAfter = optionalString(body, 'updatedAfter');
+        const updatedBefore = optionalString(body, 'updatedBefore');
+        // §17.2 的 `recall`：hook 每轮按回车都等的就是这一段。边界只包检索本身，
+        // 后面的响应映射也不算——它们各自是未归因间隙。
+        const hits = await observability.phase('recall', () =>
+          search.find(query, {
+            scopes: scope,
+            subject: context.subject,
+            principals: context.principals,
+            contextTypes,
+            levels,
+            memoryTypes,
+            updatedAfter,
+            updatedBefore,
+            limit,
+          }),
+        );
         return ok({ hits: hits.map(serializeHit) });
       });
 
@@ -225,7 +235,35 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
         if (mode === 'context') {
           // `context` 是同一个 `search` 出参形态的变体（§8.6），不是第 17 个工具。
           // 跨轮去重的时钟由 `sessionId` 推导；不传就不去重（见 `ContextOptions`）。
-          const result = await search.context(query, {
+          //
+          // 这段 `recall` **包含上下文组装与渲染**：它们发生在 `SearchService.context`
+          // 内部，路由层切不开。§17.2 把「组装 + 序列化」单列为 `serialize`，那一层
+          // 只在 hook 里（`formatRecallBlock`）——所以这里不另记一个近乎为 0 的
+          // `serialize`，那会让人以为注入序列化已经被量到了。
+          const result = await observability.phase('recall', () =>
+            search.context(query, {
+              scopes: scope,
+              subject: context.subject,
+              principals: context.principals,
+              contextTypes,
+              levels,
+              memoryTypes,
+              updatedAfter,
+              updatedBefore,
+              limit,
+              sessionId,
+            }),
+          );
+          return ok({
+            items: result.items.map(serializeAssembledItem),
+            rendered: result.rendered,
+            dropped: result.dropped,
+            usedTokens: result.tokensUsed,
+          });
+        }
+
+        const result = await observability.phase('recall', () =>
+          search.search(query, {
             scopes: scope,
             subject: context.subject,
             principals: context.principals,
@@ -236,27 +274,8 @@ export function createSearchRoutes(services: HttpRouteServices): HttpRouteGroup 
             updatedBefore,
             limit,
             sessionId,
-          });
-          return ok({
-            items: result.items.map(serializeAssembledItem),
-            rendered: result.rendered,
-            dropped: result.dropped,
-            usedTokens: result.tokensUsed,
-          });
-        }
-
-        const result = await search.search(query, {
-          scopes: scope,
-          subject: context.subject,
-          principals: context.principals,
-          contextTypes,
-          levels,
-          memoryTypes,
-          updatedAfter,
-          updatedBefore,
-          limit,
-          sessionId,
-        });
+          }),
+        );
 
         // 查询计划：`analyzed: false` 时看 `reason` 就知道重写为什么没生效。
         return ok({ hits: result.hits.map(serializeSearchHit), plan: serializePlan(result.plan) });

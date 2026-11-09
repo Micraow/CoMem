@@ -170,39 +170,69 @@ describe('phase / attribute', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('四阶段相加等于总耗时（§20 的验收点）', async () => {
+  it('作用域外调 phase() 丢弃并记一条 warn', async () => {
+    // 没有 `withRequestScope` 包住：阶段无处可记。静默丢弃会让「为什么 phases 是
+    // NULL」变成要读实现才能回答的问题。
+    await service.phase('recall', async () => {
+      await sleep(1);
+    });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('不在请求作用域'),
+      expect.objectContaining({ phase: 'recall' }),
+    );
+
+    // 后台阶段是例外：它记进程级 gauge（`#asyncPhases`），不需要作用域，也不该 warn。
+    await service.phase('archive', async () => {
+      await sleep(1);
+    });
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('阶段之和不超过测量总耗时，差额是未归因间隙（§20 的验收点）', async () => {
     const report = await inScope(async () => {
       for (const name of BLOCKING) {
         await service.phase(name, async () => {
           await sleep(1);
         });
       }
-      return service.attribute('req_2');
+      // 外部量到的总耗时比阶段之和多 7ms：身份解析、路由、响应编码没有计时。
+      const accounted = service.attribute('req_2').accountedMs;
+      return service.attribute('req_2', accounted + 7);
     });
     const sum = BLOCKING.reduce((total, name) => total + (report.phases[name] ?? 0), 0);
 
     expect(report.accountedMs).toBe(sum);
-    expect(Math.abs(report.totalMs - sum)).toBeLessThanOrEqual(0.5);
+    expect(report.totalMs).toBeCloseTo(sum + 7, 6);
+    expect(report.unattributedMs).toBeCloseTo(7, 6);
+    expect(sum).toBeLessThanOrEqual(report.totalMs);
     expect(report.blockingMs).toBe(sum);
     expect(report.asyncMs).toBe(0);
+    // 间隙是正常的，不是「有阶段没计时」的错误信号。
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it('超过 0.5ms 容差时记 warn，但不抛错', async () => {
-    const report = await inScope(async () => {
-      await service.phase('recall', async () => {});
-      return service.attribute('req_3', 10);
+  it('阶段之和超过总耗时超过容差时记 warn，但不抛错', async () => {
+    await inScope(async () => {
+      await service.phase('recall', async () => {
+        await sleep(2);
+      });
+      const accounted = service.attribute('req_3').accountedMs;
+      expect(accounted).toBeGreaterThan(1);
+
+      // 容差以内不记：0.4ms 的偏差是浮点计时的正常范围。
+      service.attribute('req_4', accounted - 0.4);
+      expect(logger.warn).not.toHaveBeenCalled();
+
+      // 总耗时不到阶段之和的一半：同一段被套了两层 `phase()`，或者读到的是别的请求的账。
+      const report = service.attribute('req_5', accounted / 3);
+      expect(report.unattributedMs).toBe(0);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('超过请求总耗时'),
+        expect.objectContaining({ requestId: 'req_5' }),
+      );
     });
-
-    expect(report.totalMs).toBe(10);
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('不一致'),
-      expect.objectContaining({ requestId: 'req_3', totalMs: 10 }),
-    );
-
-    // 容差以内不重复记：0.4ms 的偏差是浮点计时的正常范围。
-    service.attribute('req_4', report.accountedMs + 0.4);
-    expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
   it('阻塞与异步分开统计（§17.2 的表格）', async () => {

@@ -18,11 +18,28 @@
  * 单轮阻塞开销是前四个之和，典型 60–180ms；后台部分不算进去——用户没等它（§17.2）。
  * 分开统计是必须的：把进程启动藏在「检索 20ms」后面会误导人。
  *
- * ## 2. 四阶段相加等于总耗时（§20 的验收点）
+ * ## 2. 阶段之和不超过总耗时（§20 的验收点）
  *
- * `attribute()` 把阶段累加值与测量总耗时对比，超过 `ATTRIBUTION_TOLERANCE_MS` 记
- * `warn`。**不抛错**：观测代码不该让请求失败（§19「错误必须可解释」的反面——它
- * 也不该制造错误）。
+ * `attribute()` 把阶段累加值与测量总耗时对比：**差额（`unattributedMs`）是正常的**，
+ * 它覆盖身份解析、路由、请求体解析、响应编码这些没有被计时的部分。只有阶段之和
+ * **超过**总耗时（`ATTRIBUTION_TOLERANCE_MS` 之外）才记 `warn`——那说明同一段被记了
+ * 两次，或者这些阶段不是这次请求的。**不抛错**：观测代码不该让请求失败（§19「错误
+ * 必须可解释」的反面——它也不该制造错误）。
+ *
+ * ## 2.1 四个阶段里哪些在服务端测得到（§17.2 的实现注记）
+ *
+ * `phase(name, fn)` 是唯一的记录入口，边界由调用方给定：
+ *
+ * | 阶段 | 服务端边界 | 备注 |
+ * |---|---|---|
+ * | `processStart` | 无 | hook 进程启动，只有 hook 自己知道（`performance.timeOrigin`） |
+ * | `recall` | `/search/find`、`/search/search` 的服务调用 | `mode=context` 的组装与渲染在 `SearchService.context` 内部，随它一起计时 |
+ * | `serialize` | 无 | 注入块的格式化在 hook 里（`formatRecallBlock`） |
+ * | `capture` | `POST /sessions/{id}/messages` 的落盘 | hook 侧「写 worker 载荷 + spawn」不在这里 |
+ *
+ * 所以 `request_log.phases` 里通常只有 `recall` 或 `capture` 之一，`processStart` /
+ * `serialize` 不会凭空出现。整轮的四阶段由 hook 上报到 `/telemetry/hook`，进
+ * `/metrics` 的 gauge（`recordHookOverhead`）。
  *
  * ## 3. 低基数标签（§17.1、§18 的 `includeAccountLabel` 注释）
  *
@@ -95,9 +112,10 @@ const ASYNC_PHASES: readonly string[] = ['archive', 'extract', 'merge', 'summary
 /**
  * `attribute()` 的容差：0.5ms。
  *
- * §20 的验收点只写「四阶段相加等于总耗时」。半毫秒是浮点计时（`performance.now()`
- * 的微秒分辨率 + 各阶段边界）的误差上界，经验值，来源未知。取半毫秒而不是 0：
- * 归因报告是给人看的，差 0.1ms 报一条 warn 只会让人忽略这条日志。
+ * 它只用来判断「阶段之和是否**超过**总耗时」——超过说明同一段被 `phase()` 套了两层，
+ * 不是未归因间隙。半毫秒是浮点计时（`performance.now()` 的微秒分辨率 + 阶段边界）
+ * 的误差上界，经验值，来源未知。取半毫秒而不是 0：归因报告是给人看的，差 0.1ms
+ * 报一条 warn 只会让人忽略这条日志。
  */
 const ATTRIBUTION_TOLERANCE_MS = 0.5;
 
@@ -177,9 +195,12 @@ const BLOCKING_PHASE_LABELS = [
 
 export interface LatencyAttribution {
   readonly requestId: string;
+  /** 外部测量的总耗时；没传时取阶段累加值（此时报告只回答「各阶段各花了多少」）。 */
   readonly totalMs: number;
-  /** 四阶段相加必须等于它（容差 0.5ms，浮点） */
+  /** 记到的阶段之和。**不超过** `totalMs`，差额是未归因间隙。 */
   readonly accountedMs: number;
+  /** `totalMs - accountedMs`：没有被计时的部分，正常为正数，不会是负数 */
+  readonly unattributedMs: number;
   readonly phases: Readonly<Record<string, number>>;
   /** §17.2 的阻塞合计 */
   readonly blockingMs: number;
@@ -388,7 +409,15 @@ export class ObservabilityService {
   }
 
   /**
-   * 给一个阶段计时。同名阶段多次调用会累加（`recall` 在一次请求里可能跑两轮）。
+   * 给一个阶段计时（§17.2）。**这是唯一的阶段记录入口**：边界由调用方用 `fn` 包出来，
+   * 文件名与行号就是「这个阶段从哪开始、到哪结束」的答案。
+   *
+   * 同名阶段多次调用**累加**（`recall` 在一次请求里可能跑几轮；累加保住「这一段总共
+   * 花了多少」，覆盖会只留下最后一轮）。
+   *
+   * 只在 `withRequestScope()` 里有效。作用域外调用时同步阶段被丢弃并记一次 `warn`
+   * ——静默丢弃会让「为什么 phases 是 NULL」变成需要读源码才能回答的问题。后台阶段
+   * 是例外：它们记进进程级 `#asyncPhases`（不挂在某个请求下），不需要作用域。
    *
    * 用 `performance.now()` 而不是 `Date.now()`：后者是墙上时钟，系统时间被校准时
    * 可能倒退，耗时会变成负数。
@@ -419,8 +448,12 @@ export class ObservabilityService {
    * 生成归因报告（§17.2）。
    *
    * `measuredTotalMs` 是外部的请求总耗时（middleware / hook 自己量的）。不传时总耗时
-   * 取阶段累加值——此时两者恒等，报告只回答「各阶段各花了多少」。传了才做 §20 的
-   * 「相加等于总耗时」检查。
+   * 取阶段累加值——此时两者恒等，报告只回答「各阶段各花了多少」。传了才回答
+   * 「这个请求有多少是没被计时的」（`unattributedMs`）。
+   *
+   * **间隙不是错误。** 只有显式调用 `phase()` 的边界会计时，身份解析、路由、请求体
+   * 解析、响应编码都不计时（见文件头 2.1 的表格）。所以这里只在阶段之和**超过**总耗时
+   * 时记 `warn`——那是重复计时，不是间隙。
    */
   attribute(requestId: string, measuredTotalMs?: number): LatencyAttribution {
     const phases: Record<string, number> = {};
@@ -433,20 +466,22 @@ export class ObservabilityService {
     const totalMs = measuredTotalMs ?? accountedMs;
     const blockingMs = sumOf(phases, BLOCKING_PHASES);
     const asyncMs = sumOf(phases, ASYNC_PHASES);
+    // 时钟不会让阶段比请求本身还长，除非同一段被记了两次；`Math.max` 保护下游，
+    // 「间隙」这个词本身不表达负数。
+    const unattributedMs = Math.max(0, totalMs - accountedMs);
 
-    const divergence = Math.abs(totalMs - accountedMs);
-    if (divergence > ATTRIBUTION_TOLERANCE_MS) {
-      // §20 的验收点不成立说明有阶段没被计时。不抛错：观测代码不该让请求失败。
-      this.#logger.warn('延迟归因与总耗时不一致，有阶段没有被计时。', {
+    if (accountedMs > totalMs + ATTRIBUTION_TOLERANCE_MS) {
+      // §20 的验收点：阶段之和必须落在总耗时之内。超了说明有阶段被套了两层，或者
+      // 读到的是另一个请求的账。不抛错：观测代码不该让请求失败。
+      this.#logger.warn('阶段耗时之和超过请求总耗时，归因出现重复计时。', {
         requestId,
         totalMs,
         accountedMs,
-        divergenceMs: divergence,
         phases,
       });
     }
 
-    return { requestId, totalMs, accountedMs, phases, blockingMs, asyncMs };
+    return { requestId, totalMs, accountedMs, unattributedMs, phases, blockingMs, asyncMs };
   }
 
   /** 记录一次请求：写 `request_log`（§17.6）+ 结构化日志（§17.8）。 */
@@ -464,8 +499,11 @@ export class ObservabilityService {
     }
 
     // 作用域随请求结束一起被丢弃，不需要（也不能）在这里清空——清空会抹掉同进程
-    // 里另一个正在跑的请求的阶段。
-    const phases = this.#snapshotPhases();
+    // 里另一个正在跑的请求的阶段。归因顺手在这里跑一次：`attribute()` 的超额检查
+    // 只有在真实请求上才有意义，悬空的方法永远发现不了重复计时。空 Map 写 NULL
+    // （§17.6：没有计时时为 NULL）。
+    const attribution = this.attribute(entry.requestId, entry.durationMs);
+    const phases = Object.keys(attribution.phases).length === 0 ? null : attribution.phases;
 
     if (!this.#policy.enabled) {
       return;
@@ -738,14 +776,6 @@ export class ObservabilityService {
     );
 
     return `${lines.join('\n')}\n`;
-  }
-
-  #snapshotPhases(): Record<string, number> | null {
-    const scope = this.#scope.getStore();
-    if (scope === undefined || scope.size === 0) {
-      return null;
-    }
-    return Object.fromEntries(scope);
   }
 
   #logRequest(row: RequestLogRow): void {

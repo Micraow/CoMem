@@ -171,7 +171,7 @@ function serializeSession(session: Session): Record<string, unknown> {
 }
 
 export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { session, filesystem, authorizer } = services;
+  const { session, filesystem, authorizer, observability } = services;
 
   return {
     prefix: '/sessions',
@@ -207,10 +207,21 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
           throw invalid('messages 必须是非空数组。', { field: 'messages' });
         }
-        const appended: SessionMessage[] = [];
-        for (const rawMessage of rawMessages) {
-          appended.push(await session.addMessage(sessionUri, parseMessage(requireRecord(rawMessage, 'messages[]'))));
-        }
+        // §17.2 的 `capture`：`Stop` 在 hook 里只写 worker 载荷并 spawn，**真正落盘
+        // 的是这个端点**。边界包住逐条 `addMessage`，授权与参数解析不算——它们是
+        // 未归因间隙。
+        const appended = await observability.phase('capture', async () => {
+          const messages: SessionMessage[] = [];
+          for (const rawMessage of rawMessages) {
+            messages.push(
+              await session.addMessage(
+                sessionUri,
+                parseMessage(requireRecord(rawMessage, 'messages[]')),
+              ),
+            );
+          }
+          return messages;
+        });
         return ok({ uri: sessionUri.toString(), messages: appended, count: appended.length });
       });
 

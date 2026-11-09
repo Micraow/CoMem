@@ -237,6 +237,12 @@ export function createIdentityMiddleware(resolve: IdentityResolver): IdentityMid
  *
  * `done()` 在 `withRequestScope` 的回调里被同步调用，所以后续 hook 与 handler 都继承
  * 这个 `AsyncLocalStorage` 上下文；`onResponse` 里 `recordRequest` 才能读到阶段耗时。
+ *
+ * **这个中间件只建作用域，不记阶段。** 阶段由实际干活的地方用 `phase()` 包边界：
+ * `recall` 在 `/search/find` 与 `/search/search`，`capture` 在
+ * `POST /sessions/{id}/messages`。`processStart` 与 `serialize` 在服务端没有对应
+ * 边界（前者是 hook 进程启动，后者是 hook 的注入块格式化），所以它们不会出现在
+ * `request_log.phases` 里。`onResponse` 算出的总耗时与阶段之和的差额就是未归因间隙。
  */
 export function createObservabilityMiddleware(
   observability: ObservabilityService,
