@@ -207,7 +207,8 @@ export interface SearchServiceDeps {
   readonly vectors?: Pick<SqliteVectorIndex, 'search'>;
   /**
    * 向量命中只有 URI + 分数，其余列（`level` / `abstract` / `contextType` /
-   * `memoryType` / `status`）从 `node` 表补。没有它 `SearchHit` 就是半成品。
+   * `memoryType`）从 `node` 表补。没有它 `SearchHit` 就是半成品。
+   * 归档状态不在这里补：候选集已由 `index.glob` 的 SQL 过滤。
    */
   readonly nodes?: Pick<NodeRepository, 'get'>;
   /** §18 的 `retrieval.engine`，默认 `fts5`（与 schema 默认值一致）。 */
@@ -1072,12 +1073,13 @@ export class SearchService {
    * 向量命中补全成 `SearchHit`。
    *
    * 向量索引只返回 URI + 分数；`node` 表的 `level` / `abstract` / `context_type` /
-   * `memory_type` / `status` 必须补上，否则 §8.6 的分层投放拿不到层级、事件类记忆
+   * `memory_type` 必须补上，否则 §8.6 的分层投放拿不到层级、事件类记忆
    * 会退化成一句话摘要。`node` 行已不存在（索引与磁盘短暂不一致）时跳过——留一条
    * 打不开的命中比少一条更难查。
    *
-   * `contextTypes` / `levels` / `status` 在这里过滤：FTS5 在 SQL 里做，向量后端
-   * 没有这些列，过滤必须落在补全之后。
+   * `contextTypes` / `levels` 在这里过滤：FTS5 在 SQL 里做，向量后端没有这些列，
+   * 过滤必须落在补全之后。`status` 不在这里：候选集来自 `#readableUris` 的
+   * `index.glob`，SQL 已经按 `ACTIVE_STATUS_PREDICATE` 滤掉非 `active` 的行。
    *
    * **层级取的是节点自身那一行（`NodeRepository.get` 的口径）**：向量按 URI 一条，
    * 没有「这一条命中的是概览行还是摘要行」这回事——目录本来就不产生向量，所以
@@ -1092,7 +1094,7 @@ export class SearchService {
     const enriched: SearchHit[] = [];
     for (const hit of hits) {
       const node = nodes.get(hit.uri);
-      if (node === null || node.status !== 'active') {
+      if (node === null) {
         continue;
       }
       if (
