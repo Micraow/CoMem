@@ -1,7 +1,7 @@
 /**
  * `add_skill`：安装技能（架构文档 §13.2）。
  *
- * 技能是一组可执行文件，安装在 `parentUri` 下；`name` 是目录名。文件内容按 UTF-8
+ * 技能是一组文件，安装在 `parentUri` 下；`name` 是目录名。文件内容按 UTF-8
  * 文本传输——MCP 的参数是 JSON，没有字节串类型。二进制技能不在支持范围内。
  *
  * 与 `add_resource` 一样走批量入口：一次调用写完所有文件，索引只在结束时更新一次。
@@ -13,7 +13,6 @@ import {
   asRecord,
   indexStatus,
   nonEmptyString,
-  optionalBoolean,
   recordArray,
   requiredString,
   textResult,
@@ -27,11 +26,9 @@ const WRITE = 3;
 const ENCODER = new TextEncoder();
 
 function toFileInput(file: Record<string, unknown>): SkillFileInput {
-  const executable = optionalBoolean(file, 'executable', false, 'add_skill');
   return {
     path: nonEmptyString(file, 'path', 'add_skill'),
     content: ENCODER.encode(requiredString(file, 'content', 'add_skill')),
-    ...(executable ? { executable } : {}),
   };
 }
 
@@ -39,7 +36,7 @@ export const addSkillTool: McpToolDefinition = {
   name: 'add_skill',
   kind: 'ingest',
   description:
-    '把一组文件安装成可复用技能（skills/{name}/）。要沉淀「怎么做一件事」的可执行包时用；只是存文档用 add_resource。name 是目录名，重名会覆盖。files 每项必须有 path 与 content（UTF-8 文本），二进制不在支持范围内；executable=true 给文件加执行位。',
+    '把一组文件安装成可复用技能（skills/{name}/）。要沉淀「怎么做一件事」的可执行包时用；只是存文档用 add_resource。name 是目录名。再次安装同名技能时，本次提交的同路径文件被覆盖；上一版存在但本次未提供的文件不会被移除（仍能被 find / grep 检到）。files 每项必须有 path 与 content（UTF-8 文本），二进制不在支持范围内。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -52,7 +49,6 @@ export const addSkillTool: McpToolDefinition = {
           properties: {
             path: { type: 'string', description: '技能内相对路径' },
             content: { type: 'string', description: 'UTF-8 文本内容' },
-            executable: { type: 'boolean', default: false },
           },
           required: ['path', 'content'],
         },

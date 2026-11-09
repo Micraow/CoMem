@@ -13,9 +13,22 @@
  *
  * ## attempts 记什么
  *
- * `attempts` 记「已经跑完的执行次数」，不是「认领次数」（`domain/task.ts` 的
- * `claim` 注释）。所以：认领不递增，这次执行失败时递增。`shouldRetry` 的上限判断
- * 用递增后的值——`maxAttempts = 3` 表示最多执行 3 次，第 3 次失败后置 `failed`。
+ * `attempts` 记「**已经开始的执行次数**」，`maxAttempts` 是**允许的最大执行次数**。
+ * 加一只有一处：`tryClaim` 的 SQL，与 `running` 的状态转移在同一条 UPDATE 里原子
+ * 完成（`adapters/sqlite/task-repository.ts`），`WHERE` 没命中的认领不会计数。
+ *
+ * 应用层不补这次加一：
+ *
+ * - 并发认领时两个 worker 会各自读到同一个旧值再各自加一，两次执行只记一次；
+ * - 失败路径加一（上一版的做法）要求这里先把「加过之后是多少」预演一遍再判断
+ *   `shouldRetry`，同一规则写了两份，两份必须时刻对齐。上一版删掉这里的补偿就会
+ *   跑 4 次：第 3 次失败时数据库里的 `attempts` 还是 2（递增发生在判断之后），
+ *   于是又放行了第 4 次。
+ *
+ * 认领之后的 `attempts` 就是「含这次执行」的次数，所以 `shouldRetry` 直接看它：
+ * 第 N 次认领后 `attempts = N`，`N < maxAttempts` 才回队列，第 `maxAttempts` 次
+ * 失败后置 `failed`。成功、失败、回队列都不再改这个计数——回收扫描也不改，
+ * 一次认领只算一次。
  *
  * ## 哪些错误不重试
  *
@@ -177,7 +190,8 @@ export class TaskService {
    * 失败处理：错误先进 `error` 字段与 `error.log`（§10.4），再决定重试还是终态。
    *
    * 终态错误（URI / 参数 / 权限）不重试；其余按 `shouldRetry` 判断。回到 `pending`
-   * 时 `attempts` 由仓储递增，下次 `tryClaim` 会再领到它。
+   * 时 `attempts` 不变：这次执行的开始已经在认领时记过，下次 `tryClaim` 会再领到它
+   * 并记下一次开始。
    */
   #handleFailure(id: string, claimed: TaskRow, error: unknown): false {
     const failure = ComemError.from(error);
@@ -189,9 +203,9 @@ export class TaskService {
     });
 
     const latest = this.#tasks.get(id) ?? claimed;
-    // 这次执行已经跑完，`attempts` 先加一，再用它判断还有没有下一次。
-    const attempted: TaskRow = { ...latest, attempts: latest.attempts + 1 };
-    if (isTerminalStepError(failure.code) || !shouldRetry(attempted, this.#maxAttempts)) {
+    // `latest.attempts` 已经包含这次执行（认领时 SQL 加的），直接用它判断还有没有
+    // 下一次；这里再补一次就是同一个计数加两遍。
+    if (isTerminalStepError(failure.code) || !shouldRetry(latest, this.#maxAttempts)) {
       this.#tasks.finish(id, 'failed', failure.message, new Date());
       return false;
     }

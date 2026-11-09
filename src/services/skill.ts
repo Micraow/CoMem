@@ -11,12 +11,6 @@
  * 技能包没有入口文件等于没装，所以 `SKILL.md` 缺失直接 `INVALID_ARGUMENT`。
  * `SKILL.md` 的 frontmatter 至少要有 `name` 与 `description`：前者是技能标识，
  * 后者是检索与展示用的说明，缺任一个都装不出可用的技能。
- *
- * ## 可执行位
- *
- * `SkillFileInput.executable` 字段保留，但**不设置**：`services/` 不能 import
- * `node:fs`（§4.2），`ContentStore` 也没有 chmod 能力。等 `adapters/` 增加一个
- * 显式的权限设置入口再落地；静默忽略比伪造一个不存在的保证更诚实。
  */
 
 import type { ContentStore, StoredStat } from '../adapters/fs/content-store.js';
@@ -31,6 +25,7 @@ import type { Uri } from '../domain/uri.js';
 
 import type { SummaryService } from './summary.js';
 import type { Authorizer } from './authorizer.js';
+import { recordIndexFailures, recordReconcileFailure } from './reconcile-record.js';
 import { invalidateParentSummaries, materializeAncestorPermissions } from './write-through.js';
 
 /** 技能入口文件名。 */
@@ -52,8 +47,6 @@ export interface SkillFileInput {
   /** 相对技能根目录的路径，如 `SKILL.md` 或 `scripts/check.sh` */
   readonly path: string;
   readonly content: Uint8Array;
-  /** 可执行权限（见文件头「可执行位」：当前不设置） */
-  readonly executable?: boolean;
 }
 
 export interface AddSkillOptions {
@@ -333,9 +326,14 @@ export class SkillService {
           count: records.length,
           error: reason,
         });
-        for (const record of records) {
-          await this.#recordReconcile('index', record.uri, reason);
-        }
+        // 与 `ResourceService` / `IndexObserver` 共用同一份记录实现（§10.6）。
+        await recordIndexFailures(
+          this.#reconcile,
+          this.#logger,
+          records.map((record) => record.uri),
+          reason,
+          new Date().toISOString(),
+        );
       }
 
       // §12.4 的「写时算」：技能文件不经过 `FileSystemService`，观察者收不到通知。
@@ -372,17 +370,20 @@ export class SkillService {
     return { skillUri, fileCount: records.length };
   }
 
-  /** 对账日志写失败不能让安装失败：它只是补偿线索，不是真相。 */
+  /**
+   * 对账日志写失败不能让安装失败：它只是补偿线索，不是真相。
+   *
+   * 记录形状与失败处理只有一份实现（`reconcile-record.ts`）。
+   */
   async #recordReconcile(op: string, uri: string, error: string): Promise<void> {
-    try {
-      await this.#reconcile.append({ op, uri, error, at: new Date().toISOString() });
-    } catch (appendError) {
-      this.#logger.error('对账日志写入失败，已忽略。', {
-        op,
-        uri,
-        error: errorMessage(appendError),
-      });
-    }
+    await recordReconcileFailure(
+      this.#reconcile,
+      this.#logger,
+      op,
+      uri,
+      error,
+      new Date().toISOString(),
+    );
   }
 
   /**

@@ -55,6 +55,8 @@ function serializeRecord(record: MemoryRecord): Record<string, unknown> {
     status: record.status,
     updatedAt: record.updatedAt,
     fields: record.fields,
+    // 溯源（W97）：复核页要能回答「这条经验从哪来」。缺键的旧记忆是空数组。
+    sources: record.sources,
   };
 }
 

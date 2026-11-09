@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import type { AclAction } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import {
-  AllowAllAuthorizer,
   permissionDenied,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
@@ -148,18 +148,14 @@ describe('write / read', () => {
   it('不传 frontmatter 时保留磁盘上现有的 frontmatter（§10.6）', async () => {
     const target = uri('profile.md');
     await service.write(target, '第一版', AUTH_PRINCIPALS, {
-      frontmatter: { summary: '摘要', summaryDigest: 'abc', summaryState: 'fresh' },
+      frontmatter: { summary: '摘要' },
     });
 
     await service.write(target, '第二版', AUTH_PRINCIPALS);
 
     const document = await service.read(target, AUTH_PRINCIPALS);
     expect(document.text).toBe('第二版');
-    expect(document.frontmatter).toEqual({
-      summary: '摘要',
-      summaryDigest: 'abc',
-      summaryState: 'fresh',
-    });
+    expect(document.frontmatter).toEqual({ summary: '摘要' });
   });
 
   it('读不存在的文件抛 NOT_FOUND', async () => {
@@ -197,7 +193,7 @@ describe('stat', () => {
 });
 
 describe('list', () => {
-  it('按 name 升序返回直接子项，abstract 为 null', async () => {
+  it('按 name 升序返回直接子项', async () => {
     await service.write(uri('b.md'), 'b', AUTH_PRINCIPALS);
     await service.write(uri('a.md'), 'a', AUTH_PRINCIPALS);
     await service.mkdir(uri('sub'), AUTH_PRINCIPALS);
@@ -205,7 +201,6 @@ describe('list', () => {
     const entries = await service.list(Uri.parse(BASE), AUTH_PRINCIPALS);
 
     expect(entries.map((entry) => entry.uri.name)).toEqual(['a.md', 'b.md', 'sub']);
-    expect(entries.every((entry) => entry.abstract === null)).toBe(true);
     expect(entries.at(-1)).toMatchObject({ kind: 'directory' });
   });
 

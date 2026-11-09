@@ -92,11 +92,16 @@ const HOOK_PHASES: readonly { readonly key: string; readonly label: string }[] =
   { key: 'capture', label: '采集' },
 ]
 
-/** §15.2 的七个 Hook 生命周期点 + 兜底的 `other`。 */
+/**
+ * §15.2 的六个 Hook 生命周期点 + 兜底的 `other`。
+ *
+ * `PreToolUse` 不发 HTTP，也不做开销上报，所以不在这里——留一行永远没有样本的
+ * 事件会被读成「这个事件没发生」，而不是「这个事件没被采集」。它的耗时排查走
+ * 宿主自己的日志。
+ */
 const HOOK_EVENTS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'session_start', label: '会话开始' },
   { key: 'user_prompt_submit', label: '提交提示' },
-  { key: 'pre_tool_use', label: '工具调用前' },
   { key: 'post_tool_use', label: '工具调用后' },
   { key: 'stop', label: '轮次结束' },
   { key: 'pre_compact', label: '上下文压缩前' },
@@ -131,10 +136,9 @@ function sampleValue(
 function hookBreakdownOf(series: PrometheusSeries): readonly HookEventBreakdown[] {
   const overhead = series['comem_hook_overhead_seconds'] ?? []
   const totals = series['comem_hook_overhead_total_seconds'] ?? []
-  const asyncs = series['comem_hook_async_seconds'] ?? []
 
   const present = new Set<string>()
-  for (const sample of [...overhead, ...totals, ...asyncs]) {
+  for (const sample of [...overhead, ...totals]) {
     const event = sample.labels['event']
     if (event !== undefined) {
       present.add(event)
@@ -162,7 +166,6 @@ function hookBreakdownOf(series: PrometheusSeries): readonly HookEventBreakdown[
     }))
 
     const reportedTotal = sampleValue(series, 'comem_hook_overhead_total_seconds', { event })
-    const asyncSeconds = sampleValue(series, 'comem_hook_async_seconds', { event })
 
     return {
       event,
@@ -172,7 +175,6 @@ function hookBreakdownOf(series: PrometheusSeries): readonly HookEventBreakdown[
           ? phases.reduce((sum, phase) => sum + phase.ms, 0)
           : reportedTotal * MILLISECONDS_PER_SECOND,
       phases,
-      asyncMs: asyncSeconds === null ? null : asyncSeconds * MILLISECONDS_PER_SECOND,
     }
   })
 }
@@ -190,6 +192,7 @@ function usageOf(series: PrometheusSeries): MonitorUsage {
     promptTokens: sampleValue(series, 'comem_llm_tokens_total', { kind: 'prompt' }),
     completionTokens: sampleValue(series, 'comem_llm_tokens_total', { kind: 'completion' }),
     costUsd: sampleValue(series, 'comem_llm_cost_usd_total'),
+    pricingConfigured: sampleValue(series, 'comem_llm_pricing_configured'),
   }
 }
 
@@ -204,6 +207,7 @@ const VISIBLE_METRICS: readonly { readonly name: string; readonly label: string 
   { name: 'comem_http_request_duration_seconds_count', label: '请求总数' },
   { name: 'comem_llm_tokens_total', label: '模型 Token 累计' },
   { name: 'comem_llm_cost_usd_total', label: '模型成本累计' },
+  { name: 'comem_llm_pricing_configured', label: '模型单价是否配置' },
   { name: 'comem_index_nodes', label: '索引节点数' },
   { name: 'comem_pending_review', label: '待复核记忆条数' },
   { name: 'comem_hook_overhead_seconds', label: 'Hook 分阶段阻塞开销' },
@@ -239,20 +243,15 @@ import {
   errorMessageOf,
   useApi,
   type HealthPayload,
-  type PendingMemoriesPayload,
 } from '~/composables/useApi'
 
 useHead({ title: '监控 · CoMem 控制台' })
-
-/** 待复核列表只取一页：这里只要「最老一条的时间」，不需要全量。 */
-const PENDING_PREVIEW_LIMIT = 100
 
 const api = useApi()
 const config = useRuntimeConfig()
 
 const health = ref<HealthPayload | null>(null)
 const metricsText = ref<string | null>(null)
-const pending = ref<PendingMemoriesPayload | null>(null)
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -267,20 +266,21 @@ const usage = computed<MonitorUsage | null>(() =>
 
 const hookEvents = computed<readonly HookEventBreakdown[]>(() => hookBreakdownOf(series.value))
 
-const pendingReview = computed<number | null>(() =>
-  sampleValue(series.value, 'comem_pending_review'),
-)
-
-/** 最老一条待复核记忆的年龄（秒）。列表按更新时间排序，第一条就是最老的。 */
-const oldestPendingSeconds = computed<number | null>(() => {
-  const memories = pending.value?.memories ?? []
-  const timestamps = memories
-    .map((memory) => new Date(memory.updatedAt).getTime())
-    .filter((time) => !Number.isNaN(time))
-  if (timestamps.length === 0) {
+/**
+ * 后台处理耗时（毫秒）。**取最近一次最慢的后台阶段。**
+ *
+ * 服务端的 `#asyncPhases` 按阶段（归档 / 抽取 / 合并 / 摘要）记录「最近一次」的
+ * 耗时，`renderMetrics` 以 `comem_hook_async_seconds{phase="..."}` 输出。这些值来自
+ * 各自的阶段，不属于任何一个 hook 事件；其中一个阶段可能由不同事件触发，逐事件
+ * 展示会读出「每个事件各自的后台耗时」。这里取所有阶段样本里的最大值，含义是
+ * 「最近一次观察到的、最慢的那个后台阶段」。
+ */
+const asyncOverheadMs = computed<number | null>(() => {
+  const samples = series.value['comem_hook_async_seconds'] ?? []
+  if (samples.length === 0) {
     return null
   }
-  return Math.max(0, (Date.now() - Math.min(...timestamps)) / 1000)
+  return Math.max(...samples.map((sample) => sample.value)) * MILLISECONDS_PER_SECOND
 })
 
 const availableMetrics = computed<readonly string[]>(() =>
@@ -320,10 +320,9 @@ async function load(): Promise<void> {
 
   const failures: string[] = []
 
-  const [healthResult, metricsResult, pendingResult] = await Promise.allSettled([
+  const [healthResult, metricsResult] = await Promise.allSettled([
     api.get<HealthPayload>('/health'),
     fetchMetricsText(),
-    api.get<PendingMemoriesPayload>('/memories/pending', { limit: PENDING_PREVIEW_LIMIT }),
   ])
 
   if (healthResult.status === 'fulfilled') {
@@ -338,13 +337,6 @@ async function load(): Promise<void> {
   } else {
     metricsText.value = null
     failures.push(`指标：${errorMessageOf(metricsResult.reason)}`)
-  }
-
-  if (pendingResult.status === 'fulfilled') {
-    pending.value = pendingResult.value
-  } else {
-    pending.value = null
-    failures.push(`待复核列表：${errorMessageOf(pendingResult.reason)}`)
   }
 
   error.value = failures.length === 0 ? null : failures.join(' ')
@@ -376,12 +368,7 @@ onMounted(load)
 
       <section class="section">
         <h2 class="section__title">记忆健康度</h2>
-        <DomainHealthCards
-          :health="health"
-          :pending-review="pendingReview"
-          :oldest-pending-seconds="oldestPendingSeconds"
-          :loading="loading"
-        />
+        <DomainHealthCards :health="health" :loading="loading" />
       </section>
 
       <section class="section">
@@ -394,7 +381,11 @@ onMounted(load)
             <UiSkeleton width="72%" height="10px" />
             <UiSkeleton width="58%" height="10px" />
           </div>
-          <DomainPhaseBreakdown v-else-if="metricsText !== null" :events="hookEvents" />
+          <DomainPhaseBreakdown
+            v-else-if="metricsText !== null"
+            :events="hookEvents"
+            :async-ms="asyncOverheadMs"
+          />
           <p v-else class="unavailable">指标没有取到，无法展示开销归因。</p>
         </UiCard>
       </section>

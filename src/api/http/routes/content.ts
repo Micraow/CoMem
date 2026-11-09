@@ -27,6 +27,7 @@ import { ComemError } from '../../../domain/errors.js';
 import type { PatchBlock } from '../../../domain/patch.js';
 import type { Uri } from '../../../domain/uri.js';
 import { verifyDownloadToken } from '../../mcp/tools/download.js';
+import { sliceText } from '../../text-slice.js';
 
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -62,14 +63,6 @@ function parseWriteMode(value: unknown): WriteMode {
   throw new ComemError('INVALID_ARGUMENT', `write 的 mode 只能是 ${WRITE_MODES.join(' / ')}。`, {
     mode: value,
   });
-}
-
-/**
- * 按 **Unicode 码点** 切片。中文与 emoji 才不会从中间断开（与 MCP `read` 一致）。
- */
-function sliceText(text: string, offset: number, limit: number): string {
-  const codePoints = [...text];
-  return codePoints.slice(offset, limit < 0 ? undefined : offset + limit).join('');
 }
 
 function parsePatchBlocks(value: unknown): readonly PatchBlock[] {
@@ -121,10 +114,13 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, READ, principals);
         const document = await filesystem.read(uri, principals);
+        const text = sliceText(document.text, offset, limit);
         return ok({
           uri: uri.toString(),
-          text: sliceText(document.text, offset, limit),
-          truncated: limit >= 0,
+          text,
+          // `limit < 0` 表示不截断；否则「还有码点没返回」才是截断。按码点数比较，
+          // 中文与 emoji 不会因为 UTF-16 代理对被算多。
+          truncated: limit >= 0 && offset + [...text].length < [...document.text].length,
         });
       });
 

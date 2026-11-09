@@ -11,22 +11,30 @@ import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
 import type { IndexRecord, RetrievalIndex, SearchHit } from '../../../src/domain/retrieval.js';
 import type { RerankProvider } from '../../../src/domain/rerank.js';
+import type {
+  AutoCommitPolicy,
+  Session,
+  SessionMessage,
+} from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
-  AllowAllAuthorizer,
   permissionDenied,
   type AclAction,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
-import type { DeliveredItem, RecallLedger } from '../../../src/services/recall-ledger.js';
+import { RecallLedger, type DeliveredItem } from '../../../src/services/recall-ledger.js';
+import { SessionService } from '../../../src/services/session.js';
+import { TaskService } from '../../../src/services/task.js';
 import {
   SearchService,
   type ContextOptions,
@@ -134,6 +142,7 @@ async function createService(options: {
   readonly maxTokens?: number;
   readonly index?: RetrievalIndex;
   readonly ledger?: Pick<RecallLedger, 'recentlyDelivered' | 'record'>;
+  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'>;
   readonly rerank?: {
     readonly provider: RerankProvider;
     readonly topN: number;
@@ -146,7 +155,6 @@ async function createService(options: {
     metadata,
     authorizer: activeAuthorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const filesystem = new FileSystemService({
     store,
@@ -166,6 +174,7 @@ async function createService(options: {
         ? CONFIG
         : { ...CONFIG, assembly: { ...CONFIG.assembly, maxTokens: options.maxTokens } },
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    ...(options.sessions === undefined ? {} : { sessions: options.sessions }),
     ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
     // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
     hotnessWeight: 0,
@@ -275,22 +284,6 @@ describe('find', () => {
 
     expect(hits.map((hit) => hit.uri)).toEqual([l0, l2]);
     expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0);
-  });
-
-  it('scoreThreshold 在加权之后过滤', async () => {
-    await seed(DOC, '上下文记忆数据库的设计', { level: 'L2' });
-    const service = await createService();
-
-    const [hit] = await service.find('记忆', findOptions());
-    expect(hit).toBeDefined();
-    const score = hit?.score ?? 0;
-
-    await expect(service.find('记忆', findOptions({ scoreThreshold: score + 1 }))).resolves.toEqual(
-      [],
-    );
-    await expect(
-      service.find('记忆', findOptions({ scoreThreshold: score - 1 })),
-    ).resolves.toHaveLength(1);
   });
 
   it('limit 生效', async () => {
@@ -493,6 +486,31 @@ describe('glob', () => {
 describe('context 账本', () => {
   const DOC = 'comem://user/alice/mem/m1.md';
 
+  /**
+   * 生产路径上时钟只有一个来源：`sessionId` + 会话的累计消息数
+   * （`sessions.totalMessageCount`）。没有 HTTP / MCP 入口能直接指定 `scopeKey` /
+   * `turn`，所以用假 SessionService 钉住这个推导，而不是绕过它。
+   *
+   * 假对象的 `load` 只为满足依赖形状（意图分析取最近消息）；时钟读的是
+   * `totalMessageCount`。两者在真实实现里不是同一个数：提交后 `load` 的
+   * `messageCount` 归零，累计数不变——那条路径由 `context 账本：累计时钟` 用真实
+   * `SessionService` 覆盖。
+   */
+  function sessionsWithClock(turn: number): Pick<SessionService, 'load' | 'totalMessageCount'> {
+    return {
+      load: async (sessionUri: Uri): Promise<Session> => ({
+        id: sessionUri.name,
+        uri: sessionUri,
+        status: 'open',
+        messages: [],
+        messageCount: turn,
+        pendingTokens: 0,
+        lastCommitAt: null,
+      }),
+      totalMessageCount: async () => turn,
+    };
+  }
+
   it('投放的条目写回账本，下一轮按账本去重', async () => {
     await writeBody(DOC, '# 标题\n\n正文。');
     await seed(DOC, '记忆', { abstract: '一句话摘要' });
@@ -517,13 +535,8 @@ describe('context 账本', () => {
       ),
     };
 
-    const service = await createService({ ledger });
-    const first = await service.context(
-      '记忆',
-      contextOptions({
-        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 4 },
-      }),
-    );
+    const service = await createService({ ledger, sessions: sessionsWithClock(4) });
+    const first = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
 
     expect(first.items.map((item) => item.uri)).toEqual([DOC]);
     expect(ledger.record).toHaveBeenCalledWith('user_alice', 'sess_1', 4, first.items, {
@@ -531,12 +544,7 @@ describe('context 账本', () => {
       maxEntries: 500,
     });
 
-    const second = await service.context(
-      '记忆',
-      contextOptions({
-        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 4 },
-      }),
-    );
+    const second = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
     expect(second.items).toEqual([]);
     expect(second.rendered).toBe('');
   });
@@ -550,13 +558,8 @@ describe('context 账本', () => {
       }),
     };
 
-    const service = await createService({ ledger });
-    const result = await service.context(
-      '记忆',
-      contextOptions({
-        excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 1 },
-      }),
-    );
+    const service = await createService({ ledger, sessions: sessionsWithClock(1) });
+    const result = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
 
     expect(result.items).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledWith(
@@ -570,18 +573,192 @@ describe('context 账本', () => {
     );
   });
 
-  it('没有注入账本时 excludeDelivered 抛 INVALID_ARGUMENT', async () => {
+  it('有会话时钟但没有注入账本时抛 INVALID_ARGUMENT', async () => {
     await seed(DOC, '记忆');
-    const service = await createService();
+    const service = await createService({ sessions: sessionsWithClock(1) });
 
     await expect(
-      service.context(
-        '记忆',
-        contextOptions({
-          excludeDelivered: { scopeKey: 'user_alice', sessionId: 'sess_1', turn: 1 },
-        }),
-      ),
+      service.context('记忆', contextOptions({ sessionId: 'sess_1' })),
     ).rejects.toBeInstanceOf(ComemError);
+  });
+});
+
+/**
+ * 账本时钟的真实实现（§8.7）：`turn` 必须取**累计**消息数。
+ *
+ * 这一段用真实 `SessionService` + 真实 `RecallLedger`。假 sessions 只能证明调用方
+ * 传了什么，证明不了「提交清空 live 之后时钟还在」——那正是接线前断掉的地方：
+ * `totalMessageCount` 实现了但没人调用，`#deliveryClock` 拿 `load` 的
+ * `messageCount` 当时钟。`keepRecentCount: 0`（默认）的第一次提交把 live 清空，
+ * `turn` 从 2 掉到 0，账本读侧的 `entry.turn <= turn` 把 turn=2 的条目当成
+ * 「未来轮次」排除，刚投过的记忆下一轮再投一次。
+ */
+describe('context 账本：累计时钟', () => {
+  const DOC = 'comem://user/alice/mem/m1.md';
+
+  /** §10.2.1 的默认策略；`keepRecentCount: 0` 是默认值，也是本回归的触发条件。 */
+  const POLICY: AutoCommitPolicy = {
+    enabled: true,
+    pendingTokenThreshold: 150000,
+    messageCountThreshold: 100,
+    minCommitIntervalSeconds: 0,
+    idleTimeoutSeconds: 0,
+    keepRecentCount: 0,
+  };
+
+  function createSessions(policy: Partial<AutoCommitPolicy> = {}): SessionService {
+    const meta = new MetadataFileStore({ dataDir, logger });
+    return new SessionService({
+      store,
+      metadata: meta,
+      locks: createPathLockManager({ dataDir, logger, pollIntervalMs: 1 }),
+      tasks: new TaskService({ tasks: new TaskRepository({ db, logger }), logger }),
+      logger,
+      meta,
+      config: { autoCommit: { ...POLICY, ...policy } },
+      authorizer,
+    });
+  }
+
+  /** 真实账本 + 内存端口：过滤规则跑真的，只把落盘换成 Map。 */
+  function createLedger(): RecallLedger {
+    const files = new Map<string, string>();
+    return new RecallLedger({
+      dataDir,
+      store: {
+        read: async (key) => files.get(key) ?? null,
+        write: async (key, text) => {
+          files.set(key, text);
+        },
+        remove: async (key) => {
+          files.delete(key);
+        },
+      },
+      logger,
+    });
+  }
+
+  function message(id: string): Omit<SessionMessage, 'turn'> {
+    return {
+      id,
+      role: 'user',
+      parts: [{ kind: 'text', text: '消息正文' }],
+      createdAt: '2026-11-08T00:00:00.000Z',
+    };
+  }
+
+  /** 一条可召回的文档 + 一个写了若干条消息的会话（默认 2 条、`keepRecentCount: 0`）。 */
+  async function prepare(
+    options: {
+      readonly policy?: Partial<AutoCommitPolicy>;
+      readonly messageIds?: readonly string[];
+    } = {},
+  ): Promise<{
+    readonly sessions: SessionService;
+    readonly sessionUri: Uri;
+  }> {
+    await writeBody(DOC, '# 标题\n\n正文。');
+    await seed(DOC, '记忆', { abstract: '一句话摘要' });
+
+    const sessions = createSessions(options.policy);
+    const sessionUri = await sessions.create(Uri.parse(SCOPE), PRINCIPALS);
+    for (const id of options.messageIds ?? ['m1', 'm2']) {
+      await sessions.addMessage(sessionUri, message(id));
+    }
+    return { sessions, sessionUri };
+  }
+
+  it('提交清空 live 之后，第二次 context 不重复投放第一次给过的 URI', async () => {
+    const { sessions, sessionUri } = await prepare();
+    const service = await createService({ ledger: createLedger(), sessions });
+    const options = contextOptions({ sessionId: sessionUri.name });
+
+    const first = await service.context('记忆', options);
+    const firstUris = first.items.map((item) => item.uri);
+    expect(firstUris).toEqual([DOC]);
+
+    // `keepRecentCount: 0`：提交把 live 全部移进归档，live 条数归零。
+    await sessions.commitPhase1(sessionUri);
+    expect((await sessions.load(sessionUri)).messageCount).toBe(0);
+    expect(await sessions.totalMessageCount(sessionUri)).toBe(2);
+
+    const second = await service.context('记忆', options);
+    const secondUris = second.items.map((item) => item.uri);
+    expect(secondUris.filter((uri) => firstUris.includes(uri))).toEqual([]);
+
+    // 时钟没有退化：投在 turn=2 的条目仍在窗口内，第二次的 turn 也是 2。
+    expect(await sessions.totalMessageCount(sessionUri)).toBe(2);
+  });
+
+  it('轮次时钟单调：提交前后 turn 不下降', async () => {
+    const { sessions, sessionUri } = await prepare();
+    const ledger = createLedger();
+    const record = vi.spyOn(ledger, 'record');
+    const service = await createService({ ledger, sessions });
+    const options = contextOptions({ sessionId: sessionUri.name });
+
+    await service.context('记忆', options);
+    // 2 条 live 消息 = turn 2。
+    expect(record.mock.calls.map((call) => call[2])).toEqual([2]);
+
+    await sessions.commitPhase1(sessionUri);
+    await service.context('记忆', options);
+
+    // 提交后 live = 0，累计数仍是 2：turn 不回到 0。
+    const turns = record.mock.calls.map((call) => call[2]);
+    expect(turns).toEqual([2, 2]);
+    expect(turns[1]).toBeGreaterThanOrEqual(turns[0] ?? 0);
+  });
+
+  /**
+   * `keepRecentCount > 0` 的边界：提交只归档前 `n - keepRecentCount` 条，最后
+   * `keepRecentCount` 条留在 live。累计数取「归档段 ID 数 + live 条数」，两段互斥
+   * （`archivedMessageIds` 只收归档段），所以和等于提交前的消息总数——不重不漏，
+   * 时钟不回退。默认值 0 之外的这个分支以前没有测试。
+   */
+  it('keepRecentCount > 0 时归档段与保留段不重不漏，时钟仍单调', async () => {
+    const { sessions, sessionUri } = await prepare({
+      policy: { keepRecentCount: 1 },
+      messageIds: ['m1', 'm2', 'm3'],
+    });
+    const ledger = createLedger();
+    const record = vi.spyOn(ledger, 'record');
+    const service = await createService({ ledger, sessions });
+    const options = contextOptions({ sessionId: sessionUri.name });
+
+    const first = await service.context('记忆', options);
+    const firstUris = first.items.map((item) => item.uri);
+    expect(firstUris).toEqual([DOC]);
+    // 3 条 live 消息 = turn 3。
+    expect(record.mock.calls.map((call) => call[2])).toEqual([3]);
+
+    await sessions.commitPhase1(sessionUri);
+
+    // 3 条里归档 2 条、保留 1 条：live 只剩 1，累计数仍是 3。
+    const loaded = await sessions.load(sessionUri);
+    expect(loaded.messageCount).toBe(1);
+    expect(loaded.messages.map((item) => item.id)).toEqual(['m3']);
+    expect(await sessions.totalMessageCount(sessionUri)).toBe(3);
+
+    const second = await service.context('记忆', options);
+    expect(second.items.map((item) => item.uri).filter((uri) => firstUris.includes(uri))).toEqual(
+      [],
+    );
+    expect(record.mock.calls.map((call) => call[2])).toEqual([3, 3]);
+  });
+
+  it('会话读不到时只记 warn，检索照常返回（本次不做跨轮去重）', async () => {
+    await writeBody(DOC, '# 标题\n\n正文。');
+    await seed(DOC, '记忆', { abstract: '一句话摘要' });
+    const service = await createService({ ledger: createLedger(), sessions: createSessions() });
+
+    const result = await service.context('记忆', contextOptions({ sessionId: 'sess_missing' }));
+
+    expect(result.items.map((item) => item.uri)).toEqual([DOC]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      '会话不可读，本次不做跨轮去重',
+      expect.objectContaining({ sessionId: 'sess_missing', code: 'NOT_FOUND' }),
+    );
   });
 });
 
@@ -748,7 +925,6 @@ describe('SearchService 构造', () => {
       metadata,
       authorizer,
       logger,
-      estimateTokens: (text) => text.length,
     });
     const filesystem = new FileSystemService({
       store,

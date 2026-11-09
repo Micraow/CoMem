@@ -89,11 +89,11 @@ describe('Document', () => {
   it('保留 frontmatter 与 memoryType', () => {
     const node = document('comem://user/alice/memories/preferences/code-style', '正文', {
       memoryType: 'preferences',
-      frontmatter: { summary: '摘要', summaryDigest: 'abc', summaryState: 'stale' },
+      frontmatter: { summary: '摘要' },
     });
 
     expect(node.memoryType).toBe('preferences');
-    expect(node.frontmatter.summaryState).toBe('stale');
+    expect(node.frontmatter.summary).toBe('摘要');
   });
 });
 

@@ -36,16 +36,12 @@ function parseFile(value: unknown, index: number): SkillFileInput {
   const record = requireRecord(value, `files[${index}]`);
   const path = record['path'];
   const content = record['content'];
-  const executable = record['executable'];
 
   if (typeof path !== 'string' || path === '') {
     throw invalid(`files[${index}].path 必须是非空字符串。`, { index });
   }
   if (typeof content !== 'string') {
     throw invalid(`files[${index}].content 必须是 base64 字符串。`, { index });
-  }
-  if (executable !== undefined && typeof executable !== 'boolean') {
-    throw invalid(`files[${index}].executable 必须是布尔值。`, { index });
   }
 
   // `Buffer.from(..., 'base64')` 对非法字符是静默跳过，不是报错。先按规范形态
@@ -57,7 +53,6 @@ function parseFile(value: unknown, index: number): SkillFileInput {
   return {
     path,
     content: new Uint8Array(Buffer.from(content, 'base64')),
-    ...(executable === undefined ? {} : { executable }),
   };
 }
 

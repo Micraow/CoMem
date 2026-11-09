@@ -167,8 +167,12 @@ export class TaskRepository {
    * 可领。`lease_until IS NULL` 的 `running` 行按已过期处理：认领一定会写租约，
    * 出现这种行说明数据被改坏了，让它能被捞回来而不是永远卡在 `running`。
    *
-   * 认领不递增 `attempts`：递增在「这次执行结束」时（失败回队列、或恢复扫描重置
-   * 僵尸任务），一次失败只算一次。
+   * **认领成功即 `attempts += 1`，并与状态转移写在同一条 SQL 里。** 语义是
+   * 「`attempts` = 已开始的执行次数」：一次认领就是一次执行的开始，执行成功与否、
+   * 进程是否中途被杀，都不再改这个计数。`WHERE` 命中的那次 UPDATE 才递增，
+   * 所以在应用层做这件事不安全——两个 worker 会读到同一个旧值再各自加一（丢一次
+   * 计数），或者认领已经落盘、加一却没落盘（计数落后于真实执行次数，`maxAttempts`
+   * 因此多放行一次）。
    */
   tryClaim(id: string, now: Date, leaseSeconds: number): boolean {
     const nowIso = now.toISOString();
@@ -176,7 +180,7 @@ export class TaskRepository {
       this.#db
         .prepare(
           `UPDATE task
-              SET status = 'running', lease_until = ?, updated_at = ?
+              SET status = 'running', attempts = attempts + 1, lease_until = ?, updated_at = ?
             WHERE id = ?
               AND (
                 status = 'pending'
@@ -215,10 +219,12 @@ export class TaskRepository {
   }
 
   /**
-   * 失败但还值得重试：回到 `pending`，`attempts += 1`。
+   * 失败但还值得重试：回到 `pending`，**不动 `attempts`**。
    *
-   * `domain/task.ts` 的转移表里 `running → pending` 是合法转移；这里用一条 UPDATE
-   * 完成，不经过内存里的 `transition`——那会多一次读。
+   * 这次执行的开始已经在 `tryClaim` 里记过（一次认领 = 一次执行的开始），这里再加
+   * 一次会把「一次失败」记成两次，可重试次数凭空减半。`domain/task.ts` 的转移表里
+   * `running → pending` 是合法转移；这里用一条 UPDATE 完成，不经过内存里的
+   * `transition`——那会多一次读。
    *
    * 保留 `error`：它是「上一次失败的原因」，重试成功后由 `finish('done')` 清空。
    * 清掉的话，一个反复失败的任务在队列里看不到任何线索。
@@ -228,7 +234,7 @@ export class TaskRepository {
       this.#db
         .prepare(
           `UPDATE task
-              SET status = 'pending', lease_until = NULL, attempts = attempts + 1, updated_at = ?
+              SET status = 'pending', lease_until = NULL, updated_at = ?
             WHERE id = ?`,
         )
         .run(now.toISOString(), id);
@@ -237,25 +243,32 @@ export class TaskRepository {
   }
 
   /**
-   * 终态（§10.4）。`done` 不递增 `attempts`；`failed` 递增——`attempts` 记的是
-   * 「已经跑完的执行次数」，失败的这一次也要算进去，否则 `shouldRetry` 永远为真。
+   * 终态（§10.4）。**不动 `attempts`**：这次执行的开始已经在 `tryClaim` 里记过。
+   *
+   * 成功与失败都不改计数——成功的那次同样是一次「已开始的执行」。在这里给失败补加
+   * 一次，等于让 `attempts` 时而记开始、时而记失败，两条回收路径（认领 / 启动扫描）
+   * 对「一次认领算不算一次尝试」给出两个答案。
    */
   finish(id: string, status: 'done' | 'failed', error: string | null, now: Date): void {
-    const attemptsDelta = status === 'failed' ? 1 : 0;
     withWriteTransaction(this.#db, () => {
       this.#db
         .prepare(
           `UPDATE task
-              SET status = ?, lease_until = NULL, error = ?, attempts = attempts + ?, updated_at = ?
+              SET status = ?, lease_until = NULL, error = ?, updated_at = ?
             WHERE id = ?`,
         )
-        .run(status, error, attemptsDelta, now.toISOString(), id);
+        .run(status, error, now.toISOString(), id);
     });
     this.#logger.info('任务进入终态', { taskId: id, status, error });
   }
 
   /**
-   * 启动扫描（§10.4）：租约过期的 `running` → `pending`，`attempts += 1`。
+   * 启动扫描（§10.4）：租约过期的 `running` → `pending`，**不动 `attempts`**。
+   *
+   * 僵尸任务的那次认领已经算过一次执行开始（`tryClaim`）。回收只是把行放回队列，
+   * 不是一次新的执行，所以不计数。否则同一个任务会因为「被回收」而多消耗一次重试：
+   * 直接抢过期租约（`tryClaim`）与经本方法重置是同一个状态的两条回收路径，它们必须
+   * 对「一次认领算不算一次尝试」给同一个答案。
    *
    * 先 SELECT 再批量 UPDATE，整体一个事务：SELECT 到的行在事务内不会被别的写者
    * 改掉（`BEGIN IMMEDIATE` 先拿写锁），所以不存在「读到了、写的时候已经变了」。
@@ -277,7 +290,7 @@ export class TaskRepository {
       }
       const statement = this.#db.prepare(
         `UPDATE task
-            SET status = 'pending', lease_until = NULL, attempts = attempts + 1, updated_at = ?
+            SET status = 'pending', lease_until = NULL, updated_at = ?
           WHERE id = ?`,
       );
       for (const id of ids) {

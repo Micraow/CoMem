@@ -3,8 +3,9 @@
 装进宿主的会话召回与采集插件。它是**独立于服务端的交付物**：纯 JavaScript（`.mjs`），
 只依赖 Node 内置模块，不声明任何 `dependencies`。
 
-这个目录交付三样东西：**六个 Hook**（自动召回与采集）、**一个 stdio MCP 代理**（给
-只支持本地 stdio 服务器的宿主），以及**两份提示词**（教 agent 什么时候用 MCP 工具）。
+这个目录交付三样东西：**七个 Hook 事件**（自动召回与采集，六个脚本）、**一个 stdio MCP
+代理**（给只支持本地 stdio 服务器的宿主），以及**两份提示词**（教 agent 什么时候用 MCP
+工具）。
 MCP 工具本身不经过这里：CoMem 在 `/mcp` 暴露 Streamable HTTP，能直连的宿主直接配
 URL 即可。分工与配置片段见下面的「[MCP 接入](#mcp-接入)」。
 
@@ -15,6 +16,8 @@ integrations/
 ├── lib/                  # 与宿主无关的共享模块
 │   ├── config.mjs        # 配置 + 宿主解析 + bypass
 │   ├── http.mjs          # 超时 / 重试 / 错误封套
+│   ├── events.json       # 事件名映射表（宿主 PascalCase ↔ 内部 snake_case）
+│   ├── events.mjs        # 读上面那张表，导出 EVENT_NAMES / REPORTED_EVENT_NAMES
 │   ├── dedup.mjs         # 事件去重（500ms 窗口）
 │   ├── lock.mjs          # 跨进程会话锁
 │   ├── cursor.mjs        # 消息游标
@@ -23,8 +26,8 @@ integrations/
 ├── servers/              # 七个可执行入口
 │   ├── session-start.mjs      # ┐
 │   ├── user-prompt-submit.mjs # │
-│   ├── pre-tool-use.mjs       # │ 六个 Hook：stdin JSON → stdout JSON
-│   ├── post-tool-use.mjs      # │
+│   ├── pre-tool-use.mjs       # │ 六个 Hook 脚本：stdin JSON → stdout JSON
+│   ├── post-tool-use.mjs      # │ `pre-compact.mjs` 同时服务 PreCompact 与 SessionEnd
 │   ├── stop.mjs               # │
 │   ├── pre-compact.mjs        # ┘
 │   └── mcp-proxy.mjs     # stdio → POST /mcp 的 MCP 代理
@@ -68,7 +71,7 @@ co-mem uninstall --host codex
 ### Codex
 
 Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），
-事件名与 CoMem 的六个一一对应，载荷字段与 Claude Code 同形（`session_id` /
+事件名与 CoMem 的七个一一对应，载荷字段与 Claude Code 同形（`session_id` /
 `transcript_path` / `cwd` / `hook_event_name`）。官方文档：
 <https://developers.openai.com/codex/hooks>。
 
@@ -94,19 +97,40 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | hook 脚本 | 重新运行 `co-mem install` |
 | 游标文件可写 | 检查 `COMEM_HOOK_TMPDIR` 目录权限 |
 
-## 六个 hook
+## 七个 hook 事件
 
 | Hook | 做什么 | 阻塞还是异步 |
 |---|---|---|
 | `SessionStart` | 注入 profile、偏好、`<available-skills>` 技能目录 | 阻塞（一次读 + 一次列表） |
 | `UserPromptSubmit` | 拿 prompt 去 `find`，把相关记忆注入上下文 | 阻塞（§15.9 的核心开销） |
-| `PreToolUse` | 拦住把 `comem://` 当本地路径的 `Read` / `Write` / `Edit`，指回 MCP 工具 | 阻塞（纯内存判断） |
+| `PreToolUse` | 拦住把 `comem://` 当本地路径的 `Read` / `Write` / `Edit`，指回 MCP 工具 | 阻塞（纯内存判断；**不发 HTTP，也不上报开销**） |
 | `PostToolUse` | 把工具调用与结果采集为 `tool` 消息 | 阻塞（5–20ms 的采集写入） |
 | `Stop` | 采集本轮 user / assistant 消息并提交 | **主进程立刻返回**，采集与提交在分离的 worker 进程里 |
-| `PreCompact` / `SessionEnd` | 把待处理消息提交完 | 阻塞，等提交完成（总预算 30s / 1.2s，见「每个 hook 的总预算」） |
+| `PreCompact` | 把待处理消息提交完 | 阻塞，等提交完成（总预算 30s，见「每个 hook 的总预算」） |
+| `SessionEnd` | 把待处理消息提交完 | 阻塞，等提交完成（总预算 1.2s：宿主只给这组 hook 1.5 秒） |
 
-`SessionEnd` 在内部归一成 `PreCompact`：两者都是「对话要没了，把手上的消息交出去」。
-默认只安装表格里的六个事件；要接 `SessionEnd` 时把 `pre-compact.mjs` 再加一条即可。
+七个事件、六个脚本：`PreCompact` 与 `SessionEnd` 共用 `servers/pre-compact.mjs`，两者
+都是「对话要没了，把手上的消息交出去」，但内部事件名不同（`pre_compact` /
+`session_end`）、预算也不同。`co-mem install` 默认把七个都写进宿主的配置。
+
+### 事件名与开销上报
+
+两套事件名分居两侧，对应关系只写在 `lib/events.json`：
+
+| 字段 | 含义 |
+|---|---|
+| 键（对象键） | 内部事件名，`session_start` 等 snake_case，也是 `/telemetry/hook` 的 `event` |
+| `hostEventName` | 宿主发的名字，`SessionStart` 等 PascalCase |
+| `reportsOverhead` | 这个事件是否上报阻塞开销 |
+
+`lib/events.json` 是这张表的唯一一份，`lib/events.mjs` 从它导出 `EVENT_NAMES`（7 个）
+与 `REPORTED_EVENT_NAMES`（6 个）。三个宿主共享这张表——各写一份时，事件名对不上会
+让 `/metrics` 里的样本全部塌进 `event="other"`。
+
+**「宿主会调的事件」是 7 个，「进 `/metrics` 的事件」是 6 个。** `pre_tool_use` 的
+`reportsOverhead` 是 `false`：它的判定全在本地，没有 HTTP 往返可归因，上报一个
+全是 0ms 的样本只会稀释「每轮阻塞开销」的分布。它的预算（1000ms）仍然是真实的，
+超时排查看宿主自己的日志。
 
 ### 采集为什么不阻塞
 
@@ -146,7 +170,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 不写也不关 stdin 时，`for await` 永远不会返回。800ms 小于最短的事件预算，保证
 「stdin 卡住」不会把任何 hook 拖过它的总预算。
 
-**错误路径的契约（六个 hook 一致）**：
+**错误路径的契约（七个事件一致）**：
 
 | 性质 | 实现 |
 |---|---|
@@ -169,7 +193,7 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 
 | 通道 | 谁发起 | 负责什么 |
 |---|---|---|
-| Hook | 宿主在固定生命周期点自动调用 | 召回注入（`SessionStart` / `UserPromptSubmit`）、采集（`PostToolUse` / `Stop` / `PreCompact`） |
+| Hook | 宿主在固定生命周期点自动调用 | 召回注入（`SessionStart` / `UserPromptSubmit`）、采集（`PostToolUse` / `Stop` / `PreCompact` / `SessionEnd`） |
 | MCP | 模型主动调用 | 16 个工具：`find` / `search` / `read` / `write` / `remember` / `forget` / `add_resource` 等 |
 
 两者互补：**只装 Hook** 时，agent 能拿到自动注入的记忆，但不能主动 `remember` /
@@ -531,7 +555,7 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |
 | 自检 | `GET /health` | 2xx |
 
-## 三层去重
+## 四层去重
 
 1. **事件去重**：同一个 `eventId` 在 500ms 窗口内只处理一次。窗口落在
    `{tmpdir}/comem-events.json`——内存 Map 出了进程就没了，挡不住跨进程重投。
@@ -539,6 +563,14 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
    就重投，宁可重复不能丢。
 3. **跨进程锁**：同一个 session 的多个 hook 进程用 `{tmpdir}/comem-{sid}.lock`
    串行化（`wx` 原子创建 + 过期时间，不做心跳）。
+4. **服务端按消息 `id` 幂等**：同一条消息重复提交时返回已有的那条，不新增、不推进
+   轮次、不改会话状态（活会话与已归档会话都查）。第 2 层的「宁可重投」靠这一层收口，
+   两道合起来才是「不丢也不重」。
+
+插件给的消息 `id` 是稳定值：对话消息取 transcript 里的 `uuid`，工具消息取
+`tool_${toolUseId}`。**服务端只在调用方给了 `id` 时才能去重**：`POST
+/sessions/{id}/messages` 在缺 `id` 时补一个随机 UUID，重投会变成两条——自己写客户端
+时不要省这个字段。
 
 ## 故障排查
 

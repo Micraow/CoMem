@@ -1,5 +1,5 @@
 /**
- * MCP 工具调用的时间上限（`src/api/mcp/deadline.ts`、`services/search.ts` 的上游预算）。
+ * MCP 工具调用的时间上限（`src/api/deadline.ts`、`services/search.ts` 的上游预算）。
  *
  * 这一组测试要证明四件事，每件都对应一条会挂住宿主 agent 的真实故障：
  *
@@ -47,7 +47,7 @@ import { MCP_TOOLS } from '../../../src/api/mcp/tools/index.js';
 import { configSchema } from '../../../src/config/index.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { IndexRecord, RetrievalEngine } from '../../../src/domain/retrieval.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { EmbeddingService } from '../../../src/services/embedding.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
@@ -213,7 +213,6 @@ async function createSearchHarness(options: SearchHarnessOptions): Promise<Searc
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const embedding =
     options.embeddingBaseUrl === undefined
@@ -284,6 +283,17 @@ async function createSearchHarness(options: SearchHarnessOptions): Promise<Searc
     acl: authorizer,
     session: {} as unknown as SessionService,
     memory: {} as unknown as MemoryService,
+    observability: {
+      health: async () => ({
+        pendingReview: 0,
+        staleSummaries: 0,
+        degradedSummaries: 0,
+        orphanTasks: 0,
+        indexNodes: 0,
+        oldestPendingAgeSeconds: null,
+        profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
+      }),
+    },
     resource: {} as unknown as ResourceService,
     skill: {} as unknown as SkillService,
     tasks,
@@ -471,6 +481,17 @@ function minimalContext(search: SearchService): Omit<
     acl: new AllowAllAuthorizer(),
     session: {} as unknown as SessionService,
     memory: {} as unknown as MemoryService,
+    observability: {
+      health: async () => ({
+        pendingReview: 0,
+        staleSummaries: 0,
+        degradedSummaries: 0,
+        orphanTasks: 0,
+        indexNodes: 0,
+        oldestPendingAgeSeconds: null,
+        profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
+      }),
+    },
     resource: {} as unknown as ResourceService,
     skill: {} as unknown as SkillService,
     tasks: {} as unknown as TaskService,
@@ -515,7 +536,7 @@ describe('MCP 工具调用的时间上限', () => {
 
     expect(result.isError).toBe(true);
     const text = textOfContent(result);
-    expect(text).toContain('TOOL_DEADLINE_EXCEEDED');
+    expect(text.startsWith('TOOL_DEADLINE_EXCEEDED: ')).toBe(true);
     expect(text).toContain('向量嵌入（embedding）');
     expect(text).toContain('150 毫秒');
     // 150ms 上限 + 客户端与协议开销。上限的意义是「有界」，不是「精确到毫秒」。
@@ -542,7 +563,7 @@ describe('MCP 工具调用的时间上限', () => {
 
     expect(result.isError).toBe(true);
     const text = textOfContent(result);
-    expect(text).toContain('TOOL_DEADLINE_EXCEEDED');
+    expect(text.startsWith('TOOL_DEADLINE_EXCEEDED: ')).toBe(true);
     expect(text).toContain('本地');
     expect(elapsedMs).toBeLessThan(120 + 1_500);
   });

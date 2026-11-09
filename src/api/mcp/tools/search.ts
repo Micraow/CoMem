@@ -12,6 +12,7 @@
 import { ComemError } from '../../../domain/errors.js';
 import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
 import {
   asRecord,
   formatDegradations,
@@ -19,16 +20,13 @@ import {
   optionalContextType,
   optionalLevel,
   optionalString,
+  nonEmptyString,
   optionalStringArray,
   positiveInteger,
   readScopes,
-  requiredString,
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-/** §13.2 的默认值：`limit=10`。 */
-const DEFAULT_LIMIT = 10;
 
 /** `search` 的出参形态（§8.6）：`list` 是默认，`context` 返回可直接注入模型的文本。 */
 type SearchMode = 'list' | 'context';
@@ -110,7 +108,7 @@ export const searchTool: McpToolDefinition = {
         type: 'string',
         description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
       },
-      limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT },
+      limit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT },
       level: { type: 'string', enum: ['L0', 'L1', 'L2'] },
       contextType: { type: 'string', enum: ['memory', 'resource', 'skill', 'session'] },
       memoryTypes: {
@@ -141,9 +139,9 @@ export const searchTool: McpToolDefinition = {
   },
   async execute(input, context) {
     const args = asRecord(input, 'search');
-    const query = requiredString(args, 'query', 'search');
+    const query = nonEmptyString(args, 'query', 'search');
     const targetUri = optionalString(args, 'targetUri', 'search');
-    const limit = positiveInteger(args, 'limit', DEFAULT_LIMIT, 'search');
+    const limit = positiveInteger(args, 'limit', DEFAULT_SEARCH_LIMIT, 'search');
     const level = optionalLevel(args, 'level', 'search');
     const contextType = optionalContextType(args, 'contextType', 'search');
     const sessionId = optionalString(args, 'sessionId', 'search');

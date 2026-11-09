@@ -7,16 +7,16 @@
  * 界面必须把这件事说出来（「租约已过期」+「下次启动扫描会回收」），否则运维会把它
  * 读成「正在跑」，然后等一个不会发生的完成。
  *
- * ## 重试按钮为什么先禁用
+ * ## 为什么没有重试按钮
  *
- * 服务端对非 `failed` 的任务重试返回 409（`CONFLICT`）。让用户点一下再弹错误是
- * 把服务端的约束搬到交互之后——用户白点一次，还得读一条本该不需要读的错误。
- * 这里按状态直接禁用，`title` 说明原因。
+ * 重试接口只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期
+ * 的 `running`）——`failed` 行永远不会出现在这张表里。按钮挂在一行永远不出现的
+ * 数据上就是不可达的死路，所以整列删掉，不补一个「没有失败任务」的假空态。
  *
  * ## 状态为什么不用红黄绿
  *
- * §16.1：不用颜色单独表意。四个状态用强调色的深浅（实心 → 浅染 → 描边 → 中性底）
- * 加文字表达，深浅两套外观都成立，色盲用户也读得出来。
+ * §16.1：不用颜色单独表意。两个状态用强调色的深浅（实心 → 描边）加文字表达，
+ * 深浅两套外观都成立，色盲用户也读得出来。
  */
 
 /** `GET /tasks` 的任务行。只声明控制台读到的字段（`payload` / `stepsDone` 不读）。 */
@@ -109,37 +109,25 @@ const props = withDefaults(
     tasks: readonly TaskRowPayload[]
     loading: boolean
     error: string | null
-    /** 正在重试的任务 ID：按钮转成禁用态，避免重复提交。 */
-    retrying: readonly string[]
     /** 刚提交的会话产出的任务 ID：高亮并滚到可视区。 */
     highlightId: string | null
   }>(),
   { highlightId: null },
 )
 
-const emit = defineEmits<{ retry: [taskId: string] }>()
-
 const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
   archive: '归档',
-  extract: '抽取',
-  merge: '合并',
-  summary: '摘要',
-  index: '索引',
 }
 
 const TASK_STATUS_LABEL: Readonly<Record<string, string>> = {
   pending: '排队中',
   running: '运行中',
-  done: '已完成',
-  failed: '失败',
 }
 
-/** 状态徽章的深浅档位；未知名回落到中性底，不发明第五档。 */
+/** 状态徽章的深浅档位；未知名回落到中性底，不发明第三档。 */
 const STATUS_DEPTH: Readonly<Record<string, string>> = {
   pending: 'pending',
   running: 'running',
-  done: 'done',
-  failed: 'failed',
 }
 
 const expiredCount = computed(() => props.tasks.filter((task) => isLeaseExpired(task)).length)
@@ -168,20 +156,6 @@ function statusLabelOf(status: string): string {
 
 function depthOf(status: string): string {
   return STATUS_DEPTH[status] ?? 'pending'
-}
-
-function retryTitleOf(task: TaskRowPayload): string {
-  if (task.status !== 'failed') {
-    return `只有失败的任务可以重试，当前状态是${statusLabelOf(task.status)}。`
-  }
-  if (props.retrying.includes(task.id)) {
-    return '正在重试。'
-  }
-  return '重新排入队列。'
-}
-
-function isRetryDisabled(task: TaskRowPayload): boolean {
-  return task.status !== 'failed' || props.retrying.includes(task.id)
 }
 </script>
 
@@ -218,7 +192,6 @@ function isRetryDisabled(task: TaskRowPayload): boolean {
             <th>创建时间</th>
             <th>租约到期</th>
             <th class="num">重试次数</th>
-            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -257,18 +230,6 @@ function isRetryDisabled(task: TaskRowPayload): boolean {
               <span v-else class="faint">—</span>
             </td>
             <td class="num">{{ task.attempts }}</td>
-            <td>
-              <UiButton
-                variant="secondary"
-                size="sm"
-                :disabled="isRetryDisabled(task)"
-                :title="retryTitleOf(task)"
-                @click="emit('retry', task.id)"
-              >
-                <RotateCcw :size="13" :stroke-width="1.5" />
-                重试
-              </UiButton>
-            </td>
           </tr>
         </tbody>
       </UiTable>
@@ -325,18 +286,6 @@ function isRetryDisabled(task: TaskRowPayload): boolean {
 .depth[data-depth="running"] {
   background: var(--accent);
   color: #fff;
-}
-
-.depth[data-depth="done"] {
-  background: var(--accent-tint);
-  color: var(--accent-ink);
-}
-
-.depth[data-depth="failed"] {
-  background: var(--surface-4);
-  box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
-  color: var(--label);
-  font-weight: 650;
 }
 
 .lease-expired {

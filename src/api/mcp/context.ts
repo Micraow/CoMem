@@ -19,6 +19,7 @@ import type { RetrievalIndex } from '../../domain/retrieval.js';
 import type { Authorizer } from '../../services/authorizer.js';
 import type { FileSystemService } from '../../services/filesystem.js';
 import type { MemoryService } from '../../services/memory.js';
+import type { ObservabilityService } from '../../services/observability.js';
 import type { ResourceService } from '../../services/resource.js';
 import type { SearchService } from '../../services/search.js';
 import type { SessionService } from '../../services/session.js';
@@ -26,7 +27,7 @@ import type { SkillService } from '../../services/skill.js';
 import type { SummaryService } from '../../services/summary.js';
 import type { TaskService } from '../../services/task.js';
 
-import type { ToolDeadline } from './deadline.js';
+import type { CallDeadline } from '../deadline.js';
 
 export interface McpToolContext {
   readonly filesystem: FileSystemService;
@@ -35,6 +36,11 @@ export interface McpToolContext {
   readonly acl: Authorizer;
   readonly session: SessionService;
   readonly memory: MemoryService;
+  /**
+   * 记忆健康度（`health` 工具）。与 HTTP `/health` 调同一个方法：降级摘要数只能
+   * 由 `ObservabilityService.health()` 算，MCP 侧重算会变成第二份实现。
+   */
+  readonly observability: Pick<ObservabilityService, 'health'>;
   readonly resource: ResourceService;
   readonly skill: SkillService;
   readonly tasks: TaskService;
@@ -48,7 +54,7 @@ export interface McpToolContext {
   /** 请求 ID，贯穿日志（§17.7） */
   readonly requestId: string;
   /**
-   * 本次工具调用的截止时间（§13、`deadline.ts`）。
+   * 本次工具调用的截止时间（§13、`api/deadline.ts`）。
    *
    * 由 `ToolRegistry` 在 `execute` 前注入，所以工具实现里可能拿不到它（单元测试
    * 直接调用裸定义时）。**省略表示不做工具级上限**，不是「用默认值」——默认值只在
@@ -57,5 +63,5 @@ export interface McpToolContext {
    * 工具把它传给服务层的 `deadlineAt` / `onUpstream`，检索因此能在总上限之前先
    * 把「向量不可用」降级成 FTS 结果。
    */
-  readonly deadline?: ToolDeadline;
+  readonly deadline?: CallDeadline;
 }

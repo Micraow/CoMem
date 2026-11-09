@@ -44,7 +44,6 @@ import { createResourceRoutes } from './resources.js';
 import { createSearchRoutes } from './search.js';
 import { createSessionRoutes } from './sessions.js';
 import { createSkillRoutes } from './skills.js';
-import { createStatsRoutes, type MemoryStatsAccess } from './stats.js';
 import type { TaskQueryStore } from './tasks.js';
 import { createTaskRoutes } from './tasks.js';
 import { createTelemetryRoutes } from './telemetry.js';
@@ -90,13 +89,15 @@ export interface HttpRouteServices {
   readonly identity: IdentityService;
   /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
   readonly auth: AuthService;
+  /**
+   * 系统管理员用户 ID（`config.auth.adminUserIds`）。
+   *
+   * 用户 / 组目录与任务队列没有「被操作的目标资源」可以求权，只认这份显式名单。
+   * 空数组 = 没有系统管理员（默认），这些端点对所有请求 403。
+   */
+  readonly adminUserIds: readonly string[];
   /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
   readonly adminAccess: AdminAccess;
-  /**
-   * 记忆健康度统计端口（`GET /stats/memories`，§17.5）。SQL 与 ACL 谓词由
-   * bootstrap 提供，`api/` 不碰 `adapters/`（§4.2）。
-   */
-  readonly memoryStats: MemoryStatsAccess;
   /**
    * 服务图绑定的主体（`config.server.subject`，`createContainer` 的 `subject`
    * 可覆盖）。
@@ -141,7 +142,6 @@ export function createHttpRouteGroups(
     createMemoryRoutes(services),
     createResourceRoutes(services),
     createSkillRoutes(services),
-    createStatsRoutes(services),
     createAdminRoutes(services),
     createAuthRoutes(services),
     createPromptRoutes(services),

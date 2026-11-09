@@ -28,7 +28,7 @@ import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { IndexRecord } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService, type NodeWriteObserver } from '../../../src/services/filesystem.js';
 import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
@@ -85,7 +85,6 @@ function createSearch(hotnessWeight: number): SearchService {
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   return new SearchService({
     index: fts,

@@ -9,6 +9,7 @@ import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { ReconcileLog } from '../../../src/adapters/fs/reconcile-log.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repository.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
@@ -93,7 +94,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 1 });
 
   const acl = new AclService({
-    dataDir,
     db,
     aclFile,
     permissions,
@@ -124,6 +124,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     nodes,
     permissions,
     logger,
+    reconcile: new ReconcileLog({ dataDir, logger }),
     ...(options.embeddings === true ? { embeddings: new EmbeddingRepository({ db, logger }) } : {}),
     ...(options.embedding === undefined
       ? {}

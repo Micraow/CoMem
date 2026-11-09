@@ -187,12 +187,9 @@ const COMMIT_STEP_NAMES: ReadonlySet<string> = new Set<CommitStepName>([
 /** 会话状态集合（`domain/session.ts` 的 `SessionStatus`）。 */
 const SESSION_STATUSES: ReadonlySet<string> = new Set<SessionStatus>([
   'open',
-  'committing',
-  'committed',
   // 空闲过期的终态（`session.expiry.action: archive`）。漏掉它时归档写盘成功、读回
   // 却抛 INTERNAL——「归档了一个会话，之后它从列表里消失」。
   'archived',
-  'failed',
 ]);
 
 /**
@@ -248,7 +245,7 @@ function isSkippedCommitStepArray(value: unknown): value is readonly SkippedComm
 }
 
 function isArchivePhaseStatus(value: unknown): value is ArchivePhaseStatus {
-  return value === 'preparing' || value === 'ready' || value === 'failed';
+  return value === 'preparing' || value === 'ready';
 }
 
 function isSessionStatus(value: unknown): value is SessionStatus {
@@ -264,7 +261,7 @@ function toArchivePhase1(value: unknown, uri: Uri): ArchivePhase1 {
   const archivedMessageIds = value['archivedMessageIds'];
   const retainedMessageIds = value['retainedMessageIds'];
   if (!isArchivePhaseStatus(status)) {
-    throw corruptMetadata(uri, 'phase1.status 不是 preparing | ready | failed');
+    throw corruptMetadata(uri, 'phase1.status 不是 preparing | ready');
   }
   if (typeof messagesSha256 !== 'string') {
     throw corruptMetadata(uri, 'phase1.messagesSha256 不是字符串');

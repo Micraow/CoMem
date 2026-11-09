@@ -266,8 +266,15 @@ function archiveSequence(name: string): number {
 /**
  * 消息的稳定 ID：`sha256(role + \0 + text + \0 + createdAt)`。
  *
- * 与 `remember`（`api/mcp/tools/remember.ts` 的 `messageId`）同一个公式——两条
- * 导入路径可能落进同一个会话，公式一漂就互相看不见对方的去重。
+ * **这是唯一实现**：`remember`（`api/mcp/tools/remember.ts`）与 `ingest`
+ * （`services/ingest.ts`）都直接 import 它，不在各自文件里重算。服务端去重按 ID
+ * 判等，两份实现各写一遍时公式一漂，两边写进去的消息就互相看不见对方的去重。
+ *
+ * 为什么放在服务层而不是 `domain/session.ts`：它是纯函数，规则上属于领域，但
+ * sha256 要用 `node:crypto`，而 `domain/` 的 lint 规则禁止任何 `node:*` import
+ * （`eslint.config.js` 的 `DOMAIN_MESSAGE`）。为一个函数在 `services/` 单开模块
+ * 也没必要——本文件已经是权威实现，调用方与 `stableMessageId` 的既有 import
+ * 路径都不变。
  *
  * 为什么要稳定 ID：游标只在消息落盘之后前进，进程死在「写完消息、游标没写」之间
  * 时重跑会从同一个游标再读一遍。ID 每次随机时服务端没有任何判据能认出「这条已经
@@ -275,6 +282,7 @@ function archiveSequence(name: string): number {
  *
  * **`createdAt` 是幂等键的一部分**：源日志没有时间戳时调用方只能填当前时刻，
  * 重跑会得到不同的 ID，去重失效。这是已知窗口，写进 §18「并发控制」。
+ * `remember.ts` 的 `createdAtOf` 就保留这个行为（缺省取当前时刻），不在这里兜。
  *
  * 分隔符用 NUL：它不出现在角色名或 ISO 时间串里，正文里出现同样的字符也不会让
  * `("ab", "c")` 与 `("a", "bc")` 拼出同一个摘要。
@@ -302,6 +310,13 @@ export class SessionService {
   readonly #authorizer: Authorizer | undefined;
   readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'> | undefined;
   readonly #observer: Pick<NodeWriteObserver, 'onNodeWritten' | 'onNodeRemoved'> | undefined;
+  /**
+   * 已归档消息 ID → 归档目录 URI（按会话）。`addMessage` 的幂等判据要用它。
+   *
+   * 懒加载：每个会话第一次写入时读一遍归档元数据；提交时增量更新。见
+   * {@link SessionService.addMessage}。
+   */
+  readonly #archivedMessageIndex = new Map<string, Map<string, Uri>>();
 
   constructor(options: SessionServiceOptions) {
     this.#store = options.store;
@@ -350,6 +365,9 @@ export class SessionService {
           sessionId,
         });
       }
+      // 元数据不在就是新会话（或崩溃留下的空壳）。缓存里若有同名会话的归档索引，
+      // 那是上一份数据留下的，必须丢掉。
+      this.#archivedMessageIndex.delete(sessionUri.toString());
       // 先写消息文件再写元数据：崩溃时留下的是「有目录、没有元数据」，`load` 按
       // NOT_FOUND 处理；反过来会留下一个声称存在、但读不出消息的会话。
       await this.#store.writeText(this.#messagesUri(sessionUri), '');
@@ -379,11 +397,17 @@ export class SessionService {
    * 按调用方指定的稳定 ID 取会话；不存在就创建。
    *
    * 幂等上传（`remember` 的 `sessionId`）重跑时拿到的是同一个会话，消息由调用方
-   * 自己按稳定 ID 去重。
+   * 按稳定 ID 去重。
    *
    * 只认元数据是否存在：`.meta.json` 是会话「存在」的判据（`load` 也按它判）。
    * `create` 先写消息、后写元数据，所以「目录在、元数据不在」只可能是崩溃留下的
    * 空会话，重新创建不会丢消息。
+   *
+   * **并发同 ID 是复用，不是错误。** 两个 `ensure` 可能同时看到 NOT_FOUND，随后
+   * 都去 `create`；`create` 在 `TREE` 锁内看到前一个写下的元数据，抛
+   * `ALREADY_EXISTS`。这里把它转成「读回已存在的会话」——竞态的胜者已经建好了，
+   * 输家要做的是拿到同一个 URI，而不是把 409 抛给调用方。只捕获这一个错误码，
+   * 不做重试循环。
    */
   async ensure(
     scopeUri: Uri,
@@ -395,8 +419,18 @@ export class SessionService {
       await this.#requireSession(sessionUri);
       return sessionUri;
     } catch (error) {
-      if (error instanceof ComemError && error.code === 'NOT_FOUND') {
-        return this.create(scopeUri, principals, { sessionId });
+      if (!(error instanceof ComemError) || error.code !== 'NOT_FOUND') {
+        throw error;
+      }
+    }
+    try {
+      return await this.create(scopeUri, principals, { sessionId });
+    } catch (error) {
+      if (error instanceof ComemError && error.code === 'ALREADY_EXISTS') {
+        // 并发 `ensure` 的胜者已经建好并写下了元数据。再读一次确认它还在
+        // （例如期间被 `remove` 掉的话，NOT_FOUND 会原样抛给调用方）。
+        await this.#requireSession(sessionUri);
+        return sessionUri;
       }
       throw error;
     }
@@ -421,9 +455,86 @@ export class SessionService {
   }
 
   /**
+   * 会话的**累计**消息数：已归档消息（去重后的 ID）数 + live 条数。
+   *
+   * 时钟语义见 §8.7：`turn = totalMessageCount(sessionUri)`，调用方直接拿这个返回值
+   * 当 `turn`，不再自己取 `max`。归档之后消息已经移出 live，只数 live 会让时钟在
+   * 每次提交后归零（`commitPhase1` 默认 `keepRecentCount = 0`，live 变空），所以这里
+   * 把已归档 ID 数与 live 条数相加。它是**派生量**，天然 `>= live 条数`——原先写成
+   * `max(totalMessageCount, liveMessages.length)`，但 `max` 恒等于前一项，没有信息量，
+   * 已从调用点去掉。
+   *
+   * 归档部分复用 `addMessage` 幂等用的那份索引（`#loadArchivedMessageIndex`）：
+   * 每个会话第一次调用读一次归档元数据，之后 O(1)；提交 / 补完归档时增量更新。
+   * live 部分仍要读一次 `messages.jsonl`（与 `load` 相同），它最多是提交阈值那么多条。
+   *
+   * **不要用 `Session.messageCount` 替代。** 那个字段是「未提交的 live 条数」，
+   * `shouldAutoCommit` 的消息数阈值依赖这个语义；本方法是独立的累计时钟。
+   *
+   * **也不要用 `SessionMessage.turn`。** 那个字段是消息在当前 live 窗口内的序号
+   * （`nextTurn` = `messages.length + 1`），提交之后新消息从 1 重新编号，同样会倒退。
+   * 账本要的「会话累计轮次」只有本方法算得出来。
+   *
+   * **与 `load` 的一处差异（有意）：本方法不检查 `.meta.json`。** `load` 以元数据
+   * 是否存在判「会话存在」，这里只读 `messages.jsonl` 与归档元数据。`create` 先写
+   * 消息、后写元数据，崩溃留下的空壳（有 `messages.jsonl`、无 `.meta.json`）在
+   * `load` 里是 `NOT_FOUND`，在这里能算出 live 条数。调用方只需要「会话不可读时
+   * 别让检索失败」，两种判据的差异不影响去重。
+   *
+   * **崩溃窗口。** `commitPhase1` 在写归档元数据之前就把归档消息 ID 记进进程内索引
+   * （见 `#recordArchivedMessages` 的调用点）。那一步之后、元数据落盘之前失败而进程
+   * 继续运行时，本方法会多算这一批；重启后从元数据重建则少算，时钟可能回落一批。
+   * 只出现在提交失败路径上。
+   *
+   * **已知限制：会话 `remove` 后用同一 ID 重建，累计数从 0 重来。** 归档索引随
+   * `remove` / `create` 一起清掉（见 `#archivedMessageIndex` 的两个删除点），而召回
+   * 账本里的条目按 `sessionId` 留着（只有删 user / group 才清）。旧条目在新会话
+   * `turn` 追上旧值时，会短暂重新落进去重窗口，压掉新会话从没投过的 URI。修它要
+   * 让会话删除依赖账本端口并按会话清账本，为一个边缘场景引入跨服务依赖不划算，
+   * 因此记录为限制。
+   *
+   * 索引是进程内缓存，与 `addMessage` 的幂等索引共用同一个假设：当前架构不支持
+   * 多进程写同一个 `dataDir`，否则会漏计已归档消息。
+   */
+  async totalMessageCount(sessionUri: Uri): Promise<number> {
+    const archived = (await this.#loadArchivedMessageIndex(sessionUri)).size;
+    const live = (await this.#readMessages(this.#messagesUri(sessionUri))).length;
+    return archived + live;
+  }
+
+  /**
    * 追加消息。**必须持 `TREE` 锁**（§10.6：`commit` 与 `add_message` 不丢消息）。
    *
    * 轮次时钟由 `nextTurn` 按消息总数算（§8.7），不接受调用方传入。
+   *
+   * ## 幂等：同一会话内 ID 相同的消息只留一条
+   *
+   * 采集侧的游标只在消息落盘之后前进（`integrations/lib/cursor.mjs`）：进程被杀、
+   * 请求超时、跨进程锁过期时，同一批消息会被重投。重投是**正常恢复路径**，所以
+   * 重复提交返回已经落盘的那条消息（保留它原来的 turn），不写正文、不改 turn、
+   * 不抛 409。
+   *
+   * 判据是消息 ID：它由调用方生成（宿主 uuid 或 `stableMessageId`），同一条宿主
+   * 消息重投时 ID 不变。空串不是身份——拿它去重会把互不相关的消息合并成一条，
+   * 所以在入口拒绝。正文不参与判据：ID 相同就是同一条消息。
+   *
+   * **已归档的消息也算。** 提交之后消息移进 `history/archive_NNN/`，只查 live 会把
+   * 重投的那一批当成新消息再追加一遍。归档消息 ID 在归档元数据的
+   * `archivedMessageIds` 里；本服务按会话在进程内缓存「ID → 归档 URI」，每个会话
+   * 第一次写入时读一次元数据（不解析归档的 `messages.jsonl`），提交时增量更新。
+   * live 的检查没有额外 IO：写路径本来就要把整个 `messages.jsonl` 读出来重写。
+   *
+   * ## 追加成功时把会话状态改回 `open`
+   *
+   * `archive()`（空闲过期）把状态置 `archived`，调度器对 `status === 'archived'`
+   * 的会话直接跳过（`bootstrap/scheduler.ts` 的 `#autoCommit` 入口）。消息进来了
+   * 就是活跃会话：不清状态的话，只依赖自动提交的客户端复用一个已归档会话后，新
+   * 消息会一直停在 live、永远不会被归档。状态与 `pendingTokens` 在同一次
+   * `writeSession` 里落盘。归档失败不是会话状态（`task.status` 表达它），所以这里
+   * 不需要复位别的值。
+   *
+   * **重复消息不重置状态。** 没有新内容进来，重放一条已经落盘的消息不该让一个
+   * 已过期归档的会话重新变活跃；这也保住了「重复提交零写入」的幂等契约。
    */
   async addMessage(
     sessionUri: Uri,
@@ -431,11 +542,50 @@ export class SessionService {
   ): Promise<SessionMessage> {
     return this.#locks.withLock(sessionUri, 'tree', async () => {
       const meta = await this.#requireSession(sessionUri);
+      if (message.id === '') {
+        throw new ComemError('INVALID_ARGUMENT', '消息 ID 不能为空。', {
+          uri: sessionUri.toString(),
+        });
+      }
       const messages = await this.#readMessages(this.#messagesUri(sessionUri));
+      const existing = messages.find((item) => item.id === message.id);
+      if (existing !== undefined) {
+        this.#logger.debug('消息已存在，跳过追加。', {
+          uri: sessionUri.toString(),
+          id: message.id,
+          turn: existing.turn,
+        });
+        return existing;
+      }
+      const archiveUri = (await this.#loadArchivedMessageIndex(sessionUri)).get(message.id);
+      if (archiveUri !== undefined) {
+        const original = (await this.#readMessages(this.#messagesUri(archiveUri))).find(
+          (item) => item.id === message.id,
+        );
+        if (original === undefined) {
+          throw corruptDocument(
+            this.#messagesUri(archiveUri),
+            '归档元数据记了这条消息，归档的 messages.jsonl 里却没有',
+          );
+        }
+        this.#logger.debug('消息已归档，跳过追加。', {
+          uri: sessionUri.toString(),
+          id: message.id,
+          archiveUri: archiveUri.toString(),
+          turn: original.turn,
+        });
+        return original;
+      }
       const appended: SessionMessage = { ...message, turn: nextTurn(messages) };
       const next = [...messages, appended];
       await this.#store.writeText(this.#messagesUri(sessionUri), serializeMessages(next));
-      await this.#meta.writeSession(sessionUri, { ...meta, pendingTokens: sumTokens(next) });
+      await this.#meta.writeSession(sessionUri, {
+        ...meta,
+        // 追加消息把已归档会话重新激活。归档失败不是会话状态：它表达在
+        // `task.status` 上，不走这里。
+        status: meta.status === 'archived' ? 'open' : meta.status,
+        pendingTokens: sumTokens(next),
+      });
       await this.#notifyWritten(this.#messagesUri(sessionUri));
       return appended;
     });
@@ -512,6 +662,7 @@ export class SessionService {
     const messages = await this.#countMessages(sessionUri);
     const archives = (await this.#listArchives(this.#historyUri(sessionUri))).length;
     const removedEntries = await this.#store.remove(sessionUri, { recursive: true });
+    this.#archivedMessageIndex.delete(sessionUri.toString());
     // `messages.jsonl` 有索引行（见 `SessionServiceOptions.observer`）：目录删掉之后
     // 不清理的话，`find` / `glob` 会返回一条打不开的记录。
     await this.#notifyRemoved(sessionUri);
@@ -560,6 +711,9 @@ export class SessionService {
 
     // 步骤 2：写归档消息（原子写）。
     await this.#store.writeText(this.#messagesUri(archiveUri), serializeMessages(archived));
+    // 消息已经在归档里了：重投的同一批不能再落回 live。索引只在本进程有缓存时
+    // 更新，没有缓存就等下一次 `addMessage` 从磁盘重建。
+    this.#recordArchivedMessages(sessionUri, archiveUri, archived);
     const messagesSha256 = await this.#sha256(this.#messagesUri(archiveUri));
     // 归档目录里的「原始对话」也要是一个可寻址的节点：不建索引行 / 不物化权限，
     // 用户点开归档只看得到元数据（见 `SessionServiceOptions.observer`）。
@@ -618,6 +772,7 @@ export class SessionService {
     const archiveId = archiveUri.name;
     const archived = await this.#readMessages(this.#messagesUri(archiveUri));
     const messagesSha256 = await this.#sha256(this.#messagesUri(archiveUri));
+    this.#recordArchivedMessages(sessionUri, archiveUri, archived);
     // 崩溃可能停在「归档消息写完、索引行没写」之间：补完时把归档节点补上。
     await this.#notifyWritten(this.#messagesUri(archiveUri));
     const live = await this.#readMessages(this.#messagesUri(sessionUri));
@@ -824,6 +979,48 @@ export class SessionService {
         uri: sessionUri.toString(),
         reason: error instanceof Error ? error.message : String(error),
       });
+    }
+  }
+
+  /**
+   * 已归档消息 ID → 归档目录 URI。按会话懒加载。
+   *
+   * 只读归档元数据的 `archivedMessageIds`，不解析归档的 `messages.jsonl`——后者只在
+   * 真的重投了一条已归档消息时读一次，用来把原消息（含原 turn）原样返回。
+   *
+   * 缓存是进程内的。当前架构里同一个会话只有一个写入方（本服务）：hook 的 `Stop`
+   * worker 通过 HTTP 回到本进程，`ingest` 命令只写自己新建的随机会话。绕过本服务
+   * 手改磁盘会让索引过期，与 `.meta.json` 里 `pendingTokens` 是缓存同一类假设。
+   */
+  async #loadArchivedMessageIndex(sessionUri: Uri): Promise<Map<string, Uri>> {
+    const key = sessionUri.toString();
+    const cached = this.#archivedMessageIndex.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const index = new Map<string, Uri>();
+    for (const archiveUri of await this.#listArchives(this.#historyUri(sessionUri))) {
+      const meta = await this.#meta.readArchive(archiveUri);
+      for (const id of meta?.phase1.archivedMessageIds ?? []) {
+        index.set(id, archiveUri);
+      }
+    }
+    this.#archivedMessageIndex.set(key, index);
+    return index;
+  }
+
+  /** 归档写盘之后把消息 ID 记进进程内索引；索引还没建时留给下一次懒加载。 */
+  #recordArchivedMessages(
+    sessionUri: Uri,
+    archiveUri: Uri,
+    archived: readonly SessionMessage[],
+  ): void {
+    const index = this.#archivedMessageIndex.get(sessionUri.toString());
+    if (index === undefined) {
+      return;
+    }
+    for (const message of archived) {
+      index.set(message.id, archiveUri);
     }
   }
 

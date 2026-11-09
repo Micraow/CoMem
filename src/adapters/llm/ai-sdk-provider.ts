@@ -258,6 +258,10 @@ export class AiSdkLlmProvider implements LlmProvider {
    * 随之中断。`LlmOptions.abortSignal`（HTTP 请求断开时由接口层传入）与超时信号
    * 用 `AbortSignal.any` 合并——任一触发都中止这次调用。
    *
+   * `LlmOptions.timeoutMs` 是**上限**：实际取
+   * `min(构造时的 timeoutSeconds * 1000, timeoutMs)`，内部预算（意图分析的
+   * `REWRITE_TIMEOUT_MS`）只能收紧用户配置。
+   *
    * 定时器 `unref()`：生成正常结束时它会清掉，但进程退出时不该被一个 120 秒的
    * 计时器拖住。
    */
@@ -265,7 +269,11 @@ export class AiSdkLlmProvider implements LlmProvider {
     operation: (abortSignal: AbortSignal) => Promise<T>,
     options?: LlmOptions,
   ): Promise<T> {
-    const timeoutMs = options?.timeoutMs ?? this.timeoutSeconds * MILLISECONDS_PER_SECOND;
+    // 与重排、嵌入同一语义：`timeoutMs` 只能收紧 `providers.llm.*.timeoutSeconds`，
+    // 不能放宽。意图分析的 10 秒预算不该把用户配的 1 秒变成 10 秒。
+    const configuredMs = this.timeoutSeconds * MILLISECONDS_PER_SECOND;
+    const timeoutMs =
+      options?.timeoutMs === undefined ? configuredMs : Math.min(configuredMs, options.timeoutMs);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {

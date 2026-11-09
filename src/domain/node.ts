@@ -83,6 +83,10 @@ export function stableDigest(input: string): string {
  *
  * 手写而不是用 `TextEncoder`：后者虽然可用，但 domain 层保持零全局依赖更省心，
  * 而且这里只需要长度，不需要编码结果。
+ *
+ * `services/resource.ts` 另有一份 `Buffer.byteLength` 的实现——domain 层被 lint
+ * 禁止 import `node:*`，不能直接用 `Buffer`。两份实现的等价性由
+ * `tests/unit/utf8-byte-length.test.ts` 锁定；改这里或改那边都必须让那个测试保持绿。
  */
 function utf8ByteLength(text: string): number {
   let bytes = 0;
@@ -143,15 +147,15 @@ export abstract class Node {
  *
  * 摘要跟着文件走，存在文件自己的 frontmatter 里，不另存档：移动、复制、备份
  * 都不用额外维护，重建索引时扫一遍文件头就够，零 LLM 调用。
+ *
+ * 失效**不在这里**：`summary_state` / `summary_digest` 是旧机制，生产从不写，
+ * 已删除。真实的失效传播走 `SummaryService.markStale()` 与 `node` 表的
+ * `summary_baseline` / `summary_pending` / `summary_entries` 三列
+ * （`migrations/0001_init.sql`）——那套是索引侧的状态，不落在文件头上。
  */
-export type SummaryState = 'fresh' | 'stale';
-
 export interface DocumentFrontmatter {
   /** 一句话摘要 */
   readonly summary?: string;
-  /** 摘要对应的正文摘要；对不上说明正文被改过 */
-  readonly summaryDigest?: string;
-  readonly summaryState?: SummaryState;
 }
 
 export interface DocumentInit extends NodeInit {

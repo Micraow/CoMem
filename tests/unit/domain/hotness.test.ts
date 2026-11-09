@@ -4,7 +4,6 @@ import { ComemError } from '../../../src/domain/errors.js';
 import {
   DEFAULT_HALF_LIFE_DAYS,
   hotnessScore,
-  hotnessTier,
 } from '../../../src/domain/hotness.js';
 
 /** 固定「现在」，让所有采样点的年龄是精确的整数天。 */
@@ -172,29 +171,5 @@ describe('hotnessScore 的边界与校验', () => {
       expect(error).toBeInstanceOf(ComemError);
       expect((error as ComemError).details).toMatchObject({ activeCount: -1 });
     }
-  });
-});
-
-describe('hotnessTier', () => {
-  it('三档边界（架构文档 §17.5：≥0.7 热、≥0.3 温）', () => {
-    expect(hotnessTier(1)).toBe('hot');
-    expect(hotnessTier(0.7)).toBe('hot');
-    expect(hotnessTier(0.6999)).toBe('warm');
-    expect(hotnessTier(0.3)).toBe('warm');
-    expect(hotnessTier(0.2999)).toBe('cold');
-    expect(hotnessTier(0)).toBe('cold');
-  });
-
-  it('非有限数抛 INVALID_ARGUMENT，不落进 cold', () => {
-    for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => hotnessTier(value)).toThrowError(INVALID_ARGUMENT);
-    }
-  });
-
-  it('采样点落在直觉位置：30 天前访问 1 次是冷，昨天访问 5 次是热', () => {
-    expect(hotnessTier(score(1, 30))).toBe('cold');
-    expect(hotnessTier(score(5, 1))).toBe('hot');
-    // 三天前的 1 次访问介于两者之间。
-    expect(hotnessTier(score(1, 3))).toBe('warm');
   });
 });

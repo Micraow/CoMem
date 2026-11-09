@@ -41,9 +41,15 @@
  * `MemoryService` 没有事务（它是「一个文件一条记忆」），`filesystem` 端口也拿不回
  * 逐字节的前像（`created_at`、`status` 都会在重写时被重新计算）。所以这里**不做
  * 假回滚**：写盘前的全部校验（URI 合法、类型可还原、identity 与路径一致、
- * `addOnly` 类型不能 update）都在任何写入之前完成，把「中途失败」压到只剩 I/O 与
- * 加锁失败；真的中途失败时，错误 `details` 里带上已经应用过的 `adds` / `updates` /
+ * `addOnly` 类型不能 update、被删记录的 `sources` 全是合法 URI、写回字段的类型与
+ * identity 齐备）都在任何写入之前完成，把「中途失败」压到只剩 I/O 与加锁失败；
+ * 真的中途失败时，错误 `details` 里带上已经应用过的 `adds` / `updates` /
  * `deletes`，由运维按这份清单收尾。
+ *
+ * 其中字段类型与 identity 的校验和 `upsertMemory` 锁内那份是**同一实现**
+ * （`domain/memory-type.ts`）：锁内那次不能省，它挡的是「计划与写入之间文件被别的
+ * 写者改过」；这里这次挡的是「删除已应用、写回才失败」。解析结果也一样——被删
+ * 记录的 `sources` 在这里解析成 `Uri`，写盘阶段直接用，不解析第二遍。
  *
  * ## 并发
  *
@@ -69,10 +75,15 @@ import {
 import { ComemError } from '../domain/errors.js';
 import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
-import { identityFields, type MemoryTypeSchema } from '../domain/memory-type.js';
+import {
+  assertFieldTypes,
+  assertMemoryIdentity,
+  identityFields,
+  type MemoryTypeSchema,
+} from '../domain/memory-type.js';
 import { Uri } from '../domain/uri.js';
 
-import { renderMemoryUri, type MemoryRecord, type MemoryService } from './memory.js';
+import { appendSources, renderMemoryUri, type MemoryRecord, type MemoryService } from './memory.js';
 import type { SearchService } from './search.js';
 
 export interface ConsolidationServiceDeps {
@@ -245,6 +256,19 @@ interface UpsertPlan {
   readonly schema: MemoryTypeSchema;
   /** `upsertMemory` 的入参（identity + content）；路径由 `renderMemoryUri` 重渲染。 */
   readonly values: Readonly<Record<string, unknown>>;
+  /**
+   * 本批**被删除**的记忆的归档来源，写回时并进这条保留者的 `sources`（W97）。
+   *
+   * 模型的操作里没有「哪条被并进了哪条」的映射：`update`/`add` 给正文，`delete`
+   * 只给理由。所以只能按「本批删除的全部来源」并进本批写出的每一条——被删记忆的
+   * 正文确实参与了这批收敛，丢掉来源等于把「这条记忆综合了哪几次归档」永久抹掉。
+   * 代价是同一批里如果有两组互不相关的合并，两组都会带上对方的来源；模型输出里
+   * 没有可用的分组信号，宁可多记也不丢（`sources` 只是溯源，不参与检索与权限）。
+   *
+   * 值是 `#plan` 里已经过 `Uri.tryParse` 的对象：写盘阶段直接传给 `provenance`，
+   * 不再解析第二遍（同一个值解析两次，就是两处校验将来会分叉的地方）。
+   */
+  readonly sources: readonly Uri[];
 }
 
 type WritePlan = DeletePlan | UpsertPlan;
@@ -455,7 +479,17 @@ export class ConsolidationService {
           });
           continue;
         }
-        const write = await this.#memory.upsertMemory(scope, plan.schema, plan.values);
+        const write = await this.#memory.upsertMemory(scope, plan.schema, {
+          // 与直接传字段等价（identity + content 都在 `values` 里，路径同
+          // `upsertMemory` 内部渲染的那一个），但 `{ uri, update }` 形态能带上
+          // `provenance`：被本批删除的记忆的归档来源要并进保留者（W97）。
+          uri: renderMemoryUri(scope, plan.schema, plan.values),
+          update: () => plan.values,
+          // `plan.sources` 在 `#plan` 里已经 `Uri.tryParse` 过，直接传，不再 parse。
+          ...(plan.sources.length === 0
+            ? {}
+            : { provenance: { sources: plan.sources } }),
+        });
         (write.created ? adds : updates).push(write.uri.toString());
         this.#logger.info('记忆合并写入了记忆', {
           scope: scope.toString(),
@@ -639,18 +673,48 @@ export class ConsolidationService {
    * 这里挡住的是「模型给了一个语法合法但写不回去的操作」：路径不在记忆类型目录下、
    * `identity` 不能由路径推出（固定文件名的 `profile`）、`addOnly` 类型被 update、
    * 文件里的 `memory_type` 与路径不一致（写回会渲染到另一个文件）。
+   *
+   * 另外两处是**磁盘上的手改值**，不是模型输出：
+   *
+   * - 被删记录的 `sources` 混进非 URI（写盘阶段不再 parse，坏值只能在这里拦）；
+   * - 被 update 的记录字段类型不对或 identity 不齐（`upsertMemory` 锁内的同一份
+   *   校验会落在写盘循环里，那时删除已经应用且不回滚）。
    */
   async #plan(
     scope: Uri,
     operations: readonly ConsolidationOperation[],
   ): Promise<readonly WritePlan[]> {
-    const plans: WritePlan[] = [];
+    const deletes: DeletePlan[] = [];
+    const upserts: Omit<UpsertPlan, 'sources'>[] = [];
+    /**
+     * 本批被删除记忆的归档来源：原始值 → 已校验的 `Uri`，顺序 = 操作顺序；末尾并进
+     * 每条写出的记忆（W97）。键保留原始字符串（去重沿用 `appendSources` 的「按
+     * 字符串精确比较」），值是校验结果，写盘阶段直接用。
+     */
+    const deletedSources = new Map<string, Uri>();
 
     for (const operation of operations) {
       const uri = Uri.parse(operation.uri);
       if (operation.kind === 'delete') {
-        this.#assertActive(await this.#requireRecord(operation.uri, uri));
-        plans.push({ operation, uri, schema: null, values: null });
+        // 记录在这里读到，来源也跟着取走：删除之后磁盘上只剩它的归档历史。
+        const record = this.#assertActive(await this.#requireRecord(operation.uri, uri));
+        // 来源要并进保留者，就得在**写盘之前**确认它能被写成 URI。frontmatter 可以
+        // 被手工改坏（`sources: [not-a-uri]`，`parseSources` 只挑非空字符串），留到
+        // 写回时才 `Uri.parse` 会在删除已经应用之后抛错——没有回滚。
+        for (const source of record.sources) {
+          const parsed = Uri.tryParse(source);
+          if (parsed === null) {
+            throw new ComemError(
+              'INVALID_ARGUMENT',
+              `记忆 ${operation.uri} 的 sources 里有不合法的归档 URI：${source}；先修好这个字段再合并。`,
+              { uri: operation.uri, source },
+            );
+          }
+          if (!deletedSources.has(source)) {
+            deletedSources.set(source, parsed);
+          }
+        }
+        deletes.push({ operation, uri, schema: null, values: null });
         continue;
       }
 
@@ -689,12 +753,19 @@ export class ConsolidationService {
             { uri: operation.uri, status: existing.status },
           );
         }
-        plans.push({
-          operation,
-          uri,
-          schema: target.schema,
-          values: { ...target.identity, [CONTENT_FIELD]: operation.content },
-        });
+        const values = { ...target.identity, [CONTENT_FIELD]: operation.content };
+        // identity 值要能被 `renderPath` 接受：`Uri.parse` 只拒绝整段等于 `..` 的段，
+        // `a..b` 这种值能一路走到这里，直到写盘时 `renderMemoryUri` 才拒绝它。那时
+        // 排在它前面的删除已经应用且不回滚。与下面 `update` 分支同一写法：渲染一次
+        // 并比对，渲染不出来（identity 值含 `..`）或落到另一个文件都整批失败。
+        if (renderMemoryUri(scope, target.schema, values).toString() !== operation.uri) {
+          throw new ComemError(
+            'INVALID_ARGUMENT',
+            `记忆 ${operation.uri} 的 identity 值无法渲染回同一路径，写回会落到另一个文件。`,
+            { uri: operation.uri, memoryType: target.schema.type },
+          );
+        }
+        upserts.push({ operation, uri, schema: target.schema, values });
         continue;
       }
 
@@ -728,10 +799,28 @@ export class ConsolidationService {
         );
       }
 
-      plans.push({ operation, uri, schema: target.schema, values });
+      // 字段类型与 identity 齐备：这些值来自磁盘上可能被手工改坏的 frontmatter，
+      // 校验与 `upsertMemory` 锁内那一份是同一实现（`domain/memory-type.ts`）。
+      // 留到写盘循环里才报，删除已经应用且不回滚。
+      assertMemoryIdentity(target.schema, values);
+      assertFieldTypes(target.schema, values);
+
+      upserts.push({ operation, uri, schema: target.schema, values });
     }
 
-    return plans;
+    // 写出的每条记忆继承本批被删除记忆的来源：它们的正文参与了这次收敛。顺序 =
+    // 保留者自己的在前（`upsertMemory` 追加时保住原顺序）、被删的按操作顺序在后，
+    // 去重与 20 条上限沿用 `memory.ts` 的同一套策略。值取上面 `tryParse` 校验过的
+    // `Uri`，写盘阶段不再 parse。
+    const inheritedKeys = appendSources([], [...deletedSources.keys()]);
+    const inherited = inheritedKeys
+      .map((source) => deletedSources.get(source))
+      // `inheritedKeys` 只可能来自 `deletedSources` 的键，filter 只用于收窄类型。
+      .filter((source): source is Uri => source !== undefined);
+    return [
+      ...deletes,
+      ...upserts.map((plan) => ({ ...plan, sources: inherited }) satisfies UpsertPlan),
+    ];
   }
 
   /** 读一条记忆；不存在（含并发删除）时抛 `NOT_FOUND`。 */

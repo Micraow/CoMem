@@ -52,7 +52,7 @@ test('宿主信封：拒绝用 permissionDecision=deny', () => {
     tool_input: { file_path: 'comem://user/alice/memories/profile.md' },
   });
   assert.equal(event.filePath, 'comem://user/alice/memories/profile.md');
-  assert.equal(event.eventId, 'PreToolUse:tool-1');
+  assert.equal(event.eventId, 'pre_tool_use:tool-1');
 
   const output = formatOutput(event, handlePreToolUse(event));
   assert.equal(output.hookSpecificOutput.hookEventName, 'PreToolUse');

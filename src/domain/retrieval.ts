@@ -65,7 +65,6 @@ export interface SearchQuery {
   /** 更新时间上界，**闭区间**：`updated_at <= updatedBefore`。语义同上。 */
   readonly updatedBefore?: string;
   readonly limit: number;
-  readonly scoreThreshold?: number;
 }
 
 export interface SearchHit {
@@ -290,14 +289,6 @@ export function reciprocalRankFusion(
   return options.limit === undefined ? fused : fused.slice(0, options.limit);
 }
 
-export interface GrepQuery {
-  readonly pattern: string;
-  readonly scopes: readonly string[];
-  readonly principals: readonly string[];
-  readonly limit: number;
-  readonly contextLines: number;
-}
-
 export interface GrepHit {
   readonly uri: string;
   readonly line: number;
@@ -347,7 +338,7 @@ export interface NodeStat {
  * 持有 token，没有正文，也没法按行号返回上下文）。`grep` 由 `services/search.ts`
  * 实现——先用索引拿到权限过滤后的候选 URI，再逐个读文件做行匹配。
  *
- * `GrepQuery` / `GrepHit` 保留：它们是服务层的输入输出形状，不属于索引契约。
+ * `GrepHit` 保留：它是服务层的输出形状，不属于索引契约。
  */
 export interface RetrievalIndex {
   upsert(records: readonly IndexRecord[]): Promise<void>;

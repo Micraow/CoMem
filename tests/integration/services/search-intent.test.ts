@@ -19,7 +19,7 @@ import type { ContextType } from '../../../src/domain/node.js';
 import type { IndexRecord } from '../../../src/domain/retrieval.js';
 import type { AutoCommitPolicy } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 import { LlmService } from '../../../src/services/llm.js';
@@ -147,7 +147,6 @@ function createHarness(options: HarnessOptions = {}): Harness {
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const filesystem = new FileSystemService({ store, locks, authorizer, logger });
   const tasks = new TaskService({ tasks: new TaskRepository({ db, logger }), logger });
@@ -422,27 +421,6 @@ describe('search 的意图分析', () => {
       expect(query.limit).toBe(3);
     }
     expect(result.hits).toHaveLength(3);
-  });
-
-  it('maxQueries 限制实际执行的查询条数', async () => {
-    await seed(DOC, '上下文记忆数据库的设计');
-    const { service } = createHarness({
-      responses: [{ json: { queries: [draft('记忆'), draft('设计'), draft('数据库')] } }],
-    });
-    const searchSpy = vi.spyOn(index, 'search');
-
-    const result = await service.search('数据库设计', searchOptions({ maxQueries: 2 }));
-
-    expect(searchSpy).toHaveBeenCalledTimes(2);
-    expect(result.plan.queries).toHaveLength(2);
-  });
-
-  it('maxQueries 必须是正整数', async () => {
-    const { service } = createHarness();
-
-    await expect(
-      service.search('记忆', searchOptions({ maxQueries: 0 })),
-    ).rejects.toBeInstanceOf(ComemError);
   });
 
   it('没有注入 LlmService 时降级为原查询，并写明原因', async () => {

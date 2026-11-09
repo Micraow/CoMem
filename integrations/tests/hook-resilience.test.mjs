@@ -214,14 +214,15 @@ function assertCleanExit(result) {
 // 预算表与 deadline
 // ---------------------------------------------------------------------------
 
-test('预算表覆盖六个事件，且都小于宿主的 hook 超时', () => {
+test('预算表覆盖七个内部事件，且都小于宿主的 hook 超时', () => {
   assert.deepEqual(Object.keys(HOOK_BUDGETS_MS).sort(), [
-    'PostToolUse',
-    'PreCompact',
-    'PreToolUse',
-    'SessionStart',
-    'Stop',
-    'UserPromptSubmit',
+    'post_tool_use',
+    'pre_compact',
+    'pre_tool_use',
+    'session_end',
+    'session_start',
+    'stop',
+    'user_prompt_submit',
   ]);
   for (const [event, budget] of Object.entries(HOOK_BUDGETS_MS)) {
     assert.ok(Number.isInteger(budget) && budget > 0, `${event} 的预算必须是正整数`);
@@ -232,21 +233,13 @@ test('预算表覆盖六个事件，且都小于宿主的 hook 超时', () => {
 });
 
 test('SessionEnd 用 1.5s 派生的预算，不跟 PreCompact 共用一个 30s', () => {
-  assert.ok(SESSION_END_BUDGET_MS < HOOK_BUDGETS_MS.PreCompact);
+  assert.ok(SESSION_END_BUDGET_MS < HOOK_BUDGETS_MS.pre_compact);
   // Claude Code 给 SessionEnd 一组 hook 1.5 秒共享预算，留 300ms 给进程启动与退出。
   assert.ok(SESSION_END_BUDGET_MS + 300 <= 1500);
-  assert.equal(
-    budgetForEvent({ event: 'PreCompact', rawEventName: 'SessionEnd' }),
-    SESSION_END_BUDGET_MS,
-  );
-  assert.equal(
-    budgetForEvent({ event: 'PreCompact', rawEventName: 'PreCompact' }),
-    HOOK_BUDGETS_MS.PreCompact,
-  );
-  assert.equal(
-    budgetForEvent({ event: 'UserPromptSubmit', rawEventName: 'UserPromptSubmit' }),
-    HOOK_BUDGETS_MS.UserPromptSubmit,
-  );
+  // 两个生命周期点走同一个处理器，但预算各查各的键。
+  assert.equal(budgetForEvent({ event: 'session_end' }), SESSION_END_BUDGET_MS);
+  assert.equal(budgetForEvent({ event: 'pre_compact' }), HOOK_BUDGETS_MS.pre_compact);
+  assert.equal(budgetForEvent({ event: 'user_prompt_submit' }), HOOK_BUDGETS_MS.user_prompt_submit);
 });
 
 test('deadline 从进程启动算起，不是从现在算起', () => {
@@ -317,7 +310,7 @@ test(
   '慢服务端：UserPromptSubmit 在预算 + 余量内以 0 退出，stdout 为空，stderr 一行诊断',
   { timeout: 30_000 },
   async () => {
-    const budgetMs = HOOK_BUDGETS_MS.UserPromptSubmit;
+    const budgetMs = HOOK_BUDGETS_MS.user_prompt_submit;
     const server = await startServer(async () => {
       // 睡 30s，远大于 2s 的预算：模拟服务端卡死（不是 5xx，不是立刻断开）。
       // 没有总预算时这个 hook 会等满 `timeoutMs`（5s）。
@@ -361,7 +354,7 @@ test(
   '慢服务端：SessionStart 的三次 GET 共享一个预算，不是 3 × 5s（含 GET 重试）',
   { timeout: 30_000 },
   async () => {
-    const budgetMs = HOOK_BUDGETS_MS.SessionStart;
+    const budgetMs = HOOK_BUDGETS_MS.session_start;
     const server = await startServer(() => {
       // 永不响应；GET 还有 2 次重试，没有总预算时最坏 3 × 3 × 5s。
     });
@@ -455,7 +448,7 @@ test(
   async () => {
     const root = fileURLToPath(new URL('..', import.meta.url));
     const hostUrl = pathToFileURL(join(root, 'hosts', 'claude-code.mjs')).href;
-    const budgetMs = HOOK_BUDGETS_MS.PreToolUse;
+    const budgetMs = HOOK_BUDGETS_MS.pre_tool_use;
     // 故意挂一个真的句柄（定时器）：否则事件循环是空的，Node 会因为「没有待办」
     // 自然退出，测不到硬上限。等价于一条没关的 socket。
     const script = `
@@ -687,7 +680,7 @@ test(
           write: (line) => lines.push(line),
         },
       );
-      assert.equal(event.event, 'PreToolUse');
+      assert.equal(event.event, 'pre_tool_use');
       assert.deepEqual(lines, [], '异常路径不能写出 deny 信封');
       assert.match(stderr.join(''), /后端炸了/);
     } finally {

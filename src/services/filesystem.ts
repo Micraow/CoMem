@@ -80,11 +80,6 @@ export interface TreeEntry {
   readonly uri: Uri;
   readonly kind: 'file' | 'directory';
   readonly size: number;
-  /**
-   * 目录的 L0 摘要（来自 `.abstract.md`）；文件为 null。
-   * W4 之前先返回 null——摘要生成还没落地，编一个假摘要比空值更糟。
-   */
-  readonly abstract: string | null;
 }
 
 export interface TreeResult {
@@ -332,6 +327,10 @@ export class FileSystemService {
    * 失败时抛 `INVALID_ARGUMENT`，**不写文件**：块命中零处或多处时，任何部分应用
    * 都会把正文改成模型没预期的样子。写入用 `expectedDigest` 做乐观并发，保证
    * 「读到的正文」与「写回的正文」之间没有被别人插过。
+   *
+   * 落盘后与 `write` 走**同一条**派生数据通知：正文变了，索引里的 `body_digest` /
+   * `node_fts` / 摘要 / 物化权限都要跟着变。少了这一步，`edit` 之后 `find` 仍然
+   * 返回旧正文，而工具还会回报 `Index: indexed`（那一列只判断行存在）。
    */
   async edit(
     uri: Uri,
@@ -363,6 +362,10 @@ export class FileSystemService {
       const stat = await this.#store.writeText(uri, result.content, {
         expectedDigest: stableDigest(document.text),
       });
+      // 通知在文件真正落盘之后、且只在成功时：`writeText` 抛错时不会走到这里，
+      // 补丁未命中时更早就抛了。与 `write` 一样在路径锁内通知（观察者自己把摘要
+      // 失效推到锁释放之后，见 `IndexObserver` 文件头）。
+      await this.#notifyWritten(uri, 'file');
       return { uri, stat, applied: result.appliedCount };
     });
   }
@@ -495,5 +498,5 @@ export class FileSystemService {
 }
 
 function toTreeEntry(stat: StoredStat): TreeEntry {
-  return { uri: stat.uri, kind: stat.kind, size: stat.size, abstract: null };
+  return { uri: stat.uri, kind: stat.kind, size: stat.size };
 }

@@ -173,7 +173,7 @@ async function ensureSession(event, deps) {
  * 失败时游标不动：下一次 `Stop` / `PreCompact` 把同一批消息重投一遍。宁可重复
  * （服务端按消息 ID 去重）不能丢。
  *
- * @param {{ sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event
+ * @param {{ event: string, sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv }} deps
  * @returns {Promise<{ captured: number, committed: boolean, bypassed: boolean }>}
  */
@@ -292,7 +292,7 @@ export async function runCaptureWorker(payloadFile, deps) {
     const captureMs = elapsedMs(captureStartedAt);
     await reportOverhead(
       {
-        event: 'Stop',
+        event: payload.event.event,
         sessionId: payload.event.sessionId,
         phases: { processStartMs: payload.processStartMs, recallMs: 0, serializeMs: 0, captureMs },
       },

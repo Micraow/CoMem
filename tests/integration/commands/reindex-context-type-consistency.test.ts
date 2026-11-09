@@ -22,6 +22,7 @@ import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { ReconcileLog } from '../../../src/adapters/fs/reconcile-log.js';
 import { NullLogger } from '../../../src/adapters/log/null.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
@@ -93,7 +94,7 @@ async function createObserver(dataDir: string): Promise<ObserverHarness> {
   const index = new SqliteFtsIndex({ db, logger });
   const locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 1 });
 
-  const acl = new AclService({ dataDir, db, aclFile, permissions, nodes, logger, locks });
+  const acl = new AclService({ db, aclFile, permissions, nodes, logger, locks });
   await acl.ensureRootPreset(Uri.parse(ROOT));
 
   const summary = new SummaryService({
@@ -108,7 +109,16 @@ async function createObserver(dataDir: string): Promise<ObserverHarness> {
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
     locks,
   });
-  const observer = new IndexObserver({ store, index, acl, summary, nodes, permissions, logger });
+  const observer = new IndexObserver({
+    store,
+    index,
+    acl,
+    summary,
+    nodes,
+    permissions,
+    logger,
+    reconcile: new ReconcileLog({ dataDir, logger }),
+  });
 
   return { db, store, observer };
 }

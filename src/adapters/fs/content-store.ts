@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
-import type { DocumentFrontmatter, SummaryState } from '../../domain/node.js';
+import type { DocumentFrontmatter } from '../../domain/node.js';
 import { stableDigest } from '../../domain/node.js';
 import type { Uri } from '../../domain/uri.js';
 
@@ -76,8 +76,6 @@ const NANOSECONDS_PER_MILLISECOND = 1_000_000;
  */
 const FRONTMATTER_KEYS = {
   summary: 'summary',
-  summaryDigest: 'summary_digest',
-  summaryState: 'summary_state',
 } as const;
 
 /**
@@ -145,12 +143,6 @@ function toFrontmatterRecord(frontmatter: DocumentFrontmatter): Record<string, u
   if (frontmatter.summary !== undefined) {
     record[FRONTMATTER_KEYS.summary] = frontmatter.summary;
   }
-  if (frontmatter.summaryDigest !== undefined) {
-    record[FRONTMATTER_KEYS.summaryDigest] = frontmatter.summaryDigest;
-  }
-  if (frontmatter.summaryState !== undefined) {
-    record[FRONTMATTER_KEYS.summaryState] = frontmatter.summaryState;
-  }
   return record;
 }
 
@@ -161,23 +153,11 @@ function toFrontmatterRecord(frontmatter: DocumentFrontmatter): Record<string, u
  * 所以只收正确类型的字段，其余当作没写。
  */
 function toFrontmatter(data: Readonly<Record<string, unknown>>): DocumentFrontmatter {
-  const frontmatter: {
-    summary?: string;
-    summaryDigest?: string;
-    summaryState?: SummaryState;
-  } = {};
+  const frontmatter: { summary?: string } = {};
 
   const summary = data[FRONTMATTER_KEYS.summary];
   if (typeof summary === 'string') {
     frontmatter.summary = summary;
-  }
-  const summaryDigest = data[FRONTMATTER_KEYS.summaryDigest];
-  if (typeof summaryDigest === 'string') {
-    frontmatter.summaryDigest = summaryDigest;
-  }
-  const summaryState = data[FRONTMATTER_KEYS.summaryState];
-  if (summaryState === 'fresh' || summaryState === 'stale') {
-    frontmatter.summaryState = summaryState;
   }
 
   return frontmatter;

@@ -13,12 +13,18 @@
  * 后台处理        12.4s（不阻塞用户）
  * ```
  *
- * ## 后台耗时为什么单独一行
+ * ## 后台耗时为什么单独一行、且只有一行
  *
  * §17.2 的核心结论是「异步部分不算进去——用户没等它」。把 12.4 秒的后台处理和
  * 142 毫秒的阻塞开销画进同一根条里，读者会得出「CoMem 每轮要 12.5 秒」的结论，
  * 而这正好是相反的事实。所以两段之间有一条分隔线，后台那行用弱化色，并写明
  * 「不阻塞用户」。
+ *
+ * 后台耗时**不属于任何一个 hook 事件**：服务端按阶段（归档、抽取、合并、摘要）
+ * 记录每个阶段「最近一次」的耗时，以 `comem_hook_async_seconds{phase}` 输出
+ * （`src/services/observability.ts` 的 `recordHookOverhead` / `renderMetrics`）。
+ * 渲染在事件卡片内部会让读者以为那是「这个事件自己的后台耗时」，所以它只在事件
+ * 列表上方出现一次，由页面传入各阶段的最大值 `asyncMs`。
  *
  * ## 为什么没有数据时不画图
  *
@@ -45,8 +51,6 @@ export interface HookEventBreakdown {
   /** 单轮阻塞开销合计（四阶段相加）。 */
   readonly totalMs: number
   readonly phases: readonly HookPhase[]
-  /** 后台处理耗时；指标里没有这个事件时为 null。 */
-  readonly asyncMs: number | null
 }
 
 const numberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 })
@@ -66,7 +70,11 @@ export function formatMilliseconds(ms: number): string {
 <script setup lang="ts">
 import { Timer } from 'lucide-vue-next'
 
-const props = defineProps<{ events: readonly HookEventBreakdown[] }>()
+const props = defineProps<{
+  events: readonly HookEventBreakdown[]
+  /** 后台处理耗时（毫秒）：最近一次最慢的后台阶段；没有数据时为 null。 */
+  asyncMs: number | null
+}>()
 
 function chartDataOf(breakdown: HookEventBreakdown) {
   return breakdown.phases.map((phase) => ({ label: phase.label, value: phase.ms }))
@@ -82,6 +90,12 @@ function chartDataOf(breakdown: HookEventBreakdown) {
   </div>
 
   <div v-else class="hooks">
+    <div v-if="props.asyncMs !== null" class="hooks__async">
+      <span class="hook__async-label">后台处理</span>
+      <span class="hook__async-value mono">{{ formatMilliseconds(props.asyncMs) }}</span>
+      <span class="hook__async-note">取各阶段上报中的最大值 · 不阻塞用户</span>
+    </div>
+
     <article v-for="breakdown in props.events" :key="breakdown.event" class="hook">
       <header class="hook__head">
         <span class="hook__event">{{ breakdown.label }}</span>
@@ -92,12 +106,6 @@ function chartDataOf(breakdown: HookEventBreakdown) {
       </header>
 
       <UiChart :data="chartDataOf(breakdown)" unit="ms" />
-
-      <div v-if="breakdown.asyncMs !== null" class="hook__async">
-        <span class="hook__async-label">后台处理</span>
-        <span class="hook__async-value mono">{{ formatMilliseconds(breakdown.asyncMs) }}</span>
-        <span class="hook__async-note">不阻塞用户</span>
-      </div>
     </article>
   </div>
 </template>
@@ -143,14 +151,14 @@ function chartDataOf(breakdown: HookEventBreakdown) {
   color: var(--accent-ink);
 }
 
-/* 后台处理：与阻塞部分之间一条分隔线，颜色弱化，并写明不阻塞。 */
-.hook__async {
+/* 后台处理：事件列表上方一行，与阻塞部分用一条分隔线隔开，颜色弱化。 */
+.hooks__async {
   display: flex;
   align-items: baseline;
   gap: 10px;
   flex-wrap: wrap;
-  padding-top: 12px;
-  border-top: 0.5px dashed var(--separator);
+  padding-bottom: 14px;
+  border-bottom: 0.5px dashed var(--separator);
 }
 
 .hook__async-label {

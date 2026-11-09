@@ -18,6 +18,10 @@ import {
   type McpRouteHandler,
   type McpServerOptions,
 } from '../../../src/api/mcp/server.js';
+import {
+  ToolRegistry,
+  type McpToolDefinition,
+} from '../../../src/api/mcp/registry.js';
 import { createToolRegistry } from '../../../src/api/mcp/tools/index.js';
 import { configSchema } from '../../../src/config/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
@@ -30,7 +34,7 @@ import type { SessionService } from '../../../src/services/session.js';
 import type { SkillService } from '../../../src/services/skill.js';
 import type { SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 
 const EXPECTED_NAMES = [
   'find',
@@ -59,6 +63,29 @@ function createLogger(): Logger {
     error: () => undefined,
   };
   return logger;
+}
+
+/** 取出 tools/call 结果的第一段文本。 */
+function firstText(result: unknown): string {
+  if (typeof result !== 'object' || result === null || !('content' in result)) {
+    throw new Error('结果不是 tools/call 的内容形态。');
+  }
+  const content = result.content;
+  if (!Array.isArray(content)) {
+    throw new Error('结果没有内容块。');
+  }
+  const block: unknown = content[0];
+  if (
+    typeof block === 'object' &&
+    block !== null &&
+    'type' in block &&
+    block.type === 'text' &&
+    'text' in block &&
+    typeof block.text === 'string'
+  ) {
+    return block.text;
+  }
+  throw new Error('第一个内容块不是文本。');
 }
 
 interface TestServer {
@@ -97,6 +124,17 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
     acl: new AllowAllAuthorizer(),
     session: {} as unknown as SessionService,
     memory: {} as unknown as MemoryService,
+    observability: {
+      health: async () => ({
+        pendingReview: 0,
+        staleSummaries: 0,
+        degradedSummaries: 0,
+        orphanTasks: 0,
+        indexNodes: 0,
+        oldestPendingAgeSeconds: null,
+        profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
+      }),
+    },
     resource: {} as unknown as ResourceService,
     skill: {} as unknown as SkillService,
     tasks,
@@ -164,13 +202,14 @@ async function startServer(
 
 async function createTestServer(
   resolveIdentity: McpServerOptions['resolveIdentity'],
+  registry: ToolRegistry = createToolRegistry(),
 ): Promise<TestServer> {
   const dataDir = await mkdtemp(join(tmpdir(), 'comem-mcp-server-'));
   const db = openDatabase(':memory:');
   runMigrations(db);
   const logger = createLogger();
   const options: McpServerOptions = {
-    registry: createToolRegistry(),
+    registry,
     config: configSchema.parse({}),
     logger,
     context: createContext(db, logger),
@@ -212,6 +251,39 @@ describe('McpHttpServer', () => {
       expect(first.text).toContain('index.visibleNodes: 0');
       expect(first.text).toContain('status: ok');
     }
+  });
+
+  it('业务错误与超时错误的文本都以 code 开头', async () => {
+    const identity = async (): Promise<{ subject: string; principals: string[] }> => ({
+      subject: 'user:alice',
+      principals: ['user:alice', 'user:*'],
+    });
+    const server = await createTestServer(identity);
+
+    // 业务错误：`read` 的 limit=0 在工具层被拒绝，走 server 的 catch 分支。
+    const business = await server.client.callTool({
+      name: 'read',
+      arguments: { uri: 'comem://user/alice/mem/a.md', limit: 0 },
+    });
+    expect(business.isError).toBe(true);
+    expect(firstText(business)).toMatch(/^INVALID_ARGUMENT: /);
+
+    // 超时：注入一个永不返回的工具，上限 20 毫秒，走 `type: 'error'` 分支。
+    const hanging: McpToolDefinition = {
+      name: 'read',
+      kind: 'read',
+      description: '测试用：永不返回。',
+      inputSchema: { type: 'object', properties: {} },
+      execute: () => new Promise<never>(() => undefined),
+    };
+    const slow = await createTestServer(
+      identity,
+      new ToolRegistry([hanging], { deadlineMs: 20 }),
+    );
+
+    const timedOut = await slow.client.callTool({ name: 'read', arguments: {} });
+    expect(timedOut.isError).toBe(true);
+    expect(firstText(timedOut)).toMatch(/^TOOL_DEADLINE_EXCEEDED: /);
   });
 
   it('身份解析失败返回 401', async () => {

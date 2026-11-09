@@ -88,7 +88,6 @@ export async function setGroupOwner(
     }
 
     const acl = new AclService({
-      dataDir,
       db,
       aclFile: new AclFileStore({ dataDir, logger }),
       permissions: new PermissionRepository({ db, logger }),

@@ -22,7 +22,7 @@ import { estimateTokens, renderMessageText } from '../../../src/domain/session.j
 import { Uri } from '../../../src/domain/uri.js';
 import { AclService } from '../../../src/services/acl.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
-import { SessionService } from '../../../src/services/session.js';
+import { SessionService, stableMessageId } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
@@ -121,7 +121,6 @@ beforeEach(async () => {
 
   // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
   const acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions: new PermissionRepository({ db, logger }),
@@ -224,6 +223,25 @@ describe('create / load', () => {
     expect((await service.load(sessionUri)).messageCount).toBe(1);
   });
 
+  it('两个并发 ensure 同一个 sessionId 都成功，只建一个会话', async () => {
+    // 两个 `remember` 同时上传同一个新 sessionId：两边都可能先看到 NOT_FOUND，
+    // 随后都去 create。后一个 create 在 TREE 锁内看到元数据抛 ALREADY_EXISTS，
+    // ensure 必须把它转成「复用」，而不是把 409 抛给调用方。
+    const [first, second] = await Promise.all([
+      service.ensure(Uri.parse(SCOPE_ROOT), 'sess_ensure_race', AUTH_PRINCIPALS),
+      service.ensure(Uri.parse(SCOPE_ROOT), 'sess_ensure_race', AUTH_PRINCIPALS),
+    ]);
+
+    expect(second.toString()).toBe(first.toString());
+    expect(await readdir(join(dataDir, 'user', 'alice', 'sessions'))).toEqual([
+      'sess_ensure_race',
+    ]);
+
+    // 两个调用拿到的是同一个会话：后续写入只有一份。
+    await service.addMessage(first, message('m1'));
+    expect((await service.load(second)).messageCount).toBe(1);
+  });
+
   it('不存在的会话抛 NOT_FOUND', async () => {
     await expect(service.load(Uri.parse(`${SCOPE_ROOT}/sessions/sess_missing`))).rejects.toMatchObject(
       { code: 'NOT_FOUND' },
@@ -253,6 +271,196 @@ describe('addMessage', () => {
     expect(loaded.pendingTokens).toBe(
       estimateTokens(renderMessageText(first)) + estimateTokens(renderMessageText(second)),
     );
+  });
+});
+
+/**
+ * 采集侧的游标只在消息落盘之后前进：进程被杀、请求超时、跨进程锁过期时，同一批
+ * 消息会被重投。重投是正常恢复路径，服务端必须按消息 ID 幂等。
+ */
+describe('addMessage 幂等', () => {
+  const timestamp = '2026-11-08T00:00:00.000Z';
+
+  function replayedBatch(): readonly Omit<SessionMessage, 'turn'>[] {
+    return [
+      {
+        id: stableMessageId('user', '第一句', timestamp),
+        role: 'user',
+        parts: [{ kind: 'text', text: '第一句' }],
+        createdAt: timestamp,
+      },
+      {
+        id: stableMessageId('assistant', '第二句', timestamp),
+        role: 'assistant',
+        parts: [{ kind: 'text', text: '第二句' }],
+        createdAt: timestamp,
+      },
+    ];
+  }
+
+  it('同一批消息提交两次只落一份，turn 不变，两次都成功', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    const batch = replayedBatch();
+
+    const firstPass: SessionMessage[] = [];
+    for (const item of batch) {
+      firstPass.push(await service.addMessage(sessionUri, item));
+    }
+    expect(firstPass.map((item) => item.turn)).toEqual([1, 2]);
+
+    const messagesPath = join(sessionDirectory(sessionUri), 'messages.jsonl');
+    const metaPath = join(sessionDirectory(sessionUri), '.meta.json');
+    const rawBefore = await readFile(messagesPath, 'utf8');
+    const metaBefore = await readFile(metaPath, 'utf8');
+
+    // 重复提交不写正文、不写元数据：一次磁盘写都不该发生。
+    const writeText = vi.spyOn(store, 'writeText');
+    const secondPass: SessionMessage[] = [];
+    for (const item of batch) {
+      secondPass.push(await service.addMessage(sessionUri, item));
+    }
+    expect(writeText).not.toHaveBeenCalled();
+    writeText.mockRestore();
+
+    expect(secondPass).toEqual(firstPass);
+    expect(await readFile(messagesPath, 'utf8')).toBe(rawBefore);
+    expect(await readFile(metaPath, 'utf8')).toBe(metaBefore);
+
+    const lines = (await readFile(messagesPath, 'utf8')).trimEnd().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0] ?? '')).toMatchObject({ turn: 1 });
+    expect(JSON.parse(lines[1] ?? '')).toMatchObject({ turn: 2 });
+
+    const loaded = await service.load(sessionUri);
+    expect(loaded.messageCount).toBe(2);
+    expect(loaded.messages.map((item) => item.id)).toEqual(batch.map((item) => item.id));
+
+    // 去重不能把轮次时钟推快：下一条新消息仍然是第 3 轮。
+    expect((await service.addMessage(sessionUri, message('m3', '第三句'))).turn).toBe(3);
+  });
+
+  it('不同会话里的相同消息 ID 互不影响（去重范围是会话内）', async () => {
+    const firstSession = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    const secondSession = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    const sameMessage = message('shared-id', '同一句话');
+
+    expect((await service.addMessage(firstSession, sameMessage)).turn).toBe(1);
+    expect((await service.addMessage(secondSession, sameMessage)).turn).toBe(1);
+
+    expect((await service.load(firstSession)).messageCount).toBe(1);
+    expect((await service.load(secondSession)).messageCount).toBe(1);
+  });
+
+  it('已归档的消息重投也只留一份，且进程重启后同样成立', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    const [original] = replayedBatch();
+    if (original === undefined) {
+      throw new Error('测试批次不能为空');
+    }
+    const first = await service.addMessage(sessionUri, original);
+    const commit = await service.commitPhase1(sessionUri);
+    expect((await service.load(sessionUri)).messages).toEqual([]);
+
+    // 换一个服务实例：模拟进程重启，归档索引是冷的，必须从磁盘重建。
+    const restarted = createService();
+    const replay = await restarted.addMessage(sessionUri, original);
+
+    expect(replay).toEqual(first);
+    expect(replay.turn).toBe(1);
+    expect((await restarted.load(sessionUri)).messageCount).toBe(0);
+    expect(await restarted.listArchives(sessionUri)).toHaveLength(1);
+    expect(
+      (await restarted.readArchiveMeta(commit.archiveUri))?.phase1.archivedMessageIds,
+    ).toEqual([original.id]);
+  });
+
+  it('消息 ID 为空串时拒绝，而不是把所有无身份消息合并成一条', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+
+    await expect(service.addMessage(sessionUri, message(''))).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+    expect((await service.load(sessionUri)).messages).toEqual([]);
+  });
+});
+
+describe('addMessage 会话状态', () => {
+  it('往已归档会话追加消息会把状态改回 open', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    await service.addMessage(sessionUri, message('m1'));
+    await service.archive(sessionUri);
+    expect((await service.load(sessionUri)).status).toBe('archived');
+
+    // 复用已归档会话：消息进来了就是活跃会话。状态不清回 open 时，调度器对
+    // `status === 'archived'` 的会话直接跳过（`bootstrap/scheduler.ts` 的自动提交
+    // 入口），只依赖自动提交的客户端会把这条消息永远留在 live。
+    const appended = await service.addMessage(sessionUri, message('m2'));
+    const reopened = await service.load(sessionUri);
+    expect(reopened.status).toBe('open');
+    expect(reopened.messages.map((item) => item.id)).toEqual(['m1', appended.id]);
+  });
+
+  it('重复消息不重置已归档会话的状态（没有新内容进来）', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    const first = await service.addMessage(sessionUri, message('m1'));
+    await service.commitPhase1(sessionUri);
+    await service.archive(sessionUri);
+
+    // 重投一条已经归档的消息：返回原消息，但会话保持 archived。
+    expect(await service.addMessage(sessionUri, message(first.id))).toEqual(first);
+    expect((await service.load(sessionUri)).status).toBe('archived');
+  });
+});
+
+/**
+ * 召回账本的时钟（架构文档 §8.7）要的是「累计消息数」，不是 live 条数。提交之后
+ * live 会被清空；拿 live 条数当时钟会让 turn 归零，跨轮去重要么把旧条目当成
+ * 「未来轮次」重新投放，要么把窗口退化成整个账本。
+ */
+describe('totalMessageCount（账本时钟）', () => {
+  it('等于 live 消息数；重复提交不增加', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    expect(await service.totalMessageCount(sessionUri)).toBe(0);
+
+    await service.addMessage(sessionUri, message('m1'));
+    await service.addMessage(sessionUri, message('m2'));
+    expect(await service.totalMessageCount(sessionUri)).toBe(2);
+
+    // 幂等重复：没有新消息进 live，累计数也不动。
+    await service.addMessage(sessionUri, message('m1'));
+    expect(await service.totalMessageCount(sessionUri)).toBe(2);
+  });
+
+  it('提交归档之后不下降：keepRecentCount 保留一条时 live=1、总数仍是 3', async () => {
+    const keeper = createService({ keepRecentCount: 1 });
+    const sessionUri = await keeper.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    await keeper.addMessage(sessionUri, message('m1'));
+    await keeper.addMessage(sessionUri, message('m2'));
+    await keeper.addMessage(sessionUri, message('m3'));
+    expect(await keeper.totalMessageCount(sessionUri)).toBe(3);
+
+    await keeper.commitPhase1(sessionUri);
+    // 核心：live 只剩 1 条，时钟不能掉回 1。
+    expect((await keeper.load(sessionUri)).messageCount).toBe(1);
+    expect(await keeper.totalMessageCount(sessionUri)).toBe(3);
+
+    // 已归档消息重投也不增加累计数。
+    await keeper.addMessage(sessionUri, message('m2'));
+    expect(await keeper.totalMessageCount(sessionUri)).toBe(3);
+  });
+
+  it('keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS);
+    await service.addMessage(sessionUri, message('m1'));
+    await service.addMessage(sessionUri, message('m2'));
+    await service.addMessage(sessionUri, message('m3'));
+    await service.commitPhase1(sessionUri);
+    expect((await service.load(sessionUri)).messageCount).toBe(0);
+    expect(await service.totalMessageCount(sessionUri)).toBe(3);
+
+    // 模拟进程重启：归档索引是冷的，必须从归档元数据重建。
+    const restarted = createService();
+    expect(await restarted.totalMessageCount(sessionUri)).toBe(3);
   });
 });
 

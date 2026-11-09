@@ -6,8 +6,8 @@
  * - `append`：只追加正文，同样不碰 frontmatter；
  * - `create`：目标已存在时抛 `ALREADY_EXISTS`，用于「只在没有时创建」。
  *
- * `wait` 是给「写后立刻读」的调用方的：观察者是同步调用的，返回时索引已经更新；
- * 传 true 只影响日志，不改变行为。
+ * 索引由 `NodeWriteObserver` 在文件落盘后同步更新：返回时索引已经更新，结果里的
+ * `Index:` 行就是它的状态，不需要额外的「等待」参数。
  */
 
 import { ComemError } from '../../../domain/errors.js';
@@ -16,7 +16,6 @@ import type { McpToolContext } from '../context.js';
 import {
   asRecord,
   indexStatus,
-  optionalBoolean,
   optionalEnum,
   requiredString,
   textResult,
@@ -50,7 +49,6 @@ export const writeTool: McpToolDefinition = {
       uri: { type: 'string', description: '文件 URI；~ 是当前身份的根' },
       content: { type: 'string', description: '正文；空串表示写空文件' },
       mode: { type: 'string', enum: MODES, default: 'replace' },
-      wait: { type: 'boolean', default: false, description: '写后是否等待索引更新' },
     },
     required: ['uri', 'content'],
   },
@@ -59,7 +57,6 @@ export const writeTool: McpToolDefinition = {
     const uri = Uri.parse(requiredString(args, 'uri', 'write'));
     const content = requiredString(args, 'content', 'write');
     const mode = optionalEnum(args, 'mode', MODES, 'replace', 'write');
-    const wait = optionalBoolean(args, 'wait', false, 'write');
 
     const result = await writeWithMode(context, uri, content, mode);
     const index = await indexStatus(context, uri, 'indexed');
@@ -67,7 +64,6 @@ export const writeTool: McpToolDefinition = {
       requestId: context.requestId,
       uri: uri.toString(),
       mode,
-      wait,
     });
 
     return textResult(

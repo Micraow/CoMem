@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,6 +8,7 @@ import type { Mock } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
+import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../../../src/domain/archive.js';
@@ -121,7 +122,7 @@ function message(id: string, role: SessionMessage['role'], parts: readonly Conte
 }
 
 function record(uri: string, memoryType: string, fields: Record<string, unknown>): MemoryRecord {
-  return { uri: Uri.parse(uri), memoryType, fields, status: 'active', updatedAt: UPDATED_AT };
+  return { uri: Uri.parse(uri), memoryType, fields, status: 'active', updatedAt: UPDATED_AT, sources: [] };
 }
 
 /** 抽取步骤的端口替身：按记忆类型返回预置的「已读记忆」。 */
@@ -982,6 +983,47 @@ describe('MemoryMergeStep', () => {
 
     expect((await memory.read(Uri.parse(uri)))?.status).toBe('pending');
     expect(experiencesMemoryType.type).toBe('experiences');
+  });
+
+  it('写盘时把本次归档记进 frontmatter 的 sources（服务端确定，不由模型输出）', async () => {
+    const { step } = createMergeStep();
+
+    await step.run(
+      mergeContext(
+        [
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+          },
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'content', value: '偏好严格模式。' },
+          },
+        ],
+        [[CODE_STYLE, 'preferences']],
+      ),
+    );
+
+    const raw = await readFile(toDiskPath(dataDir, Uri.parse(CODE_STYLE)), 'utf8');
+    expect(raw).toContain(`sources:\n  - ${ARCHIVE}\n`);
+    expect((await memory.read(Uri.parse(CODE_STYLE)))?.sources).toEqual([ARCHIVE]);
+
+    // 同一归档重放一次：去重后不变，不会多出第二个 URI。
+    await step.run(
+      mergeContext(
+        [
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'content', value: '偏好严格模式。' },
+          },
+        ],
+        [[CODE_STYLE, 'preferences']],
+      ),
+    );
+    expect((await memory.read(Uri.parse(CODE_STYLE)))?.sources).toEqual([ARCHIVE]);
   });
 });
 

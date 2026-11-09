@@ -88,6 +88,60 @@ export function identityFields(schema: MemoryTypeSchema): readonly MemoryTypeFie
 }
 
 /**
+ * identity 字段全部必填（§11.1：没有 identity 就判定不了「这是同一条还是新的」）。
+ *
+ * 两个调用方共用这一份：`MemoryService.upsertMemory` 在**锁内**校验（计划与写入
+ * 之间文件可能被别的写者改过，这是最后一道保证），`ConsolidationService.#plan` 在
+ * **任何写入之前**校验（否则写入循环里的第一次失败会发生在删除已经应用之后）。
+ *
+ * 导出给抽取步骤：它要在调 `upsertMemory` 之前就知道 identity 是否齐全，缺字段的
+ * 操作应当进 `skipped`，而不是让整步在写盘时抛错。
+ */
+export function assertMemoryIdentity(
+  schema: MemoryTypeSchema,
+  values: Readonly<Record<string, unknown>>,
+): void {
+  for (const field of identityFields(schema)) {
+    const value = values[field.name];
+    if (typeof value !== 'string' || value === '') {
+      throw invalidArgument(`记忆类型 ${schema.type} 的 identity 字段 ${field.name} 不能为空。`, {
+        memoryType: schema.type,
+        field: field.name,
+      });
+    }
+  }
+}
+
+/**
+ * 字段类型必须与 schema 声明一致，否则写进去再读回来是另一种类型。
+ *
+ * 与 `assertMemoryIdentity` 同一套共用关系：`upsertMemory` 锁内一次、合并的计划阶段
+ * 一次。`undefined` 跳过：字段级合并不要求调用方提供全部字段。
+ */
+export function assertFieldTypes(
+  schema: MemoryTypeSchema,
+  values: Readonly<Record<string, unknown>>,
+): void {
+  for (const field of schema.fields) {
+    const value = values[field.name];
+    if (value === undefined) {
+      continue;
+    }
+    const valid =
+      field.type === 'string[]'
+        ? Array.isArray(value) && value.every((item) => typeof item === 'string')
+        : typeof value === field.type;
+    if (!valid) {
+      throw invalidArgument(`记忆字段 ${field.name} 的类型必须是 ${field.type}。`, {
+        memoryType: schema.type,
+        field: field.name,
+        expected: field.type,
+      });
+    }
+  }
+}
+
+/**
  * 把 filename 模板里的 identity 占位符换成实际值，拼成相对 scope 根的路径。
  *
  * `renderPath(preferences, { topic: 'code-style' })` → `memories/preferences/code-style.md`。

@@ -92,7 +92,6 @@ beforeEach(async () => {
   index = new SqliteFtsIndex({ db, logger });
   const nodes = new NodeRepository({ db, logger });
   const acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions: new PermissionRepository({ db, logger }),

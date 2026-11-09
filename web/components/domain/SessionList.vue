@@ -16,9 +16,8 @@
  *
  * ## 状态文案
  *
- * 领域层是 `open` / `committing` / `committed` / `failed`（`SessionStatus`），
- * 界面用「进行中 / 提交中 / 已归档 / 提交失败」。归档是 CoMem 里的动作名，不是
- * 内部术语，可以直接出现在界面上。
+ * 领域层是 `open` / `archived`（`SessionStatus`），界面用「进行中 / 已归档」。
+ * 归档是 CoMem 里的动作名，不是内部术语，可以直接出现在界面上。
  */
 
 /** 会话消息的 part（`src/domain/session.ts` 的 `ContentPart`）。 */
@@ -70,9 +69,7 @@ export interface SessionListPayload {
 
 const SESSION_STATUS_LABEL: Readonly<Record<string, string>> = {
   open: '进行中',
-  committing: '提交中',
-  committed: '已归档',
-  failed: '提交失败',
+  archived: '已归档',
 }
 
 const ROLE_LABEL: Readonly<Record<string, string>> = {
@@ -142,7 +139,12 @@ function toDisplayPart(part: SessionPartPayload): DisplayPart {
 <script setup lang="ts">
 import { AlertTriangle, CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
 
-import { ApiClientError, errorMessageOf, useApi } from '~/composables/useApi'
+import {
+  ApiClientError,
+  errorMessageOf,
+  useApi,
+  useScopeRoot,
+} from '~/composables/useApi'
 
 import {
   formatAbsoluteTime,
@@ -165,6 +167,13 @@ const props = withDefaults(
 const emit = defineEmits<{ commit: [sessionId: string] }>()
 
 const api = useApi()
+/**
+ * 详情必须带与列表相同的 `scopeUri`。
+ *
+ * `GET /sessions/{id}` 缺省按当前身份的个人根定位会话；在组作用域下列表能列出
+ * 组里的会话，详情却去个人根找同一个 ID，结果恒为 404「会话已不存在」。
+ */
+const scopeRoot = useScopeRoot()
 
 const openId = ref<string | null>(null)
 /** 已取回的会话快照：来回展开不重复请求。 */
@@ -191,6 +200,7 @@ async function toggle(sessionId: string): Promise<void> {
   try {
     const payload = await api.get<{ messages: readonly SessionMessagePayload[] }>(
       `/sessions/${encodeURIComponent(sessionId)}`,
+      { scopeUri: scopeRoot.value },
     )
     snapshots.value = { ...snapshots.value, [sessionId]: payload.messages }
   } catch (caught) {
@@ -481,22 +491,10 @@ function commitTitleOf(session: SessionSummaryPayload): string {
   color: #fff;
 }
 
-.session__status[data-status="committing"] {
-  background: var(--accent-tint);
-  color: var(--accent-ink);
-}
-
-.session__status[data-status="committed"] {
+.session__status[data-status="archived"] {
   background: transparent;
   box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
   color: var(--label-3);
-}
-
-.session__status[data-status="failed"] {
-  background: var(--surface-4);
-  box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
-  color: var(--label);
-  font-weight: 650;
 }
 
 .session__count {

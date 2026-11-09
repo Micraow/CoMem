@@ -13,10 +13,11 @@
  *
  * ## 为什么阈值在 hook 侧再过一遍
  *
- * 服务端的 `find` 支持 `scoreThreshold`，但 hook 与服务端的版本可以不同步（插件
- * 是独立交付物）。阈值是「注入还是噪音」的判定，必须由注入方自己负责。hook
- * **不把阈值下推给 `find`**：它作用在最终排序分上，而排序分的量纲由引擎决定
- * （见 `formatRecallBlock` 的「为什么阈值是相对的」）。
+ * 服务端 `find` 没有阈值参数：相关性由排序 + `limit` 决定，没有可下推的阈。这里的
+ * 阈值是**客户端**对返回结果的再筛（`score >= topScore × threshold`，见
+ * `formatRecallBlock` 的「为什么阈值是相对的」），与服务端参数无关。hook 又是独立
+ * 交付物、与服务端版本可以不同步，所以「注入还是噪音」的判定留在注入方自己手里；
+ * 排序分的量纲由引擎决定，也只有在拿到结果之后才算得出来。
  *
  * ## 检索失败不注入
  *
@@ -128,7 +129,7 @@ export function formatRecallBlock(hits, threshold) {
 }
 
 /**
- * @param {{ sessionId: string, cwd: string, prompt: string | null }} event
+ * @param {{ event: string, sessionId: string, cwd: string, prompt: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  * @returns {Promise<{ context?: string } | undefined>}
  */
@@ -173,7 +174,7 @@ export async function handleUserPromptSubmit(event, deps) {
 
   await reportOverhead(
     {
-      event: 'UserPromptSubmit',
+      event: event.event,
       sessionId: event.sessionId,
       phases: { processStartMs: processStartMs(), recallMs, serializeMs, captureMs: 0 },
     },

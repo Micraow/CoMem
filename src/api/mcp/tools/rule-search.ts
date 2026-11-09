@@ -6,14 +6,15 @@
  *
  * ## 为什么阈值是相对的
  *
- * 三种引擎的分数量纲不同（§18 的 `retrieval.engine`）：`fts5` 是取负的 bm25，
- * `vector` 是余弦，`hybrid` 是 RRF 融合分（`Σ levelWeight / (60 + rank)`，上限
- * 约 `2/61 ≈ 0.033`）。**同一个绝对阈值跨引擎必然不可比**——把 `0.65` 交给
- * `search.find` 的 `scoreThreshold`，`hybrid` 下一条都留不下，工具静默返回 0 条。
+ * 检索接口没有阈值参数：`SearchQuery` 里没有 `scoreThreshold`，相关性由排序 +
+ * `limit` 决定。原因是三种引擎的分数量纲不同（§18 的 `retrieval.engine`）：`fts5`
+ * 是取负的 bm25，`vector` 是余弦，`hybrid` 是 RRF 融合分（`Σ levelWeight /
+ * (60 + rank)`，上限约 `2/61 ≈ 0.033`），**同一个绝对阈值跨引擎必然不可比**。
  *
- * 规则要回答的是「这条规则和最佳规则差多少」，所以阈值按**本次最高分**的比例
- * 计算：`score >= topScore × threshold`。这个语义与引擎无关（RRF / bm25 / 余弦
- * 都成立），低分规则仍然进不来，默认 0.65 表示「只保留与最佳规则差距不到 35% 的」。
+ * 规则要回答的是「这条规则和最佳规则差多少」，所以阈值只在这个工具里按
+ * **本次最高分**的比例计算：`score >= topScore × threshold`。这个语义与引擎无关
+ * （RRF / bm25 / 余弦都成立），低分规则仍然进不来，默认 0.65 表示「只保留与最佳
+ * 规则差距不到 35% 的」。
  */
 
 import { ComemError } from '../../../domain/errors.js';
@@ -21,8 +22,8 @@ import { Uri } from '../../../domain/uri.js';
 import {
   asRecord,
   formatDegradations,
+  nonEmptyString,
   readScopes,
-  requiredString,
   textResult,
   unitInterval,
   type McpToolDefinition,
@@ -59,12 +60,14 @@ export const ruleSearchTool: McpToolDefinition = {
   },
   async execute(input, context) {
     const args = asRecord(input, 'rule_search');
-    const taskContext = requiredString(args, 'taskContext', 'rule_search');
+    const taskContext = nonEmptyString(args, 'taskContext', 'rule_search');
     const threshold = unitInterval(args, 'threshold', DEFAULT_THRESHOLD, 'rule_search');
     const scopes = await readScopes(context);
 
-    // 先取够候选，**不把阈值下推给 `search.find`**：阈值作用在最终排序分上，
-    // `hybrid` 的 RRF 分（约 0.03）会被 0.65 全部丢掉，结果在过滤之前就被截成 0。
+    // 候选按 `limit`（`RULE_LIMIT` 条）取满，检索接口没有阈值参数：相关性由排序 +
+    // `limit` 决定。阈值在这个工具内部按本次最高分的比例算（`score >= topScore ×
+    // threshold`）——拿绝对分去比的话，`hybrid` 的 RRF 分（约 0.03）会被 0.65 全部
+    // 丢掉，结果在过滤之前就被截成 0 条。
     //
     // `memoryTypes: ['rules']` 是**下推**，不是事后过滤：索引在 SQL 的 WHERE 里
     // 排除其它记忆类型，所以「前 5 条命中都是偏好 / 实体」不会再把规则挤掉

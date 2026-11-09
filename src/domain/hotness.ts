@@ -27,17 +27,6 @@ export const DEFAULT_HALF_LIFE_DAYS = 7;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
- * 热度分档阈值（架构文档 §17.5：≥0.7 热、≥0.3 温、其余冷）。
- *
- * 这两个数不是本项目测量出来的。它们与「一条被访问过几次的记忆在 7 天半衰期下
- * 算出来是多少」对齐：30 天前访问过 1 次是 0.034（冷），昨天访问过 5 次是 0.776
- * （热）。要调整分档，改这两个常数，不要改公式——公式的语义（每过一个半衰期
- * 权重减半）是可以直接向用户解释的，阈值只是把它切成三档。
- */
-const HOT_TIER_THRESHOLD = 0.7;
-const WARM_TIER_THRESHOLD = 0.3;
-
-/**
  * 一条记忆的热度分，`[0, 1]`。
  *
  * `score = sigmoid(log1p(activeCount)) × exp(-ln2 × ageDays / halfLifeDays)`
@@ -101,27 +90,4 @@ export function hotnessScore(input: {
   const decay = Math.exp((-Math.LN2 * ageDays) / halfLifeDays);
 
   return Math.min(1, Math.max(0, frequency * decay));
-}
-
-/** 热度分档，用于记忆健康度（§17.5）与控制台的冷热标记。 */
-export type HotnessTier = 'cold' | 'warm' | 'hot';
-
-/**
- * 按阈值分档（阈值见 `HOT_TIER_THRESHOLD` / `WARM_TIER_THRESHOLD`）。
- *
- * 非有限数（`NaN` / `Infinity`）抛 `INVALID_ARGUMENT` 而不是落进 `cold`：分档的
- * 输入只该来自 `hotnessScore`，拿到 `NaN` 说明调用方跳过了计算或算错了，把它标成
- * 「冷」会让一个程序缺陷伪装成「这条记忆没价值」。
- */
-export function hotnessTier(score: number): HotnessTier {
-  if (!Number.isFinite(score)) {
-    throw new ComemError('INVALID_ARGUMENT', '热度分必须是有限数。', { score });
-  }
-  if (score >= HOT_TIER_THRESHOLD) {
-    return 'hot';
-  }
-  if (score >= WARM_TIER_THRESHOLD) {
-    return 'warm';
-  }
-  return 'cold';
 }

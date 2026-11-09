@@ -9,12 +9,15 @@ import type { ComemErrorCode } from './errors.js';
 import type { BatchOperation } from './merge-op.js';
 
 /**
- * 归档的完成状态（§10.1 的 `phase1.status`）。
+ * 归档阶段的状态（§10.1 的 `phase1.status`）。
  *
- * `ready` 表示消息已经完整落到 `archive_NNN/messages.jsonl` 且 sha256 已校验。
- * 阶段二只在这个状态下开始。
+ * `ready` 表示消息已经完整落到 `archive_NNN/messages.jsonl` 且 sha256 已校验；
+ * `preparing` 是阶段一进行中的中间态，崩溃后由 `#findInterruptedArchive` 补完。
+ *
+ * 没有 `failed`：归档失败表达在任务状态上（`task.status = 'failed'`），归档元数据
+ * 停在失败那一步之前的 `stepsDone`，阶段二不检查这里的值。
  */
-export type ArchivePhaseStatus = 'preparing' | 'ready' | 'failed';
+export type ArchivePhaseStatus = 'preparing' | 'ready';
 
 export interface ArchivePhase1 {
   readonly status: ArchivePhaseStatus;

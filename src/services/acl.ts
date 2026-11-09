@@ -187,7 +187,6 @@ export interface AclState {
 export type AclInput = AclState | ((current: AclState) => AclState);
 
 export interface AclServiceOptions {
-  readonly dataDir: string;
   readonly db: AclDatabase;
   readonly aclFile: AclFileStore;
   readonly permissions: PermissionRepository;

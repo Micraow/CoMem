@@ -136,48 +136,12 @@ interface TargetInternal {
  */
 const BASELINE: readonly BaselineEntry[] = [
   {
-    id: 'ConsoleLogger.child',
-    reason: '待删：`Logger` 端口上的 `child` 零生产调用（requestId 直接进 fields），但 61 个测试文件用对象字面量实现它，删端口要先改那批字面量。',
-  },
-  {
-    id: 'FileLogger.child',
-    reason: '待删：同上，`Logger` 端口的 `child` 方法族整体无生产调用方。',
-  },
-  {
-    id: 'FileLogger.flush',
-    reason: '该接线：优雅退出没有等日志队列落盘，进程退出时丢日志。',
-  },
-  {
-    id: 'NullLogger.child',
-    reason: '待删：同上，`Logger` 端口的 `child` 方法族整体无生产调用方。',
-  },
-  {
     id: 'EmbeddingRepository.iterMissingUris',
     reason: '该接线：打开 embedding 后存量不回填，只能手动 reindex。',
   },
   {
-    id: 'NodeRepository.upsert',
-    reason: '待删：与 `SqliteFtsIndex.upsert` 是两条写 `node` 表的实现，生产只走后者。仍有服务测试拿它当夹具，改用生产写路径后再删。',
-  },
-  {
-    id: 'EmbeddingService.stats',
-    reason: '该接线：注释说 `/metrics` 与 health 在用，实际两处都没读，embedding 用量不可观测。',
-  },
-  {
     id: 'MemoryLinkService.addLinks',
     reason: '该接线：唯一写入口零调用，`GET /:uri/links` 永远返回空表。',
-  },
-  {
-    id: 'ObservabilityService.attribute',
-    reason: '待收窄：public 但只被同类 `recordRequest` 调用，应改成私有。',
-  },
-  {
-    id: 'ObservabilityService.modelUsage',
-    reason: '待删：`/metrics` 直接读 `llm.stats`，这层包装没有调用方。',
-  },
-  {
-    id: 'ResourceService.sweepStaged',
-    reason: '该接线：`_meta/tmp/` 的暂存上传没有清理调用方，会无限增长。',
   },
 ];
 

@@ -84,12 +84,6 @@ describe('未配置', () => {
       degraded: true,
       reason: '没有配置 providers.embedding',
     });
-    expect(service.stats()).toEqual({
-      calls: 0,
-      failures: 0,
-      tokens: 0,
-      degradedCalls: 1,
-    });
     expect(service.model).toBeNull();
   });
 
@@ -101,12 +95,11 @@ describe('未配置', () => {
       degraded: false,
       reason: null,
     });
-    expect(service.stats().degradedCalls).toBe(0);
   });
 });
 
 describe('正常嵌入', () => {
-  it('返回与入参同序的向量，并统计调用与 token', async () => {
+  it('返回与入参同序的向量，只打一次供应商', async () => {
     const provider = createProvider(async (texts) => vectorsFor(texts));
     const service = createService(provider);
 
@@ -123,12 +116,6 @@ describe('正常嵌入', () => {
       [1, 0, 0],
     ]);
     expect(provider.embed).toHaveBeenCalledTimes(1);
-    expect(service.stats()).toEqual({
-      calls: 1,
-      failures: 0,
-      tokens: 3,
-      degradedCalls: 0,
-    });
   });
 
   it('空输入不调供应商', async () => {
@@ -141,7 +128,6 @@ describe('正常嵌入', () => {
       reason: null,
     });
     expect(provider.embed).not.toHaveBeenCalled();
-    expect(service.stats().calls).toBe(0);
   });
 
   it('按 maxBatchSize 分批，一批评一次调用', async () => {
@@ -153,7 +139,6 @@ describe('正常嵌入', () => {
     expect(outcome.vectors).toHaveLength(3);
     expect(provider.embed).toHaveBeenCalledTimes(2);
     expect(provider.embed.mock.calls.map(([texts]) => (texts as string[]).length)).toEqual([2, 1]);
-    expect(service.stats().calls).toBe(2);
   });
 });
 
@@ -170,7 +155,6 @@ describe('供应商返回不合法', () => {
     expect(outcome.degraded).toBe(true);
     expect(outcome.vectors).toEqual([]);
     expect(outcome.reason).toContain('条数不一致');
-    expect(service.stats().failures).toBe(1);
   });
 
   it('全零向量时降级（写进索引等于一条死记录）', async () => {
@@ -186,7 +170,14 @@ describe('供应商返回不合法', () => {
     expect(outcome.reason).toContain('不合法');
   });
 
-  it('维度不一致时降级', async () => {
+  /**
+   * 维度不一致的回归：降级原因里要有两个数字，且只打一次供应商。
+   *
+   * 「只打一次」是这个用例的重点。维度不一致是确定性失败，重发同一条正文只会
+   * 拿到同样的长度；用计数器钉住它，防止将来在服务层加一个按 `isRetryable`
+   * 判断的重试循环时，把配置错误变成刷屏。
+   */
+  it('维度不一致时降级，原因带两边的数字，且只调一次供应商', async () => {
     const provider = createProvider(async () => ({
       vectors: [[1, 0]],
       usage: { promptTokens: 1, totalTokens: 1 },
@@ -196,6 +187,9 @@ describe('供应商返回不合法', () => {
     const outcome = await service.embed(['a']);
 
     expect(outcome.degraded).toBe(true);
+    expect(outcome.reason).toContain(`配置为 ${String(DIMENSION)}`);
+    expect(outcome.reason).toContain('供应商返回 2');
+    expect(provider.embed).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -220,7 +214,6 @@ describe('熔断', () => {
     // 第 6 次直接返回：供应商调用次数没变。
     expect(provider.embed).toHaveBeenCalledTimes(5);
     expect(service.available).toBe(false);
-    expect(service.stats()).toMatchObject({ calls: 5, failures: 5, degradedCalls: 6 });
   });
 
   it('冷却结束后只放一个探测，成功即恢复', async () => {

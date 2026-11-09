@@ -6,7 +6,7 @@
  * 否则「第 10 轮还没 finish」这种用例没法稳定复现。
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,11 +14,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ZodType } from 'zod';
 
+import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import { createHttpServer } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
+import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
   ConsolidationService,
@@ -31,6 +33,7 @@ const SCOPE = 'comem://user/alice';
 const CODE_STYLE = `${SCOPE}/memories/preferences/code-style.md`;
 const CODE_STYLE_LEGACY = `${SCOPE}/memories/preferences/code-style-legacy.md`;
 const EDITOR = `${SCOPE}/memories/preferences/editor.md`;
+const PROFILE = `${SCOPE}/memories/profile.md`;
 
 /** 按轮次返回预设 JSON 的模型替身。 */
 class ScriptedLlm {
@@ -97,6 +100,55 @@ async function writePreference(topic: string, content: string): Promise<void> {
   });
 }
 
+/** 写一条带溯源（`sources`）的偏好：合并要把这些归档 URI 继承下去。 */
+async function writePreferenceWithSources(
+  topic: string,
+  content: string,
+  sources: readonly string[],
+): Promise<void> {
+  await container.services.memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+    uri: Uri.parse(`${SCOPE}/memories/preferences/${topic}.md`),
+    update: (current) => ({ ...current, topic, content }),
+    provenance: { sources: sources.map((source) => Uri.parse(source)) },
+  });
+}
+
+/** 写一条画像：固定文件名，identity `name` 不出现在路径里。 */
+async function writeProfile(): Promise<void> {
+  await container.services.memory.upsertMemory(Uri.parse(SCOPE), profileMemoryType, {
+    name: 'Alice',
+    role: '后端工程师',
+    content: '先给结论。',
+  });
+}
+
+/** 直接改磁盘上的记忆文件：模拟手工改坏的 frontmatter。 */
+async function editFrontmatter(uri: string, pattern: RegExp, replacement: string): Promise<void> {
+  const path = toDiskPath(dataDir, Uri.parse(uri));
+  const raw = await readFile(path, 'utf8');
+  await writeFile(path, raw.replace(pattern, replacement), 'utf8');
+}
+
+/** 跑一次真实写盘的合并，把整批失败的错误取出来（成功时返回 `null`）。 */
+async function consolidateCapturingFailure(
+  llm: ConsolidationServiceDeps['llm'],
+): Promise<unknown> {
+  return createService(llm)
+    .consolidate(Uri.parse(SCOPE), {
+      dryRun: false,
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+}
+
+function errorMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : '';
+}
+
 async function seedThree(): Promise<void> {
   await writePreference('code-style', '缩进用 2 个空格。');
   await writePreference('code-style-legacy', '缩进用 4 个空格，且不要用 prettier。');
@@ -155,6 +207,161 @@ describe('ConsolidationService.consolidate', () => {
     const merged = await container.services.memory.read(Uri.parse(CODE_STYLE));
     expect(merged?.fields['content']).toBe('缩进用 2 个空格，统一用 prettier 格式化。');
     expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).toBeNull();
+  });
+
+  it('被合并掉的记忆，它的 sources 并进保留者（W97）', async () => {
+    const archive = (index: number): string =>
+      `${SCOPE}/sessions/s1/history/archive_${String(index).padStart(3, '0')}`;
+    await writePreferenceWithSources('code-style', '缩进用 2 个空格。', [archive(1), archive(2)]);
+    await writePreferenceWithSources('code-style-legacy', '缩进用 4 个空格。', [
+      archive(3),
+      archive(2),
+    ]);
+    await writePreference('editor', '默认编辑器是 vim。');
+
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          {
+            kind: 'update',
+            uri: CODE_STYLE,
+            content: '缩进统一用 2 个空格。',
+            reason: 'code-style-legacy 的结论已被取代',
+          },
+          { kind: 'delete', uri: CODE_STYLE_LEGACY, content: null, reason: '被 code-style 取代' },
+        ],
+      },
+    ]);
+
+    await createService(llm).consolidate(Uri.parse(SCOPE), {
+      dryRun: false,
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    });
+
+    // 保留者自己的在前，被删的按操作顺序追加，重复的归档只留一次。
+    const merged = await container.services.memory.read(Uri.parse(CODE_STYLE));
+    expect(merged?.fields['content']).toBe('缩进统一用 2 个空格。');
+    expect(merged?.sources).toEqual([archive(1), archive(2), archive(3)]);
+    // 被删的那条真的不在了：它的来源只能从保留者身上回溯。
+    expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).toBeNull();
+  });
+
+  it('合并一条没有 sources 的记录：不产生 sources 键（空 provenance 不写空数组）', async () => {
+    await writePreference('code-style', '缩进用 2 个空格。');
+    await writePreference('code-style-legacy', '缩进用 4 个空格。');
+
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          { kind: 'update', uri: CODE_STYLE, content: '缩进统一用 2 个空格。', reason: '合并' },
+          { kind: 'delete', uri: CODE_STYLE_LEGACY, content: null, reason: '被 code-style 取代' },
+        ],
+      },
+    ]);
+
+    await createService(llm).consolidate(Uri.parse(SCOPE), {
+      dryRun: false,
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    });
+
+    // 守的是**输出契约**：没有可继承的来源时，写出的文件里没有 `sources` 键（空数组
+    // 也不写），旧文件与改动前的输出逐字节相同。不是守调用点有没有传 `provenance`。
+    const merged = await container.services.memory.read(Uri.parse(CODE_STYLE));
+    expect(merged?.fields['content']).toBe('缩进统一用 2 个空格。');
+    expect(merged?.sources).toEqual([]);
+    const raw = await readFile(toDiskPath(dataDir, Uri.parse(CODE_STYLE)), 'utf8');
+    expect(raw).not.toContain('sources');
+  });
+
+  it('被删记录的 sources 里有坏值：整批失败，一条记忆都没删（校验在写盘之前）', async () => {
+    await writePreference('code-style', '缩进用 2 个空格。');
+    await writePreference('code-style-legacy', '缩进用 4 个空格。');
+    // 手工改坏 frontmatter：`parseSources` 只挑非空字符串，坏值要到 `Uri.parse` 才暴露。
+    const legacyPath = toDiskPath(dataDir, Uri.parse(CODE_STYLE_LEGACY));
+    const raw = await readFile(legacyPath, 'utf8');
+    await writeFile(legacyPath, raw.replace(/^---\n/u, '---\nsources:\n  - not-a-uri\n'), 'utf8');
+
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          { kind: 'update', uri: CODE_STYLE, content: '缩进统一用 2 个空格。', reason: '合并' },
+          { kind: 'delete', uri: CODE_STYLE_LEGACY, content: null, reason: '被 code-style 取代' },
+        ],
+      },
+    ]);
+
+    await expect(
+      createService(llm).consolidate(Uri.parse(SCOPE), {
+        dryRun: false,
+        subject: SUBJECT,
+        principals: PRINCIPALS,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // 计划阶段失败：两个文件都还在，保留者的正文没被改写。
+    expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).not.toBeNull();
+    const kept = await container.services.memory.read(Uri.parse(CODE_STYLE));
+    expect(kept?.fields['content']).toBe('缩进用 2 个空格。');
+  });
+
+  it('保留者的字段类型不对：整批失败，被删的记录仍在（校验在写盘之前）', async () => {
+    await writeProfile();
+    await writePreference('code-style-legacy', '缩进用 4 个空格。');
+    // 手工把 frontmatter 的 `role` 改成数字：`parseScalar` 会把 `42` 读成 number，
+    // 与 schema 声明的 string 不一致。`#plan` 若不校验字段类型，这个坏值要到
+    // `upsertMemory` 锁内才暴露，而那时排在它前面的删除已经应用且不回滚。
+    await editFrontmatter(PROFILE, /^role: .*$/gmu, 'role: 42');
+
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          { kind: 'update', uri: PROFILE, content: '先给结论，再给证据。', reason: '合并画像' },
+          { kind: 'delete', uri: CODE_STYLE_LEGACY, content: null, reason: '被合并' },
+        ],
+      },
+    ]);
+
+    const failure = await consolidateCapturingFailure(llm);
+
+    expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    // 关键断言：不是写盘循环里那句「已应用…没有回滚」，删除一次都没发生。
+    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).not.toBeNull();
+    const kept = await container.services.memory.read(Uri.parse(PROFILE));
+    expect(kept?.fields['content']).toBe('先给结论。');
+  });
+
+  it('保留者的 identity 缺失：整批失败，一条记录都没删（校验在写盘之前）', async () => {
+    await writeProfile();
+    await writePreference('code-style-legacy', '缩进用 4 个空格。');
+    // `profile` 的文件名固定，identity 推不出路径：删掉 `name` 之后 `renderMemoryUri`
+    // 仍能渲染，只有 identity 校验能发现。留到 `upsertMemory` 锁内才报的话，
+    // 排在它前面的删除已经应用且不回滚。
+    await editFrontmatter(PROFILE, /^name: .*\n?/gmu, '');
+
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          { kind: 'update', uri: PROFILE, content: '先给结论，再给证据。', reason: '合并画像' },
+          { kind: 'delete', uri: CODE_STYLE_LEGACY, content: null, reason: '被合并' },
+        ],
+      },
+    ]);
+
+    const failure = await consolidateCapturingFailure(llm);
+
+    expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).not.toBeNull();
+    const kept = await container.services.memory.read(Uri.parse(PROFILE));
+    expect(kept?.fields['content']).toBe('先给结论。');
   });
 
   it('add 落到记忆类型目录下，并出现在最终清单里', async () => {
@@ -376,6 +583,32 @@ describe('ConsolidationService.consolidate', () => {
         principals: PRINCIPALS,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('add 的 identity 值含 ..：整批失败，被删的记录仍在（校验在写盘之前）', async () => {
+    await writePreference('code-style', '缩进用 2 个空格。');
+    // `Uri.normalizeSegment` 只拒绝整段等于 `..`，`z..z` 是合法路径段，能一路通过
+    // `Uri.parse` / `resolveMemoryTarget`；只有 `renderPath` 的 identity 校验会拒绝
+    // 它。这一步若留在写盘循环里，排在它前面的删除已经应用且不回滚。
+    const badTopic = `${SCOPE}/memories/preferences/z..z.md`;
+    const llm = new ScriptedLlm([
+      {
+        action: 'finish',
+        operations: [
+          { kind: 'delete', uri: CODE_STYLE, content: null, reason: '被新的一条取代' },
+          { kind: 'add', uri: badTopic, content: '缩进用 4 个空格。', reason: '改写结论' },
+        ],
+      },
+    ]);
+
+    const failure = await consolidateCapturingFailure(llm);
+
+    expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    // 关键断言：不是写盘循环里那句「已应用…没有回滚」，删除一次都没发生。
+    expect(errorMessage(failure)).not.toContain('没有回滚');
+    const kept = await container.services.memory.read(Uri.parse(CODE_STYLE));
+    expect(kept?.fields['content']).toBe('缩进用 2 个空格。');
+    expect(await container.services.memory.read(Uri.parse(badTopic))).toBeNull();
   });
 
   it('HTTP 端点在 memory.consolidation.enabled 为 false 时明确拒绝（不是空结果）', async () => {

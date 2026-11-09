@@ -37,6 +37,7 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { EVENT_NAMES, internalEventNameOf } from '../lib/events.mjs';
 import { ComemHookError } from '../lib/http.mjs';
 import {
   STDIN_READ_CAP_MS,
@@ -63,15 +64,13 @@ export const SESSION_ID_PREFIX = 'dsh-';
  */
 export const MAX_CONTEXT_BYTES = 20000;
 
-/** 内部事件名 ↔ 宿主事件名。DSH 用同一组名字。 */
-export const EVENT_NAMES = Object.freeze({
-  SessionStart: 'SessionStart',
-  UserPromptSubmit: 'UserPromptSubmit',
-  PreToolUse: 'PreToolUse',
-  PostToolUse: 'PostToolUse',
-  Stop: 'Stop',
-  PreCompact: 'PreCompact',
-});
+/**
+ * 内部事件名 ↔ 宿主事件名。
+ *
+ * 表在 `lib/events.mjs`（全仓库唯一一份）。DSH 的事件名与其它两个宿主相同，
+ * 所以共用一张表；名字本身不在这里定义。
+ */
+export { EVENT_NAMES };
 
 /** 需要拦截 `comem://` 路径的文件工具（任务书：只有这三个）。 */
 const FILE_TOOLS = new Set(['Read', 'Write', 'Edit']);
@@ -151,8 +150,10 @@ export function normalizeEvent(raw) {
   if (rawEventName === null) {
     throw new ComemHookError('DSH 载荷缺少 event。', { code: 'HOOK_INVALID_ARGUMENT' });
   }
-  const event = rawEventName === 'SessionEnd' ? 'PreCompact' : rawEventName;
-  if (!(event in EVENT_NAMES)) {
+  // 宿主事件名 → 内部事件名。`SessionEnd` 是一等事件（自己的预算与上报标签），
+  // 不再改写成 `PreCompact`。
+  const event = internalEventNameOf(rawEventName);
+  if (event === null) {
     throw new ComemHookError(`未支持的 DSH hook 事件：${rawEventName}`, {
       code: 'HOOK_INVALID_ARGUMENT',
     });
@@ -171,7 +172,6 @@ export function normalizeEvent(raw) {
   return {
     host: 'dsh',
     event,
-    rawEventName,
     hostEventName: EVENT_NAMES[event],
     sessionId: `${SESSION_ID_PREFIX}${sessionId}`,
     eventId: text(envelope['eventId']) ?? text(envelope['event_id']) ?? null,

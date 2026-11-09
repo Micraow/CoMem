@@ -59,7 +59,12 @@ export interface Group {
 export interface GroupMember {
   readonly groupId: string;
   readonly userId: string;
-  /** `owner` 可以改组本身；其余是普通成员。 */
+  /**
+   * 派生字段：`userId === group.ownerUserId` 才是 `owner`。
+   *
+   * 不来自 `group_member.role` 列——那一列已废弃。组的 owner 决定 ACL 里
+   * `user:{owner} = manage` 怎么写，但它本身不是成员行上的属性。
+   */
   readonly role: 'owner' | 'member';
   readonly addedAt: string;
 }

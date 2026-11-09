@@ -19,8 +19,10 @@
  *
  * 1. **只记账真的给了正文的条目。** 只给了 URI 的不记——模型没看到内容，下一轮
  *    还得给。
- * 2. **轮次时钟取消息总数。** `turn = max(totalMessageCount, liveMessages.length)`
- *    由调用方计算后传进来；这一层只消费 `turn`，不认识消息。
+ * 2. **轮次时钟取消息总数。** `turn = SessionService.totalMessageCount(sessionUri)`
+ *    （已归档消息 ID 集合大小 + live 条数）由调用方算好传进来；这一层只消费
+ *    `turn`，不认识消息。它天然不小于 live 条数，所以旧公式里的
+ *    `max(totalMessageCount, liveMessages.length)` 不再需要：`max` 恒等于前者。
  * 3. **按 `turn - 4 × dedupTurns` 裁剪，上限 500 条。** 两个条件都要满足：先按
  *    轮次裁，再按条数裁（保留最新的）。
  *

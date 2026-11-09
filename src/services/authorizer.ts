@@ -56,27 +56,6 @@ const ACTION_LABEL: Readonly<Record<AclAction, string>> = Object.freeze({
 });
 
 /**
- * 测试替身：全部放行。
- *
- * 只许在测试与 bootstrap 的默认装配里用。生产路径必须注入真实的 `AclService`，
- * 否则权限模型等于不存在。
- */
-export class AllowAllAuthorizer implements Authorizer {
-  async check(): Promise<boolean> {
-    return true;
-  }
-
-  async filterReadable(uris: readonly Uri[]): Promise<ReadonlySet<string>> {
-    return new Set(uris.map((uri) => uri.toString()));
-  }
-
-  async assert(): Promise<void> {
-    // 全部放行，没有可抛的东西。
-    return;
-  }
-}
-
-/**
  * `assert` 的标准错误。
  *
  * 消息是中文完整句子，带 URI 与所需级别——用户看到的就是这一句，

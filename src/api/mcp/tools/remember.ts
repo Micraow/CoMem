@@ -11,20 +11,23 @@
  * 的语义。批量上传本机历史会话时必须传：同一份日志重跑要落回**同一个**会话，
  * 否则 908 个会话重跑一次就变成 1,816 个。
  *
- * 幂等靠**稳定消息 ID**：`sha256(role + text + createdAt)`。追加前先收集会话已有的
- * 消息 ID（live + 归档），命中就跳过。所以调用方必须把源日志里的 `createdAt` 原样
- * 传进来——不传时用当前时刻，重跑会得到不同的 ID，无法去重。
+ * 幂等靠**稳定消息 ID**：直接调服务层的 `stableMessageId`（`services/session.ts`），
+ * 不在本文件重算。服务端去重按 ID 判等，`remember` 与 `ingest` 各算一份时公式一漂
+ * 就互相看不见对方的去重。追加前先收集会话已有的消息 ID（live + 归档），命中就跳过。
+ * 所以调用方必须把源日志里的 `createdAt` 原样传进来——不传时用当前时刻，重跑会得到
+ * 不同的 ID，无法去重。
  *
  * **顺序去重是「同一批消息」语义。** 并发两个同 `sessionId` 的调用没有跨请求的锁，
  * 去重是「读现有 → 追加」两步，可能各追加一份。批量导入是单协程顺序调用，不受
  * 影响；要支持并发导入需要在会话层加一把跨消息的锁。
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import { ComemError } from '../../../domain/errors.js';
 import type { MessageRole } from '../../../domain/session.js';
 import type { Uri } from '../../../domain/uri.js';
+import { stableMessageId } from '../../../services/session.js';
 import type { McpToolContext } from '../context.js';
 import {
   asRecord,
@@ -39,14 +42,6 @@ const ROLES: readonly MessageRole[] = ['user', 'assistant', 'system', 'tool'];
 
 /** §12.1：write = 3。合成会话写在个人根下，需要写权限。 */
 const WRITE = 3;
-
-/**
- * 稳定 ID 的分隔符。
- *
- * 用 NUL：它不会出现在角色名或 ISO 时间串里，正文里出现同样的字符也不会让
- * `("ab", "c")` 与 `("a", "bc")` 拼出同一个摘要。
- */
-const ID_SEPARATOR = '\u0000';
 
 function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
   return new ComemError('INVALID_ARGUMENT', message, details);
@@ -90,13 +85,6 @@ function optionalSessionId(input: Record<string, unknown>): string | undefined {
     });
   }
   return value;
-}
-
-/** 稳定消息 ID：同样的角色、正文与时间戳得到同一个 ID。 */
-function messageId(role: MessageRole, text: string, createdAt: string): string {
-  return createHash('sha256')
-    .update([role, text, createdAt].join(ID_SEPARATOR))
-    .digest('hex');
 }
 
 /**
@@ -150,7 +138,7 @@ function parseMessages(
       role,
       text,
       createdAt,
-      id: stableIds ? messageId(role, text, createdAt) : randomUUID(),
+      id: stableIds ? stableMessageId(role, text, createdAt) : randomUUID(),
     };
   });
 }

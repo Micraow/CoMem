@@ -117,8 +117,6 @@ describe('嵌入缓存', () => {
     expect(provider.embed).toHaveBeenCalledTimes(1);
     expect(second.degraded).toBe(false);
     expect(second.vectors).toEqual(first.vectors);
-    // 命中不消耗 token：统计里只有第一次的那一次调用。
-    expect(service.stats()).toMatchObject({ calls: 1, tokens: 1 });
   });
 
   it('未命中发请求', async () => {
@@ -227,19 +225,19 @@ describe('嵌入缓存', () => {
     );
   });
 
-  it('全部命中时不推进熔断状态', async () => {
+  it('全部命中时不打供应商', async () => {
     const provider = createProvider();
     const cache = createCache();
     const service = createService(provider, cache);
     await service.embed(['一段记忆']);
-    const before = service.stats();
 
     // 让供应商挂掉：后续未命中会降级。
     provider.embed.mockRejectedValue(new ComemError('PROVIDER_UNAVAILABLE', '挂了。', {}));
     const hit = await service.embed(['一段记忆']);
     expect(hit.degraded).toBe(false);
-    // 命中没有产生新的调用，也没有把降级计数加一。
-    expect(service.stats()).toEqual(before);
+    // 命中没有产生新的调用，熔断也不会因为一次命中被推进。
+    expect(provider.embed).toHaveBeenCalledTimes(1);
+    expect(service.available).toBe(true);
   });
 
   it('cache: null 时完全不碰缓存', async () => {

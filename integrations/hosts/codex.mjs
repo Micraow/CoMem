@@ -47,6 +47,7 @@
  * 上生效。普通 `Edit` / `Write` 仍读 `file_path` / `path`。
  */
 
+import { EVENT_NAMES, internalEventNameOf } from '../lib/events.mjs';
 import { ComemHookError } from '../lib/http.mjs';
 import {
   STDIN_READ_CAP_MS,
@@ -77,15 +78,13 @@ export const SESSION_ID_PREFIX = 'cx-';
  */
 export const MAX_CONTEXT_BYTES = 9500;
 
-/** 内部事件名 ↔ 宿主事件名。Codex 用同名事件。 */
-export const EVENT_NAMES = Object.freeze({
-  SessionStart: 'SessionStart',
-  UserPromptSubmit: 'UserPromptSubmit',
-  PreToolUse: 'PreToolUse',
-  PostToolUse: 'PostToolUse',
-  Stop: 'Stop',
-  PreCompact: 'PreCompact',
-});
+/**
+ * 内部事件名 ↔ 宿主事件名。
+ *
+ * 表在 `lib/events.mjs`（全仓库唯一一份）。Codex 的事件名与 Claude Code 相同，
+ * 所以共用一张表；名字本身不在这里定义。
+ */
+export { EVENT_NAMES };
 
 /** 直接带 `file_path` / `path` 的文件工具（Codex 的 apply_patch 别名也在此）。 */
 const PATCH_TOOLS = new Set(['apply_patch', 'Edit', 'Write']);
@@ -155,10 +154,10 @@ export function normalizeEvent(raw) {
       code: 'HOOK_INVALID_ARGUMENT',
     });
   }
-  // `SessionEnd` 与 `PreCompact` 都是「把待处理消息提交完」的时机（§15.2 的表格
-  // 把它们并成一行），内部归一成 `PreCompact`。
-  const event = rawEventName === 'SessionEnd' ? 'PreCompact' : rawEventName;
-  if (!(event in EVENT_NAMES)) {
+  // 宿主事件名 → 内部事件名。`SessionEnd` 是一等事件（自己的预算与上报标签），
+  // 不再改写成 `PreCompact`。
+  const event = internalEventNameOf(rawEventName);
+  if (event === null) {
     throw new ComemHookError(`未支持的 Codex hook 事件：${rawEventName}`, {
       code: 'HOOK_INVALID_ARGUMENT',
     });
@@ -178,7 +177,6 @@ export function normalizeEvent(raw) {
   return {
     host: 'codex',
     event,
-    rawEventName,
     hostEventName: EVENT_NAMES[event],
     sessionId: `${SESSION_ID_PREFIX}${sessionId}`,
     eventId: toolUseId === null ? null : `${event}:${toolUseId}`,

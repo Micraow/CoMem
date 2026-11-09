@@ -1,0 +1,30 @@
+{
+  "session_start": {
+    "hostEventName": "SessionStart",
+    "reportsOverhead": true
+  },
+  "user_prompt_submit": {
+    "hostEventName": "UserPromptSubmit",
+    "reportsOverhead": true
+  },
+  "pre_tool_use": {
+    "hostEventName": "PreToolUse",
+    "reportsOverhead": false
+  },
+  "post_tool_use": {
+    "hostEventName": "PostToolUse",
+    "reportsOverhead": true
+  },
+  "stop": {
+    "hostEventName": "Stop",
+    "reportsOverhead": true
+  },
+  "pre_compact": {
+    "hostEventName": "PreCompact",
+    "reportsOverhead": true
+  },
+  "session_end": {
+    "hostEventName": "SessionEnd",
+    "reportsOverhead": true
+  }
+}

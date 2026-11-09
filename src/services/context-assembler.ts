@@ -35,6 +35,7 @@ import {
 } from '../domain/assembly.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
+import { estimateTokens } from '../domain/session.js';
 import { skeletonOverview } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
@@ -44,24 +45,20 @@ import type { AclAction, Authorizer } from './authorizer.js';
 const READ: AclAction = 1;
 
 /**
- * 默认并发上限（`local/notes/comparison.md` 第 1 条）。
+ * 并发读上限（`local/notes/comparison.md` 第 1 条）。
  *
  * 8：经验值，来源未知。与 `domain/assembly.ts` 的 `READ_CONCURRENCY` 取同一个数，
  * 但两者挡的不是同一层：那边是「同时发起多少个读」，这边是「同时打开多少个文件
  * 描述符」。8 足够把 IO 延迟藏在其它条目的计算后面，又不会让 fd 数量失控。
+ *
+ * 不设配置项也不注入：它只约束 fd 压力，不影响读取结果（读同一个文件是并发安全的），
+ * 没有调优到需要部署者改的场景。
  */
-const DEFAULT_READ_CONCURRENCY = 8;
+const READ_CONCURRENCY = 8;
 
 /**
- * 字符数 → token 数的默认估算：`Math.ceil(length / 4)`。
- *
- * 4：经验值，来源未知（英文约 4 字符/token 的常见估计）。中文按 1–2 字符/token，
- * 这个估算会**低估**中文预算，所以生产装配应该注入真实的 tokenizer（不同模型的分词器
- * 不一样，领域层不硬编码）。
+ * 1 毫秒 = 1e6 纳秒，用于把 `hrtime` 差值换算成毫秒。
  */
-const CHARS_PER_TOKEN = 4;
-
-/** 1 毫秒 = 1e6 纳秒，用于把 `hrtime` 差值换算成毫秒。 */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
 export interface ContextAssemblerDeps {
@@ -69,10 +66,6 @@ export interface ContextAssemblerDeps {
   readonly metadata: MetadataFileStore;
   readonly authorizer: Authorizer;
   readonly logger: Logger;
-  /** 读原文的并发上限，默认 8（`assembly.ts` 内部也有一层；这里挡的是文件 IO） */
-  readonly readConcurrency?: number;
-  /** token 估算，默认按 4 字符/token 近似 */
-  readonly estimateTokens?: (text: string) => number;
 }
 
 /**
@@ -84,14 +77,10 @@ interface ReadCache {
   readonly body: Map<string, Promise<string | null>>;
 }
 
-function defaultEstimateTokens(text: string): number {
-  return Math.ceil(text.length / CHARS_PER_TOKEN);
-}
-
 /**
  * 有界并发信号量。
  *
- * 直接在 `ports` 的每个读方法上取许可，而不是在外面套一层 `mapWithConcurrency`：
+ * 直接在读路径上取许可（`#readText`），而不是在外面套一层 `mapWithConcurrency`：
  * 调用方（`assembly.ts` 的升级轮次）自己决定并发形态，这一层只保证「同时打开的
  * 文件描述符不超过上限」。
  */
@@ -143,45 +132,14 @@ export class ContextAssembler {
   readonly #metadata: MetadataFileStore;
   readonly #authorizer: Authorizer;
   readonly #logger: Logger;
-  readonly #estimateTokens: (text: string) => number;
   readonly #semaphore: Semaphore;
 
-  /**
-   * 给外部直接用的端口。不做跨调用缓存：概览与原文都会随写入变化，长期缓存等于
-   * 返回过期内容。`assemble` 走的是每次新建的那一份（见 `assemble`）。
-   *
-   * 比 domain 的 `AssemblyPorts` 多一个 `principals` 参数：授权是请求期的身份，
-   * 领域层不持有身份，端口必须由调用方传进来。不传就没有默认值——漏传在类型
-   * 检查期报错，不会静默退化成「无主体」。
-   */
-  readonly ports: {
-    readOverview(uri: string, principals: readonly string[]): Promise<string | null>;
-    readBody(uri: string, principals: readonly string[]): Promise<string | null>;
-    estimateTokens(text: string): number;
-    logger: Logger;
-  };
-
   constructor(deps: ContextAssemblerDeps) {
-    const concurrency = deps.readConcurrency ?? DEFAULT_READ_CONCURRENCY;
-    if (!Number.isInteger(concurrency) || concurrency < 1) {
-      throw new ComemError('INVALID_ARGUMENT', 'readConcurrency 必须是正整数。', {
-        readConcurrency: concurrency,
-      });
-    }
-
     this.#store = deps.store;
     this.#metadata = deps.metadata;
     this.#authorizer = deps.authorizer;
     this.#logger = deps.logger;
-    this.#estimateTokens = deps.estimateTokens ?? defaultEstimateTokens;
-    this.#semaphore = new Semaphore(concurrency);
-
-    this.ports = {
-      readOverview: (uri, principals) => this.#readOverview(uri, null, principals),
-      readBody: (uri, principals) => this.#readBody(uri, null, principals),
-      estimateTokens: this.#estimateTokens,
-      logger: this.#logger,
-    };
+    this.#semaphore = new Semaphore(READ_CONCURRENCY);
   }
 
   /**
@@ -200,7 +158,7 @@ export class ContextAssembler {
     const ports: AssemblyPorts = {
       readOverview: (uri) => this.#readOverview(uri, cache, principals),
       readBody: (uri) => this.#readBody(uri, cache, principals),
-      estimateTokens: this.#estimateTokens,
+      estimateTokens,
       logger: this.#logger,
     };
     return assembleContext(candidates, options, ports);
@@ -215,15 +173,15 @@ export class ContextAssembler {
    */
   async #readOverview(
     value: string,
-    cache: ReadCache | null,
+    cache: ReadCache,
     principals: readonly string[],
   ): Promise<string | null> {
-    const memoized = cache?.overview.get(value);
+    const memoized = cache.overview.get(value);
     if (memoized !== undefined) {
       return memoized;
     }
     const pending = this.#loadOverview(value, principals);
-    cache?.overview.set(value, pending);
+    cache.overview.set(value, pending);
     return pending;
   }
 
@@ -291,15 +249,15 @@ export class ContextAssembler {
   /** 读 L2 原文。读不到（不存在、是目录、无权限）返回 `null`，不抛错。 */
   async #readBody(
     value: string,
-    cache: ReadCache | null,
+    cache: ReadCache,
     principals: readonly string[],
   ): Promise<string | null> {
-    const memoized = cache?.body.get(value);
+    const memoized = cache.body.get(value);
     if (memoized !== undefined) {
       return memoized;
     }
     const pending = this.#loadBody(value, principals);
-    cache?.body.set(value, pending);
+    cache.body.set(value, pending);
     return pending;
   }
 

@@ -53,20 +53,26 @@ const PREFIX_OPTIONS = [
 ] as const
 
 const LEVEL_OPTIONS = [
-  { value: '1', label: 'read · 读' },
-  { value: '3', label: 'write · 写' },
-  { value: '7', label: 'manage · 管理' },
+  { value: '1', label: '读取' },
+  { value: '3', label: '写入' },
+  { value: '7', label: '管理' },
 ] as const
 
 const EFFECT_OPTIONS = [
-  { value: 'allow', label: 'allow · 允许' },
-  { value: 'deny', label: 'deny · 拒绝' },
+  { value: 'allow', label: '允许' },
+  { value: 'deny', label: '拒绝' },
 ] as const
 
-const LEVEL_NAME: Readonly<Record<AclLevel, string>> = {
-  1: 'read',
-  3: 'write',
-  7: 'manage',
+/** 级别与效果的中文名：界面上只出现用户能做的动作，不出现服务端枚举。 */
+const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
+  1: '读取',
+  3: '写入',
+  7: '管理',
+}
+
+const EFFECT_LABEL: Readonly<Record<AclEffect, string>> = {
+  allow: '允许',
+  deny: '拒绝',
 }
 
 const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'blue'>> = {
@@ -91,7 +97,21 @@ const confirmOpen = computed({
   },
 })
 
+/**
+ * 继承模式的中文标签。`inherit` / `restricted` 是服务端枚举，不直接进界面
+ * （AGENTS §11）；界面上只出现「继承父级」与「仅本节点」。
+ */
+const MODE_LABEL: Readonly<Record<AclMode, string>> = {
+  inherit: '继承父级',
+  restricted: '仅本节点',
+}
+
 const isRestricted = computed(() => props.acl?.mode === 'restricted')
+
+const modeLabel = computed(() => {
+  const mode = props.acl?.mode
+  return mode === undefined ? '—' : MODE_LABEL[mode]
+})
 
 const entries = computed(() => props.acl?.entries ?? [])
 
@@ -115,11 +135,11 @@ const confirmMessage = computed(() => {
   }
   if (action.kind === 'mode') {
     return action.mode === 'restricted'
-      ? '切换为 restricted 后，这个节点不再继承祖先的授权，所有主体只保留本节点的直接授权。当前沿链生效的权限会立即失效。'
-      : '切换为 inherit 后，祖先链上的授权重新生效，这个节点会继承上游的全部权限。'
+      ? '切换为「仅本节点」后，这个节点不再继承祖先的授权，所有主体只保留本节点的直接授权。当前沿链生效的权限会立即失效。'
+      : '切换为「继承父级」后，祖先链上的授权重新生效，这个节点会继承上游的全部权限。'
   }
   if (action.kind === 'grant') {
-    return `将给 ${action.entry.principal} 授予 ${LEVEL_NAME[action.entry.level]}（${action.entry.effect}）。同一主体只能有一条授权，重复添加会覆盖原来的级别与效果。`
+    return `将给 ${action.entry.principal} 授予「${LEVEL_LABEL[action.entry.level]}」（${EFFECT_LABEL[action.entry.effect]}）。同一主体只能有一条授权，重复添加会覆盖原来的级别与效果。`
   }
   return `将撤销 ${action.principal} 在这个节点上的直接授权。如果上游也有授权，撤销后仍然继承上游的权限。`
 })
@@ -223,11 +243,11 @@ function confirm(): void {
           <UiSwitch
             :model-value="isRestricted"
             :disabled="props.busy || props.loading"
-            aria-label="切换到 restricted"
+            aria-label="切断继承"
             @update:model-value="onModeToggle"
           />
           <UiBadge :variant="isRestricted ? 'red' : 'outline'">
-            {{ props.acl?.mode ?? '—' }}
+            {{ modeLabel }}
           </UiBadge>
         </div>
       </header>
@@ -235,7 +255,7 @@ function confirm(): void {
       <div class="callout" :class="isRestricted ? 'callout--danger' : 'callout--info'">
         <AlertTriangle :size="15" :stroke-width="1.4" />
         <div>
-          <b>{{ isRestricted ? 'restricted：继承在这里切断' : 'inherit：沿祖先链累加' }}</b>
+          <b>{{ isRestricted ? '仅本节点：继承在这里切断' : '继承父级：沿祖先链累加' }}</b>
           <br>
           {{
             isRestricted
@@ -266,12 +286,12 @@ function confirm(): void {
               <td class="mono strong">{{ entry.principal }}</td>
               <td>
                 <UiBadge :variant="LEVEL_VARIANT[entry.level]">
-                  {{ LEVEL_NAME[entry.level] }}
+                  {{ LEVEL_LABEL[entry.level] }}
                 </UiBadge>
               </td>
               <td>
                 <UiBadge :variant="entry.effect === 'deny' ? 'red' : 'green'">
-                  {{ entry.effect }}
+                  {{ EFFECT_LABEL[entry.effect] }}
                 </UiBadge>
               </td>
               <td class="num">
@@ -293,7 +313,7 @@ function confirm(): void {
           <span class="empty__title">这个节点没有直接授权</span>
           <span class="empty__text">
             {{
-              isRestricted ? 'restricted 且没有直接授权：所有主体都没有权限。' : '权限全部来自祖先链。'
+              isRestricted ? '仅本节点且没有直接授权：所有主体都没有权限。' : '权限全部来自祖先链。'
             }}
           </span>
         </div>
@@ -303,7 +323,7 @@ function confirm(): void {
         <div class="sec-head">
           <span class="sec-label">添加授权</span>
           <span class="spacer" />
-          <span class="caption">只有 manage 能修改 ACL</span>
+          <span class="caption">只有「管理」级别能修改 ACL</span>
         </div>
 
         <div class="grantbar__row">
@@ -323,7 +343,7 @@ function confirm(): void {
           </UiButton>
         </div>
 
-        <p class="caption grantbar__hint">user:* 匹配所有用户；同节点上的 deny 优先。</p>
+        <p class="caption grantbar__hint">user:* 匹配所有用户；同节点上的「拒绝」优先。</p>
 
         <p v-if="formError !== null" class="grantbar__error">{{ formError }}</p>
       </section>

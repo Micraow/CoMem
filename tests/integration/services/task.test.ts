@@ -231,9 +231,11 @@ describe('失败重试', () => {
 });
 
 describe('recover', () => {
-  it('回收租约过期的 running 任务并 attempts += 1', () => {
+  it('回收租约过期的 running 任务：attempts 保持认领时的值，回收不计数', () => {
     const zombie = service.create('archive', {});
     repository.tryClaim(zombie.id, new Date('2026-11-01T00:00:00.000Z'), 1);
+    // 认领成功就是一次执行的开始。
+    expect(attemptsOf(zombie.id)).toBe(1);
 
     expect(service.recover()).toBe(1);
     expect(repository.get(zombie.id)).toMatchObject({ status: 'pending', attempts: 1 });
@@ -250,7 +252,7 @@ describe('recover', () => {
 describe('claimable / countByStatus', () => {
   it('返回待处理任务，按 created_at 升序', () => {
     const first = service.create('archive', {});
-    const second = service.create('extract', {});
+    const second = service.create('archive', {});
 
     expect(service.claimable().map((task) => task.id)).toEqual([first.id, second.id]);
     expect(service.claimable(1)).toHaveLength(1);

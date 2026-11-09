@@ -8,6 +8,11 @@
  * 目录没有 L2 正文，第三档展示它的直接子项——「读一个目录的原文」没有定义，
  * 编一段拼接文本比列目录更容易误导。
  *
+ * 文档没有 L1 概览：`GET /content/overview` 对 document 恒返回 `overview: null`，
+ * 前端也没有对应的合成逻辑（服务端注释里的 `skeletonOverview` 在 `web/` 里不存在）。
+ * 挂一个永远空的「概览」档比不挂更糟，所以文档只保留 L0 / L2；目录的 L1 是真实
+ * 的 `.overview` 摘要，照常展示。
+ *
  * 右栏的摘要来源与新鲜度只展示服务端真的有的字段：单节点的生成时间、模型、
  * 版本当前没有出口，界面写「未知」而不是拿全站数字冒充单节点状态。
  */
@@ -92,6 +97,15 @@ const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
 const isDirectory = computed(() => stat.value?.kind === 'directory')
+
+/**
+ * 文档没有 L1 概览（服务端恒返回 null，前端没有合成逻辑），这一档不展示。
+ *
+ * 只按 `stat.kind` 判断：目录的概览来自 `.abstract.md` 对应的摘要文件，是真实数据。
+ */
+const visibleLayerTabs = computed(() =>
+  isDirectory.value ? layerTabs : layerTabs.filter((tab) => tab.value !== 'l1'),
+)
 
 async function loadHealth(): Promise<void> {
   try {
@@ -293,7 +307,7 @@ onBeforeUnmount(() => {
 
             <div v-else class="detail-grid">
               <div>
-                <UiTabs v-model="layer" :items="layerTabs" aria-label="披露层级" />
+                <UiTabs v-model="layer" :items="visibleLayerTabs" aria-label="披露层级" />
 
                 <div class="layer-note">
                   <Info :size="15" :stroke-width="1.4" />

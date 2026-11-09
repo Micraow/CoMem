@@ -1,9 +1,10 @@
 /**
  * `add_resource`：批量导入资料（架构文档 §13.2、§10.6 的批量写入）。
  *
- * 分两步：附件先上传拿到 `uploadId`（HTTP 的 `temp-upload`），再来建资源。原始
- * 附件落盘保留，`download` 才有东西可下；`content` 是 agent 已经规范化好的文本，
- * 后端不做 PDF / Office 解析。
+ * 两种来源：纯文本资料直接给 `content`（agent 已规范化的正文），MCP 单入口就能
+ * 用；要保留原始附件时先用 HTTP 的 `temp-upload` 拿 `uploadId`，再与 `content`
+ * 一起提交——`uploadId` 落盘到 `.attachments/` 供 `download`，`content` 是索引与
+ * 检索用的正文。两者可以同时给（原件 + 正文），后端不做 PDF / Office 解析。
  *
  * 批量路径在服务层入口去重祖先，写完后统一触发一次摘要重算（§10.6）——工具层
  * 只负责把一次调用的文件全部交给服务，不循环调用 `write`。
@@ -16,7 +17,6 @@ import {
   asRecord,
   indexStatus,
   nonEmptyString,
-  optionalBoolean,
   optionalString,
   recordArray,
   requiredString,
@@ -55,7 +55,7 @@ export const addResourceTool: McpToolDefinition = {
   name: 'add_resource',
   kind: 'ingest',
   description:
-    '把外部文件（文档 / 图片 / 代码）作为资料导入记忆库。要建可检索、可下载的资料节点时用它；逐个 write 会触发多次摘要重算，也会丢掉原始附件。files 每项必须有 path，并至少带 uploadId（先用 HTTP temp-upload 上传）或 content（agent 已转好的文本）——后端不解析 PDF / Office。',
+    '把外部文件（文档 / 图片 / 代码）作为资料导入记忆库。要建可检索、可下载的资料节点时用它；逐个 write 会触发多次摘要重算，也会丢掉原始附件。files 每项必须有 path，且至少带 content（agent 转好的正文）或 uploadId（HTTP temp-upload 的附件 id，两者可同时给：原件 + 正文）——后端不解析 PDF / Office。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -66,15 +66,17 @@ export const addResourceTool: McpToolDefinition = {
           type: 'object',
           properties: {
             path: { type: 'string', description: '逻辑路径，如 docs/api.md' },
-            uploadId: { type: 'string', description: '临时上传返回的附件 id' },
-            content: { type: 'string', description: '规范化后的文本' },
+            uploadId: {
+              type: 'string',
+              description: 'HTTP temp-upload 返回的附件 id；与 content 可同时给（原件 + 正文）',
+            },
+            content: { type: 'string', description: 'agent 规范化后的正文；纯文本资料只给它就够' },
             summary: { type: 'string', description: 'agent 给的文件摘要' },
           },
           required: ['path'],
         },
         description: '要导入的文件',
       },
-      wait: { type: 'boolean', default: false },
     },
     required: ['parentUri', 'files'],
   },
@@ -82,11 +84,12 @@ export const addResourceTool: McpToolDefinition = {
     const args = asRecord(input, 'add_resource');
     const parentUri = Uri.parse(requiredString(args, 'parentUri', 'add_resource'));
     const files = recordArray(args, 'files', 'add_resource').map(toFileInput);
-    const wait = optionalBoolean(args, 'wait', false, 'add_resource');
 
     // §12.4：摄取是 write 出口，服务层之外的授权在工具层先做。
     await context.acl.assert(parentUri, WRITE, context.principals);
 
+    // 单个文件的大小上限由 `ResourceService` 统一执行（`DEFAULT_MAX_FILE_BYTES`，
+    // `content` 的 UTF-8 字节数与附件原始字节走同一条判定）——这里不复制这个数字。
     const result = await context.resource.addResource({
       parentUri,
       files,
@@ -98,7 +101,6 @@ export const addResourceTool: McpToolDefinition = {
       requestId: context.requestId,
       parentUri: parentUri.toString(),
       files: files.length,
-      wait,
       created: result.created.length,
       updated: result.updated.length,
       skipped: result.skipped.length,

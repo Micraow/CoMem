@@ -409,3 +409,66 @@ describe('0005 升级路径（删 node.expires_at）', () => {
     ).not.toThrow();
   });
 });
+
+/**
+ * 0006 删掉 `request_log` 上三个没有查询用到的索引（架构文档 §17.6）。
+ *
+ * 这张表没有读出口，`status_code` / `request_id` / `subject` 三个索引只增加每次
+ * HTTP 响应的写入成本。升级要在**已有库**上可用：索引没了，表与裁剪用的
+ * `request_log_created` 还在，行还在。
+ */
+describe('0006 升级路径（删 request_log 的查询索引）', () => {
+  const MIGRATIONS = new URL('../../../src/adapters/sqlite/migrations/', import.meta.url);
+  const DROPPED = ['request_log_status', 'request_log_request_id', 'request_log_subject'];
+
+  /** `request_log` 自己的索引名；`LIKE` 不会匹配到 `sqlite_autoindex_*`。 */
+  function requestLogIndexNames(db: DatabaseSync): string[] {
+    return db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'request_log%' ORDER BY name",
+      )
+      .all()
+      .map((row) => String(row['name']));
+  }
+
+  function applyPre0006(db: DatabaseSync): void {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const files = [
+      '0001_init.sql',
+      '0002_archived_at.sql',
+      '0003_memory_link.sql',
+      '0004_node_level_rows.sql',
+      '0005_sliding_ttl.sql',
+    ];
+    for (const [index, name] of files.entries()) {
+      db.exec(readFileSync(new URL(name, MIGRATIONS), 'utf8'));
+      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+        index + 1,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  it('从 0005 升级后三个查询索引消失，裁剪用的索引与数据保留', () => {
+    const db = open(':memory:');
+    applyPre0006(db);
+    expect(currentVersion(db)).toBe(5);
+    expect(requestLogIndexNames(db)).toEqual(
+      expect.arrayContaining(['request_log_created', ...DROPPED]),
+    );
+    db.prepare(
+      `INSERT INTO request_log (id, request_id, method, path, status_code, duration_ms, phases, error_code, subject, created_at)
+       VALUES ('log-1', 'req_1', 'GET', '/api/v1/health', 200, 1, NULL, NULL, 'user:alice', '2026-11-01T00:00:00.000Z')`,
+    ).run();
+
+    expect(runMigrations(db)).toBe(LATEST_VERSION);
+
+    expect(requestLogIndexNames(db)).toEqual(['request_log_created']);
+    // 只删索引，不动行。
+    expect(db.prepare('SELECT COUNT(*) AS total FROM request_log').get()).toMatchObject({
+      total: 1,
+    });
+  });
+});

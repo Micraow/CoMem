@@ -5,23 +5,22 @@
  * 一次检索只会更慢，而且 `read` 的报错更直接。
  */
 
+import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
+
 import {
   optionalContextType,
   optionalLevel,
   optionalString,
   optionalStringArray,
+  nonEmptyString,
   positiveInteger,
   readScopes,
-  requiredString,
   asRecord,
   formatDegradations,
   formatHits,
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-/** §13.2 的默认值：`limit=10`。 */
-const DEFAULT_LIMIT = 10;
 
 export const findTool: McpToolDefinition = {
   name: 'find',
@@ -36,7 +35,7 @@ export const findTool: McpToolDefinition = {
         type: 'string',
         description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
       },
-      limit: { type: 'integer', minimum: 1, default: DEFAULT_LIMIT, description: '最多返回条数' },
+      limit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT, description: '最多返回条数' },
       level: { type: 'string', enum: ['L0', 'L1', 'L2'], description: '只看某一层级' },
       contextType: {
         type: 'string',
@@ -63,9 +62,9 @@ export const findTool: McpToolDefinition = {
   },
   async execute(input, context) {
     const args = asRecord(input, 'find');
-    const query = requiredString(args, 'query', 'find');
+    const query = nonEmptyString(args, 'query', 'find');
     const targetUri = optionalString(args, 'targetUri', 'find');
-    const limit = positiveInteger(args, 'limit', DEFAULT_LIMIT, 'find');
+    const limit = positiveInteger(args, 'limit', DEFAULT_SEARCH_LIMIT, 'find');
     const level = optionalLevel(args, 'level', 'find');
     const contextType = optionalContextType(args, 'contextType', 'find');
     const scopes = await readScopes(context, targetUri);

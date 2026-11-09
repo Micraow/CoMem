@@ -69,7 +69,6 @@ beforeEach(async () => {
   locks = createPathLockManager({ dataDir, logger });
   // 真实 `AclService`：`#summarize` 写索引之后要物化权限，桩会让这条链路在测试里断掉。
   acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions: new PermissionRepository({ db, logger }),
@@ -358,7 +357,8 @@ describe('degraded', () => {
     await writeText(STYLE, '# 风格\n');
     await seedRow(STYLE, { abstract: '代码风格。' });
 
-    await createService({ generator: new RuleSummarizer() }).regenerate(Uri.parse(PREFERENCES));
+    const service = createService({ generator: new RuleSummarizer() });
+    await service.regenerate(Uri.parse(PREFERENCES));
 
     // degraded 由 `MetadataFileStore.writeSummary` 写进 frontmatter，控制台的
     // 「监控」页与 `health` 工具读它（§9.2）。
@@ -368,6 +368,9 @@ describe('degraded', () => {
     );
     expect(raw).toContain('degraded: true');
     expect((await summaryFiles(PREFERENCES)).abstract).toContain('code-style.md');
+    // 落盘不算数，`read` 要把它回填上来：调用方（`GET /content/abstract`）读的是
+    // `read` 的返回值，恒为 false 就等于静默降级（§17.9）。
+    expect((await service.read(Uri.parse(PREFERENCES)))?.degraded).toBe(true);
   });
 });
 

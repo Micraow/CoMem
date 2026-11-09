@@ -196,7 +196,6 @@ beforeEach(async () => {
 
   // 真实 `AclService`：归档步骤写摘要后要物化权限，桩会让这条链路在测试里断掉。
   const acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions: new PermissionRepository({ db, logger }),
@@ -592,8 +591,8 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     const secondTask = taskStore.get(second.taskId);
     expect(secondTask).toMatchObject({ status: 'done', error: null });
     expect(secondTask?.stepsDone).toEqual([...ALL_STEPS]);
-    // `attempts` 只在失败重排队时递增：0 表示第一次执行就跑完了，没有白重试。
-    expect(secondTask?.attempts).toBe(0);
+    // `attempts` 认领即递增：1 表示只开始了一次执行，第一次就跑完了，没有白重试。
+    expect(secondTask?.attempts).toBe(1);
 
     // `memory_diff.json` 是「这条为什么没生效」的唯一入口。
     const diff = JSON.parse(
@@ -671,7 +670,10 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
 
   /**
    * 回归：四个后台步骤以前没有任何 `phase()` 调用点，`comem_hook_async_seconds`
-   * 恒为 0。这里跑一次真实提交，再走公开上报 + 指标渲染，断言它非 0。
+   * 恒为 0。这里跑一次真实提交，再渲染指标，断言它非 0。
+   *
+   * 指标不再依赖一次 hook 上报把它「快照」出来，也不带 `event` 标签：后台阶段是
+   * 进程级的，不属于任何一次上报。
    */
   it('后台阶段耗时进 comem_hook_async_seconds（非 0）', async () => {
     const observability = createObservability();
@@ -684,18 +686,14 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     await session.commitPhase1(sessionUri);
     await runner.tick();
 
-    // 指标值来自 `recordHookOverhead` 对进程级后台阶段的一次快照。
-    await observability.recordHookOverhead({
-      event: 'stop',
-      sessionId: 'sess_1',
-      phases: { processStartMs: 0, recallMs: 0, serializeMs: 0, captureMs: 0 },
-    });
-    const line = observability
+    const asyncLines = observability
       .renderMetrics()
       .split('\n')
-      .find((entry) => entry.startsWith('comem_hook_async_seconds{event="stop"}'));
-    expect(line).toBeDefined();
-    const asyncSeconds = Number(line?.split(' ').at(-1));
+      .filter((entry) => entry.startsWith('comem_hook_async_seconds{'));
+    expect(asyncLines.length).toBeGreaterThan(0);
+    // 只有 `phase` 一个维度：有的阶段真的更快，而事件之间的复制是假的。
+    expect(asyncLines.every((entry) => entry.includes('{phase="'))).toBe(true);
+    const asyncSeconds = asyncLines.reduce((sum, entry) => sum + Number(entry.split(' ').at(-1)), 0);
     expect(asyncSeconds).toBeGreaterThan(0);
 
     await runner.stop();

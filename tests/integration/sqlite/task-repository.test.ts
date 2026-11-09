@@ -104,7 +104,7 @@ describe('insert / get', () => {
 });
 
 describe('tryClaim', () => {
-  it('pending 可以认领，lease_until = now + leaseSeconds', () => {
+  it('pending 可以认领：lease_until = now + leaseSeconds，attempts += 1', () => {
     repository.insert(row());
 
     expect(repository.tryClaim('task-1', NOW, LEASE_SECONDS)).toBe(true);
@@ -113,34 +113,47 @@ describe('tryClaim', () => {
     expect(claimed?.status).toBe('running');
     expect(claimed?.leaseUntil).toBe(at(LEASE_SECONDS).toISOString());
     expect(claimed?.updatedAt).toBe(NOW.toISOString());
+    // attempts 记「已开始的执行次数」：认领成功就是一次开始。
+    expect(claimed?.attempts).toBe(1);
   });
 
-  it('running 且租约未过期时不能认领', () => {
-    repository.insert(row({ status: 'running', leaseUntil: at(30).toISOString() }));
+  it('running 且租约未过期时不能认领，计数不动', () => {
+    repository.insert(
+      row({ status: 'running', attempts: 1, leaseUntil: at(30).toISOString() }),
+    );
 
     expect(repository.tryClaim('task-1', NOW, LEASE_SECONDS)).toBe(false);
-    expect(repository.get('task-1')?.leaseUntil).toBe(at(30).toISOString());
+    expect(repository.get('task-1')).toMatchObject({
+      leaseUntil: at(30).toISOString(),
+      attempts: 1,
+    });
   });
 
-  it('running 且租约过期时可以认领', () => {
-    repository.insert(row({ status: 'running', leaseUntil: at(-1).toISOString() }));
+  it('running 且租约过期时可以认领（第二条回收路径同样计数一次）', () => {
+    repository.insert(row({ status: 'running', attempts: 1, leaseUntil: at(-1).toISOString() }));
 
     expect(repository.tryClaim('task-1', NOW, LEASE_SECONDS)).toBe(true);
-    expect(repository.get('task-1')?.leaseUntil).toBe(at(LEASE_SECONDS).toISOString());
+    expect(repository.get('task-1')).toMatchObject({
+      leaseUntil: at(LEASE_SECONDS).toISOString(),
+      attempts: 2,
+    });
   });
 
   it('running 但没有租约按已过期处理（与领域层 isLeaseExpired 一致）', () => {
     repository.insert(row({ status: 'running', leaseUntil: null }));
 
     expect(repository.tryClaim('task-1', NOW, LEASE_SECONDS)).toBe(true);
+    expect(repository.get('task-1')?.attempts).toBe(1);
   });
 
-  it('done / failed 不能认领', () => {
+  it('done / failed 不能认领，计数不动', () => {
     repository.insert(row({ id: 'done', status: 'done' }));
     repository.insert(row({ id: 'failed', status: 'failed' }));
 
     expect(repository.tryClaim('done', NOW, LEASE_SECONDS)).toBe(false);
     expect(repository.tryClaim('failed', NOW, LEASE_SECONDS)).toBe(false);
+    expect(repository.get('done')?.attempts).toBe(0);
+    expect(repository.get('failed')?.attempts).toBe(0);
   });
 });
 
@@ -173,8 +186,10 @@ describe('updateStepsDone', () => {
 });
 
 describe('requeue / finish', () => {
-  it('requeue 回到 pending 并递增 attempts，保留 error', () => {
-    repository.insert(row({ status: 'running', leaseUntil: at(60).toISOString(), error: '上次失败' }));
+  it('requeue 回到 pending，不动 attempts（认领时已经记过这次开始）', () => {
+    repository.insert(
+      row({ status: 'running', attempts: 1, leaseUntil: at(60).toISOString(), error: '上次失败' }),
+    );
 
     repository.requeue('task-1', at(5));
 
@@ -186,20 +201,20 @@ describe('requeue / finish', () => {
     expect(task?.updatedAt).toBe(at(5).toISOString());
   });
 
-  it('finish(done) 清空租约但不递增 attempts', () => {
-    repository.insert(row({ status: 'running', leaseUntil: at(60).toISOString() }));
+  it('finish(done) 清空租约，不动 attempts', () => {
+    repository.insert(row({ status: 'running', attempts: 1, leaseUntil: at(60).toISOString() }));
 
     repository.finish('task-1', 'done', null, at(5));
 
     const task = repository.get('task-1');
     expect(task?.status).toBe('done');
     expect(task?.leaseUntil).toBeNull();
-    expect(task?.attempts).toBe(0);
+    expect(task?.attempts).toBe(1);
     expect(task?.error).toBeNull();
   });
 
-  it('finish(failed) 写 error 并递增 attempts', () => {
-    repository.insert(row({ status: 'running', leaseUntil: at(60).toISOString() }));
+  it('finish(failed) 写 error，不动 attempts', () => {
+    repository.insert(row({ status: 'running', attempts: 1, leaseUntil: at(60).toISOString() }));
 
     repository.finish('task-1', 'failed', '抽取失败', at(5));
 
@@ -212,8 +227,10 @@ describe('requeue / finish', () => {
 });
 
 describe('recoverExpired', () => {
-  it('只回收租约过期的 running 行，并 attempts += 1', () => {
-    repository.insert(row({ id: 'zombie', status: 'running', leaseUntil: at(-10).toISOString() }));
+  it('只回收租约过期的 running 行，不动 attempts（那次认领已经算过）', () => {
+    repository.insert(
+      row({ id: 'zombie', status: 'running', attempts: 1, leaseUntil: at(-10).toISOString() }),
+    );
     repository.insert(row({ id: 'alive', status: 'running', leaseUntil: at(30).toISOString() }));
     repository.insert(row({ id: 'queued', status: 'pending' }));
 
@@ -223,6 +240,7 @@ describe('recoverExpired', () => {
     expect(repository.get('zombie')).toMatchObject({
       status: 'pending',
       leaseUntil: null,
+      // 回收不是一次新的执行：计数保持认领时的 1。
       attempts: 1,
     });
     expect(repository.get('alive')).toMatchObject({ status: 'running', attempts: 0 });

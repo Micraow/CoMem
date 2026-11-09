@@ -63,6 +63,9 @@ beforeEach(async () => {
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: UNREACHABLE_LLM_BASE_URL,
+      // 管理面与任务队列的跨主体端点只认显式名单。这组用例测的是路由契约，
+      // 不是「谁能管理」，所以绑定主体显式声明为系统管理员。
+      COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
     },
   });
   await container.services.acl.ensureRootPreset(Uri.parse(ROOT));
@@ -441,6 +444,43 @@ describe('文件系统与内容', () => {
       url: `/api/v1/fs?uri=${encode(directory)}`,
     });
     expect(resultOf(removed)['removedFiles']).toBeGreaterThan(0);
+  });
+
+  it('content/read 的 truncated 按实际是否截断计算', async () => {
+    const file = `${ROOT}/truncation.md`;
+    await inject({
+      method: 'POST',
+      url: '/api/v1/content/write',
+      payload: { uri: file, content: '中文内容😀' },
+    });
+
+    // 默认 `limit = -1`：全文返回，没有截断。
+    const full = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/read?uri=${encode(file)}` }),
+    );
+    expect(full['text']).toBe('中文内容😀');
+    expect(full['truncated']).toBe(false);
+
+    // 按 Unicode 码点切：3 个码点就是「中文内」，后面还有内容。
+    const head = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/read?uri=${encode(file)}&limit=3` }),
+    );
+    expect(head['text']).toBe('中文内');
+    expect(head['truncated']).toBe(true);
+
+    // 恰好切到末尾不算截断。
+    const exact = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/read?uri=${encode(file)}&limit=5` }),
+    );
+    expect(exact['text']).toBe('中文内容😀');
+    expect(exact['truncated']).toBe(false);
+
+    // 只给 offset 是「从这读到底」，同样不截断。
+    const offsetOnly = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/content/read?uri=${encode(file)}&offset=2` }),
+    );
+    expect(offsetOnly['text']).toBe('内容😀');
+    expect(offsetOnly['truncated']).toBe(false);
   });
 
   it('content/write 的 create 模式在目标存在时 409', async () => {
@@ -907,6 +947,8 @@ describe('ACL 与记忆复核', () => {
       await inject({ method: 'GET', url: `/api/v1/memories/pending?scopeUri=${encode(ROOT)}` }),
     );
     expect((pending['memories'] as unknown[]).length).toBe(1);
+    // 没有溯源信息的记忆是空数组，不是缺字段：复核页按数组渲染。
+    expect((pending['memories'] as Record<string, unknown>[])[0]?.['sources']).toEqual([]);
 
     const approved = await inject({
       method: 'POST',
@@ -915,6 +957,27 @@ describe('ACL 与记忆复核', () => {
     });
     expect(approved.statusCode).toBe(200);
     expect((await container.services.memory.read(record.uri))?.status).toBe('active');
+  });
+
+  it('pending 列表带上 sources（W97：复核页能回答「这条从哪来」）', async () => {
+    const archiveUri = `${ROOT}/sessions/s1/history/archive_001`;
+    const record = await container.services.memory.upsertMemory(
+      Uri.parse(ROOT),
+      (await import('../../../src/domain/memory-types/experiences.js')).experiencesMemoryType,
+      {
+        uri: Uri.parse(`${ROOT}/memories/experiences/from-archive.md`),
+        update: () => ({ topic: 'from-archive', content: '这条经验来自一次归档。' }),
+        provenance: { sources: [Uri.parse(archiveUri)] },
+      },
+    );
+
+    const pending = resultOf(
+      await inject({ method: 'GET', url: `/api/v1/memories/pending?scopeUri=${encode(ROOT)}` }),
+    );
+    const listed = (pending['memories'] as Record<string, unknown>[]).find(
+      (entry) => entry['uri'] === record.uri.toString(),
+    );
+    expect(listed?.['sources']).toEqual([archiveUri]);
   });
 });
 
@@ -990,6 +1053,39 @@ describe('资源与技能', () => {
     // 会把它整个过滤掉。
     const directories = await container.services.filesystem.list(Uri.parse(parentUri), AUTH_PRINCIPALS);
     expect(directories.map((entry) => entry.uri.name)).toEqual(['code-review']);
+  });
+
+  it('skills 的 files[].executable 已不是参数（不做类型校验、不参与透传）', async () => {
+    // 该字段曾从 HTTP 透传到 `SkillFileInput`，最后被静默丢弃。它已从两个类型里
+    // 删除；这里故意传一个非法类型：旧实现会因“executable 必须是布尔值”返回
+    // 400，删掉后它只是未知键。若有人把字段或校验加回来，这条会失败。
+    const parentUri = `${ROOT}/skills-no-exec`;
+    const skill = [
+      '---',
+      'name: no-exec',
+      'description: 没有执行位字段',
+      '---',
+      '',
+      '# no-exec',
+    ].join('\n');
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/skills',
+      payload: {
+        parentUri,
+        name: 'no-exec',
+        files: [
+          {
+            path: 'SKILL.md',
+            content: Buffer.from(skill).toString('base64'),
+            executable: 'yes',
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(resultOf(response)['fileCount']).toBe(1);
   });
 });
 

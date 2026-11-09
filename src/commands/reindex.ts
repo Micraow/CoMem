@@ -73,6 +73,14 @@ export interface ReindexResult {
   readonly scanned: number;
   /** 实际写入的检索索引 / 向量条数 */
   readonly rewritten: number;
+  /**
+   * 本次写入 `node_embedding` 的行数（一个文件一条）。
+   *
+   * 与 `rewritten` 分开：`rewritten` 是「有东西被写回的节点数」，一次写入既可能
+   * 只重写检索索引，也可能顺带补齐向量。切换 `retrieval.engine` 之后要回答的是
+   * 「补齐了多少条向量」，只有这个字段能回答。
+   */
+  readonly vectors: number;
   /** 嵌入没变而跳过的文件数 */
   readonly skipped: number;
   /** 解析失败或嵌入降级的节点数 */
@@ -360,6 +368,34 @@ function restoreEmbeddings(db: DatabaseSync, backup: EmbeddingBackup, logger: Lo
 }
 
 /**
+ * 「库里有记忆但没有向量」的存在性判断（`LIMIT 1`）。
+ *
+ * 启动提醒（`bootstrap/main.ts` 的 `warnIfVectorsMissing`）用它，**判定条件必须与
+ * `runReindex` 的跳过规则同源**：只嵌 `kind = 'document'` 且正文非空的文件，向量
+ * 行的 `model` 或 `content_digest` 对不上就重算。分两处写，迟早分叉成「启动说没缺、
+ * reindex 还在干活」或者「启动永远在报、reindex 却无事可做」。
+ *
+ * 只回答有没有，不回答多少条：条数是 `runReindex` 输出里的「补齐向量 N 条」。
+ * 有缺失时第一条就返回；没有缺失时最坏扫一遍 `node`（1 万条实测约 90 毫秒）。
+ */
+export function hasDocumentsMissingVectors(db: DatabaseSync, model: string): boolean {
+  const missing = db
+    .prepare(
+      `SELECT 1 AS missing
+         FROM node n
+        WHERE n.kind = 'document'
+          AND n.body_digest <> ?
+          AND NOT EXISTS (
+            SELECT 1 FROM node_embedding e
+             WHERE e.uri = n.uri AND e.model = ? AND e.content_digest = n.body_digest
+          )
+        LIMIT 1`,
+    )
+    .get(stableDigest(''), model);
+  return missing !== undefined;
+}
+
+/**
  * 重建索引。
  *
  * `dryRun` 不打开数据库：`openDatabase` 会创建文件、`runMigrations` 会写
@@ -390,7 +426,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
   const nodes = await walkDataDir(config.dataDir, logger);
   if (dryRun) {
     progress(0, nodes.length, 0, 0, 0);
-    return { scanned: nodes.length, rewritten: 0, skipped: 0, failed: 0 };
+    return { scanned: nodes.length, rewritten: 0, vectors: 0, skipped: 0, failed: 0 };
   }
 
   const embeddingConfig = config.providers.embedding;
@@ -452,6 +488,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
 
     const model = embedding.model;
     let rewritten = 0;
+    let vectors = 0;
     let skipped = 0;
     let failed = 0;
 
@@ -511,6 +548,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
                 });
               } else {
                 embeddings.upsert([{ uri, model, contentDigest: digest, vector }]);
+                vectors += 1;
                 wrote = true;
               }
             }
@@ -536,7 +574,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     if (backup !== null) {
       db.exec(`DROP TABLE IF EXISTS ${EMBEDDING_BACKUP_TABLE}`);
     }
-    return { scanned: nodes.length, rewritten, skipped, failed };
+    return { scanned: nodes.length, rewritten, vectors, skipped, failed };
   } catch (error) {
     // 单个节点的失败在循环里已经计入 `failed`，走到这里的只有全局故障（磁盘满、
     // 表结构被外部改坏）。旧表还在备份表里，先还原再往上抛。
@@ -599,7 +637,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   runReindex({ ...parseArgs(argv), argv }).then(
     (result) => {
       process.stdout.write(
-        `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，跳过 ${result.skipped}，失败 ${result.failed}。\n`,
+        `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，补齐向量 ${result.vectors} 条，跳过 ${result.skipped}，失败 ${result.failed}。\n`,
       );
     },
     (error: unknown) => {

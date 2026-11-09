@@ -45,6 +45,7 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
+import { recordIndexFailures, recordReconcileFailure } from './reconcile-record.js';
 import type { SummaryService } from './summary.js';
 import { invalidateParentSummaries, materializeAncestorPermissions } from './write-through.js';
 
@@ -205,7 +206,15 @@ function decodeText(bytes: Uint8Array): string {
   }
 }
 
-function utf8ByteLength(text: string): number {
+/**
+ * 正文的 UTF-8 字节数，用于「实际写入磁盘多少字节」的上限判定。
+ *
+ * 与 `domain/node.ts` 的手写实现重复：domain 层被 lint 禁止 import `node:*`，不能
+ * 直接用 `Buffer`，所以那边另写了一份按编码区间计数的版本。两份结果必须相同，由
+ * `tests/unit/utf8-byte-length.test.ts` 对同一组语料断言——那是唯一的对齐保证。
+ * 导出只为这个测试能直接比对。
+ */
+export function utf8ByteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 
@@ -424,9 +433,15 @@ export class ResourceService {
             count: records.length,
             error: reason,
           });
-          for (const record of records) {
-            await this.#recordReconcile('index', record.uri, reason);
-          }
+          // 与 `SkillService` / `IndexObserver` 共用同一份记录实现（§10.6）：
+          // 一行一个 URI，写日志失败只记 error，不改写操作的结果。
+          await recordIndexFailures(
+            { append: (entry) => this.#storage.appendReconcile(entry) },
+            this.#logger,
+            records.map((record) => record.uri),
+            reason,
+            new Date().toISOString(),
+          );
         }
       }
 
@@ -607,17 +622,21 @@ export class ResourceService {
     }
   }
 
-  /** 对账日志写失败不能让导入失败：它只是补偿线索，不是真相。 */
+  /**
+   * 对账日志写失败不能让导入失败：它只是补偿线索，不是真相。
+   *
+   * 记录形状与失败处理只有一份实现（`record-reconcile`），`ResourceStorage` 的方法名
+   * 是 `appendReconcile`，这里适配成 `append`。
+   */
   async #recordReconcile(op: string, uri: string, error: string): Promise<void> {
-    try {
-      await this.#storage.appendReconcile({ op, uri, error, at: new Date().toISOString() });
-    } catch (appendError) {
-      this.#logger.error('对账日志写入失败，已忽略。', {
-        op,
-        uri,
-        error: errorMessage(appendError),
-      });
-    }
+    await recordReconcileFailure(
+      { append: (entry) => this.#storage.appendReconcile(entry) },
+      this.#logger,
+      op,
+      uri,
+      error,
+      new Date().toISOString(),
+    );
   }
 }
 

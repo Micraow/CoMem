@@ -90,7 +90,6 @@ function createService(
   const subject = options.subject ?? 'user:alice';
   const groups = options.groups ?? [];
   const acl = new AclService({
-    dataDir,
     db,
     aclFile,
     permissions,

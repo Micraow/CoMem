@@ -17,6 +17,7 @@
  * | `PostToolUse` | 同上 + `tool_response` |
  * | `Stop` | `stop_hook_active` |
  * | `PreCompact` | `trigger`、`custom_instructions` |
+ * | `SessionEnd` | `reason`（`clear` / `logout` / `prompt_input_exit` / `other`） |
  *
  * ## 事件 ID
  *
@@ -25,6 +26,7 @@
  * `tool_use_id` 合成 ID，其余一律 `null`（不去重，靠游标兜底，§15.4）。
  */
 
+import { EVENT_NAMES, internalEventNameOf } from '../lib/events.mjs';
 import { ComemHookError } from '../lib/http.mjs';
 import {
   STDIN_READ_CAP_MS,
@@ -51,15 +53,13 @@ export const SESSION_ID_PREFIX = 'cc-';
  */
 export const MAX_CONTEXT_BYTES = 9500;
 
-/** 内部事件名 ↔ 宿主事件名。 */
-export const EVENT_NAMES = Object.freeze({
-  SessionStart: 'SessionStart',
-  UserPromptSubmit: 'UserPromptSubmit',
-  PreToolUse: 'PreToolUse',
-  PostToolUse: 'PostToolUse',
-  Stop: 'Stop',
-  PreCompact: 'PreCompact',
-});
+/**
+ * 内部事件名 ↔ 宿主事件名。
+ *
+ * 表在 `lib/events.mjs`（全仓库唯一一份，三个宿主共用）。这里只转出去，方便
+ * 调用方按宿主取名字；名字本身不在这里定义。
+ */
+export { EVENT_NAMES };
 
 /** 需要拦截 `comem://` 路径的文件工具（任务书：只有这三个）。 */
 const FILE_TOOLS = new Set(['Read', 'Write', 'Edit']);
@@ -109,10 +109,11 @@ export function normalizeEvent(raw) {
       code: 'HOOK_INVALID_ARGUMENT',
     });
   }
-  // `SessionEnd` 与 `PreCompact` 都是「把待处理消息提交完」的时机（§15.2 的表格
-  // 把它们并成一行），内部归一成 `PreCompact`。
-  const event = rawEventName === 'SessionEnd' ? 'PreCompact' : rawEventName;
-  if (!(event in EVENT_NAMES)) {
+  // 宿主事件名 → 内部事件名。`SessionEnd` 也是一等事件（它有自己的预算与
+  // 上报标签），不再改写成 `PreCompact`：报文里的 `event` 必须能回答「用户是在
+  // 哪个生命周期点上等的」，改写掉就永远看不到会话结束那一段。
+  const event = internalEventNameOf(rawEventName);
+  if (event === null) {
     throw new ComemHookError(`未支持的 Claude Code hook 事件：${rawEventName}`, {
       code: 'HOOK_INVALID_ARGUMENT',
     });
@@ -132,7 +133,6 @@ export function normalizeEvent(raw) {
   return {
     host: 'claude-code',
     event,
-    rawEventName,
     hostEventName: EVENT_NAMES[event],
     sessionId: `${SESSION_ID_PREFIX}${sessionId}`,
     eventId: toolUseId === null ? null : `${event}:${toolUseId}`,

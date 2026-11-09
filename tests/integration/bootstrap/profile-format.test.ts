@@ -6,7 +6,7 @@
  * 1. 不合规画像**写入成功**（不拒绝、不丢弃）；
  * 2. 磁盘上的正文与传入内容一致；
  * 3. 写入成功后有一条 `warn` 日志，带 scope / URI / 违规类型与条数，且不含正文；
- * 4. `ObservabilityService.health()`（以及 `GET /stats/memories`）能看到计数。
+ * 4. `ObservabilityService.health()` 与 `GET /health` 能看到计数。
  *
  * 从 `createContainer` 起跑：`profileBodies` 由 bootstrap 注入，只有真实装配能
  * 证明「服务端校验真的接在写入路径上」，单元测试证明不了接线。
@@ -135,21 +135,7 @@ describe('画像格式契约的写入链路', () => {
         truncated: false,
       });
 
-      // 4b. `GET /stats/memories` 的响应里能看到同一个数。
-      const response = await app.inject({ method: 'GET', url: '/api/v1/stats/memories' });
-      const envelope = JSON.parse(response.body) as {
-        status: string;
-        result: Record<string, unknown>;
-      };
-      expect(envelope.status).toBe('ok');
-      expect(envelope.result['profileFormat']).toEqual({
-        checked: 1,
-        invalid: 1,
-        violations: 6,
-        truncated: false,
-      });
-
-      // 4c. `GET /health` 的 memory 块也带同一个数（§17.9）。
+      // 4b. `GET /health` 的 memory 块也带同一个数（§17.9）。
       const healthResponse = await app.inject({ method: 'GET', url: '/health' });
       const healthEnvelope = JSON.parse(healthResponse.body) as {
         result: { memory?: { profileFormat?: unknown } };

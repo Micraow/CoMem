@@ -15,7 +15,11 @@ import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { MemoryService, type MemoryServicePorts } from '../../../src/services/memory.js';
+import {
+  MemoryService,
+  type MemoryServicePorts,
+  type MemoryWriteResult,
+} from '../../../src/services/memory.js';
 
 const SCOPE = 'comem://user/alice';
 const PROFILE = `${SCOPE}/memories/profile.md`;
@@ -410,5 +414,148 @@ describe('YAML 转义（formatScalar）', () => {
         content: 'x',
       }),
     ).rejects.toBeInstanceOf(ComemError);
+  });
+});
+
+describe('sources 溯源（W97）', () => {
+  /** 一次归档的 URI；与真实归档目录同形（`archive_NNN`）。 */
+  function archive(index: number): string {
+    return `${SCOPE}/sessions/s1/archive_${String(index).padStart(3, '0')}`;
+  }
+
+  function archives(...indexes: readonly number[]): Uri[] {
+    return indexes.map((index) => Uri.parse(archive(index)));
+  }
+
+  /**
+   * 以 `{ uri, update, provenance }` 形态写一条记忆。
+   *
+   * 这就是 `memory_merge` 的写法：归档 URI 由写入点给出，不是记忆字段。
+   */
+  async function writeWithSources(
+    topic: string,
+    content: string,
+    indexes: readonly number[],
+  ): Promise<MemoryWriteResult> {
+    return memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      uri: Uri.parse(`${SCOPE}/memories/preferences/${topic}.md`),
+      update: (current) => ({ ...current, topic, content }),
+      provenance: { sources: archives(...indexes) },
+    });
+  }
+
+  it('写入时把归档 URI 追加进 frontmatter 的 sources，且不进 fields', async () => {
+    await writeWithSources('code-style', '用户偏好 TypeScript 严格模式。', [1]);
+
+    const raw = await readFile(toDiskPath(dataDir, Uri.parse(CODE_STYLE)), 'utf8');
+    // 块序列，与 string[] 字段同一写法。
+    expect(raw).toContain(`sources:\n  - ${archive(1)}\n`);
+
+    const record = await memory.read(Uri.parse(CODE_STYLE));
+    expect(record?.sources).toEqual([archive(1)]);
+    // 保留键：它不是记忆字段，`read` 出来的 `fields` 里不该多一列。
+    expect(Object.keys(record?.fields ?? {})).not.toContain('sources');
+  });
+
+  it('两次归档更新同一条记忆：追加而不是覆盖，重复的归档不重复记', async () => {
+    const uri = Uri.parse(CODE_STYLE);
+    for (const index of [1, 2, 1]) {
+      await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+        uri,
+        update: (current) => ({
+          ...current,
+          topic: 'code-style',
+          content: `第 ${index} 次归档的结论。`,
+        }),
+        provenance: { sources: archives(index) },
+      });
+    }
+
+    // 顺序 = 最旧在前；第三次是重放（同一个归档）→ 去重后不动位置。
+    expect((await memory.read(uri))?.sources).toEqual([archive(1), archive(2)]);
+  });
+
+  it('重写正文不丢 sources（完整重写会丢掉不在保留键里的键）', async () => {
+    const uri = Uri.parse(CODE_STYLE);
+    await writeWithSources('code-style', '旧正文', [1, 2]);
+
+    // 再走一次补丁写：`upsertMemory` 整份重写文件，`sources` 只能靠保留键活下来。
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      uri,
+      update: (current) => ({ ...current, content: '新正文' }),
+    });
+
+    const record = await memory.read(uri);
+    expect(record?.fields['content']).toBe('新正文');
+    expect(record?.sources).toEqual([archive(1), archive(2)]);
+
+    const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(raw).toContain(`  - ${archive(1)}`);
+    expect(raw).toContain(`  - ${archive(2)}`);
+  });
+
+  it('复核通过（approve 整份重写）不丢 sources', async () => {
+    const result = await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      uri: Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`),
+      update: () => ({ topic: 'monorepo-migration', content: '从 monorepo 迁到单包。' }),
+      provenance: { sources: archives(7) },
+    });
+    expect((await memory.read(result.uri))?.status).toBe('pending');
+
+    await memory.approve(result.uri);
+
+    const approved = await memory.read(result.uri);
+    expect(approved?.status).toBe('active');
+    expect(approved?.sources).toEqual([archive(7)]);
+  });
+
+  it('没有归档信息的写入不产生 sources 键（旧数据与旧输出都不变）', async () => {
+    const result = await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '没有溯源的记忆。',
+    });
+
+    const raw = await readFile(toDiskPath(dataDir, result.uri), 'utf8');
+    expect(raw).not.toContain('sources');
+    expect((await memory.read(result.uri))?.sources).toEqual([]);
+  });
+
+  it('合并两条各有 sources 的记忆：并集去重', async () => {
+    const kept = await writeWithSources('code-style', '主记忆。', [1]);
+    const merged = await writeWithSources('other', '被合并掉的记忆。', [2, 1]);
+
+    // `ConsolidationService` 的写回是同一形态：把被合并记录的 sources 并进保留者。
+    const mergedSources = (await memory.read(merged.uri))?.sources ?? [];
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      uri: kept.uri,
+      update: (current) => ({ ...current, content: '主记忆 + 被合并的一条。' }),
+      provenance: { sources: mergedSources.map((source) => Uri.parse(source)) },
+    });
+
+    expect((await memory.read(kept.uri))?.sources).toEqual([archive(1), archive(2)]);
+  });
+
+  it('超过 20 条只保留最近 20 条（最早的先丢）', async () => {
+    const uri = Uri.parse(CODE_STYLE);
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '基线。',
+    });
+
+    for (let index = 1; index <= 21; index += 1) {
+      await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+        uri,
+        update: (current) => ({ ...current }),
+        provenance: { sources: archives(index) },
+      });
+    }
+
+    const sources = (await memory.read(uri))?.sources ?? [];
+    expect(sources).toHaveLength(20);
+    expect(sources[0]).toBe(archive(2));
+    expect(sources.at(-1)).toBe(archive(21));
+
+    const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(raw.match(/^ {2}- comem:\/\//gm)).toHaveLength(20);
   });
 });

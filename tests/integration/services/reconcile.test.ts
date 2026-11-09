@@ -115,7 +115,6 @@ beforeEach(async () => {
   nodes = new NodeRepository({ db, logger });
   const permissions = new PermissionRepository({ db, logger });
   acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions,
@@ -153,7 +152,6 @@ beforeEach(async () => {
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   search = new SearchService({
     index,

@@ -14,7 +14,13 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import {
+  RequestLogRepository,
+  type RequestLogRow,
+} from '../../../src/adapters/sqlite/request-log-repository.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import type { Logger } from '../../../src/domain/log.js';
 import type { SessionMessage } from '../../../src/domain/session.js';
 import { estimateTokens, renderMessageText } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
@@ -494,23 +500,61 @@ describe('记忆 TTL（container → 清扫）', () => {
 });
 
 describe('配置全关', () => {
+  const ALL_OFF_YAML = [
+    'session:',
+    '  autoCommit:',
+    '    enabled: false',
+    '  expiry:',
+    '    idleTimeoutSeconds: 0',
+    'memory:',
+    '  ttl:',
+    '    defaultDays: 0',
+  ].join('\n');
+
   it('自动提交、会话过期、记忆 TTL 全关时不起定时器', async () => {
-    const started = await startContainer(
-      [
-        'session:',
-        '  autoCommit:',
-        '    enabled: false',
-        '  expiry:',
-        '    idleTimeoutSeconds: 0',
-        'memory:',
-        '  ttl:',
-        '    defaultDays: 0',
-      ].join('\n'),
-    );
+    const started = await startContainer(ALL_OFF_YAML);
     container = started;
 
     expect(started.scheduler.started).toBe(false);
     // 关掉定时器不等于「调度器没了」：手动 tick 仍然可用（测试与脚本要确定点）。
     await expect(started.scheduler.tick()).resolves.toMatchObject({ skipped: false, scanned: 0 });
+  });
+
+  it('调度器不启动时，启动清理仍是 request_log 的唯一保证', async () => {
+    // 启动清理在 `createContainer` 内部执行，超期行只能在它之前写进同一个库。
+    await mkdir(join(dataDir, '_meta'), { recursive: true });
+    const db = openDatabase(join(dataDir, '_meta', 'comem.sqlite'));
+    runMigrations(db);
+    const noop = (): void => undefined;
+    const silentLogger: Logger = { debug: noop, info: noop, warn: noop, error: noop };
+    const requestLog = new RequestLogRepository({ db, logger: silentLogger });
+    const now = Date.now();
+    const row = (id: string, ageDays: number): RequestLogRow => ({
+      id,
+      requestId: `req_${id}`,
+      method: 'GET',
+      path: '/api/v1/health',
+      statusCode: 200,
+      durationMs: 1,
+      phases: null,
+      errorCode: null,
+      subject: 'user:local',
+      createdAt: new Date(now - ageDays * MILLISECONDS_PER_DAY).toISOString(),
+    });
+    requestLog.insert(row('stale', 8));
+    requestLog.insert(row('fresh', 1));
+    db.close();
+
+    const started = await startContainer(ALL_OFF_YAML);
+    container = started;
+    expect(started.scheduler.started).toBe(false);
+
+    // 只按天裁：默认 `retainRows` 是 10 万，两条规则都不会误删窗口内的行。
+    expect(
+      started.db
+        .prepare('SELECT id FROM request_log ORDER BY id')
+        .all()
+        .map((item) => item['id']),
+    ).toEqual(['fresh']);
   });
 });

@@ -2,9 +2,12 @@
 /**
  * 概览（架构文档 §16 的第一页）。
  *
- * 四个指标 + 最近任务。指标全部来自 `GET /health` 与 `GET /memories/pending`：
+ * 四个指标 + 待处理任务。指标全部来自 `GET /health`，任务卡来自 `GET /tasks`。
  * `/metrics` 是 Prometheus 文本，不套信封，且它的计数与 `/health` 重叠，
  * 在浏览器里再解析一份只会得到两套口径。
+ *
+ * 待复核数直接读 `health.memory.pendingReview`：`GET /memories/pending` 不排序、
+ * 先截断 100 条，拿它的返回条数当总数只会得到一个偏小的值。
  *
  * 「最近请求」没有对应端点：`request_log` 只落 SQLite，没有 HTTP 读出口。
  * 这里退一步展示任务队列——它是同一批后台工作里唯一可读的部分。
@@ -15,23 +18,17 @@ import {
   errorMessageOf,
   useApi,
   type HealthPayload,
-  type PendingMemoriesPayload,
   type TaskPayload,
 } from '~/composables/useApi'
 
 useHead({ title: '概览 · CoMem 控制台' })
 
-/** 复核列表只取前 100 条做计数预览；超过时显示「100+」。 */
-const PENDING_PREVIEW_LIMIT = 100
-
-/** 任务表只陈列最近的一屏。 */
+/** 任务表只陈列最前面的一屏。 */
 const TASK_PREVIEW_LIMIT = 8
 
 const api = useApi()
-const scopeRoot = useScopeRoot()
 
 const health = useState<HealthPayload | null>('comem-health', () => null)
-const pending = useState<PendingMemoriesPayload | null>('comem-pending', () => null)
 const tasks = useState<readonly TaskPayload[] | null>('comem-tasks', () => null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -44,11 +41,13 @@ const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
   index: '索引',
 }
 
+/**
+ * `/tasks` 只返回可认领的任务（`pending` 或租约过期的 `running`），
+ * `done` / `failed` 不会出现在这里，因此不声明这两个状态的文案。
+ */
 const TASK_STATUS_LABEL: Readonly<Record<string, string>> = {
   pending: '排队中',
   running: '运行中',
-  done: '已完成',
-  failed: '失败',
 }
 
 type BadgeVariant = 'blue' | 'green' | 'red' | 'orange' | 'purple' | 'teal' | 'gray' | 'outline'
@@ -56,14 +55,7 @@ type BadgeVariant = 'blue' | 'green' | 'red' | 'orange' | 'purple' | 'teal' | 'g
 const TASK_STATUS_VARIANT: Readonly<Record<string, BadgeVariant>> = {
   pending: 'gray',
   running: 'blue',
-  done: 'green',
-  failed: 'red',
 }
-
-const pendingCount = computed(() => {
-  const total = pending.value?.memories.length ?? 0
-  return total >= PENDING_PREVIEW_LIMIT ? `${total}+` : String(total)
-})
 
 const stats = computed<readonly { key: string; label: string; value: string; tone?: string }[]>(
   () => [
@@ -81,8 +73,8 @@ const stats = computed<readonly { key: string; label: string; value: string; ton
     {
       key: 'review',
       label: '待复核记忆',
-      value: pending.value === null ? '—' : pendingCount.value,
-      tone: (pending.value?.memories.length ?? 0) > 0 ? 'is-orange' : undefined,
+      value: health.value === null ? '—' : String(health.value.memory.pendingReview),
+      tone: (health.value?.memory.pendingReview ?? 0) > 0 ? 'is-orange' : undefined,
     },
     {
       key: 'degraded',
@@ -110,23 +102,17 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [healthPayload, pendingPayload, taskPayload] = await Promise.all([
+    const [healthPayload, taskPayload] = await Promise.all([
       api.get<HealthPayload>('/health'),
-      api.get<PendingMemoriesPayload>('/memories/pending', {
-        limit: PENDING_PREVIEW_LIMIT,
-        scopeUri: scopeRoot.value,
-      }),
       api.get<{ tasks: readonly TaskPayload[]; total: number }>('/tasks', {
         limit: TASK_PREVIEW_LIMIT,
       }),
     ])
     health.value = healthPayload
-    pending.value = pendingPayload
     tasks.value = taskPayload.tasks
   } catch (caught) {
     error.value = errorMessageOf(caught)
     health.value = null
-    pending.value = null
     tasks.value = null
   } finally {
     loading.value = false
@@ -134,11 +120,6 @@ async function load(): Promise<void> {
 }
 
 onMounted(load)
-
-// 待复核计数按作用域统计；索引与任务队列是全局的，但一起刷新保持同一帧。
-watch(scopeRoot, () => {
-  void load()
-})
 </script>
 
 <template>
@@ -169,9 +150,9 @@ watch(scopeRoot, () => {
         </div>
       </div>
 
-      <UiCard title="最近任务" panel>
+      <UiCard title="待处理任务" panel>
         <template #actions>
-          <span class="caption">按更新时间倒序</span>
+          <span class="caption">最早创建优先，只含可认领的任务</span>
         </template>
 
         <div v-if="loading && tasks === null" class="stack-12">
@@ -185,7 +166,7 @@ watch(scopeRoot, () => {
           <span class="empty__title">队列是空的</span>
         </div>
 
-        <UiTable v-else-if="tasks !== null" caption="最近任务">
+        <UiTable v-else-if="tasks !== null" caption="待处理任务">
           <thead>
             <tr>
               <th>任务</th>

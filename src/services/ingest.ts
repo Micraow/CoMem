@@ -50,10 +50,10 @@
  * 判据）。
  *
  * 所以消息 ID 是**确定性**的：`sha256(role + text + createdAt)`
- * （`stableMessageId`，与 `remember` 同一个公式）。追加前先收集会话已有的消息 ID
- * （live + 全部归档的 `archivedMessageIds`），命中就跳过。**源时间戳是幂等键的
- * 一部分**：源日志没有 `createdAt` 时只能填当前时刻，重跑会得到不同的 ID，这一段
- * 仍然会重复——已知窗口，写在这里而不是留给人踩。
+ * （`stableMessageId`，`remember` 与 `ingest` 同调这一个函数）。追加前先收集会话
+ * 已有的消息 ID（live + 全部归档的 `archivedMessageIds`），命中就跳过。**源时间戳
+ * 是幂等键的一部分**：源日志没有 `createdAt` 时只能填当前时刻，重跑会得到不同的
+ * ID，这一段仍然会重复——已知窗口，写在这里而不是留给人踩。
  *
  * ## `dryRun` 不写
  *

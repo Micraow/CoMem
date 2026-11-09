@@ -59,6 +59,20 @@
  * 文件已经落盘，回滚反而丢数据；派生数据靠对账修复（§7）。`FileSystemService` 已经
  * 捕获了异常，这里**再自己 try/catch** 的目的不是兜底，而是让日志能定位到 URI——
  * 上层只有一个「观察者失败」的泛化消息，串不起是哪条路径。
+ *
+ * **「靠对账修复」的前提是这条路径自己写对账记录。** 三条失败路径各自留下重放器
+ * 看得懂的记录（与 `ResourceService` / `SkillService` 共用 `reconcile-record.ts`）：
+ *
+ * | 失败 | 记录 | 重放动作 |
+ * |---|---|---|
+ * | 节点索引行（`#writeIndexRecord`） | `op: 'index'` + 该文件 URI | 从磁盘重建索引行 |
+ * | 移动后目标子树批量写（`#writeMovedRecords`） | `op: 'index'` + 每个目标文件 URI | 同上 |
+ * | 权限物化（`#materializePermission`） | `op: 'permission'` + 节点 URI | `materializeNode` |
+ *
+ * 目录型节点的索引行只记日志（重放器只重建文件，目录目标会被判 `not-a-file` 后移出），
+ * 所以那条 message 也不写「已记录」。其余不记的形态与原因见架构文档 §10.6「仍然无法
+ * 重放的形态」：读盘失败（构造不出记录）、索引**删除**失败（重放器没有「删一条过期行」
+ * 这个动作，写了也只能被移出日志）。
  */
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
@@ -77,6 +91,11 @@ import { Uri } from '../domain/uri.js';
 import type { AclService } from './acl.js';
 import type { EmbeddingService } from './embedding.js';
 import type { NodeWriteObserver } from './filesystem.js';
+import {
+  recordIndexFailures,
+  recordPermissionFailure,
+  type ReconcileLogAppender,
+} from './reconcile-record.js';
 import type { SummaryService } from './summary.js';
 
 /** 文件是可检索的原文（§8.5 的 L2）；目录是它的 L0 摘要（见文件头）。 */
@@ -130,6 +149,15 @@ export interface IndexObserverDeps {
    */
   readonly permissions: Pick<PermissionRepository, 'deleteSubtree'>;
   readonly logger: Logger;
+  /**
+   * 写失败时追加对账记录（`op: 'index'` / `op: 'permission'`，§10.6）。
+   *
+   * 必填：内容写路径（`FileSystemService` 的 `write` / `mkdir`、`MemoryService`
+   * 的字节写、会话消息落盘）全部经过这里。不注入时失败就只剩一行日志，
+   * 「文件在、检索不到」永远不会自愈——那正是这个依赖要修掉的形态。生产装配注入
+   * `adapters/fs/reconcile-log.ts` 的实例，与重放器是同一个对象。
+   */
+  readonly reconcile: ReconcileLogAppender;
   /**
    * 嵌入服务（§8.1 的 `node_embedding`、§17.2 的异步阶段）。
    *
@@ -259,6 +287,7 @@ export class IndexObserver implements NodeWriteObserver {
   readonly #nodes: NodeRepository;
   readonly #permissions: Pick<PermissionRepository, 'deleteSubtree'>;
   readonly #logger: Logger;
+  readonly #reconcile: ReconcileLogAppender;
   readonly #embedding: Pick<
     EmbeddingService,
     'embed' | 'model' | 'maxBatchSize' | 'available'
@@ -281,6 +310,7 @@ export class IndexObserver implements NodeWriteObserver {
     this.#nodes = deps.nodes;
     this.#permissions = deps.permissions;
     this.#logger = deps.logger;
+    this.#reconcile = deps.reconcile;
     // 两个依赖必须成对：只给一个时嵌入阶段无法完成，整体跳过比半途抛错清楚。
     this.#embedding = deps.embedding;
     this.#embeddings = deps.embeddings;
@@ -291,9 +321,11 @@ export class IndexObserver implements NodeWriteObserver {
       await this.#indexNode(uri, kind);
       await this.#materializeAncestors(uri);
     } catch (error) {
-      // 写操作已经成功，异常不能往上传（§7：派生数据靠对账修复）。URI 进日志是
-      // 为了让「哪条路径没进索引」可查。
-      this.#logger.error('节点写入后维护索引失败，已忽略。', {
+      // 写操作已经成功，异常不能往上传（§7：文件是真相）。索引写失败与权限物化
+      // 失败分别由 `#writeIndexRecord` / `#materializePermission` 记了对账记录
+      // （重放器都能修）；走到这里的是**读盘失败**——连 `IndexRecord` 都构造不出来，
+      // 重放同样没有输入，只能留日志。
+      this.#logger.error('节点写入后维护派生数据失败，已忽略。', {
         uri: uri.toString(),
         kind,
         error: errorMessage(error),
@@ -322,10 +354,10 @@ export class IndexObserver implements NodeWriteObserver {
     if (parent === null) {
       return;
     }
-    // 父目录的物化行要重算：删掉子项之后，它自己的有效权限可能变了。
-    await this.#isolate('节点删除后重算父目录权限失败，已忽略。', details, () =>
-      this.#acl.materializeNode(parent),
-    );
+    // 父目录的物化行要重算：删掉子项之后，它自己的有效权限可能变了。失败要留
+    // `op: 'permission'` 记录——被删节点自己记了也会被重放器按「目标已不存在」
+    // 移出，能修的只有父目录。
+    await this.#materializePermission(parent);
     // 删子项同样是「父目录的 L0 变了」，摘要要重算（延后到锁释放后）。
     this.#scheduleSummaryInvalidation(parent);
   }
@@ -358,27 +390,27 @@ export class IndexObserver implements NodeWriteObserver {
       return;
     }
 
-    // 索引：删掉源前缀的整棵子树，再一次性写回目标前缀的整棵子树。
-    await this.#isolate('节点移动后重建索引失败，已忽略。', details, async () => {
-      await this.#index.deleteByUri(details.from, { recursive: true });
-      await this.#index.upsert(records);
-    });
+    // 索引：删掉源前缀的整棵子树，再一次性写回目标前缀的整棵子树。**两步分开**，
+    // 因为它们的重放语义不同：写失败可以对账（目标文件在磁盘上，重放器能重建），
+    // 删失败没有可表达的操作（重放器只会补齐存在的节点，不会删掉一条过期行）。
+    const sourceCleared = await this.#isolate(
+      '节点移动后删除源子树索引失败，已忽略。',
+      details,
+      () => this.#index.deleteByUri(details.from, { recursive: true }),
+    );
+    if (sourceCleared) {
+      await this.#writeMovedRecords(records, details);
+    }
 
     // 物化权限：源前缀的行没有外键级联，要显式删；目标前缀逐节点物化。
     await this.#isolate('节点移动后清理源路径的物化权限失败，已忽略。', details, () => {
       this.#permissions.deleteSubtree(details.from);
     });
     // `ContentStore.move` 会 `mkdir -p` 出目标路径的祖先，它们同样没有行。
-    await this.#isolate('节点移动后物化祖先目录失败，已忽略。', details, () =>
-      this.#materializeAncestors(to),
-    );
+    await this.#materializeAncestors(to);
     for (const record of records) {
       const uri = Uri.parse(record.uri);
-      await this.#isolate(
-        '节点移动后物化权限失败，已忽略。',
-        { uri: record.uri },
-        () => this.#acl.materializeNode(uri),
-      );
+      await this.#materializePermission(uri);
       // 反查表也要按新 URI 重建：`deleteSubtree(from)` 把源子树的 `acl_entry` 删了，
       // 而 `materializeNode` 只写 `node_permission`。少了这一步，删账号时
       // `purgePrincipal` 找不到那个目录，文件里的授权撤不掉，同 ID 重建就继承旧权限。
@@ -446,11 +478,13 @@ export class IndexObserver implements NodeWriteObserver {
     message: string,
     details: Readonly<Record<string, string>>,
     run: () => Promise<void> | void,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await run();
+      return true;
     } catch (error) {
       this.#logger.error(message, { ...details, error: errorMessage(error) });
+      return false;
     }
   }
 
@@ -548,8 +582,37 @@ export class IndexObserver implements NodeWriteObserver {
   async #materializeAncestors(uri: Uri): Promise<void> {
     let current = uri.parent();
     while (current !== null) {
-      await this.#acl.materializeNode(current);
+      await this.#materializePermission(current);
       current = current.parent();
+    }
+  }
+
+  /**
+   * 物化一个节点的权限；失败时留一条 `op: 'permission'` 的记录（§10.6）。
+   *
+   * 重放器能修这类失败（`AclService.materializeNode` 幂等），所以不再只是日志。
+   * `uri` 必须是磁盘上仍然存在的节点：删掉的节点重放器会按「目标已不存在」移出
+   * 日志，删除路径因此记父目录（见 `onNodeRemoved`）。
+   *
+   * 失败**不抛**：后续的权限物化与摘要失效是彼此独立的派生数据，一个节点失败
+   * 不该让整条祖先链静默丢行（与 `#writeIndexRecord` 同一个取舍）。
+   */
+  async #materializePermission(uri: Uri): Promise<void> {
+    try {
+      await this.#acl.materializeNode(uri);
+    } catch (error) {
+      const reason = errorMessage(error);
+      this.#logger.error('节点权限物化失败，已记录待重放。', {
+        uri: uri.toString(),
+        error: reason,
+      });
+      await recordPermissionFailure(
+        this.#reconcile,
+        this.#logger,
+        uri.toString(),
+        reason,
+        new Date().toISOString(),
+      );
     }
   }
 
@@ -568,9 +631,9 @@ export class IndexObserver implements NodeWriteObserver {
         ? await this.#documentRecord(uri, contextType, stat.size, stat.updatedAt)
         : this.#directoryRecord(uri, contextType, stat.size, stat.updatedAt);
 
-    await this.#index.upsert([record]);
+    await this.#writeIndexRecord(record);
     // 物化要在索引之后：`materializeNode` 从 `node` 表读 kind 决定链的起点。
-    await this.#acl.materializeNode(uri);
+    await this.#materializePermission(uri);
 
     // 嵌入是派生数据的派生（§7）：正文变了才重算，且推到锁释放之后（见文件头
     // 「为什么摘要失效要延后到锁释放之后」——嵌入要打网络，更不能在锁里做）。
@@ -583,6 +646,94 @@ export class IndexObserver implements NodeWriteObserver {
     const parent = uri.parent();
     if (parent !== null) {
       this.#scheduleSummaryInvalidation(parent);
+    }
+  }
+
+  /**
+   * 写节点自己的索引行；失败时留一条 `op: 'index'` 的对账记录，**不抛出**。
+   *
+   * **不抛出的原因**是后面还有派生数据要维护：`materializeNode` 不跟着做，节点在
+   * `node_permission` 里没有行，权限过滤是纯 SQL 查询——重放补上索引行之后 `find`
+   * 仍然搜不到（默认 deny）。`ResourceService` / `SkillService` 的批量路径是同一个
+   * 取舍（见它们「索引失败时仍然要物化」的注释）。
+   *
+   * **只有文件记录对账**：重放器按文件重建索引行（`ReconcileService.#reindex`），
+   * 目录目标会被当成 `not-a-file` 移出日志。为目录写一条重放不动的记录，等于把
+   * 「修不了」伪装成「已排队」。
+   *
+   * 精确到 URI：`#indexNode` 每次只写一行，失败的那一行就是 `record.uri`，不存在
+   * 「整批失败只知道批里有哪些 URI」的模糊地带。
+   */
+  async #writeIndexRecord(record: IndexRecord): Promise<void> {
+    try {
+      await this.#index.upsert([record]);
+    } catch (error) {
+      const reason = errorMessage(error);
+      if (record.kind !== 'document') {
+        // 目录行不进对账：重放器只按文件重建，目录目标会被判 `not-a-file` 后移出。
+        // 消息里不能说「已记录」——那会让运维在日志里看到一条并不存在的记录。
+        this.#logger.error('节点写入后目录索引行写入失败，已忽略。', {
+          uri: record.uri,
+          error: reason,
+        });
+        return;
+      }
+      this.#logger.error('节点写入后索引写入失败，已记录待重放。', {
+        uri: record.uri,
+        error: reason,
+      });
+      await recordIndexFailures(
+        this.#reconcile,
+        this.#logger,
+        [record.uri],
+        reason,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  /**
+   * 移动后目标子树的索引行。
+   *
+   * 批量 `upsert` 失败时记录的是**目标** URI：`records` 里的 `uri` 就是新位置
+   * （源前缀磁盘上已经没有了，记源 URI 会被重放器按「目标已不存在」移出，等于没记）。
+   * 只记文件——重放器不重建目录行（见 `#writeIndexRecord`）。
+   *
+   * 与 `#writeIndexRecord` 一样不抛出：后面的物化权限、向量重挂与摘要失效都还要跑，
+   * 否则「移动之后目标子树在磁盘上、在索引里不存在、权限表也空着」会同时发生。
+   */
+  async #writeMovedRecords(
+    records: readonly IndexRecord[],
+    details: Readonly<Record<string, string>>,
+  ): Promise<void> {
+    try {
+      await this.#index.upsert(records);
+    } catch (error) {
+      const reason = errorMessage(error);
+      const replayable = records
+        .filter((record) => record.kind === 'document')
+        .map((record) => record.uri);
+      if (replayable.length === 0) {
+        this.#logger.error('节点移动后目录索引行写入失败，已忽略。', {
+          ...details,
+          count: records.length,
+          error: reason,
+        });
+        return;
+      }
+      this.#logger.error('节点移动后重建索引失败，已记录待重放。', {
+        ...details,
+        count: records.length,
+        documents: replayable.length,
+        error: reason,
+      });
+      await recordIndexFailures(
+        this.#reconcile,
+        this.#logger,
+        replayable,
+        reason,
+        new Date().toISOString(),
+      );
     }
   }
 

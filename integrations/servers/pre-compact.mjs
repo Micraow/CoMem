@@ -43,7 +43,7 @@ const warn = (message, data) => warnToStderr('pre-compact', message, data);
  * 失败不向外抛：hook 抛错会让宿主在压缩上下文时看到一条红色错误。失败时游标
  * 停在原处，下一次 `Stop` 会重投同一批消息。stderr 留一行诊断（不含消息正文）。
  *
- * @param {{ sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event
+ * @param {{ event: string, sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event `event` 是内部事件名（`pre_compact` 或 `session_end`），上报时原样用
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, deduper?: FileEventDeduper, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  * @returns {Promise<{ message?: string } | undefined>}
  */
@@ -70,9 +70,13 @@ export async function handlePreCompact(event, deps) {
 
   // 这条链路是阻塞的（等提交完成），四个阶段里只有 `captureMs` 有值——检索与
   // 序列化发生在 `UserPromptSubmit`，那条请求已经上报过。
+  //
+  // 事件名取自载荷里的内部事件名（`lib/events.json` 的键），不写死：同一条链路
+  // 服务 `PreCompact` 与 `SessionEnd` 两个生命周期点，写死一个名字会让另一个永远
+  // 不出现在 `/metrics` 里。其它脚本也只转发适配器归一化后的名字。
   await reportOverhead(
     {
-      event: 'PreCompact',
+      event: event.event,
       sessionId: event.sessionId,
       phases: { processStartMs: processStartMs(), recallMs: 0, serializeMs: 0, captureMs },
     },

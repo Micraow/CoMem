@@ -153,6 +153,11 @@ auth:
   #   Authorization: Bearer comem_<prefix>_<secret>（POST /api/v1/admin/users/{id}/api-keys 创建）
   # 缺失或非法一律 401 UNAUTHENTICATED。组主体仍然不能当认证身份。
   enabled: false
+  # 系统管理员（app_user.id 列表）。用户 / 组目录这类跨主体端点（列全部用户、
+  # 创建用户、列全部组、建组）没有目标资源可求权，只认这份显式名单。
+  # 默认空 = 没有系统管理员，这些端点对所有人 403；没有任何隐式规则
+  # （绑定主体、第一个用户都不会自动成为管理员）。单用户部署也要显式写自己的 ID。
+  adminUserIds: []
   # session token 的 HMAC 密钥。留空时进程启动生成随机值——重启即失效。
   # 多实例部署必须显式配置同一个值，否则一个实例签发的 token 在另一个实例上无效。
   sessionSecret: ""

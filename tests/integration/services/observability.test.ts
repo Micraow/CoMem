@@ -5,13 +5,14 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import hookEventNames from '../../../integrations/lib/events.json';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { LlmService } from '../../../src/services/llm.js';
+import { LlmService, type LlmCallStats } from '../../../src/services/llm.js';
 import {
   ObservabilityService,
   type HookOverheadReport,
@@ -302,12 +303,38 @@ describe('renderMetrics', () => {
     expect(text).toContain('comem_http_request_duration_seconds_count 1');
     expect(text).toContain('comem_hook_overhead_seconds{event="stop",phase="process_start"} 0.038');
     expect(text).toContain('comem_hook_overhead_total_seconds{event="stop"} 0.142');
-    expect(text).toMatch(/comem_hook_async_seconds\{event="stop"\} 0\.0/);
+    // 后台耗时按 `phase` 上报：`#asyncPhases` 是进程级的「每个阶段最近一次」，
+    // 不属于任何一次 hook 上报，所以不能再带 `event` 标签。
+    expect(text).toMatch(/comem_hook_async_seconds\{phase="archive"\} 0\.0/);
+    expect(text).not.toContain('comem_hook_async_seconds{event=');
     expect(text).toContain('comem_index_nodes 0');
     expect(text).toContain('comem_pending_review 0');
     expect(text).toContain('comem_llm_tokens_total{kind="prompt"} 0');
     expect(text).toContain('comem_llm_tokens_total{kind="completion"} 0');
+    // 这一份服务配了单价（`pricing`），所以 0 是真实累加值，不是默认值。
     expect(text).toContain('comem_llm_cost_usd_total 0');
+    expect(text).toContain('comem_llm_pricing_configured 1');
+  });
+
+  it('后台耗时按阶段各自计算：不同 phase 的值不是同一份快照', async () => {
+    // 值来自 `#asyncPhases` 里**该阶段自己**的最近一次耗时。以前它被复制进「刚上
+    // 报的那个事件」，同一个数字被贴到每个 event 上——那不是维度，是噪音。
+    await service.phase('archive', async () => {
+      await sleep(30);
+    });
+    await service.phase('extract', async () => {});
+
+    const text = service.renderMetrics();
+    const valueOf = (phase: string): number => {
+      const match = new RegExp(
+        `comem_hook_async_seconds\\{phase="${phase}"\\} ([0-9.eE+-]+)`,
+      ).exec(text);
+      return match === null ? Number.NaN : Number(match[1]);
+    };
+
+    // 30ms 与 0ms 差一个数量级，机器负载不会把顺序翻过来。
+    expect(valueOf('archive')).toBeGreaterThan(0.02);
+    expect(valueOf('extract')).toBeLessThan(0.01);
   });
 
   it('未知事件归成 other，sessionId 不进标签（§17.1 的低基数要求）', async () => {
@@ -318,6 +345,62 @@ describe('renderMetrics', () => {
     expect(text).toContain('comem_hook_overhead_total_seconds{event="other"} 0.142');
     expect(text).not.toContain('sess_secret');
     expect(text).not.toContain('some_unknown_event');
+  });
+});
+
+describe('hook 事件名契约', () => {
+  /**
+   * 上报方的事件名表（`integrations/lib/events.json`，hook 侧唯一的常量表）。
+   *
+   * 断言从这张表读键，不手写事件名：手写的话，以后加一个事件、只改上报方、忘了
+   * 改这里，测试仍然是绿的——那正是「所有样本塌进 other」那个缺陷的成因。加事件
+   * 的一方必须同时改 `HOOK_EVENTS`（本文件所在的服务的白名单）。
+   *
+   * `reportsOverhead` 区分了「宿主会调用」与「会出现在 `/metrics`」两个集合；
+   * 白名单只接受后者，所以两个方向都要断言。
+   */
+  const table = Object.entries(hookEventNames);
+  const reported = table.filter(([, entry]) => entry.reportsOverhead).map(([name]) => name);
+  const unreported = table.filter(([, entry]) => !entry.reportsOverhead).map(([name]) => name);
+
+  it('有上报点的每个事件名都原样成为 event 标签，不塌进 other', async () => {
+    for (const name of reported) {
+      await service.recordHookOverhead(hookReport({ event: name }));
+    }
+
+    const text = service.renderMetrics();
+
+    for (const name of reported) {
+      expect(text).toContain(`comem_hook_overhead_total_seconds{event="${name}"} 0.142`);
+    }
+    // 一个 `other` 都不该有：它只接收真正未知的事件名。
+    expect(text).not.toContain('event="other"');
+  });
+
+  it('没有上报点的事件名不进白名单：不留永远没有样本的事件名', async () => {
+    // 目前只有 `pre_tool_use`：`PreToolUse` 刻意不发 HTTP，所以它永远不会有样本。
+    // 留在白名单里会多一条永远空的时间序列，控制台上也会多一个「看起来没发生」的行。
+    expect(unreported).toEqual(['pre_tool_use']);
+
+    for (const name of unreported) {
+      await service.recordHookOverhead(hookReport({ event: name }));
+    }
+
+    const text = service.renderMetrics();
+
+    expect(text).not.toContain('event="pre_tool_use"');
+    expect(text).toContain('comem_hook_overhead_total_seconds{event="other"} 0.142');
+  });
+
+  it('不接受宿主侧的 PascalCase：两套命名不共存', async () => {
+    // 服务端不加「PascalCase 也接受」的兼容表。真需要兼容时先决定哪一侧是权威
+    // 的一方，而不是让两套名字长期并存。
+    await service.recordHookOverhead(hookReport({ event: 'SessionStart' }));
+
+    const text = service.renderMetrics();
+
+    expect(text).toContain('comem_hook_overhead_total_seconds{event="other"} 0.142');
+    expect(text).not.toContain('event="SessionStart"');
   });
 });
 
@@ -589,7 +672,8 @@ describe('profileFormatHealth（§11.1）', () => {
       },
     });
 
-    const format = await local.profileFormatHealth();
+    // 唯一出口是 `health()`：这个方法不再对外公开，截断行为跟着健康度一起验。
+    const format = (await local.health()).profileFormat;
 
     expect(format).toEqual({ checked: 200, invalid: 0, violations: 0, truncated: true });
     expect(logger.warn).toHaveBeenCalledWith(
@@ -599,20 +683,67 @@ describe('profileFormatHealth（§11.1）', () => {
   });
 });
 
-describe('modelUsage', () => {
-  it('返回 LlmService 的用量快照，并进 /metrics', async () => {
-    await llm.generate({ messages: [{ role: 'user', content: '你好' }] });
+describe('模型成本', () => {
+  /** 只关心 `LlmCallStats` 的调用方；`llm` 依赖只要能给出 stats 即可。 */
+  function serviceWith(stats: LlmCallStats): ObservabilityService {
+    return createService({ llm: { stats } });
+  }
 
-    expect(service.modelUsage().stats).toMatchObject({
-      calls: 1,
-      promptTokens: 10,
-      completionTokens: 5,
-      costUsd: 0.00002,
-    });
+  it('没配单价时不输出成本样本：未知不写成 0', () => {
+    // pricing 没配时 `costUsd` 是 `null`（`services/llm.ts` 的 `costOf` 返回 null），
+    // 但 `calls` 已经涨过——这正是「有调用、没单价」那个状态。
+    const text = serviceWith({
+      calls: 3,
+      promptTokens: 30,
+      completionTokens: 15,
+      costUsd: null,
+      truncated: 0,
+      failed: 0,
+    }).renderMetrics();
+
+    expect(text).not.toContain('comem_llm_cost_usd_total');
+    expect(text).toContain('comem_llm_pricing_configured 0');
+    // token 计数照常：它不依赖单价。
+    expect(text).toContain('comem_llm_tokens_total{kind="prompt"} 30');
+  });
+
+  it('配了单价但还一次没调用：成本是真实的 0，configured=1', () => {
+    // `LlmService.emptyStats()` 在配了 pricing 时把 costUsd 初始化成 0（累加起点），
+    // 没配时才是 null。所以 0 与「没有序列」的区别不是靠猜的。
+    const text = serviceWith({
+      calls: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      costUsd: 0,
+      truncated: 0,
+      failed: 0,
+    }).renderMetrics();
+
+    expect(text).toContain('comem_llm_cost_usd_total 0');
+    expect(text).toContain('comem_llm_pricing_configured 1');
+  });
+
+  it('配了单价且有过调用：输出累计成本与 configured=1', () => {
+    const text = serviceWith({
+      calls: 3,
+      promptTokens: 30,
+      completionTokens: 15,
+      costUsd: 0.0125,
+      truncated: 0,
+      failed: 0,
+    }).renderMetrics();
+
+    expect(text).toContain('comem_llm_cost_usd_total 0.0125');
+    expect(text).toContain('comem_llm_pricing_configured 1');
+  });
+
+  it('真实调用后 /metrics 反映同一份累加器', async () => {
+    await llm.generate({ messages: [{ role: 'user', content: '你好' }] });
 
     const text = service.renderMetrics();
     expect(text).toContain('comem_llm_tokens_total{kind="prompt"} 10');
     expect(text).toContain('comem_llm_tokens_total{kind="completion"} 5');
     expect(text).toContain('comem_llm_cost_usd_total 0.00002');
+    expect(text).toContain('comem_llm_pricing_configured 1');
   });
 });

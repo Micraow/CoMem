@@ -9,13 +9,18 @@ import type { Uri } from './uri.js';
 import { ComemError } from './errors.js';
 
 /**
- * 提交管线的阶段（架构文档 §10.1）。
+ * 会话状态（架构文档 §10.1）。只有两个值，二者都被真实写入：
  *
- * `archived` 是**空闲过期**的终态（§11.7、`session.expiry.action: archive`）：会话不再
- * 接收自动提交，内容保持原样。它与 `committed` 不同——`committed` 说的是「这次归档
- * 提交完成了」，`archived` 说的是「这个会话不会再有新消息」。两者可以先后出现。
+ * - `open`：新会话的初始状态，接收消息与自动提交；
+ * - `archived`：**空闲过期**（§11.7、`session.expiry.action: archive`）的终态，
+ *   会话不再接收自动提交，内容保持原样。新消息进来时 `addMessage` 把它改回
+ *   `open`（一次过期不该吞掉后续所有消息）。
+ *
+ * 归档失败**不是**会话状态：它表达在 `task.status` 上，会话本身仍然是 `open`。
+ * 所以没有 `failed`，也没有「提交中」这类中间态——两阶段提交的进度在
+ * `archive/.meta.json` 的 `phase1` / `stepsDone` 里。
  */
-export type SessionStatus = 'open' | 'committing' | 'committed' | 'archived' | 'failed';
+export type SessionStatus = 'open' | 'archived';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
@@ -56,7 +61,8 @@ export interface SessionMessage {
   readonly parts: readonly ContentPart[];
   /** ISO 8601 时间串 */
   readonly createdAt: string;
-  /** 轮次时钟，等于生成这条消息时的消息总数（架构文档 §8.7），从 1 开始 */
+  /** 本条消息在当前 live 窗口内的序号（`nextTurn` = `messages.length + 1`），
+   * 不是会话累计轮次；账本时钟用 `SessionService.totalMessageCount`。 */
   readonly turn: number;
 }
 
@@ -91,9 +97,6 @@ export interface SessionMeta {
   readonly lastCommitAt: string | null;
   readonly pendingTokens: number;
 }
-
-/** 归档阶段的状态（架构文档 §10.1 的 `phase1.status`）。 */
-export type ArchiveStatus = 'pending' | 'archived' | 'failed';
 
 /** 自动提交策略（架构文档 §10.2.1）。`0` 表示关闭对应的触发条件。 */
 export interface AutoCommitPolicy {

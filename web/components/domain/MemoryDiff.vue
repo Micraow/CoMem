@@ -47,11 +47,6 @@ function contentOf(memory: PendingMemoryPayload): string {
   return typeof value === 'string' ? value : ''
 }
 
-function confidenceOf(memory: PendingMemoryPayload): number | null {
-  const value = memory.fields['confidence']
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
 function splitLines(text: string | null): readonly string[] {
   if (text === null || text === '') {
     return []
@@ -168,9 +163,6 @@ function nameOf(uri: string): string {
             <div class="rowflex">
               <UiBadge variant="orange">待复核</UiBadge>
               <UiBadge variant="gray">{{ props.memory.memoryType }}</UiBadge>
-              <UiBadge v-if="confidenceOf(props.memory) !== null" variant="outline">
-                置信度 {{ (confidenceOf(props.memory) ?? 0).toFixed(2) }}
-              </UiBadge>
             </div>
           </header>
 

@@ -237,7 +237,7 @@ function readSkills(result) {
 }
 
 /**
- * @param {{ sessionId: string, cwd: string, source: string | null }} event
+ * @param {{ event: string, sessionId: string, cwd: string, source: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
  * @param {{
  *   config: Awaited<ReturnType<typeof loadConfig>>,
  *   http: ReturnType<typeof createHttpClient>,
@@ -321,7 +321,7 @@ export async function handleSessionStart(event, deps) {
 
   await reportOverhead(
     {
-      event: 'SessionStart',
+      event: event.event,
       sessionId: event.sessionId,
       phases: { processStartMs: processStartMs(), recallMs, serializeMs, captureMs: 0 },
     },

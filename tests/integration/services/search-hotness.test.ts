@@ -28,7 +28,7 @@ import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
 import type { RetrievalIndex, SearchHit } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 
@@ -158,7 +158,6 @@ function createService(index: RetrievalIndex, hotness: HotnessOptions = {}): Sea
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const filesystem = new FileSystemService({
     store,

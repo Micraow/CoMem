@@ -37,7 +37,14 @@ import { createHttpClient } from './lib/http.mjs';
 /** 本包的根目录。 */
 const ROOT = dirname(fileURLToPath(import.meta.url));
 
-/** 六个 hook（架构文档 §15.2 的表格）。 */
+/**
+ * 宿主事件名 → 脚本（架构文档 §15.2 的表格）。
+ *
+ * 键是**宿主**事件名（写进宿主 settings 的那一层必须用宿主认识的名字）；
+ * 内部事件名在 `lib/events.mjs`。两边的键集必须一致：认识但没装的事件等于
+ * 一个永远不会出现的事件名，装了但没登记的事件会被适配器拒绝——`event-names`
+ * 测试会断言这一点。
+ */
 export const HOOK_EVENTS = Object.freeze({
   SessionStart: 'session-start.mjs',
   UserPromptSubmit: 'user-prompt-submit.mjs',
@@ -45,6 +52,9 @@ export const HOOK_EVENTS = Object.freeze({
   PostToolUse: 'post-tool-use.mjs',
   Stop: 'stop.mjs',
   PreCompact: 'pre-compact.mjs',
+  // 同一条链路：两个事件都是「对话要没了，把待处理消息交出去」。预算不同
+  // （1200ms vs 30000ms），由 `lib/lifecycle.mjs` 按事件分开给。
+  SessionEnd: 'pre-compact.mjs',
 });
 
 /** 需要按工具名预过滤的事件（少起进程）。 */
@@ -178,7 +188,7 @@ function hooksOf(settings) {
 }
 
 /**
- * 安装：备份 → 清掉我们的旧条目 → 写入六条 → 落盘。
+ * 安装：备份 → 清掉我们的旧条目 → 写入 `HOOK_EVENTS` 里的每一条 → 落盘。
  *
  * 幂等：重复 install 不会产生重复条目（先清后写）。
  *
@@ -309,7 +319,7 @@ export async function doctor(options = {}) {
     });
   }
 
-  // 3. 六个 hook 脚本可执行。
+  // 3. hook 脚本可读（`HOOK_EVENTS` 里的每个入口）。
   const missing = [];
   for (const script of Object.values(HOOK_EVENTS)) {
     try {

@@ -6,16 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
-import type { AssemblyCandidate } from '../../../src/domain/assembly.js';
-import { ComemError } from '../../../src/domain/errors.js';
+import type { AssembledItem, AssemblyCandidate } from '../../../src/domain/assembly.js';
 import type { Logger } from '../../../src/domain/log.js';
+import { estimateTokens } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
-  AllowAllAuthorizer,
   permissionDenied,
   type AclAction,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 
 const AUTH_PRINCIPALS: readonly string[] = [];
@@ -45,19 +45,8 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-function createAssembler(options: {
-  readonly authorizer?: Authorizer;
-  readonly readConcurrency?: number;
-  readonly estimateTokens?: (text: string) => number;
-} = {}): ContextAssembler {
-  return new ContextAssembler({
-    store,
-    metadata,
-    authorizer: options.authorizer ?? new AllowAllAuthorizer(),
-    logger,
-    readConcurrency: options.readConcurrency,
-    estimateTokens: options.estimateTokens,
-  });
+function createAssembler(authorizer: Authorizer = new AllowAllAuthorizer()): ContextAssembler {
+  return new ContextAssembler({ store, metadata, authorizer, logger });
 }
 
 function candidate(uri: string, overrides: Partial<AssemblyCandidate> = {}): AssemblyCandidate {
@@ -97,13 +86,38 @@ class DenyAllAuthorizer implements Authorizer {
   }
 }
 
-describe('readOverview', () => {
+/**
+ * 组装层是 IO 降级链：概览 / 原文读不到就退到更粗的一层。这里不直接调私有读方法
+ * （那需要为测试保留一个公开端口），而是走 `assemble`，检查条目实际落到的层级与
+ * 正文——这才是调用方看到的结果。
+ */
+
+/** 概览层的候选：`events` 从概览起投，`skill` 的天花板也是概览，升级轮次因此跳过。 */
+function overviewOnly(uri: string): AssemblyCandidate {
+  return candidate(uri, { contextType: 'skill', memoryType: 'events' });
+}
+
+/** 只投一个候选，返回它落到的条目（预算足够时就是该层级本身）。 */
+async function assembleItem(
+  assembler: ContextAssembler,
+  entry: AssemblyCandidate,
+): Promise<AssembledItem | undefined> {
+  const result = await assembler.assemble(
+    [entry],
+    { maxTokens: 10_000, quotaPreset: 'chat' },
+    AUTH_PRINCIPALS,
+  );
+  return result.items[0];
+}
+
+describe('概览读取', () => {
   it('目录候选读自己的 .overview.md', async () => {
     await writeBody(BODY, '原文正文');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(DIRECTORY.toString(), AUTH_PRINCIPALS)).resolves.toBe('L1 概览正文');
+    const item = await assembleItem(createAssembler(), overviewOnly(DIRECTORY.toString()));
+    expect(item?.detail).toBe('overview');
+    expect(item?.text).toBe('L1 概览正文');
   });
 
   it('文件候选拿不到目录的 L1，降级成自己的骨架', async () => {
@@ -112,43 +126,48 @@ describe('readOverview', () => {
     await writeBody(BODY, '# 标题\n\n原文正文');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('标题\n\n原文正文');
+    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    expect(item?.detail).toBe('overview');
+    expect(item?.text).toBe('标题\n\n原文正文');
   });
 
   it('L1 缺失时用「标题树 + 首段」降级', async () => {
     await writeBody(BODY, ['# 标题', '', '首段。', '', '## 子标题', '', '其余。'].join('\n'));
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('标题\n  子标题\n\n首段。');
+    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    expect(item?.text).toBe('标题\n  子标题\n\n首段。');
   });
 
   it('摘要文件存在但正文为空时同样降级', async () => {
     await writeBody(BODY, '首段。');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', '');
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('首段。');
+    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    expect(item?.text).toBe('首段。');
   });
 
-  it('摘要与正文都没有时返回 null', async () => {
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
+  it('摘要与正文都没有时只剩 URI', async () => {
+    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    expect(item?.detail).toBeNull();
+    expect(item?.text).toBe('');
   });
 
   it('正文只有标题时返回标题树', async () => {
     await writeBody(BODY, '# 只有标题');
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBe('只有标题');
+    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    expect(item?.text).toBe('只有标题');
   });
 
-  it('无权限时返回 null，且不读文件', async () => {
+  it('无权限时不读文件，条目只剩 URI', async () => {
     await writeBody(BODY, '原文正文');
     const spy = vi.spyOn(store, 'readText');
 
-    const assembler = createAssembler({ authorizer: new DenyAllAuthorizer() });
-    await expect(assembler.ports.readOverview(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
+    const item = await assembleItem(
+      createAssembler(new DenyAllAuthorizer()),
+      overviewOnly(BODY),
+    );
+    expect(item?.detail).toBeNull();
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -156,66 +175,72 @@ describe('readOverview', () => {
     const authorizer: Authorizer = new AllowAllAuthorizer();
     const check = vi.spyOn(authorizer, 'check');
 
-    const assembler = createAssembler({ authorizer });
-    await assembler.ports.readOverview(BODY, AUTH_PRINCIPALS);
+    await assembleItem(createAssembler(authorizer), overviewOnly(BODY));
     expect(check).toHaveBeenCalledTimes(1);
     expect((check.mock.calls[0]?.[0] as Uri).toString()).toBe(BODY);
   });
 
-  it('URI 无法解析时返回 null', async () => {
-    const assembler = createAssembler();
-    await expect(assembler.ports.readOverview('not-a-uri', AUTH_PRINCIPALS)).resolves.toBeNull();
+  it('URI 无法解析时按缺失处理', async () => {
+    const item = await assembleItem(createAssembler(), overviewOnly('not-a-uri'));
+    expect(item?.detail).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith('检索候选的 URI 无法解析，概览按缺失处理', {
+      uri: 'not-a-uri',
+    });
   });
 });
 
-describe('readBody', () => {
+describe('原文读取', () => {
   it('返回原文正文（不含 frontmatter）', async () => {
     await store.writeText(Uri.parse(BODY), '正文', {
       frontmatter: { summary: '摘要' },
     });
 
-    const assembler = createAssembler();
-    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBe('正文');
+    const item = await assembleItem(createAssembler(), candidate(BODY, { abstract: '摘要' }));
+    expect(item?.detail).toBe('full');
+    expect(item?.text).toBe('正文');
   });
 
-  it('读不到原文返回 null，不抛错', async () => {
-    const assembler = createAssembler();
-    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
+  it('读不到原文时停在摘要层，不抛错', async () => {
+    const item = await assembleItem(createAssembler(), candidate(BODY, { abstract: '摘要' }));
+    expect(item?.detail).toBe('abstract');
+    expect(item?.text).toBe('摘要');
   });
 
-  it('目标是目录时返回 null', async () => {
+  it('目标是目录时停在摘要层', async () => {
     await writeBody(BODY, '正文');
-    const assembler = createAssembler();
 
-    await expect(assembler.ports.readBody(DIRECTORY.toString(), AUTH_PRINCIPALS)).resolves.toBeNull();
+    const item = await assembleItem(
+      createAssembler(),
+      candidate(DIRECTORY.toString(), { abstract: '摘要' }),
+    );
+    expect(item?.detail).toBe('abstract');
   });
 
-  it('无权限时返回 null', async () => {
+  it('无权限时停在摘要层', async () => {
     await writeBody(BODY, '正文');
-    const assembler = createAssembler({ authorizer: new DenyAllAuthorizer() });
 
-    await expect(assembler.ports.readBody(BODY, AUTH_PRINCIPALS)).resolves.toBeNull();
+    const item = await assembleItem(
+      createAssembler(new DenyAllAuthorizer()),
+      candidate(BODY, { abstract: '摘要' }),
+    );
+    expect(item?.detail).toBe('abstract');
   });
 });
 
-describe('ports', () => {
-  it('暴露注入的 logger 与 token 估算器', () => {
-    const assembler = createAssembler({ estimateTokens: (text) => text.length });
+describe('装配参数', () => {
+  it('token 成本与自动提交阈值共用 domain 的实现（CJK 1 码点/token）', async () => {
+    await writeBody(BODY, '中文正文');
+    const result = await createAssembler().assemble(
+      [candidate(BODY, { abstract: '摘要' })],
+      { maxTokens: 10_000, quotaPreset: 'chat' },
+      AUTH_PRINCIPALS,
+    );
 
-    expect(assembler.ports.logger).toBe(logger);
-    expect(assembler.ports.estimateTokens('abcd')).toBe(4);
-  });
-
-  it('默认估算按 4 字符/token', () => {
-    const assembler = createAssembler();
-    expect(assembler.ports.estimateTokens('abcd')).toBe(1);
-    expect(assembler.ports.estimateTokens('abcde')).toBe(2);
-    expect(assembler.ports.estimateTokens('')).toBe(0);
-  });
-
-  it('并发上限必须是正整数', () => {
-    expect(() => createAssembler({ readConcurrency: 0 })).toThrow(ComemError);
-    expect(() => createAssembler({ readConcurrency: 1.5 })).toThrow(ComemError);
+    expect(result.items).toHaveLength(1);
+    // 单条目时 `rendered` 就是这条的渲染结果。装配层不再自己估算，用的是
+    // `domain/session.ts` 的 `estimateTokens`——同一段文本在装配预算与自动提交
+    // 阈值里必须是同一个数。
+    expect(result.items[0]?.tokens).toBe(estimateTokens(result.rendered));
   });
 });
 
@@ -224,7 +249,7 @@ describe('assemble', () => {
     await writeBody(BODY, '原文正文');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
-    const assembler = createAssembler({ estimateTokens: (text) => text.length });
+    const assembler = createAssembler();
     const result = await assembler.assemble([candidate(BODY, { abstract: '一句话摘要' })], {
       maxTokens: 10_000,
       quotaPreset: 'chat',
@@ -240,7 +265,7 @@ describe('assemble', () => {
     await writeBody(BODY, ['# 标题', '', '首段。'].join('\n'));
     const spy = vi.spyOn(store, 'readText');
 
-    const assembler = createAssembler({ estimateTokens: (text) => text.length });
+    const assembler = createAssembler();
     const result = await assembler.assemble(
       [
         candidate(BODY, { level: 'L0', abstract: '一句话摘要' }),
@@ -255,8 +280,10 @@ describe('assemble', () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  it('并发峰值不超过 readConcurrency', async () => {
-    const uris = Array.from({ length: 6 }, (_, index) => `${BODY}-${index}`);
+  it('并发读的峰值不超过固定上限 8', async () => {
+    // `READ_CONCURRENCY` 是 fd 压力界，不注入也不配置。9 条候选才能把上限顶满：
+    // 8 个并发 + 1 个等许可。
+    const uris = Array.from({ length: 9 }, (_, index) => `${BODY}-${index}`);
     await Promise.all(uris.map((uri) => writeBody(uri, `正文 ${uri}`)));
 
     const original = store.readText.bind(store);
@@ -273,49 +300,19 @@ describe('assemble', () => {
       }
     });
 
-    const assembler = createAssembler({ readConcurrency: 2 });
-    await assembler.assemble(
+    await createAssembler().assemble(
       uris.map((uri) => candidate(uri)),
-      { maxTokens: 100_000, quotaPreset: 'chat' }, AUTH_PRINCIPALS,
+      { maxTokens: 100_000, quotaPreset: 'chat' },
+      AUTH_PRINCIPALS,
     );
 
-    expect(peak).toBe(2);
-  });
-
-  it('并发上限为 1 时串行读', async () => {
-    const uris = Array.from({ length: 4 }, (_, index) => `${BODY}-serial-${index}`);
-    await Promise.all(uris.map((uri) => writeBody(uri, `正文 ${uri}`)));
-
-    const original = store.readText.bind(store);
-    let active = 0;
-    let peak = 0;
-    vi.spyOn(store, 'readText').mockImplementation(async (uri) => {
-      active += 1;
-      peak = Math.max(peak, active);
-      try {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        return await original(uri);
-      } finally {
-        active -= 1;
-      }
-    });
-
-    const assembler = createAssembler({ readConcurrency: 1 });
-    await assembler.assemble(
-      uris.map((uri) => candidate(uri)),
-      { maxTokens: 100_000, quotaPreset: 'chat' }, AUTH_PRINCIPALS,
-    );
-
-    expect(peak).toBe(1);
+    expect(peak).toBe(8);
   });
 
   it('无权限的候选拿不到正文，按只剩 URI 投放', async () => {
     await writeBody(BODY, '原文正文');
 
-    const assembler = createAssembler({
-      authorizer: new DenyAllAuthorizer(),
-      estimateTokens: (text) => text.length,
-    });
+    const assembler = createAssembler(new DenyAllAuthorizer());
     const result = await assembler.assemble([candidate(BODY, { abstract: null })], {
       maxTokens: 10_000,
       quotaPreset: 'chat',

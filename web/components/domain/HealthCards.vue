@@ -5,12 +5,11 @@
  * 四张指标卡 + 一条降级比例。四个数字分别回答「库有多大」「积压多少」「待复核多少」
  * 「摘要降级多少」，都是运维每周会看一眼的量。
  *
- * ## 为什么「最老待复核」要单独取一次
+ * ## 待复核的数字从哪来
  *
- * `GET /health` 没有这个字段：服务层的 `ObservabilityService.health()` 算了
- * `oldestPendingAgeSeconds`，但路由的响应封套没有带出来。控制台不补一个假数字，
- * 改成从 `GET /memories/pending` 的第一条 `updatedAt` 算——待复核列表按时间排序，
- * 第一条就是最老的那条。等 `/health` 补上字段后，这里换成读 `health` 即可。
+ * 直接读 `GET /health` 的 `memory.pendingReview` 与 `memory.oldestPendingAgeSeconds`。
+ * 不要改成从 `GET /memories/pending` 数条数或取第一条的 `updatedAt`：那个端点不
+ * 排序、先截断 100 条，「第一条」不是「最老一条」，数量也只是下限。
  *
  * ## 降级比例的分母
  *
@@ -42,17 +41,10 @@ export function formatDuration(seconds: number): string {
 <script setup lang="ts">
 import type { HealthPayload } from '~/composables/useApi'
 
-const props = withDefaults(
-  defineProps<{
-    health: HealthPayload | null
-    /** `comem_pending_review`：待复核记忆条数。 */
-    pendingReview: number | null
-    /** 最老待复核记忆的年龄（秒）；没有待复核时是 null。 */
-    oldestPendingSeconds: number | null
-    loading: boolean
-  }>(),
-  { pendingReview: null, oldestPendingSeconds: null },
-)
+const props = defineProps<{
+  health: HealthPayload | null
+  loading: boolean
+}>()
 
 interface StatCard {
   readonly key: string
@@ -63,6 +55,7 @@ interface StatCard {
 
 const stats = computed<readonly StatCard[]>(() => {
   const health = props.health
+  const memory = health?.memory ?? null
   return [
     {
       key: 'nodes',
@@ -79,11 +72,11 @@ const stats = computed<readonly StatCard[]>(() => {
     {
       key: 'review',
       label: '待复核记忆',
-      value: props.pendingReview === null ? '—' : String(props.pendingReview),
+      value: memory === null ? '—' : String(memory.pendingReview),
       sub:
-        props.oldestPendingSeconds === null
+        memory?.oldestPendingAgeSeconds == null
           ? null
-          : `最老一条 ${formatDuration(props.oldestPendingSeconds)}前`,
+          : `最老一条 ${formatDuration(memory.oldestPendingAgeSeconds)}前`,
     },
     {
       key: 'degraded',

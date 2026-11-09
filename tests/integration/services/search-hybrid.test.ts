@@ -18,7 +18,7 @@ import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { ContextType } from '../../../src/domain/node.js';
 import type { IndexRecord, RetrievalEngine } from '../../../src/domain/retrieval.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import type { EmbedOutcome } from '../../../src/services/embedding.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
@@ -180,7 +180,6 @@ function createService(options: {
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const filesystem = new FileSystemService({
     store,
@@ -244,7 +243,11 @@ describe('engine: fts5', () => {
       principals: PRINCIPALS,
       contextTypes: undefined,
       levels: undefined,
-      limit: 20,
+      memoryTypes: undefined,
+      updatedAfter: undefined,
+      updatedBefore: undefined,
+      // 服务层默认与 MCP / HTTP 共用 `api/search-defaults.ts` 的 10。
+      limit: 10,
     });
   });
 
@@ -556,7 +559,6 @@ describe('SearchService 构造', () => {
       metadata,
       authorizer,
       logger,
-      estimateTokens: (text) => text.length,
     });
     const filesystem = new FileSystemService({
       store,

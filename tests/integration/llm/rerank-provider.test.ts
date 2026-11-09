@@ -290,6 +290,26 @@ describe('错误映射', () => {
 });
 
 describe('超时', () => {
+  it('timeoutMs 只能收紧配置，不能放宽：配置 1 秒 + timeoutMs 12000 实际按 1000 超时', async () => {
+    // 永不响应：只有超时定时器能让这次调用结束，所以耗时就是实际生效的超时值。
+    responder = () => {
+      // 故意不响应
+    };
+
+    const startedAt = Date.now();
+    const error = await createProvider({ timeoutSeconds: 1 })
+      .score('q', ['a'], { timeoutMs: 12_000 })
+      .catch((caught: unknown) => caught);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(error).toBeInstanceOf(ComemError);
+    // 错误里带的就是**实际生效**的预算：1000 而不是 12000。
+    expect((error as ComemError).details).toMatchObject({ timeout: true, timeoutMs: 1000 });
+    // 实测等待时间也是 1 秒量级（12 秒会把这条用例拖成超时）。
+    expect(elapsedMs).toBeGreaterThanOrEqual(900);
+    expect(elapsedMs).toBeLessThan(4_000);
+  });
+
   it('超时抛 PROVIDER_UNAVAILABLE 并带 details.timeout', async () => {
     // 永不响应，等超时定时器取消请求。
     responder = () => {

@@ -48,6 +48,9 @@ beforeEach(async () => {
       COMEM_DATA_DIR: dataDir,
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
+      // 这组用例测的是管理用例本身（目录、撤权、根预置），不是「谁能调管理面」。
+      // 绑定主体显式声明为系统管理员；权限面由 `admin-access-control.test.ts` 覆盖。
+      COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
     },
   });
   app = await createHttpServer({
@@ -114,8 +117,14 @@ function createGroup(id: string): Promise<unknown> {
  * v1 的 `container.resolveIdentity` 只接受绑定主体（`server.subject`），测「另一个
  * 用户发请求」需要自己给一份身份。真实的服务与 ACL 实例共用同一份数据根，只有身份
  * 解析是替身——攻击链依赖的是「请求身份是谁」，不是「身份怎么来的」。
+ *
+ * `adminUserIds` 默认空：用例想验证的是**目标资源**的 ACL 判定，不是系统管理员
+ * 旁路。要测旁路就显式传名单。
  */
-async function createAdminAppAs(subject: string): Promise<FastifyInstance> {
+async function createAdminAppAs(
+  subject: string,
+  adminUserIds: readonly string[] = [],
+): Promise<FastifyInstance> {
   const instance = Fastify({ logger: false });
   instance.addHook('onRequest', createRequestIdMiddleware());
   instance.addHook(
@@ -129,6 +138,7 @@ async function createAdminAppAs(subject: string): Promise<FastifyInstance> {
   const adminAccess: AdminAccess = {
     permissionCounts: () => new Map(),
     memberCounts: () => new Map(),
+    apiKeyOwner: () => null,
     userCount: () => 0,
     groupCount: () => 0,
   };
@@ -139,6 +149,7 @@ async function createAdminAppAs(subject: string): Promise<FastifyInstance> {
       adminAccess,
       acl: container.services.acl,
       ledger: container.services.ledger,
+      adminUserIds,
     }).register,
     { prefix: '/admin' },
   );
@@ -306,15 +317,15 @@ describe('组管理', () => {
     ]);
     expect(members['total']).toBe(1);
 
-    // 重复添加是幂等的：同一行，角色被更新（`GroupRepository.addMember` 的语义）。
+    // 重复添加是幂等的：同一行，role 是派生值，仍是 `member`。
     const again = resultOf(
       await inject({
         method: 'POST',
         url: '/api/v1/admin/groups/eng/members',
-        payload: { userId: 'alice', role: 'owner' },
+        payload: { userId: 'alice' },
       }),
     );
-    expect((again['member'] as Record<string, unknown>)['role']).toBe('owner');
+    expect((again['member'] as Record<string, unknown>)['role']).toBe('member');
     const afterAdd = resultOf(
       await inject({ method: 'GET', url: '/api/v1/admin/groups/eng/members' }),
     );
@@ -735,7 +746,6 @@ describe('purgePrincipal 的事务边界', () => {
     // 同一份数据库与数据根，只把 `.acl.json` 的写入换成必然失败。
     const aclFile = new AclFileStore({ dataDir, logger: container.logger });
     const acl = new AclService({
-      dataDir,
       db: container.db,
       aclFile,
       permissions: new PermissionRepository({ db: container.db, logger: container.logger }),
@@ -909,14 +919,22 @@ describe('组 owner', () => {
     );
     expect(onDisk.entries.some((entry) => entry.principal === 'user:local')).toBe(false);
 
-    // local 已经不是 owner，组根也没有 manage 条目 → 不能再改回去。
-    const denied = await inject({
-      method: 'POST',
-      url: '/api/v1/admin/groups/eng/owner',
-      payload: { userId: 'local' },
-    });
-    expect(denied.statusCode).toBe(403);
-    expect(errorOf(denied)['code']).toBe('PERMISSION_DENIED');
+    // 原 owner 的 manage 来自组根条目；条目被替换后它不再有 manage。用另一个
+    // 非管理员身份（bob）请求：既不是当前 owner，也不是组根 manage 持有者 → 403。
+    expect(await container.services.acl.check(GROUP_ROOT, 7, LOCAL_PRINCIPALS)).toBe(false);
+    await createUser('bob');
+    const bobApp = await createAdminAppAs('user:bob');
+    try {
+      const denied = await bobApp.inject({
+        method: 'POST',
+        url: '/admin/groups/eng/owner',
+        payload: { userId: 'bob' },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(errorOf(denied)['code']).toBe('PERMISSION_DENIED');
+    } finally {
+      await bobApp.close();
+    }
   });
 
   it('owner 指向不存在的用户返回 404', async () => {
@@ -1203,10 +1221,7 @@ describe('删账号 / 组清掉召回账本', () => {
 });
 
 describe('授权', () => {
-  it('没有 manage 权限时 403', async () => {
-    // 路由的授权在 owner 恒 manage 的规则下对「自身根」总是成立，所以这里用
-    // 一个明确拒绝的 Authorizer 验证出口清单确实被求值——真实部署里它挡住的是
-    // 「请求身份与绑定身份不一致」被误判成放行的情况。
+  it('目标端点对拒绝的 Authorizer 返回 403，跨主体端点对非管理员返回 403', async () => {
     const db = openDatabase(':memory:');
     runMigrations(db);
     const logger: Logger = {
@@ -1227,7 +1242,7 @@ describe('授权', () => {
       filterReadable: async () => new Set<string>(),
       assert: async () => {
         throw new ComemError('PERMISSION_DENIED', '没有权限。', {
-          uri: 'comem://user/local',
+          uri: 'comem://user/alice',
           action: 7,
         });
       },
@@ -1235,6 +1250,7 @@ describe('授权', () => {
     const adminAccess: AdminAccess = {
       permissionCounts: () => new Map(),
       memberCounts: () => new Map(),
+      apiKeyOwner: () => null,
       userCount: () => 0,
       groupCount: () => 0,
     };
@@ -1261,15 +1277,34 @@ describe('授权', () => {
       const mapped = toErrorEnvelope(error);
       reply.code(mapped.statusCode).send(mapped.body);
     });
-    denyingApp.register(createAdminRoutes({ identity, authorizer, adminAccess, acl, ledger }).register, {
-      prefix: '/admin',
-    });
+    denyingApp.register(
+      createAdminRoutes({
+        identity,
+        authorizer,
+        adminAccess,
+        acl,
+        ledger,
+        // 没有系统管理员：用户 / 组目录这类跨主体端点对所有人 403。
+        adminUserIds: [],
+      }).register,
+      { prefix: '/admin' },
+    );
     await denyingApp.ready();
 
     try {
-      const response = await denyingApp.inject({ method: 'GET', url: '/admin/users' });
-      expect(response.statusCode).toBe(403);
-      expect(errorOf(response)['code']).toBe('PERMISSION_DENIED');
+      // 目标端点：判定确实经过 Authorizer（这里是一个明确拒绝的实现）。
+      const target = await denyingApp.inject({
+        method: 'PATCH',
+        url: '/admin/users/alice',
+        payload: { displayName: 'Alice' },
+      });
+      expect(target.statusCode).toBe(403);
+      expect(errorOf(target)['code']).toBe('PERMISSION_DENIED');
+
+      // 跨主体端点：不走 ACL，只看 adminUserIds；空名单 = 403。
+      const global = await denyingApp.inject({ method: 'GET', url: '/admin/users' });
+      expect(global.statusCode).toBe(403);
+      expect(errorOf(global)['code']).toBe('PERMISSION_DENIED');
     } finally {
       await denyingApp.close();
       db.close();

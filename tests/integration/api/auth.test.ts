@@ -27,6 +27,9 @@ beforeEach(async () => {
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_AUTH_ENABLED: 'true',
       COMEM_AUTH_SESSION_SECRET: SESSION_SECRET,
+      // 这组用例测认证（token 是否有效），不是测谁能调管理面。绑定主体显式声明为
+      // 系统管理员；跨主体端点没有这个配置就一律 403（默认空名单）。
+      COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
     },
   });
   // 启动时已经建好 `user:local` 与它的命名空间；这里只补密码。
@@ -154,15 +157,15 @@ describe('删账号与改密码撤销访问', () => {
     await container.services.identity.setPassword('alice', PASSWORD);
 
     const aliceToken = await login('alice', PASSWORD);
-    expect(
-      (
-        await inject({
-          method: 'GET',
-          url: '/api/v1/admin/users',
-          headers: bearer(aliceToken),
-        })
-      ).statusCode,
-    ).toBe(200);
+    // 身份有效但 alice 不是系统管理员：跨主体端点是 403（不是 401）。这个差异
+    // 正是「token 还在不在」的判据——删账号后同一请求必须掉到 401。
+    const aliceValid = await inject({
+      method: 'GET',
+      url: '/api/v1/admin/users',
+      headers: bearer(aliceToken),
+    });
+    expect(aliceValid.statusCode).toBe(403);
+    expect(json(aliceValid)['error']).toMatchObject({ code: 'PERMISSION_DENIED' });
 
     expect(
       (
@@ -310,6 +313,7 @@ describe('auth.enabled = false', () => {
         COMEM_SUMMARY_GENERATOR: 'rule',
         COMEM_LOGGING_LEVEL: 'error',
         COMEM_AUTH_ENABLED: 'false',
+        COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
       },
     });
     const disabledApp = await createHttpServer({

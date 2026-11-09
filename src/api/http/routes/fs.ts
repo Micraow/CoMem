@@ -45,7 +45,6 @@ interface SerializedEntry {
   readonly name: string;
   readonly kind: 'file' | 'directory';
   readonly size: number;
-  readonly abstract: string | null;
 }
 
 function serializeEntry(entry: TreeEntry): SerializedEntry {
@@ -54,7 +53,6 @@ function serializeEntry(entry: TreeEntry): SerializedEntry {
     name: entry.uri.name,
     kind: entry.kind,
     size: entry.size,
-    abstract: entry.abstract,
   };
 }
 

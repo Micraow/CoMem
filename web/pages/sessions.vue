@@ -15,7 +15,7 @@
  *
  * ## 为什么错误分两层
  *
- * 列表加载失败（`sessionsError` / `tasksError`）说明这一屏没有数据；提交或重试失败
+ * 列表加载失败（`sessionsError` / `tasksError`）说明这一屏没有数据；提交失败
  * 说明**刚才那个动作**没生效，列表本身还是好的。混成一个错误会让用户以为整页坏了。
  */
 import { AlertTriangle, RefreshCw } from 'lucide-vue-next'
@@ -48,11 +48,10 @@ const loadingTasks = ref(false)
 
 const sessionsError = ref<string | null>(null)
 const tasksError = ref<string | null>(null)
-/** 提交 / 重试这类单次动作的错误，与列表加载错误分开。 */
+/** 提交这类单次动作的错误，与列表加载错误分开。 */
 const actionError = ref<string | null>(null)
 
 const committing = ref<readonly string[]>([])
-const retrying = ref<readonly string[]>([])
 const committedTaskIds = ref<Readonly<Record<string, string>>>({})
 const highlightTaskId = ref<string | null>(null)
 
@@ -112,23 +111,6 @@ async function commitSession(sessionId: string): Promise<void> {
     actionError.value = errorMessageOf(caught)
   } finally {
     committing.value = committing.value.filter((id) => id !== sessionId)
-  }
-}
-
-async function retryTask(taskId: string): Promise<void> {
-  if (retrying.value.includes(taskId)) {
-    return
-  }
-  retrying.value = [...retrying.value, taskId]
-  actionError.value = null
-
-  try {
-    await api.post(`/tasks/${encodeURIComponent(taskId)}/retry`)
-    await loadTasks()
-  } catch (caught) {
-    actionError.value = errorMessageOf(caught)
-  } finally {
-    retrying.value = retrying.value.filter((id) => id !== taskId)
   }
 }
 
@@ -218,9 +200,7 @@ watch(scopeRoot, () => {
           :tasks="tasks"
           :loading="loadingTasks"
           :error="tasksError"
-          :retrying="retrying"
           :highlight-id="highlightTaskId"
-          @retry="retryTask"
         />
       </div>
     </div>

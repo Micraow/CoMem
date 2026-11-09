@@ -84,17 +84,6 @@ export interface EmbedOutcome {
   readonly reason: string | null;
 }
 
-export interface EmbeddingStats {
-  /** 打出去的供应商请求数（一批算一次） */
-  readonly calls: number;
-  /** 失败的供应商请求数 */
-  readonly failures: number;
-  /** 供应商返回的 token 总数（只累加成功的批次） */
-  readonly tokens: number;
-  /** 返回 `degraded: true` 的 `embed()` 调用次数。熔断打开过一定体现在这里 */
-  readonly degradedCalls: number;
-}
-
 /**
  * 连续失败多少次后打开熔断。
  *
@@ -113,13 +102,6 @@ const FAILURE_THRESHOLD = 5;
 const COOLDOWN_MS = 30_000;
 
 type CircuitState = 'closed' | 'open' | 'half-open';
-
-interface MutableStats {
-  calls: number;
-  failures: number;
-  tokens: number;
-  degradedCalls: number;
-}
 
 /** 一次供应商批量调用的结果：成功给向量，失败给降级结果（已记日志、已计数）。 */
 type BatchOutcome =
@@ -147,7 +129,6 @@ export class EmbeddingService {
   #openedAt = 0;
   /** 半开状态下是否已经放出一个探测请求。并发调用只有一个能成为探测。 */
   #probeInFlight = false;
-  #stats: MutableStats = { calls: 0, failures: 0, tokens: 0, degradedCalls: 0 };
 
   constructor(deps: EmbeddingServiceDeps) {
     const { dimension, maxBatchSize, timeoutMs } = deps.config;
@@ -282,11 +263,6 @@ export class EmbeddingService {
     }
   }
 
-  /** 用量统计（`/metrics` 与 `health` 用）。返回快照，调用方改不到内部状态。 */
-  stats(): EmbeddingStats {
-    return { ...this.#stats };
-  }
-
   /** 按输入下标合并「缓存命中」与「本次产出」，保证与入参同序。 */
   #merge(
     texts: readonly string[],
@@ -315,16 +291,14 @@ export class EmbeddingService {
     batch: readonly string[],
     options: EmbeddingOptions | undefined,
   ): Promise<BatchOutcome> {
-    this.#stats.calls += 1;
-
     let result: EmbeddingResult;
     try {
       result = await provider.embed(batch, {
-        timeoutMs: options?.timeoutMs ?? this.#config.timeoutMs,
+        // 调用方的预算只能收紧配置值，不能放宽（与 provider 的 `min` 同一语义）。
+        timeoutMs: Math.min(options?.timeoutMs ?? this.#config.timeoutMs, this.#config.timeoutMs),
         ...(options?.signal === undefined ? { } : { signal: options.signal }),
       });
     } catch (error) {
-      this.#stats.failures += 1;
       this.#recordFailure();
       const failure = ComemError.from(error);
       return { ok: false, outcome: this.#degrade(`嵌入调用失败（${failure.code}）：${failure.message}`) };
@@ -333,7 +307,6 @@ export class EmbeddingService {
     // 条数不一致是供应商的 bug：把结果写回 `node_embedding` 会让向量与 URI
     // 错位，比直接降级严重得多。
     if (result.vectors.length !== batch.length) {
-      this.#stats.failures += 1;
       this.#recordFailure();
       return {
         ok: false,
@@ -346,19 +319,27 @@ export class EmbeddingService {
     const vectors: (readonly number[])[] = [];
     try {
       for (const vector of result.vectors) {
+        // 维度不一致单独判，且消息里带两个数字：它最常见的成因是
+        // `providers.embedding.dimension` 与模型不符，`assertValidVector` 的
+        // 「长度与维度不匹配」不告诉用户该改哪一边。
+        if (vector.length !== this.#config.dimension) {
+          throw new ComemError(
+            'INVALID_ARGUMENT',
+            `向量维度与配置不一致：providers.embedding.dimension 配置为 ${this.#config.dimension}，供应商返回 ${vector.length}。`,
+            { expected: this.#config.dimension, actual: vector.length, model: provider.model },
+          );
+        }
         assertValidVector(vector, this.#config.dimension);
         vectors.push([...vector]);
       }
     } catch (error) {
       // 维度 / NaN / 全零是配置或供应商的问题，不是「入参非法」：降级而不抛，
       // 让写路径继续，同时把原因留给日志。
-      this.#stats.failures += 1;
       this.#recordFailure();
       const failure = ComemError.from(error);
       return { ok: false, outcome: this.#degrade(`嵌入供应商返回的向量不合法：${failure.message}`) };
     }
 
-    this.#stats.tokens += result.usage.totalTokens;
     return { ok: true, vectors };
   }
 
@@ -488,7 +469,6 @@ export class EmbeddingService {
   }
 
   #degrade(reason: string): EmbedOutcome {
-    this.#stats.degradedCalls += 1;
     this.#logger.warn('嵌入降级', { reason });
     return { vectors: [], degraded: true, reason };
   }

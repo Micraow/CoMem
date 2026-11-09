@@ -27,7 +27,11 @@ export interface RerankResult {
 }
 
 export interface RerankOptions {
-  /** 单次调用超时，毫秒。省略时用适配器构造时配置的 `timeoutSeconds` */
+  /**
+   * 单次调用超时，毫秒。**只能是上限**：适配器取
+   * `min(配置的 timeoutSeconds * 1000, timeoutMs)`，内部预算不能放宽用户配置。
+   * 省略时用配置值。
+   */
   readonly timeoutMs?: number;
   /** 上游取消信号；HTTP 请求断开时用它中止重排调用 */
   readonly signal?: AbortSignal;

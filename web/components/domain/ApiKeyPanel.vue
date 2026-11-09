@@ -8,13 +8,19 @@
  *
  * 撤销是二次确认：一把 key 就是那个用户的完整凭据，撤销后使用它的 Agent 立刻
  * 无法接入。
+ *
+ * ## 为什么没有「最后使用」列
+ *
+ * `api_key` 表里没有使用时间列，`ApiKeyRepository` 的读方法也不返回这个字段
+ * （`src/adapters/sqlite/api-key-repository.ts`）。服务端从未记录过它，不是
+ * 「记了但没出口」——补一列空值只会把「从不展示」变成「永远显示 —」。
  */
 import { AlertTriangle, Copy, KeyRound, Plus, Trash2 } from 'lucide-vue-next'
 
 import { errorMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 
-/** `GET /admin/users/{id}/api-keys` 的行。`lastUsedAt` 目前没有出口，有就显示。 */
+/** `GET /admin/users/{id}/api-keys` 的行。 */
 interface ApiKeyPayload {
   readonly id: string
   readonly userId: string
@@ -23,7 +29,6 @@ interface ApiKeyPayload {
   readonly createdAt: string
   readonly expiresAt: string | null
   readonly revokedAt: string | null
-  readonly lastUsedAt?: string | null
 }
 
 interface KeyListPayload {
@@ -69,8 +74,6 @@ const revokeOpen = computed({
   },
 })
 const revoking = ref(false)
-
-const hasLastUsed = computed(() => keys.value.some((key) => key.lastUsedAt != null))
 
 function formatTime(iso: string): string {
   const time = new Date(iso)
@@ -209,7 +212,6 @@ watch(createOpen, (open) => {
           <th>名称</th>
           <th>前缀</th>
           <th>创建时间</th>
-          <th v-if="hasLastUsed">最后使用</th>
           <th>状态</th>
           <th class="num">操作</th>
         </tr>
@@ -222,9 +224,6 @@ watch(createOpen, (open) => {
             <time class="mono" :title="formatTime(key.createdAt)">
               {{ formatTime(key.createdAt) }}
             </time>
-          </td>
-          <td v-if="hasLastUsed" class="mono">
-            {{ key.lastUsedAt == null ? '—' : formatTime(key.lastUsedAt) }}
           </td>
           <td>
             <UiBadge :variant="statusOf(key).variant">{{ statusOf(key).label }}</UiBadge>

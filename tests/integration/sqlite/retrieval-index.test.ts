@@ -386,13 +386,6 @@ describe('search：分数', () => {
     expect(first?.score ?? 0).toBeGreaterThan(second?.score ?? 0);
   });
 
-  it('scoreThreshold 在取负之后比较', async () => {
-    const [best, worst] = await search('设计');
-    const midpoint = ((best?.score ?? 0) + (worst?.score ?? 0)) / 2;
-
-    expect(uris(await search('设计', { scoreThreshold: midpoint }))).toEqual([best?.uri]);
-    expect(await search('设计', { scoreThreshold: (best?.score ?? 0) + 1 })).toEqual([]);
-  });
 });
 
 describe('search：candidateMultiplier', () => {

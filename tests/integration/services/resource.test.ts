@@ -169,7 +169,6 @@ beforeEach(async () => {
   index = new SqliteFtsIndex({ db, logger });
   // 与生产装配同一份：写路径在物化表缺行时先物化再求权（`InheritingAuthorizer`）。
   const acl = new AclService({
-    dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions: new PermissionRepository({ db, logger }),

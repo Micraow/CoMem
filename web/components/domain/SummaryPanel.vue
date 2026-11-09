@@ -38,9 +38,9 @@ const props = withDefaults(
 type AclLevel = 1 | 3 | 7
 
 const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
-  1: 'read',
-  3: 'write',
-  7: 'manage',
+  1: '读取',
+  3: '写入',
+  7: '管理',
 }
 
 const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'purple'>> = {
@@ -116,7 +116,9 @@ const updatedLabel = computed(() => {
         </div>
         <div class="meta-list__row">
           <span class="meta-list__k">层级</span>
-          <span class="meta-list__v">L0 摘要 · L1 概览</span>
+          <span class="meta-list__v">
+            {{ stat?.kind === 'directory' ? 'L0 摘要 · L1 概览' : 'L0 摘要' }}
+          </span>
         </div>
       </div>
     </section>

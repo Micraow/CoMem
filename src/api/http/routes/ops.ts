@@ -12,6 +12,9 @@
  *   骗人；
  * - `ok`：其余。
  *
+ * 判定与 MCP 的 `health` 工具共用 `api/health-status.ts`，枚举只有 `ok` / `degraded`：
+ * 两个入口各写一份会让同一个部署用不同方式健康检查得到不同结论。
+ *
  * `memoryExtract.skipped` 单独报告归档提交的记忆抽取是否被跳过（`providers.llm.default.type`
  * 是 `disabled` 时是）。它不参与 `status` 判定：同样的部署下 `summary.generator`
  * 必须是 `rule`，`status` 已经是 `degraded`；再加一个条件只是重复。
@@ -36,20 +39,11 @@ import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { AclService } from '../../../services/acl.js';
+import { healthStatus } from '../../health-status.js';
 import { ok } from '../envelope.js';
 import { PROMETHEUS_CONTENT_TYPE, SERVICE_VERSION, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
-
-type HealthStatus = 'ok' | 'degraded';
-
-function statusOf(
-  ruleGenerator: boolean,
-  degradedSummaries: number,
-  rerankDegraded: boolean,
-): HealthStatus {
-  return ruleGenerator || degradedSummaries > 0 || rerankDegraded ? 'degraded' : 'ok';
-}
 
 /**
  * 绑定主体可寻址且可读的根（§12.1、§12.5）。
@@ -98,7 +92,11 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
         // 调用失败、这次检索用的是融合分。与 `summary.degraded` 同一个判定模式。
         const rerank = search.rerankHealth;
         return ok({
-          status: statusOf(ruleGenerator, health.degradedSummaries, rerank.degraded),
+          status: healthStatus({
+            ruleGenerator,
+            degradedSummaries: health.degradedSummaries,
+            rerankDegraded: rerank.degraded,
+          }),
           // 控制台的身份引导读这两个字段（§16）；与 MCP `health` 的字段同名同义。
           subject,
           scopes: await readableScopes(acl, acl.resolvePrincipals(subject, groups)),

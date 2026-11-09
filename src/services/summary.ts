@@ -408,7 +408,13 @@ export class SummaryService {
     if (!content.complete) {
       return null;
     }
-    return { abstract: content.abstract, overview: content.overview, degraded: false };
+    return {
+      abstract: content.abstract,
+      overview: content.overview,
+      // 没有生成信息（手工写的摘要文件、从未生成过）按「未降级」处理：`degraded`
+      // 的语义是「这次生成走了规则摘要」，来源未知不等于降级。
+      degraded: content.generation?.degraded ?? false,
+    };
   }
 
   // ── 失效 ──

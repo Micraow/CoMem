@@ -415,7 +415,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
    * 而不是先取候选再过滤，避免「取回的候选全无权限，最终返回不足 limit 条」（§8.2）。
    *
    * 排序用 `bm25()` 升序（越负越相关），返回时取负。`LIMIT` 是
-   * `limit × candidateMultiplier`（§18），`scoreThreshold` 在取负之后比较。
+   * `limit × candidateMultiplier`（§18）。
    */
   async search(query: SearchQuery): Promise<SearchHit[]> {
     validateSearchQuery(query);
@@ -467,9 +467,6 @@ export class SqliteFtsIndex implements RetrievalIndex {
     for (const row of this.#db.prepare(sql).all(...params)) {
       // bm25 是负数，取负转成「越大越相关」（见文件头）。
       const score = -Number(row['rank']);
-      if (query.scoreThreshold !== undefined && score < query.scoreThreshold) {
-        continue;
-      }
       hits.push({
         uri: text(row['uri']),
         level: text(row['level']) as Level,
@@ -485,9 +482,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
       returned: Math.min(hits.length, query.limit),
       contextTypes: query.contextTypes?.length ?? 0,
     });
-    // SQL 取的是 limit × candidateMultiplier 条候选，`scoreThreshold` 又在取负后
-    // 过滤了一部分，最终对外仍然是 limit 条上限（§8.2 的「候选不足」问题由权限
-    // 子查询在 SQL 里解决，多取的候选只用于阈值过滤后仍有足够结果）。
+    // SQL 取的是 limit × candidateMultiplier 条候选，多取的部分留给层级加权与
+    // 去重（`services/search.ts` 的 `#rank`），最终对外仍然是 limit 条上限
+    // （§8.2 的「候选不足」问题由权限子查询在 SQL 里解决）。
     return hits.slice(0, query.limit);
   }
 

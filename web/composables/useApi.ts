@@ -290,7 +290,6 @@ export interface TreeEntryPayload {
   readonly name: string
   readonly kind: 'file' | 'directory'
   readonly size: number
-  readonly abstract: string | null
 }
 
 /**
@@ -328,6 +327,17 @@ export interface HealthPayload {
     readonly degraded: boolean
     readonly pendingDirs: number
     readonly degradedDirs: number
+  }
+  /**
+   * 记忆健康度（§17.5）。`oldestPendingAgeSeconds` 为 null 表示没有待复核记忆。
+   *
+   * 这两个字段由 `ObservabilityService.health()` 计算、`routes/ops.ts` 的封套带出；
+   * 不要改回从 `GET /memories/pending` 的第一页重算——那个端点不排序且会截断，
+   * 「第一条」不是「最老一条」。
+   */
+  readonly memory: {
+    readonly pendingReview: number
+    readonly oldestPendingAgeSeconds: number | null
   }
   readonly version: string
 }

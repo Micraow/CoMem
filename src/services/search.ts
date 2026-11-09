@@ -56,7 +56,6 @@ import {
   type QueryFilter,
 } from '../domain/query-filter.js';
 import {
-  MAX_TYPED_QUERIES,
   reciprocalRankFusion,
   type FusedHit,
   type GrepHit,
@@ -185,12 +184,15 @@ export interface SearchServiceDeps {
    */
   readonly llm?: Pick<LlmService, 'generateJson'>;
   /**
-   * 最近消息的来源（§8.4 的「用 session」）。
+   * 会话服务，两个用途：
    *
-   * 只用来解析指代（「那它呢」）。不注入时按「历史为空」处理：查询仍然会重写，
-   * 只是省略的主语补不回来。
+   * - `load`：最近消息的来源（§8.4 的「用 session」）。只用来解析指代（「那它呢」）。
+   *   不注入时按「历史为空」处理：查询仍然会重写，只是省略的主语补不回来。
+   * - `totalMessageCount`：跨轮去重的轮次时钟（§8.7）。**不能换成 `load` 的
+   *   `messageCount`**：那是 live 未提交条数（`shouldAutoCommit` 的判据），提交后
+   *   归零，时钟会倒退。
    */
-  readonly sessions?: Pick<SessionService, 'load'>;
+  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'>;
   /**
    * 嵌入（§8.3、§18 的 `retrieval.engine`）。只有 `vector` / `hybrid` 用到。
    *
@@ -255,7 +257,6 @@ export interface FindOptions {
   /** 更新时间上界，闭区间（`updated_at <= updatedBefore`），ISO 8601。 */
   readonly updatedBefore?: string;
   readonly limit?: number;
-  readonly scoreThreshold?: number;
   /**
    * 本次查询的**墙上时钟**上限（epoch 毫秒），由接口层（MCP 工具）注入。
    *
@@ -280,26 +281,16 @@ export type SearchUpstream = 'llm' | 'embedding' | 'rerank';
 export interface SearchOptions extends FindOptions {
   /** 会话 ID。有它才能解析指代；没有也能分析，只是历史为空 */
   readonly sessionId?: string;
-  /** 最多执行几条 TypedQuery；默认 5（§8.4 的「0–5 条」），传入更大值按 5 算 */
-  readonly maxQueries?: number;
 }
 
 export interface ContextOptions extends FindOptions {
-  readonly quotaPreset?: QuotaPreset;
   /**
-   * 会话 ID。跨轮去重的轮次时钟（§8.7）取它读到的消息总数。
+   * 会话 ID。跨轮去重的轮次时钟（§8.7）取该会话的累计消息数。
    *
    * 不传时不做跨轮去重：没有会话就没有东西能推进 `turn`，用常量会让账本在
    * 500 条之后永久排除所有候选——那是静默失效，比不去重更糟。组装本身照常工作。
    */
   readonly sessionId?: string;
-  /**
-   * 显式指定去重时钟（`scopeKey` + `sessionId` + `turn`）。
-   *
-   * 传了它就用它，不再从 `sessionId` 推导；离线脚本与测试用它钉住确定的值。
-   * 不注入账本时传它会抛 `INVALID_ARGUMENT`——静默不去重比报错更难查。
-   */
-  readonly excludeDelivered?: DeliveryClock;
 }
 
 /**
@@ -308,7 +299,9 @@ export interface ContextOptions extends FindOptions {
  * `scopeKey` 决定账本文件（按作用域分片），`sessionId` 决定文件里哪些条目参与
  * 本次去重，`turn` 决定去重窗口。
  *
- * `turn` 取会话消息总数，与 `SessionService.load` 的 `messageCount` 同一口径。
+ * `turn` 取会话的**累计**消息数（`SessionService.totalMessageCount`：已归档 +
+ * live）。`Session.messageCount` 是 live 未提交条数、`SessionMessage.turn` 是 live
+ * 窗口内序号，两者提交后都会倒退，不能当时钟。
  */
 interface DeliveryClock {
   readonly scopeKey: string;
@@ -402,12 +395,14 @@ interface VectorRetrievalDeps {
 export type ContextAssembly = AssemblyResult;
 
 /**
- * 默认返回条数。
+ * 检索类入口的默认条数（架构文档 §8.4、§13.2）。
  *
- * 20：经验值，来源未知。§8.4 / §8.5 没给默认值；§13.2 的 MCP `find` 工具默认 10，
- * 服务层取 20 给工具层留截断余量（工具可以再取前 10 条，反过来拿不到）。
+ * 10：`find` / `search` / `grep` 的返回直接进模型上下文，10 条摘要约 1–2k token，
+ * 再多会挤占工作上下文。`services/` 不能 import `api/`（§4.2），所以值定义在这里，
+ * `api/search-defaults.ts` 再导出给两个入口——服务层的 `resolveLimit` 与 MCP / HTTP
+ * 的默认值必须是同一个数，否则「同一个能力」会按调用方式返回不同规模。
  */
-const DEFAULT_RESULT_LIMIT = 20;
+export const DEFAULT_SEARCH_LIMIT = 10;
 
 /** 一天的小时数。`hotnessHalfLifeHours` 的单位是小时，`hotnessScore` 的输入是天。 */
 const HOURS_PER_DAY = 24;
@@ -494,7 +489,7 @@ const QUERY_EMBED_TIMEOUT_MS = 6_000;
  * （`eval/README.md` 的 105 条基线）。12 秒是 p95 的 1.28 倍，仍覆盖绝大多数
  * 查询；超过它的调用退回融合分并标注 `Degraded`。**不沿用
  * `providers.rerank.timeoutSeconds` 的 30 秒**：那是「不静默降级」的配置预算，
- * 30 秒的重排等待会直接吃掉 MCP 工具总上限（见 `api/mcp/deadline.ts`）。
+ * 30 秒的重排等待会直接吃掉 MCP 工具总上限（见 `api/deadline.ts`）。
  */
 const QUERY_RERANK_TIMEOUT_MS = 12_000;
 
@@ -590,28 +585,12 @@ function elapsedMs(startedAt: bigint): number {
 
 function resolveLimit(limit: number | undefined): number {
   if (limit === undefined) {
-    return DEFAULT_RESULT_LIMIT;
+    return DEFAULT_SEARCH_LIMIT;
   }
   if (!Number.isInteger(limit) || limit <= 0) {
     throw new ComemError('INVALID_ARGUMENT', 'limit 必须是正整数。', { limit });
   }
   return limit;
-}
-
-/**
- * `maxQueries` 的上限是 §8.4 的「0–5 条」。
- *
- * 传入更大的值按 5 截断而不是报错：调用方表达的是「最多跑几条」，而 5 是契约
- * 上限，截断不改变它的意图。`0` 与负数报错——那多半是把「不限制」写错了。
- */
-function resolveMaxQueries(maxQueries: number | undefined): number {
-  if (maxQueries === undefined) {
-    return MAX_TYPED_QUERIES;
-  }
-  if (!Number.isInteger(maxQueries) || maxQueries <= 0) {
-    throw new ComemError('INVALID_ARGUMENT', 'maxQueries 必须是正整数。', { maxQueries });
-  }
-  return Math.min(maxQueries, MAX_TYPED_QUERIES);
 }
 
 /**
@@ -647,7 +626,7 @@ export class SearchService {
   readonly #ledger: Pick<RecallLedger, 'recentlyDelivered' | 'record'> | undefined;
   readonly #rerank: SearchServiceDeps['rerank'];
   readonly #llm: Pick<LlmService, 'generateJson'> | undefined;
-  readonly #sessions: Pick<SessionService, 'load'> | undefined;
+  readonly #sessions: Pick<SessionService, 'load' | 'totalMessageCount'> | undefined;
   readonly #queryFilters: readonly QueryFilter[];
   readonly #engine: RetrievalEngine;
   /**
@@ -762,15 +741,9 @@ export class SearchService {
    * `vector` 降级不退回 FTS5，是因为用户显式选了语义检索：静默换引擎会给出
    * 「看起来能用、其实换了实现」的结果，比空命中更让人困惑。
    *
-   * ## `scoreThreshold` 的语义
-   *
-   * 三种引擎的分数量纲不同：FTS5 是 `bm25` 取负（无界正数），向量是余弦
-   * （`[-1, 1]`），融合是 RRF（约 `1/61` 到 `2/61`）。`scoreThreshold` 作用在
-   * **本引擎最终排序分**上——单引擎是层级加权后的分（§8.5），`hybrid` 是融合分。
-   * 同一个阈值在三种引擎下不可比，切换引擎时必须重新标定。
-   *
-   * 配了 `telemetry.hotness.weight` 时，阈值作用在**热度加权之前**的相关性分上：
-   * 热度只重排已经通过阈值的命中，不能把一条不相关的记忆「救」进来。
+   * 配了 `telemetry.hotness.weight` 时，热度只调整排序分，不改变相关性判断：
+   * 没有数字阈值——三种引擎的分数量纲不同（FTS5 是 `bm25` 取负、向量是余弦、
+   * 融合是 RRF），一个固定的阈值换引擎就失效（§8.5）。
    */
   async find(query: string, options: FindOptions): Promise<readonly RankedScoredHit[]> {
     const diagnostics = await this.findWithDiagnostics(query, options);
@@ -857,7 +830,7 @@ export class SearchService {
         updatedBefore: options.updatedBefore,
         limit: candidateLimit,
       });
-      const ranked = this.#rank(hits, candidateLimit, options.scoreThreshold).map((hit) => ({
+      const ranked = this.#rank(hits, candidateLimit).map((hit) => ({
         ...hit,
         ranks: null,
       }));
@@ -921,7 +894,7 @@ export class SearchService {
       limit: candidateLimit,
     });
     const enriched = this.#enrich(raw, options, vector.nodes);
-    const ranked = this.#rank(enriched, candidateLimit, options.scoreThreshold).map(
+    const ranked = this.#rank(enriched, candidateLimit).map(
       (hit, index) => ({
         ...hit,
         ranks: { fts5: null, vector: index + 1, hybrid: null },
@@ -999,21 +972,15 @@ export class SearchService {
       { limit: candidateLimit, levelWeights: this.#config.levelWeights },
     );
 
-    // 阈值作用在融合分上（见 `find` 的 `scoreThreshold` 语义）。
-    const scored = fused
-      .filter(
-        (hit: FusedHit) =>
-          options.scoreThreshold === undefined || hit.score >= options.scoreThreshold,
-      )
-      .map((hit: FusedHit) => ({
-        uri: hit.uri,
-        contextType: hit.contextType,
-        memoryType: hit.memoryType,
-        level: hit.level,
-        abstract: hit.abstract,
-        score: hit.score,
-        ranks: hit.ranks,
-      }));
+    const scored = fused.map((hit: FusedHit) => ({
+      uri: hit.uri,
+      contextType: hit.contextType,
+      memoryType: hit.memoryType,
+      level: hit.level,
+      abstract: hit.abstract,
+      score: hit.score,
+      ranks: hit.ranks,
+    }));
 
     const reranked = await this.#applyRerank(text, scored, options);
     return {
@@ -1164,7 +1131,6 @@ export class SearchService {
   async search(query: string, options: SearchOptions): Promise<ScoredSearchResult> {
     const startedAt = process.hrtime.bigint();
     const limit = resolveLimit(options.limit);
-    const maxQueries = resolveMaxQueries(options.maxQueries);
     const filtered = applyQueryFilters(query, this.#queryFilters);
 
     if (filtered === '') {
@@ -1184,7 +1150,7 @@ export class SearchService {
       return { hits: [], plan };
     }
 
-    const analysis = await this.#analyze(filtered, options, maxQueries);
+    const analysis = await this.#analyze(filtered, options);
 
     if (analysis.queries.length === 0) {
       const plan: SearchPlan = {
@@ -1217,7 +1183,6 @@ export class SearchService {
           updatedAfter: options.updatedAfter,
           updatedBefore: options.updatedBefore,
           limit,
-          scoreThreshold: options.scoreThreshold,
           // 预算与归因必须穿透到每一路 `find`：只在入口收窄的话，5 条 TypedQuery
           // 各自重排时仍会等满自己的预算。
           deadlineAt: options.deadlineAt,
@@ -1268,7 +1233,6 @@ export class SearchService {
   async #analyze(
     query: string,
     options: SearchOptions,
-    maxQueries: number,
   ): Promise<{
     readonly queries: readonly TypedQuery[];
     readonly analyzed: boolean;
@@ -1320,7 +1284,7 @@ export class SearchService {
         budget === null
           ? await call
           : await withBudget(call, budget, () => budgetExceeded('意图分析（LLM）', budget));
-      return { queries: output.queries.slice(0, maxQueries), analyzed: true, reason: null };
+      return { queries: output.queries, analyzed: true, reason: null };
     } catch (error) {
       // 超时、截断（`details.truncated`）、结构化输出不合法都收敛成 `ComemError`
       // （§19）。三种都不重试：同样的输入与上限只会再失败一次。
@@ -1591,7 +1555,7 @@ export class SearchService {
     const clock = await this.#deliveryClock(options);
     const assembly: AssemblyOptions = {
       maxTokens: this.#config.assembly.maxTokens,
-      quotaPreset: options.quotaPreset ?? this.#config.assembly.quotaPreset,
+      quotaPreset: this.#config.assembly.quotaPreset,
       excludedUris: await this.#excludedUris(clock),
     };
     const result = await this.#assembler.assemble(candidates, assembly, options.principals);
@@ -1620,17 +1584,16 @@ export class SearchService {
   /**
    * 跨轮去重的时钟（§8.7）。
    *
-   * `turn` 取会话消息总数，与 `SessionService.load` 的 `messageCount` 同一口径。
+   * `turn` 取会话的**累计**消息数（`SessionService.totalMessageCount`：已归档
+   * 去重 ID 数 + live 条数）。**不要用 `Session.messageCount`**：那是 live 未提交
+   * 条数，`commitPhase1` 默认 `keepRecentCount = 0`，提交后 live 清空、时钟归零，
+   * 账本读侧的 `entry.turn <= turn` 会把提交前的条目当成「未来轮次」排除——跨轮
+   * 去重静默失效，刚投过的记忆下一轮再投一次。
+   *
    * **没有 `sessionId` 时不返回时钟**：没有东西能推进 `turn`，用一个常量会让账本
    * 在 500 条之后永久排除所有候选——静默失效，比不做跨轮去重更糟。
-   *
-   * 显式传了 `excludeDelivered` 就原样用它，不再读会话：离线脚本与测试要能钉住
-   * 确定的 `turn`。
    */
   async #deliveryClock(options: ContextOptions): Promise<DeliveryClock | undefined> {
-    if (options.excludeDelivered !== undefined) {
-      return options.excludeDelivered;
-    }
     if (options.sessionId === undefined || this.#sessions === undefined) {
       return undefined;
     }
@@ -1647,14 +1610,14 @@ export class SearchService {
     }
 
     try {
-      const session = await this.#sessions.load(sessionUri);
       return {
         scopeKey: scopeKeyOf(sessionUri),
         sessionId: options.sessionId,
-        turn: session.messageCount,
+        turn: await this.#sessions.totalMessageCount(sessionUri),
       };
     } catch (error) {
-      // 会话不可读（已归档、ID 写错）只影响去重，不该让整次检索失败。
+      // 会话不存在 / ID 写错时 `totalMessageCount` 与 `load` 一样抛 `NOT_FOUND`。
+      // 这只影响去重，不该让整次检索失败。
       this.#logger.warn('会话不可读，本次不做跨轮去重', {
         sessionId: options.sessionId,
         code: ComemError.from(error).code,
@@ -1863,7 +1826,7 @@ export class SearchService {
   }
 
   /**
-   * 层级加权 + 截断（§8.5），再做 `scoreThreshold` 过滤，最后按「同一 URI 的同一段
+   * 层级加权 + 截断（§8.5），最后按「同一 URI 的同一段
    * 摘要」去重（§8.6 第 3 步在命中列表这一层的对应物）。
    *
    * `rankCandidates` 只排序不去重，所以用「下标当身份」把排名结果映射回原始命中：
@@ -1881,11 +1844,7 @@ export class SearchService {
    * 没有为它扩大候选数：那等于给所有引擎加检索开销，而 4× 余量下 `pnpm eval` 的
    * R@10 逐位不变（见 `local/notes/decisions.md`）。
    */
-  #rank(
-    hits: readonly SearchHit[],
-    limit: number,
-    scoreThreshold: number | undefined,
-  ): ScoredHit[] {
+  #rank(hits: readonly SearchHit[], limit: number): ScoredHit[] {
     const ranked = rankCandidates(
       hits.map((hit, index) => ({
         uri: hit.uri,
@@ -1902,7 +1861,7 @@ export class SearchService {
       byHandle.set(String(index), hit);
     }
 
-    const scored = toScoredHits(ranked, byHandle, scoreThreshold);
+    const scored = toScoredHits(ranked, byHandle);
     const seen = new Set<string>();
     const unique: ScoredHit[] = [];
     for (const hit of scored) {
@@ -2019,7 +1978,7 @@ export class SearchService {
     if (this.#ledger === undefined) {
       throw new ComemError(
         'INVALID_ARGUMENT',
-        'excludeDelivered 需要注入召回账本（SearchServiceDeps.ledger）。',
+        '跨轮去重需要注入召回账本（SearchServiceDeps.ledger）。',
         { scopeKey: clock.scopeKey, sessionId: clock.sessionId, turn: clock.turn },
       );
     }
@@ -2078,13 +2037,9 @@ function compareRankedHits(left: RankedScoredHit, right: RankedScoredHit): numbe
 function toScoredHits(
   ranked: readonly RankedCandidate[],
   byHandle: ReadonlyMap<string, SearchHit>,
-  scoreThreshold: number | undefined,
 ): ScoredHit[] {
   const result: ScoredHit[] = [];
   for (const entry of ranked) {
-    if (scoreThreshold !== undefined && entry.score < scoreThreshold) {
-      continue;
-    }
     const hit = byHandle.get(entry.rendered);
     if (hit === undefined) {
       continue;

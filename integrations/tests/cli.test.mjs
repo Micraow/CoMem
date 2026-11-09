@@ -42,7 +42,7 @@ async function startServer() {
   };
 }
 
-test('install 写六个 hook，并备份原 settings', async () => {
+test('install 写七个 hook（含 SessionEnd），并备份原 settings', async () => {
   await withTempDir(async (dir) => {
     const settingsPath = join(dir, 'settings.json');
     const original = { hooks: { SessionStart: [FOREIGN_HOOK] }, other: { keep: true } };
@@ -71,6 +71,12 @@ test('install 写六个 hook，并备份原 settings', async () => {
     }
     // 只有 PreToolUse 带 matcher（少起进程）。
     assert.equal(settings.hooks.PreToolUse.at(-1).matcher, 'Read|Write|Edit');
+    // SessionEnd 与 PreCompact 共用 pre-compact.mjs：两个生命周期点走同一条提交
+    // 链路，只是预算不同（1200ms vs 30000ms）。
+    assert.equal(
+      settings.hooks.SessionEnd.at(-1).hooks[0].command,
+      settings.hooks.PreCompact.at(-1).hooks[0].command,
+    );
   });
 });
 

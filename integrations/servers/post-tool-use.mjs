@@ -66,7 +66,7 @@ export function toToolMessage(event) {
 }
 
 /**
- * @param {{ sessionId: string, cwd: string, toolName: string | null, toolUseId: string | null, toolInput: unknown, toolOutput: string | null }} event
+ * @param {{ event: string, sessionId: string, cwd: string, toolName: string | null, toolUseId: string | null, toolInput: unknown, toolOutput: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  */
 export async function handlePostToolUse(event, deps) {
@@ -113,7 +113,7 @@ export async function handlePostToolUse(event, deps) {
 
   await reportOverhead(
     {
-      event: 'PostToolUse',
+      event: event.event,
       sessionId: event.sessionId,
       phases: { processStartMs: processStartMs(), recallMs: 0, serializeMs: 0, captureMs },
     },

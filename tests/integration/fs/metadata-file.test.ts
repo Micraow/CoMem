@@ -311,7 +311,7 @@ describe('.meta.json 读写', () => {
   it('会话元数据往返：写完原样读回', async () => {
     const meta: SessionMeta = {
       ...SESSION_META,
-      status: 'committing',
+      status: 'archived',
       commitCount: 3,
       lastCommitAt: '2026-11-08T01:00:00.000Z',
       pendingTokens: 42,
@@ -485,7 +485,7 @@ describe('.meta.json 读写', () => {
     await expectCorruptMeta(() => store.readArchive(ARCHIVE_URI), ARCHIVE_URI);
   });
 
-  it('phase1.status 不是 preparing | ready | failed 时抛 INTERNAL', async () => {
+  it('phase1.status 不是 preparing | ready 时抛 INTERNAL', async () => {
     await writeRawMeta(
       ARCHIVE_URI,
       JSON.stringify({ ...ARCHIVE_META, phase1: { ...ARCHIVE_META.phase1, status: 'done' } }),

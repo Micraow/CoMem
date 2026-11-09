@@ -29,7 +29,7 @@ test('SessionStart：读 source，会话 ID 加 cx- 前缀', () => {
     source: 'resume',
   });
   assert.equal(event.host, 'codex');
-  assert.equal(event.event, 'SessionStart');
+  assert.equal(event.event, 'session_start');
   assert.equal(event.hostEventName, 'SessionStart');
   assert.equal(event.sessionId, `${SESSION_ID_PREFIX}thr_123`);
   assert.equal(event.cwd, '/work');
@@ -46,7 +46,7 @@ test('UserPromptSubmit：读 prompt，无事件 ID（靠游标兜底）', () => 
     turn_id: 'turn_1',
     prompt: '帮我找一下上周的设计决定',
   });
-  assert.equal(event.event, 'UserPromptSubmit');
+  assert.equal(event.event, 'user_prompt_submit');
   assert.equal(event.prompt, '帮我找一下上周的设计决定');
   assert.equal(event.eventId, null);
 });
@@ -63,10 +63,10 @@ test('PreToolUse：apply_patch 从补丁命令里取 comem:// 路径', () => {
       command: '*** Begin Patch\n*** Update File: comem://user/alice/memories/profile.md\n*** End Patch',
     },
   });
-  assert.equal(event.event, 'PreToolUse');
+  assert.equal(event.event, 'pre_tool_use');
   assert.equal(event.toolName, 'apply_patch');
   assert.equal(event.filePath, 'comem://user/alice/memories/profile.md');
-  assert.equal(event.eventId, 'PreToolUse:call_abc');
+  assert.equal(event.eventId, 'pre_tool_use:call_abc');
 });
 
 test('PreToolUse：Edit 用 file_path，并用 tool_use_id 合成事件 ID', () => {
@@ -79,7 +79,7 @@ test('PreToolUse：Edit 用 file_path，并用 tool_use_id 合成事件 ID', () 
     tool_input: { file_path: 'comem://user/alice/prefs/theme.md', old_string: 'a', new_string: 'b' },
   });
   assert.equal(event.filePath, 'comem://user/alice/prefs/theme.md');
-  assert.equal(event.eventId, 'PreToolUse:call_x');
+  assert.equal(event.eventId, 'pre_tool_use:call_x');
 });
 
 test('PreToolUse：Bash 不取路径（守卫只认文件工具）', () => {
@@ -105,7 +105,7 @@ test('PostToolUse：带 tool_response，渲染成文本', () => {
     tool_input: { command: 'ls' },
     tool_response: { exit_code: 0, stdout: 'a\nb' },
   });
-  assert.equal(event.event, 'PostToolUse');
+  assert.equal(event.event, 'post_tool_use');
   assert.equal(event.toolOutput, JSON.stringify({ exit_code: 0, stdout: 'a\nb' }));
 });
 
@@ -117,19 +117,21 @@ test('Stop：读 stop_hook_active，无事件 ID', () => {
     stop_hook_active: false,
     last_assistant_message: '已完成',
   });
-  assert.equal(event.event, 'Stop');
+  assert.equal(event.event, 'stop');
   assert.equal(event.eventId, null);
 });
 
-test('SessionEnd 归一成 PreCompact（与 §15.2 表格一致）', () => {
+test('SessionEnd 是一等事件：内部名 session_end，宿主名不丢', () => {
+  // 以前它被归一成 PreCompact，于是 `comem_hook_*` 里永远见不到会话结束那一段。
+  // 处理链路仍然复用（pre-compact.mjs），但事件名各自独立。
   const event = normalizeEvent({
     hook_event_name: 'SessionEnd',
     session_id: 'thr_9',
     cwd: '/repo',
     reason: 'other',
   });
-  assert.equal(event.event, 'PreCompact');
-  assert.equal(event.hostEventName, 'PreCompact');
+  assert.equal(event.event, 'session_end');
+  assert.equal(event.hostEventName, 'SessionEnd');
 });
 
 test('PreCompact：读 trigger', () => {
@@ -139,7 +141,7 @@ test('PreCompact：读 trigger', () => {
     cwd: '/repo',
     trigger: 'auto',
   });
-  assert.equal(event.event, 'PreCompact');
+  assert.equal(event.event, 'pre_compact');
 });
 
 test('未知事件被拒绝（不静默吞掉）', () => {
@@ -196,7 +198,7 @@ test('runHook：载荷解析后交给 handler，输出写进 stdout', async () =
     read: async () => ({ hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: '/r', prompt: 'x' }),
     write: (line) => lines.push(line),
   });
-  assert.equal(event.event, 'UserPromptSubmit');
+  assert.equal(event.event, 'user_prompt_submit');
   assert.deepEqual(JSON.parse(lines[0]), {
     hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'hi' },
   });
@@ -216,11 +218,12 @@ test('常量：前缀、预算、事件表齐全', () => {
   assert.equal(SESSION_ID_PREFIX, 'cx-');
   assert.equal(MAX_CONTEXT_BYTES, 9500);
   assert.deepEqual(Object.keys(EVENT_NAMES).sort(), [
-    'PostToolUse',
-    'PreCompact',
-    'PreToolUse',
-    'SessionStart',
-    'Stop',
-    'UserPromptSubmit',
+    'post_tool_use',
+    'pre_compact',
+    'pre_tool_use',
+    'session_end',
+    'session_start',
+    'stop',
+    'user_prompt_submit',
   ]);
 });

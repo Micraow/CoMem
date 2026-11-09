@@ -18,6 +18,14 @@
  * 读写必须**往返稳定**：`read` 出来的 `fields` 再 `upsertMemory` 写回去，文件正文
  * 逐字节相同。否则摘要 digest 对不上，每次写都会触发一次假失效（§9.3）。
  *
+ * ## 溯源（W97）
+ *
+ * frontmatter 的 `sources` 记「这条记忆由哪几次归档产生」，值是归档 URI，由服务端
+ * 在写入点确定（`MemoryUpdateInput.provenance`），**不由模型输出**。它进
+ * `RESERVED_KEYS`：不在 schema 字段里的键会在下一次重写时被 `serializeMemoryDocument`
+ * 丢掉，而 `upsertMemory` / `approve` 都是整份重写。旧文件没有这个键 → 读作空数组，
+ * 且不写这个键（输出与改动前一致）。
+ *
  * ## 端口为什么是「原样文档」
  *
  * `filesystem.read` 的 `text` 必须是**磁盘上的原始内容**（含 frontmatter），
@@ -58,7 +66,12 @@
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
-import { identityFields, renderPath, type MemoryTypeSchema } from '../domain/memory-type.js';
+import {
+  assertFieldTypes,
+  assertMemoryIdentity,
+  renderPath,
+  type MemoryTypeSchema,
+} from '../domain/memory-type.js';
 import { getMemoryType, profileMemoryType } from '../domain/memory-types/index.js';
 import { validateProfileBody } from '../domain/profile-format.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../domain/summary.js';
@@ -73,6 +86,13 @@ export interface MemoryRecord {
   readonly fields: Readonly<Record<string, unknown>>;
   readonly status: MemoryStatus;
   readonly updatedAt: string;
+  /**
+   * 这条记忆由哪几次归档产生（frontmatter 的保留键 `sources`），最旧在前。
+   *
+   * 由服务端在写入点确定（`provenance` 入参），**不由模型输出**：抽取模型没有可
+   * 引用的材料 URI，让它给只能得到幻觉。旧文件缺这个键时读作空数组。
+   */
+  readonly sources: readonly string[];
 }
 
 export interface MemoryWriteResult {
@@ -113,6 +133,17 @@ export type MemoryUpdate = (current: MemoryFields) => MemoryFields | null;
 export interface MemoryUpdateInput {
   readonly uri: Uri;
   readonly update: MemoryUpdate;
+  /**
+   * 本次写入追加到 `sources` 的溯源（`Uri` 是产生这条记忆的归档，`archive_NNN`）。
+   *
+   * 缺省 = 不改 `sources`（保留磁盘上的值）。值与写入点绑定：写入方知道自己在为哪次
+   * 归档写记忆，模型看不到原始材料 URI，让它输出只会得到幻觉。所以它不从抽取提示词
+   * 里来，也不进 `MemoryFields`。
+   *
+   * 只放在「先读后写」这一形态上：直接传字段的调用方（`remember`、`consolidation`
+   * 的写回）不掌握归档 URI，它们应当一个字段都不丢地保留旧值。
+   */
+  readonly provenance?: { readonly sources: readonly Uri[] };
 }
 
 /**
@@ -202,6 +233,24 @@ const URI_KEY = 'uri';
  * 模型没给过的东西。
  */
 const SUMMARY_KEY = 'summary';
+/**
+ * 溯源：这条记忆由哪几次归档产生（W97）。
+ *
+ * **必须是保留键。** `serializeMemoryDocument` 只写 `schema.fields` 与
+ * `RESERVED_KEYS`（下面的循环），其它键在下一次重写时静默消失——`read` 读出来是
+ * 对的、写回去就没了。它也不是记忆字段：模型不产出它，`edit` 也不该能改它。
+ */
+const SOURCES_KEY = 'sources';
+
+/**
+ * `sources` 的条数上限。
+ *
+ * 来源：经验假设。一条记忆通常由少数几次归档产生（新建一次、之后几次覆盖各一次），
+ * 20 是**防病态增长**的界：每次覆盖写都追加一个 URI，一条被频繁改写的记忆会无限
+ * 加长 frontmatter。一条 URI 约 90 字节，20 条约 1.8 KB，与一条记忆正文同量级。
+ * 超过时保留最近的 20 条（最早的先丢），顺序稳定为「最旧在前」。
+ */
+const MAX_SOURCES = 20;
 
 /** 这些键是文件元数据，不属于 `fields`。 */
 const RESERVED_KEYS: ReadonlySet<string> = new Set([
@@ -211,6 +260,7 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
   UPDATED_AT_KEY,
   URI_KEY,
   SUMMARY_KEY,
+  SOURCES_KEY,
 ]);
 
 /** 走复核闸门的记忆类型（§11.6）。 */
@@ -310,6 +360,8 @@ interface MemoryDocument {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly fields: Readonly<Record<string, unknown>>;
+  /** 溯源（保留键 `sources`），最旧在前；缺键时为空数组。 */
+  readonly sources: readonly string[];
   /** 正文（`## content` 及之后），与 `memory_diff.json` 的 before / after 同一形态 */
   readonly body: string;
 }
@@ -483,6 +535,43 @@ function parseStatus(value: unknown): MemoryStatus {
 }
 
 /**
+ * frontmatter 的 `sources` → 字符串数组。
+ *
+ * 缺键、写成标量、块里混进非字符串项都读作「没有可信的溯源」：一个解析不出来的
+ * URI 写进输出没有用，而抛错会让整个记忆读不出来（溯源是辅助信息，不是正文的
+ * 前置条件）。
+ */
+function parseSources(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item !== '');
+}
+
+/**
+ * 追加去重 + 截断到 `MAX_SOURCES`。
+ *
+ * 顺序 = 最旧在前：已有条目保持原顺序，新条目按传入顺序追加到尾部（同一个 URI
+ * 第二次出现不移动位置），超出上限时从头部丢。去重按 URI 字符串精确比较——归档
+ * URI 由服务自己渲染，不存在「同一个归档两种写法」。
+ *
+ * 导出给 `consolidation`：它要把被删除记忆的来源并进保留者，必须先按同一套规则
+ * 去重，否则两处各写一份就会一边留 20 条、一边留全部。
+ */
+export function appendSources(
+  current: readonly string[],
+  incoming: readonly string[],
+): readonly string[] {
+  const merged = [...current];
+  for (const uri of incoming) {
+    if (uri !== '' && !merged.includes(uri)) {
+      merged.push(uri);
+    }
+  }
+  return merged.length > MAX_SOURCES ? merged.slice(merged.length - MAX_SOURCES) : merged;
+}
+
+/**
  * 记忆文件的 L0 摘要：正文第一个非空行，按 L0 预算截断。
  *
  * 记忆的 `content` 按 §11.1 就是「一句话说清」，第一行已经是摘要量级；不调模型、
@@ -510,6 +599,8 @@ function serializeMemoryDocument(input: {
   readonly updatedAt: string;
   readonly schema: MemoryTypeSchema;
   readonly fields: Readonly<Record<string, unknown>>;
+  /** 空数组不写这个键：没有溯源的文件与 W97 之前的文件逐字节相同。 */
+  readonly sources: readonly string[];
 }): string {
   const header = [
     FRONTMATTER_DELIMITER,
@@ -519,6 +610,10 @@ function serializeMemoryDocument(input: {
     `${UPDATED_AT_KEY}: ${formatScalar(input.updatedAt)}`,
     `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
   ];
+
+  if (input.sources.length > 0) {
+    header.push(formatField(SOURCES_KEY, input.sources));
+  }
 
   // L0 摘要写进 frontmatter：`IndexObserver` 把它当 `abstract` 索引，检索侧的
   // 重排直接读它，不需要为了重排再打开文件（§8.5 的重排语义）。
@@ -591,6 +686,10 @@ function parseMemoryDocument(text: string): MemoryDocument | null {
     createdAt,
     updatedAt,
     fields,
+    // 只有在 `RESERVED_KEYS` 里，`sources` 才是「溯源」而不是一列普通 frontmatter
+    // 字段。不在保留键集合里时它会被上面的循环收进 `fields`，重写时又按 schema
+    // 丢掉——这正是「新键必须做成保留键」的失败形态，不要把它读成溯源。
+    sources: RESERVED_KEYS.has(SOURCES_KEY) ? parseSources(data[SOURCES_KEY]) : [],
     body,
   };
 }
@@ -621,49 +720,10 @@ export function renderMemoryUri(
 }
 
 /**
- * identity 字段全部必填（§11.1：没有 identity 就判定不了「这是同一条还是新的」）。
- *
- * 导出给抽取步骤：它要在调 `upsertMemory` 之前就知道 identity 是否齐全，缺字段的
- * 操作应当进 `skipped`，而不是让整步在写盘时抛错。
+ * identity 校验的实现定义在 `domain/memory-type.ts`（合并的计划阶段与这里的锁内
+ * 校验共用同一份）。转出是为了不改抽取步骤既有的 import 路径。
  */
-export function assertMemoryIdentity(
-  schema: MemoryTypeSchema,
-  values: Readonly<Record<string, unknown>>,
-): void {
-  for (const field of identityFields(schema)) {
-    const value = values[field.name];
-    if (typeof value !== 'string' || value === '') {
-      throw invalidArgument(`记忆类型 ${schema.type} 的 identity 字段 ${field.name} 不能为空。`, {
-        memoryType: schema.type,
-        field: field.name,
-      });
-    }
-  }
-}
-
-/** 字段类型必须与 schema 声明一致，否则写进去再读回来是另一种类型。 */
-function assertFieldTypes(
-  schema: MemoryTypeSchema,
-  values: Readonly<Record<string, unknown>>,
-): void {
-  for (const field of schema.fields) {
-    const value = values[field.name];
-    if (value === undefined) {
-      continue;
-    }
-    const valid =
-      field.type === 'string[]'
-        ? Array.isArray(value) && value.every((item) => typeof item === 'string')
-        : typeof value === field.type;
-    if (!valid) {
-      throw invalidArgument(`记忆字段 ${field.name} 的类型必须是 ${field.type}。`, {
-        memoryType: schema.type,
-        field: field.name,
-        expected: field.type,
-      });
-    }
-  }
-}
+export { assertMemoryIdentity };
 
 export class MemoryService {
   readonly #filesystem: MemoryServicePorts['filesystem'];
@@ -693,6 +753,7 @@ export class MemoryService {
       fields: document.fields,
       status: document.status,
       updatedAt: document.updatedAt,
+      sources: document.sources,
     };
   }
 
@@ -777,6 +838,12 @@ export class MemoryService {
           fields[UPDATED_AT_FIELD] = now;
         }
         const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
+        // 溯源只在**真的写盘**时追加：合并循环里所有字段操作都失败时（`next === null`）
+        // 这条记忆没有因为这次归档改变，给它记上一笔归档来源是错的。
+        const sources = appendSources(
+          existing?.sources ?? [],
+          (target.provenance?.sources ?? []).map((source) => source.toString()),
+        );
 
         const text = serializeMemoryDocument({
           uri: target.uri,
@@ -786,6 +853,7 @@ export class MemoryService {
           updatedAt: now,
           schema,
           fields,
+          sources,
         });
         await this.#filesystem.write(target.uri, text);
 
@@ -848,6 +916,9 @@ export class MemoryService {
           updatedAt: now,
           schema,
           fields: document.fields,
+          // 复核也是**一次完整重写**：不把读到的溯源带过来，approve 会在用户
+          // 点下「通过」的那一刻把 `sources` 抹掉。
+          sources: document.sources,
         }),
       );
       this.#logger.info('记忆复核通过', {

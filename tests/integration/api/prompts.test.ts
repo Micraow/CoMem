@@ -52,6 +52,9 @@ beforeEach(async () => {
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: UNREACHABLE_LLM_BASE_URL,
+      // 这组用例测路由接线，不是测「谁能改提示词」（由 admin-access-control 覆盖）。
+      // 绑定主体显式声明为系统管理员，写操作才到得了 PromptService。
+      COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
     },
   });
   await container.services.acl.ensureRootPreset(Uri.parse(ROOT));

@@ -63,6 +63,11 @@ export function elapsedMs(startedAt) {
  * `options.config` / `options.http` 供测试注入：真实调用每次都会重新读配置，
  * 测试里传假客户端即可，不需要落盘配置文件。
  *
+ * `report.event` 必须是**内部事件名**（`lib/events.json` 的键，snake_case）。调用方
+ * 一律转发适配器归一化后的 `event.event`，不自己拼字符串：服务端白名单
+ * （`src/services/observability.ts` 的 `HOOK_EVENTS`）只认这组名字，拼错或写成宿主
+ * 的 PascalCase 会被归成 `other`，按事件的指标维度就全丢了。
+ *
  * @param {{ event: string, sessionId: string, phases: Record<string, number> }} report
  * @param {{ config?: object, http?: { post(path: string, body?: unknown): Promise<unknown> } }} [options]
  * @returns {Promise<boolean>}

@@ -74,7 +74,7 @@ import type { Logger } from '../domain/log.js';
 import { validateProfileBody } from '../domain/profile-format.js';
 import { Uri } from '../domain/uri.js';
 
-import type { LlmCallStats, LlmService } from './llm.js';
+import type { LlmService } from './llm.js';
 
 /**
  * 只读聚合查询的最小结构端口。
@@ -133,7 +133,7 @@ const DEGRADED_DIRECTORY_LIMIT = 1000;
  * 画像一个 scope 只有一份，每份一次读，所以 200 份约等于 200 次文件读取。
  * 来源：经验值，没有实测。§17.5 把健康检查定为诊断端点（500ms 级），200 次
  * 本地读在这个预算内；画像更多的部署应该用专门的巡检脚本，而不是让 `/health`
- * 与 `/stats/memories` 把磁盘读穿。达到上限时返回值 `truncated: true` 并记一条
+ * 把磁盘读穿。达到上限时返回值 `truncated: true` 并记一条
  * `warn`，**不静默截断**。
  */
 const PROFILE_CHECK_LIMIT = 200;
@@ -142,15 +142,28 @@ const PROFILE_CHECK_LIMIT = 200;
 const MILLISECONDS_PER_SECOND = 1000;
 
 /**
- * §15.2 的七个 Hook 生命周期点。`event` 标签只允许这几个值加 `other`。
+ * 会在 `/metrics` 里出现的 Hook 事件：§15.2 的七个生命周期点减去 `pre_tool_use`。
+ * `event` 标签只允许这几个值加 `other`。
  *
  * 白名单而不是「原样透传」：Hook 是装进宿主的独立进程，它的上报内容是外部输入，
  * 一个拼错的事件名会在指标库里造出一个新时间序列，而且永远不会有第二个样本。
+ *
+ * **`pre_tool_use` 不在这里。** `PreToolUse` 的处理器只做本地字符串判断、刻意不发
+ * HTTP（`integrations/servers/pre-tool-use.mjs` 的文件头），它不承担开销上报——给每次
+ * 工具调用加一次网络往返不值得。留在白名单里会让控制台多一个永远不会有点的行，
+ * 而空行会被读成「这个事件没发生」，不是「这个事件没被采集」。它的耗时排查走宿主
+ * 自己的日志。这条约定由 hook 侧的 `events.json`（`reportsOverhead: false`）与
+ * `integrations/tests/event-names.test.mjs` 共同守住。
+ *
+ * 名字是 **snake_case**。上报方（`integrations/lib/events.json`）必须发这组名字，
+ * 它同时被控制台的行键（`web/pages/monitor.vue`）与 hook 的预算表
+ * （`integrations/lib/lifecycle.mjs`）使用。两边的一致性由
+ * `tests/integration/services/observability.test.ts` 断言：加事件时同时改这一张表
+ * 与 `integrations/lib/events.json`，不要在两个方向上各加一套映射。
  */
 const HOOK_EVENTS: readonly string[] = [
   'session_start',
   'user_prompt_submit',
-  'pre_tool_use',
   'post_tool_use',
   'stop',
   'pre_compact',
@@ -287,8 +300,8 @@ export interface ObservabilityServiceDeps {
   /** §17.4 的模型用量；`LlmService.stats` 是累加器 */
   readonly llm: Pick<LlmService, 'stats'>;
   /**
-   * 画像正文读取。必须有：缺了它 `/stats/memories` 与 `/health` 会永远报 0 违规，
-   * 「服务端校验画像」就变成假实现。
+   * 画像正文读取。必须有：缺了它 `health()` 返回的 `memory.profileFormat` 会永远
+   * 报 0 违规，「服务端校验画像」就变成假实现。
    */
   readonly profileBodies: ProfileBodyReader;
   readonly logger: Logger;
@@ -374,8 +387,6 @@ export class ObservabilityService {
   readonly #hookPhases = new Map<string, Map<string, number>>();
   /** 每个事件最近一次的单轮阻塞合计（`comem_hook_overhead_total_seconds`）。 */
   readonly #hookTotals = new Map<string, number>();
-  /** 每个事件最近一次的后台耗时（`comem_hook_async_seconds`）。 */
-  readonly #hookAsync = new Map<string, number>();
   /**
    * 后台阶段的**进程级**最近一次耗时。
    *
@@ -554,8 +565,10 @@ export class ObservabilityService {
 
     this.#hookPhases.set(event, phaseValues);
     this.#hookTotals.set(event, totalMs);
-    // 后台耗时与阻塞分开（§17.2）：它来自后台任务对 `phase()` 的调用，不是这份报告。
-    this.#hookAsync.set(event, sumOf(Object.fromEntries(this.#asyncPhases), ASYNC_PHASES));
+    // 后台耗时与阻塞分开（§17.2），也不挂到这次上报上：后台阶段的最近一次值由
+    // `#asyncPhases` 自己维护，`/metrics` 直接按 `phase` 渲染。以前这里把同一份
+    // 进程级快照复制进「刚上报的那个事件」，于是每个事件的 async 值都一样——那是
+    // 给同一个值贴了不同的标签，不是维度。
 
     this.#logger.info('Hook 开销上报完成。', {
       event: report.event,
@@ -603,16 +616,16 @@ export class ObservabilityService {
   }
 
   /**
-   * 画像格式契约自查（§11.1）。
+   * 画像格式契约自查（§11.1）。只由 `health()` 调用。
    *
    * 索引里 `memory_type = 'profile'` 的节点就是全部画像（画像单文件类型，一个
    * scope 一份）。逐个读正文跑 `validateProfileBody`，只统计、不修改文件。
    *
-   * **独立成公开方法**：`/stats/memories` 只关心画像格式，不应该为了它把
-   * `health()` 的目录摘要读盘（最多 1000 个目录）也跑一遍。`health()` 内部调用
-   * 同一个方法，两条路径的统计口径只有一份。
+   * 不对外公开：`health()` 的 `memory.profileFormat` 是唯一出口。曾经有过一个
+   * 分析端点只为避开 `health()` 的目录摘要读盘而单独调它，那个端点已删——没有
+   * 第二个调用方就不留公开面（`pnpm check:orphans` 的口径）。
    */
-  async profileFormatHealth(): Promise<ProfileFormatHealth> {
+  private async profileFormatHealth(): Promise<ProfileFormatHealth> {
     // 多取一行判断是否还有更多，避免再跑一次 COUNT。
     const rows = this.#db
       .prepare(
@@ -665,11 +678,6 @@ export class ObservabilityService {
     }
 
     return { checked, invalid, violations, truncated };
-  }
-
-  /** §17.4 模型用量与成本。返回 `LlmService` 的累加器快照。 */
-  modelUsage(): { readonly stats: LlmCallStats } {
-    return { stats: this.#llm.stats };
   }
 
   /**
@@ -741,13 +749,16 @@ export class ObservabilityService {
     }
 
     lines.push(
-      '# HELP comem_hook_async_seconds 后台处理耗时，不阻塞用户',
+      '# HELP comem_hook_async_seconds 后台处理耗时，不阻塞用户（每个后台阶段最近一次）',
       '# TYPE comem_hook_async_seconds gauge',
     );
-    for (const [event, asyncMs] of this.#hookAsync) {
+    // 按 `phase` 而不是 `event`：`#asyncPhases` 是进程级的「每个阶段最近一次」，
+    // 同一份数据不属于任何一次 hook 上报。阶段之间是真维度（归档/抽取/合并/摘要
+    // 是四个不同的操作，各有各的耗时），事件之间不是。
+    for (const [phase, elapsedMs] of this.#asyncPhases) {
       lines.push(
-        `comem_hook_async_seconds{event="${event}"} ${metricValue(
-          asyncMs / MILLISECONDS_PER_SECOND,
+        `comem_hook_async_seconds{phase="${phase}"} ${metricValue(
+          elapsedMs / MILLISECONDS_PER_SECOND,
         )}`,
       );
     }
@@ -770,9 +781,27 @@ export class ObservabilityService {
       '# TYPE comem_llm_tokens_total counter',
       `comem_llm_tokens_total{kind="prompt"} ${metricValue(stats.promptTokens)}`,
       `comem_llm_tokens_total{kind="completion"} ${metricValue(stats.completionTokens)}`,
-      '# HELP comem_llm_cost_usd_total 模型成本累计，美元（§18 的 pricing 换算）',
-      '# TYPE comem_llm_cost_usd_total counter',
-      `comem_llm_cost_usd_total ${metricValue(stats.costUsd ?? 0)}`,
+    );
+
+    // 成本只在真算得出来的时候才有样本。`costUsd` 为 `null` 表示「没配
+    // `providers.llm.default.pricing`，成本不可计算」；配了单价它就是 0 起步的累加
+    // 值（`LlmService.emptyStats`）。写成 `?? 0` 会让「没配单价」与「确实花了 0
+    // 美元」在 `/metrics` 上长得一模一样——控制台的「模型成本累计」就永远是
+    // `$0.0000`，看起来像一份正常数据。
+    // Prometheus 里「序列不存在」本身就是「未知」，不需要 `-1` 之类的哨兵值。
+    if (stats.costUsd !== null) {
+      lines.push(
+        '# HELP comem_llm_cost_usd_total 模型成本累计，美元（§18 的 pricing 换算）',
+        '# TYPE comem_llm_cost_usd_total counter',
+        `comem_llm_cost_usd_total ${metricValue(stats.costUsd)}`,
+      );
+    }
+
+    // 再给一个 0/1，抓取端不用猜「成本序列为什么不见了」。
+    lines.push(
+      '# HELP comem_llm_pricing_configured 是否配置了模型单价（0 = 未配置，成本不可计算）',
+      '# TYPE comem_llm_pricing_configured gauge',
+      `comem_llm_pricing_configured ${stats.costUsd === null ? 0 : 1}`,
     );
 
     return `${lines.join('\n')}\n`;

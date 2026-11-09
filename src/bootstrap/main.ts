@@ -12,6 +12,8 @@
  * 2. 数据根可写：只读数据根时服务能起来，但第一次写入才失败——那时已经在处理
  *    用户请求了。
  * 3. `task.recover()`：回收租约过期的 `running` 任务（§10.4 的启动扫描）。
+ * 4. `warnIfVectorsMissing()`：`retrieval.engine` 含向量时，存量记忆没有向量就提醒
+ *    一次（处置是跑 `pnpm reindex`，见该函数的注释）。
  *
  * ## 优雅退出为什么需要超时兜底
  *
@@ -23,9 +25,10 @@
 import { pathToFileURL } from 'node:url';
 
 import { startHttpServer } from '../api/http/server.js';
+import { hasDocumentsMissingVectors } from '../commands/reindex.js';
 import type { Logger } from '../domain/log.js';
 
-import { assertDataDirWritable, createContainer } from './container.js';
+import { assertDataDirWritable, createContainer, type Container } from './container.js';
 
 /**
  * 优雅退出的超时：10 秒。
@@ -72,6 +75,47 @@ export async function shutdownGracefully(
 }
 
 /**
+ * 启动时提醒「存量记忆没有向量」。
+ *
+ * 把 `retrieval.engine` 从 `fts5` 改成 `vector` / `hybrid`（或第一次配好嵌入供应商）
+ * 之后，旧记忆的正文没有嵌过，向量检索对它们一条都命中不了——用户看到的现象是
+ * 「切了引擎之后老记忆全搜不到了」，而配置、启动日志、健康检查都没有任何提示。
+ * 补齐靠 `pnpm reindex`，所以这里只提醒，**不回填**：启动时自动回填会在用户不知情
+ * 时持续消耗供应商配额。
+ *
+ * 「什么算缺向量」的查询在 `commands/reindex.ts` 的 `hasDocumentsMissingVectors`，
+ * 与补齐入口共用同一份判定（目录行、空正文、`content_digest` 对不上的旧向量）——
+ * 写在这里会让 `main` 出现业务逻辑与第二份口径。
+ *
+ * 只在 `retrieval.engine` 含向量且配了嵌入供应商时查；`fts5` 部署一次都不查。
+ */
+export function warnIfVectorsMissing(
+  target: Pick<Container, 'config' | 'logger' | 'db'>,
+): void {
+  const { config, logger, db } = target;
+  if (config.retrieval.engine === 'fts5') {
+    return;
+  }
+  const embeddingConfig = config.providers.embedding;
+  // `retrieval.engine` 不是 `fts5` 时配置校验已经要求嵌入供应商可用；这里再判一次
+  // 是因为「没配嵌入」的部署里 `node_embedding` 表根本没有建，查它会报 no such table。
+  if (embeddingConfig.type === 'disabled') {
+    return;
+  }
+  if (!hasDocumentsMissingVectors(db, embeddingConfig.model)) {
+    return;
+  }
+  logger.warn(
+    '向量检索已启用，但存量记忆里还有节点没有向量：这些记忆用向量检索搜不到。跑 `pnpm reindex` 从磁盘补齐。',
+    {
+      engine: config.retrieval.engine,
+      model: embeddingConfig.model,
+      dimension: embeddingConfig.dimension,
+    },
+  );
+}
+
+/**
  * 启动服务，等待退出信号。
  *
  * `argv` 默认取进程参数：`loadConfig` 只识别 `--config` 与 `--data-dir`（§18），
@@ -99,6 +143,10 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
   // 「文件在、检索不到」的旧状态。代价是一次日志读取 + 每条记录一次 upsert，
   // 记录为 0 时只是一次 `readFile` 的 ENOENT。
   await container.services.reconcile.replay();
+
+  // 重放会把「文件已落盘但索引没写成」的节点补进 `node`，所以探测放在它之后：
+  // 补进来的节点同样没有向量，先查会漏掉它们。
+  warnIfVectorsMissing(container);
 
   // 阶段二执行器（§10.1、§10.4）：`recover()` 之后再启动，回收出来的任务第一轮
   // 就会被认领。没有它，`commit` 建的归档任务永远停在 `pending`。

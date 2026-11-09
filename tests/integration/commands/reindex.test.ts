@@ -222,6 +222,9 @@ describe('embeddings 重建', () => {
 
     const first = await runReindex({ dataDir, configPath, only: 'embeddings' });
     expect(first.rewritten).toBe(2);
+    // 补齐的向量条数单独报：切换 `retrieval.engine` 之后要看的就是这个数字，
+    // `rewritten` 混着检索索引行，回答不了「补了多少条向量」。
+    expect(first.vectors).toBe(2);
     expect(first.failed).toBe(3);
 
     mocks.embedMany.mockImplementation(({ values }: { values: string[] }) =>
@@ -231,6 +234,7 @@ describe('embeddings 重建', () => {
     const second = await runReindex({ dataDir, configPath, only: 'embeddings' });
     expect(second.skipped).toBe(2);
     expect(second.rewritten).toBe(3);
+    expect(second.vectors).toBe(3);
     expect(second.failed).toBe(0);
 
     const db = openDb();

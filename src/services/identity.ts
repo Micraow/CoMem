@@ -135,6 +135,16 @@ function groupNotFound(id: string): ComemError {
   return new ComemError('NOT_FOUND', `组不存在：${id}`, { groupId: id });
 }
 
+/**
+ * 成员角色是派生值：唯一真相是 `app_group.owner_user_id`。
+ *
+ * 不读 `group_member.role`：那一列可能写着 `owner`，但授权从来不认它，写进去只会
+ * 让人以为那个用户能管理组。
+ */
+function roleOf(ownerUserId: string | null, userId: string): GroupMember['role'] {
+  return ownerUserId === userId ? 'owner' : 'member';
+}
+
 export class IdentityService {
   readonly #users: UserRepository;
   readonly #groups: GroupRepository;
@@ -322,28 +332,28 @@ export class IdentityService {
   // ── 成员 ──
 
   /**
-   * 加成员，默认角色 `member`。组或用户不存在抛 `NOT_FOUND`。
+   * 加成员。组或用户不存在抛 `NOT_FOUND`。
+   *
+   * **不接收角色**：组的 owner 是 `app_group.owner_user_id`，不是成员行上的属性。
+   * `group_member.role` 列已废弃，这里仍按旧签名写一个 `'member'`（适配层尚未
+   * 迁移），但返回的 `role` 按 owner 派生，读取方只认 `listMembers`。
    *
    * 存在性检查放在服务层：`group_member` 的外键是防御纵深（绕过用例直接写行时由
    * 数据库兜底），但它的报错是 `FOREIGN KEY constraint failed`，映射不成
    * `NOT_FOUND`。这里先检查，才能给出「组或用户不存在」的稳定错误码。已禁用的
    * 用户可以加入组——成员关系是数据，禁用是登录状态，重新启用后关系自动生效。
    */
-  addMember(
-    groupId: string,
-    userId: string,
-    role: GroupMember['role'] = 'member',
-    now: Date = new Date(),
-  ): GroupMember {
-    if (this.#groups.get(groupId) === null) {
+  addMember(groupId: string, userId: string, now: Date = new Date()): GroupMember {
+    const group = this.#groups.get(groupId);
+    if (group === null) {
       throw groupNotFound(groupId);
     }
     if (this.#users.get(userId) === null) {
       throw userNotFound(userId);
     }
-    const member = this.#groups.addMember(groupId, userId, role, now);
-    this.#logger.info('组成员已加入', { groupId, userId, role });
-    return member;
+    const member = this.#groups.addMember(groupId, userId, 'member', now);
+    this.#logger.info('组成员已加入', { groupId, userId });
+    return { ...member, role: roleOf(group.ownerUserId, userId) };
   }
 
   /** 移除成员。不是成员抛 `NOT_FOUND`。 */
@@ -357,12 +367,21 @@ export class IdentityService {
     this.#logger.info('组成员已移除', { groupId, userId });
   }
 
-  /** 组成员列表；组不存在抛 `NOT_FOUND`。 */
+  /**
+   * 组成员列表；组不存在抛 `NOT_FOUND`。
+   *
+   * `role` 在读取时派生：`userId === group.ownerUserId` 才是 `owner`。`group_member`
+   * 上那一列是旧数据，可能写着 `owner`，但那个用户从来没有过 owner 的能力——
+   * 用它就是一个对用户撒谎的字段。
+   */
   listMembers(groupId: string): readonly GroupMember[] {
-    if (this.#groups.get(groupId) === null) {
+    const group = this.#groups.get(groupId);
+    if (group === null) {
       throw groupNotFound(groupId);
     }
-    return this.#groups.listMembers(groupId);
+    return this.#groups
+      .listMembers(groupId)
+      .map((member) => ({ ...member, role: roleOf(group.ownerUserId, member.userId) }));
   }
 
   // ── 认证 ──

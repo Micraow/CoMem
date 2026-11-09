@@ -178,16 +178,22 @@ export class AiSdkEmbeddingProvider implements EmbeddingProvider {
 
       for (const embedding of result.embeddings) {
         if (embedding.length !== this.dimension) {
-          // 维度不一致是配置错误（模型换了、配置写错），但它落在供应商的返回里，
-          // 按契约映射成 PROVIDER_UNAVAILABLE；`details` 里的 expected / actual
-          // 是唯一能让人一眼看出问题的那条信息。
+          // 维度不一致是**配置错误**（`providers.embedding.dimension` 与模型不符），
+          // 不是供应商故障：同一条正文重发多少次，返回的还是这个维度。
           //
-          // 注意 PROVIDER_UNAVAILABLE 在 `domain/errors.ts` 的 `RETRYABLE_CODES` 里：
-          // 上层重试一次仍然会拿到同样的维度。这条映射与「配置错误不重试」的原则
-          // 冲突，改成 INVALID_ARGUMENT 是一次调用方兼容性变更，需要先确认。
+          // 用 INVALID_ARGUMENT 而不是 PROVIDER_UNAVAILABLE：
+          //
+          // 1. PROVIDER_UNAVAILABLE 在 `domain/errors.ts` 的 `RETRYABLE_CODES` 里，
+          //    `services/llm.ts` 会判成可重试——一个改配置才能解决的错误被反复重发，
+          //    日志刷屏而永远不会成功。
+          // 2. INVALID_ARGUMENT 在 `isTerminalStepError` 里，步骤层与任务层不再重放。
+          // 3. 对外状态码是 400 而不是 503：错在配置，不在供应商可用性。
+          //
+          // 消息里必须有两个数字：只说「维度不一致」时，用户不知道该改配置还是
+          // 该换模型。
           throw new ComemError(
-            'PROVIDER_UNAVAILABLE',
-            `嵌入模型返回的向量维度与配置不一致：期望 ${this.dimension}，实际 ${embedding.length}。`,
+            'INVALID_ARGUMENT',
+            `嵌入模型返回的向量维度与配置不一致：providers.embedding.dimension 配置为 ${this.dimension}，供应商返回 ${embedding.length}。请检查 dimension 与模型名（${this.model}）是否对应。`,
             { expected: this.dimension, actual: embedding.length, model: this.model },
           );
         }
@@ -207,13 +213,20 @@ export class AiSdkEmbeddingProvider implements EmbeddingProvider {
    * 随之中断。`EmbeddingOptions.signal`（HTTP 请求断开时由接口层传入）与超时信号
    * 用 `AbortSignal.any` 合并——任一触发都中止这次调用。
    *
+   * `EmbeddingOptions.timeoutMs` 是**上限**：实际取
+   * `min(构造时的 timeoutSeconds * 1000, timeoutMs)`，内部预算只能收紧用户配置。
+   *
    * 定时器 `unref()`：正常结束时它会清掉，但进程退出时不该被一个 30 秒的计时器拖住。
    */
   private async run<T>(
     operation: (abortSignal: AbortSignal) => Promise<T>,
     options?: EmbeddingOptions,
   ): Promise<T> {
-    const timeoutMs = options?.timeoutMs ?? this.timeoutSeconds * MILLISECONDS_PER_SECOND;
+    // 与重排同一语义：`timeoutMs` 只能收紧 `providers.embedding.timeoutSeconds`，
+    // 不能放宽。查询嵌入的 6 秒预算不该把用户配的 1 秒变成 6 秒。
+    const configuredMs = this.timeoutSeconds * MILLISECONDS_PER_SECOND;
+    const timeoutMs =
+      options?.timeoutMs === undefined ? configuredMs : Math.min(configuredMs, options.timeoutMs);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {

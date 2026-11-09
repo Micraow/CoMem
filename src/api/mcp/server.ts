@@ -18,8 +18,10 @@
  *
  * ## 错误
  *
- * 工具抛 `ComemError` 时消息原样进 MCP 的 error 结果（`isError: true`），不暴露
- * 堆栈；非 `ComemError` 收敛成 `INTERNAL`，堆栈只进日志（§19）。
+ * 工具抛 `ComemError` 时收敛成 `isError: true`，文本统一为 `CODE: message`——
+ * 与截止时间闸门返回的 `TOOL_DEADLINE_EXCEEDED: ...` 同一形状，宿主可以按 code
+ * 分支，不必匹配中文消息。不暴露堆栈；非 `ComemError` 收敛成 `INTERNAL`，堆栈只
+ * 进日志（§19）。
  *
  * ## 为什么 `mount` 用结构化的最小接口
  *
@@ -271,7 +273,10 @@ export class McpHttpServer {
         } else {
           this.#options.logger.warn('MCP 工具拒绝。', fields);
         }
-        return { content: [{ type: 'text', text: failure.message }], isError: true };
+        return {
+          content: [{ type: 'text', text: `${failure.code}: ${failure.message}` }],
+          isError: true,
+        };
       }
     });
 

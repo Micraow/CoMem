@@ -173,19 +173,32 @@ describe('embed', () => {
     expect(result.usage).toEqual({ promptTokens: 30, totalTokens: 30 });
   });
 
-  it('维度不匹配抛 PROVIDER_UNAVAILABLE，并带 expected / actual', async () => {
+  /**
+   * 维度不一致是配置错误，必须落到**不可重试**的错误码上。
+   *
+   * 曾经的映射是 PROVIDER_UNAVAILABLE（在 `RETRYABLE_CODES` 里）：把
+   * `providers.embedding.dimension` 写错一位，每次嵌入都失败、每次都被当成
+   * 「供应商暂时不可用」重发，永远不会成功，而错误信息把排查方向指向供应商。
+   */
+  it('维度不匹配抛 INVALID_ARGUMENT（不可重试），消息里带两边实际值', async () => {
     const provider = createProvider();
     mocks.embedMany.mockResolvedValue(embedResult([[1, 0]]));
 
     const error = await provider.embed(['a']).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(ComemError);
-    expect((error as ComemError).code).toBe('PROVIDER_UNAVAILABLE');
+    expect((error as ComemError).code).toBe('INVALID_ARGUMENT');
+    expect(isRetryable(error as ComemError)).toBe(false);
     expect((error as ComemError).details).toMatchObject({
       expected: DIMENSION,
       actual: 2,
       model: MODEL,
     });
+    // 两个数字都要在消息里：只带 details 时，读到日志的人看不到它们。
+    expect((error as ComemError).message).toContain(`配置为 ${String(DIMENSION)}`);
+    expect((error as ComemError).message).toContain('供应商返回 2');
+    // 适配器自己不重试：一次调用只打一次供应商。
+    expect(mocks.embedMany).toHaveBeenCalledTimes(1);
   });
 
   it('透传 abortSignal 给 SDK', async () => {
@@ -196,6 +209,33 @@ describe('embed', () => {
 
     const call = mocks.embedMany.mock.calls[0]?.[0] as { abortSignal: AbortSignal };
     expect(call.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('timeoutMs 只能收紧配置，不能放宽：配置 1 秒 + timeoutMs 12000 实际按 1000 超时', async () => {
+    const provider = createProvider({ timeoutSeconds: 1 });
+    // 永远不返回，等超时定时器 abort。
+    mocks.embedMany.mockImplementation(
+      ({ abortSignal }: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          abortSignal.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
+
+    const startedAt = Date.now();
+    const error = await provider
+      .embed(['a'], { timeoutMs: 12_000 })
+      .catch((caught: unknown) => caught);
+    const elapsedMs = Date.now() - startedAt;
+
+    // 错误里带的就是**实际生效**的预算：1000 而不是 12000。
+    expect(error).toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+      details: { timeoutMs: 1000 },
+    });
+    expect(elapsedMs).toBeGreaterThanOrEqual(900);
+    expect(elapsedMs).toBeLessThan(4_000);
   });
 
   it('超时抛 PROVIDER_UNAVAILABLE', async () => {

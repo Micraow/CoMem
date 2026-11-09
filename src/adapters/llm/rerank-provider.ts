@@ -226,13 +226,21 @@ export class HttpRerankProvider implements RerankProvider {
    * （HTTP 请求断开时由接口层传入）与超时信号用 `AbortSignal.any` 合并——任一
    * 触发都中止这次调用。
    *
+   * `RerankOptions.timeoutMs` 是**上限**：实际取
+   * `min(构造时的 timeoutSeconds * 1000, timeoutMs)`，内部预算只能收紧用户配置。
+   *
    * 定时器 `unref()`：正常结束时它会清掉，但进程退出时不该被一个 10 秒的计时器拖住。
    */
   async #run<T>(
     operation: (abortSignal: AbortSignal) => Promise<T>,
     options?: RerankOptions,
   ): Promise<T> {
-    const timeoutMs = options?.timeoutMs ?? this.#timeoutSeconds * MILLISECONDS_PER_SECOND;
+    // `timeoutMs` 是**上限**，不是覆盖值：`providers.rerank.timeoutSeconds` 是
+    // 用户配的预算，检索在总上限内只能收紧它（`QUERY_RERANK_TIMEOUT_MS`）。反过来
+    // 放宽会让「配置 1 秒」实际等 12 秒，配置项等于没生效。
+    const configuredMs = this.#timeoutSeconds * MILLISECONDS_PER_SECOND;
+    const timeoutMs =
+      options?.timeoutMs === undefined ? configuredMs : Math.min(configuredMs, options.timeoutMs);
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {

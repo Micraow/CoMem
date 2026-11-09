@@ -31,7 +31,6 @@ const SEARCH: SearchQuery = {
   contextTypes: ['memory'],
   levels: ['L0', 'L1'],
   limit: 10,
-  scoreThreshold: 0.5,
 };
 
 const GLOB: GlobQuery = {

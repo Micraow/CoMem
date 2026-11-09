@@ -81,7 +81,7 @@ import { EmbeddingRepository } from '../adapters/sqlite/embedding-repository.js'
 import { ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import { MemoryLinkRepository } from '../adapters/sqlite/memory-link-repository.js';
-import { NodeRepository, nodeSelfRowSql } from '../adapters/sqlite/node-repository.js';
+import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { PromptRepository } from '../adapters/sqlite/prompt-repository.js';
 import { UserRepository } from '../adapters/sqlite/user-repository.js';
@@ -94,7 +94,6 @@ import type { ToolRegistry } from '../api/mcp/registry.js';
 import { McpHttpServer } from '../api/mcp/server.js';
 import type { HttpRouteGroup } from '../api/http/server.js';
 import { createHttpRouteGroups } from '../api/http/routes/index.js';
-import type { MemoryStatsRow } from '../api/http/routes/stats.js';
 import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
 import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
@@ -616,16 +615,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   // （`search` / `summary` / `memory-extract`）不属于本 wave 的所有权，推导见
   // `services/prompts/registry.ts`。
   bindPromptRenderer(prompts);
-  // 请求记录的保留策略在启动时执行一次（§17.6 的 7 天 / 10 万条）。
-  //
-  // **不做定时任务**：单机部署的「启动清理」已经能挡住无限增长，常驻定时器要多
-  // 一个生命周期与并发问题，收益抵不过成本。`prune` 自己在删到行时记 info 日志
-  // （含 `deleted`），启动日志因此能回答「这次清掉了多少」。
-  requestLog.prune({
-    retainDays: config.telemetry.requestLog.retainDays,
-    retainRows: config.telemetry.requestLog.retainRows,
-    now: new Date(),
-  });
+  // `request_log` 的裁剪跟着调度器走（§17.6）：表在进程活着的时候长，只在启动时
+  // 裁一次就等于「常驻越久、表越大」。调度器那一轮每轮都调 `prune`，所以这里不裁；
+  // 调度器因开关全关而不启动时，启动清理是唯一保证，见下方 `schedulerEnabled`。
   const embeddings = new EmbeddingRepository({ db, logger });
   const vectors = new SqliteVectorIndex({ db, logger });
 
@@ -775,7 +767,6 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     ]),
   ];
   const acl = new AclService({
-    dataDir,
     db,
     aclFile,
     permissions,
@@ -836,6 +827,11 @@ async function ensureUserNamespace(userId: string): Promise<void> {
 
   const assembler = new ContextAssembler({ store, metadata, authorizer: acl, logger });
 
+  // 对账日志装配在观察者之前：索引写失败的记录由观察者、资源与技能三条写路径
+  // 共用同一个 `ReconcileLog`，与重放器是同一条串行队列（见
+  // `adapters/fs/reconcile-log.ts` 的文件头）。
+  const reconcileLog = new ReconcileLog({ dataDir, logger });
+
   const indexObserver = new IndexObserver({
     store,
     index,
@@ -844,6 +840,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     nodes,
     permissions,
     logger,
+    reconcile: reconcileLog,
     embedding,
     // 未配置嵌入时 `node_embedding` 表根本没有建（`ensureSchema` 只在
     // `type !== 'disabled'` 时跑）。注入一个删不掉的仓储只会让默认部署的每一次
@@ -1008,8 +1005,6 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     maxIterations: config.memory.consolidation.maxIterations,
   });
 
-  const reconcileLog = new ReconcileLog({ dataDir, logger });
-
   const resource = new ResourceService({
     store,
     locks,
@@ -1151,6 +1146,13 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     staged: resource,
     reconcile,
     memories: { read: (uri) => memory.read(uri) },
+    // 每轮都裁一次（§17.6）。仓储在没有超期、也没超行数时只做一次索引查找与一次
+    // `COUNT(*)`（10 万行实测约 1 ms），不需要另设频率或分批。
+    requestLog,
+    requestLogRetention: {
+      retainDays: config.telemetry.requestLog.retainDays,
+      retainRows: config.telemetry.requestLog.retainRows,
+    },
     expiry: {
       idleTimeoutSeconds: config.session.expiry.idleTimeoutSeconds,
       action: config.session.expiry.action,
@@ -1158,17 +1160,22 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     ttlSweepBatchSize: config.memory.ttl.sweepBatchSize,
   });
 
-  // 开关全关时不起定时器：空转的 30 秒定时器是纯浪费，而且会让「调度器在跑」
-  // 这条日志失去信息量。
+  // 「全关」指四个开关同时成立：`session.autoCommit.enabled` 为假、
+  // `session.expiry.idleTimeoutSeconds` 为 0、`memory.ttl.defaultDays` 为 0、
+  // `memory.ttl.retentionDays` 为 0。这时不起定时器：空转的 30 秒定时器是纯浪费，
+  // 而且会让「调度器在跑」这条日志失去信息量。
   //
   // `retentionDays > 0` 也算一个开关：两段式里第一段（软归档）与第二段（物理删除）
   // 是独立的，`defaultDays: 0` + `retentionDays: 30` 是「不再新增归档、只回收已有的」
   // 这一种合法配法，漏判它就等于让物理删除永不发生。
   //
   // **临时上传清理（`_meta/tmp/`）也挂在调度轮次上，不单独计时。** 因此它跟着
-  // 这里的开关走：三个开关全关时调度器不启动，超时的上传要等下次打开任一开关
+  // 这里的开关走：四个开关全关时调度器不启动，超时的上传要等下次打开任一开关
   // （或手工删除）。这是有意的取舍——不为一个低频清理再起一个定时器；这条限制
   // 需要写进运维文档的「已知限制」。
+  //
+  // **`request_log` 裁剪同理。** 开关全关时它只剩 `else` 分支里的启动清理一次，
+  // 常驻进程里表会一直长；要让它持续被裁，至少得打开上面任一开关。
   const ttlPurgeEnabled = config.memory.ttl.retentionDays > 0;
   const schedulerEnabled =
     config.session.autoCommit.enabled ||
@@ -1192,7 +1199,15 @@ async function ensureUserNamespace(userId: string): Promise<void> {
             : '关',
     });
   } else {
-    logger.info('调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。', {});
+    logger.info('调度器未启动：自动提交、会话过期、记忆 TTL 自动归档、归档物理删除全部关闭。', {});
+    // 调度器不启动时，启动清理是 `request_log` 唯一会发生的裁剪。它不是「防御性
+    // 编程」：这条配置下没有第二个裁剪路径，删掉它表就会无限长。调度器启动时这里
+    // 不裁——第一轮（≤30 秒）就会裁，启动时再裁一次是重复的。
+    requestLog.prune({
+      retainDays: config.telemetry.requestLog.retainDays,
+      retainRows: config.telemetry.requestLog.retainRows,
+      now: new Date(),
+    });
   }
 
   const observability = new ObservabilityService({
@@ -1251,6 +1266,8 @@ async function ensureUserNamespace(userId: string): Promise<void> {
       index,
       logger,
       config,
+      // 与 HTTP `/health` 共用同一份降级摘要取数（`ObservabilityService.health()`）。
+      observability,
     },
   });
 
@@ -1296,6 +1313,8 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     ledger,
     identity: identityService,
     auth: authService,
+    // 管理面与任务队列的「跨主体操作」只认这份显式名单（默认空 = 没有管理员）。
+    adminUserIds: config.auth.adminUserIds,
     prompts,
     // `/health` 回给控制台的绑定身份（§16 的身份引导）。传装配后的值而不是
     // `config.server.subject`：`options.subject` 覆盖时两者不同，回配置值会让
@@ -1308,11 +1327,14 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     adminAccess: {
       permissionCounts: (principals) => permissionCountsOf(db, principals),
       memberCounts: (groupIds) => memberCountsOf(db, groupIds),
+      // 撤销 API Key 的端点只有 key ID：持有者由这一行反查，授权判定才能针对
+      // 被吊销凭据的主人。SQL 留在这里（`api/` 不 import `adapters/`）。
+      apiKeyOwner: (keyId) => {
+        const row = db.prepare('SELECT user_id FROM api_key WHERE id = ?').get(keyId);
+        return row === undefined ? null : String(row['user_id']);
+      },
       userCount: () => userRepository.count(),
       groupCount: () => groupRepository.count(),
-    },
-    memoryStats: {
-      rowsFor: (principals) => memoryStatsRowsOf(db, principals),
     },
   });
 
@@ -1441,71 +1463,6 @@ function memberCountsOf(
     )
     .all(...groupIds);
   return new Map(rows.map((row) => [String(row['group_id']), Number(row['total'])]));
-}
-
-/**
- * `GET /stats/memories` 的取数（§17.5）：当前主体可见的记忆节点的热度输入列。
- *
- * **可见性**复用 `retrieval-index` 的 `permissionPredicate` 语义：`node_permission`
- * 上有该主体的 `allow` 行、且没有任何 `deny` 行（deny 覆盖 allow，§12.3）。谓词在
- * 这里重写一份而不是导出那个私有函数——`api/` 不能 import `adapters/`，而 `bootstrap`
- * 能同时看到两者；把同一段 SQL 复制到这里会让两处漂移，所以**只在这一层保留一份**，
- * 检索侧仍用自己的那份。两处的语义由同一个物化表约束，改物化规则时都要跟着改。
- *
- * 只取**记忆**行（`context_type = 'memory'`）：资源、技能、会话不是「记忆」，不该进
- * 冷热统计。`status <> 'archived'` 不排除：已归档的记忆仍是「存在且可能占磁盘」的
- * 治理对象，把它藏起来会让「清理」看不到真正该清的那批。
- *
- * 只取节点自身那一行（`nodeSelfRowSql`）：`memories/` 下的目录同样是
- * `context_type = 'memory'`，生成了概览之后它会多出一行 L1。两行都算会让同一份
- * 目录在冷热分布里占两个样本，而 `size` / `access_count` 是节点级的量。
- *
- * **不排序**：调用方要的是整体分布，顺序无意义；SQLite 的顺序扫描比带 ORDER BY 的
- * 索引扫描在整表聚合上更快（实测见提交说明的 `EXPLAIN QUERY PLAN`）。
- */
-function memoryStatsRowsOf(
-  db: DatabaseSync,
-  principals: readonly string[],
-): readonly MemoryStatsRow[] {
-  // 空主体集合：没有任何可见节点。空 `IN ()` 是语法错误，直接返回空。
-  if (principals.length === 0) {
-    return [];
-  }
-  const list = principals.map(() => '?').join(', ');
-  const rows = db
-    .prepare(
-      `SELECT n.memory_type, n.access_count, n.last_accessed_at, n.updated_at, n.size
-         FROM node n
-        WHERE n.context_type = 'memory'
-          AND ${nodeSelfRowSql('n')}
-          AND EXISTS (
-            SELECT 1 FROM node_permission p
-             WHERE p.node_uri = n.uri
-               AND p.principal IN (${list})
-               AND p.level >= 1
-               AND p.effect = 'allow'
-               AND NOT EXISTS (
-                 SELECT 1 FROM node_permission d
-                  WHERE d.node_uri = p.node_uri
-                    AND d.principal IN (${list})
-                    AND d.effect = 'deny'
-               )
-          )`,
-    )
-    .all(...principals, ...principals);
-
-  return rows.map((row) => ({
-    memoryType: row['memory_type'] === null || row['memory_type'] === undefined
-      ? null
-      : String(row['memory_type']),
-    accessCount: Number(row['access_count']),
-    lastAccessedAt:
-      row['last_accessed_at'] === null || row['last_accessed_at'] === undefined
-        ? null
-        : String(row['last_accessed_at']),
-    updatedAt: String(row['updated_at']),
-    size: Number(row['size']),
-  }));
 }
 
 /**

@@ -28,18 +28,20 @@ import { configSchema } from '../../../src/config/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
+import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import type { ContextType, NodeStatus } from '../../../src/domain/node.js';
 import type { IndexRecord, RetrievalEngine } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
-  AllowAllAuthorizer,
   permissionDenied,
   type AclAction,
   type Authorizer,
 } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { AclService } from '../../../src/services/acl.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import type { EmbedOutcome } from '../../../src/services/embedding.js';
+import type { MemoryHealth } from '../../../src/services/observability.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 import { MemoryService } from '../../../src/services/memory.js';
 import {
@@ -51,7 +53,7 @@ import {
   type StagedUploadInfo,
 } from '../../../src/services/resource.js';
 import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
-import { SessionService } from '../../../src/services/session.js';
+import { SessionService, stableMessageId } from '../../../src/services/session.js';
 import { SkillService } from '../../../src/services/skill.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
@@ -175,7 +177,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const acl =
     options.realAcl === true
       ? new AclService({
-          dataDir,
           db,
           aclFile: new AclFileStore({ dataDir, logger }),
           permissions,
@@ -198,7 +199,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     metadata,
     authorizer,
     logger,
-    estimateTokens: (text) => text.length,
   });
   const degradedEmbedding = {
     available: false,
@@ -293,6 +293,17 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     authorizer,
   });
 
+  const observability = {
+    health: async (): Promise<MemoryHealth> => ({
+      pendingReview: 0,
+      staleSummaries: 0,
+      degradedSummaries: 0,
+      orphanTasks: 0,
+      indexNodes: 0,
+      oldestPendingAgeSeconds: null,
+      profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
+    }),
+  };
   const context: McpToolContext = {
     filesystem,
     search,
@@ -300,6 +311,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     acl: authorizer,
     session,
     memory,
+    observability,
     resource,
     skill,
     tasks,
@@ -408,6 +420,19 @@ async function seed(
     .run(uri, SUBJECT);
 }
 
+describe('参数表', () => {
+  /**
+   * `wait` 曾经只写进日志：`write` 的 schema 描述向模型承诺「写后等待索引更新」，
+   * 实现里观察者是同步的，参数没有任何行为。宁可不给，也不给一个假参数。
+   */
+  it('write / add_resource 不再暴露 wait', () => {
+    for (const name of ['write', 'add_resource'] as const) {
+      const properties = tool(name).inputSchema['properties'] as Record<string, unknown>;
+      expect(Object.keys(properties), `${name} 的 wait 是假参数`).not.toContain('wait');
+    }
+  });
+});
+
 describe('find', () => {
   const DOC = `${MEM}/design.md`;
 
@@ -498,9 +523,38 @@ describe('read', () => {
     await harness.filesystem.write(Uri.parse(TEXT_URI), 'abcdefghij', PRINCIPALS);
   });
 
-  it('offset / limit 按码点切片', async () => {
-    expect(await callText('read', { uri: TEXT_URI, offset: 2, limit: 3 })).toBe('cde');
+  it('offset / limit 按码点切片，还有内容时标记截断', async () => {
+    expect(await callText('read', { uri: TEXT_URI, offset: 2, limit: 3 })).toBe(
+      'cde\n... (truncated)',
+    );
     expect(await callText('read', { uri: TEXT_URI })).toBe('abcdefghij');
+  });
+
+  it('恰好读到末尾不标记截断（返回长度等于 limit 也可能是读完）', async () => {
+    // 关键用例：最后一页正好是 5 个码点。调用方不能靠「返回长度 = limit」判断
+    // 还有下一页，这正是需要标记的理由。
+    expect(await callText('read', { uri: TEXT_URI, offset: 5, limit: 5 })).toBe('fghij');
+    expect(await callText('read', { uri: TEXT_URI, offset: 0, limit: 10 })).toBe('abcdefghij');
+    // 对照组：只差一个码点没返回。
+    expect(await callText('read', { uri: TEXT_URI, offset: 0, limit: 9 })).toBe(
+      'abcdefghi\n... (truncated)',
+    );
+
+    // 码点计数：内容 "😀a" 是 2 个码点、3 个 UTF-16 码元。从第 2 个码点读 1 个
+    // 恰好读完；按 UTF-16 长度算会误判成「还有内容」。
+    const emoji = `${MEM}/emoji.txt`;
+    await harness.filesystem.write(Uri.parse(emoji), '😀a', PRINCIPALS);
+    expect(await callText('read', { uri: emoji, offset: 1, limit: 1 })).toBe('a');
+  });
+
+  it('多 URI 分页时每段各自标记自己的截断', async () => {
+    const other = `${MEM}/other.txt`;
+    await harness.filesystem.write(Uri.parse(other), 'xyz', PRINCIPALS);
+
+    const text = await callText('read', { uris: [TEXT_URI, other], offset: 0, limit: 3 });
+
+    // TEXT_URI 还有 7 个码点没读；other 恰好读完（3 个码点）。
+    expect(text).toBe(`# ${TEXT_URI}\nabc\n... (truncated)\n\n# ${other}\nxyz`);
   });
 
   it('多 URI 返回带边界的文本', async () => {
@@ -533,6 +587,75 @@ describe('read', () => {
   });
 });
 
+describe('read 的溯源块（W97）', () => {
+  const MEMORY_URI = `${SCOPE}/memories/preferences/code-style.md`;
+  const ARCHIVE_1 = `${SCOPE}/sessions/s1/history/archive_001`;
+  const ARCHIVE_2 = `${SCOPE}/sessions/s1/history/archive_002`;
+
+  async function writeMemory(sources: readonly string[]): Promise<void> {
+    await harness.context.memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      uri: Uri.parse(MEMORY_URI),
+      update: () => ({ topic: 'code-style', content: '用户偏好 TypeScript 严格模式。' }),
+      provenance: { sources: sources.map((source) => Uri.parse(source)) },
+    });
+  }
+
+  it('记忆正文后追加 ## provenance，含全部归档 URI', async () => {
+    await writeMemory([ARCHIVE_1]);
+    await writeMemory([ARCHIVE_2]);
+
+    expect(await callText('read', { uri: MEMORY_URI })).toBe(
+      [
+        '## content',
+        '',
+        '用户偏好 TypeScript 严格模式。',
+        '',
+        '## provenance',
+        'sources:',
+        `  - ${ARCHIVE_1}`,
+        `  - ${ARCHIVE_2}`,
+      ].join('\n'),
+    );
+  });
+
+  it('分页读也带上完整的溯源块（它不是正文切片的一部分）', async () => {
+    await writeMemory([ARCHIVE_1]);
+
+    const text = await callText('read', { uri: MEMORY_URI, offset: 0, limit: 3 });
+
+    // 溯源块在切片之后追加；截断标记只在最后一行，仍然可被宿主识别。
+    expect(text).toBe(`## \n\n## provenance\nsources:\n  - ${ARCHIVE_1}\n... (truncated)`);
+  });
+
+  it('没有 sources 的旧记忆输出与改动前逐字节相同', async () => {
+    await writeMemory([]);
+
+    expect(await callText('read', { uri: MEMORY_URI })).toBe(
+      '## content\n\n用户偏好 TypeScript 严格模式。',
+    );
+  });
+
+  it('普通资源文件的输出不带溯源块', async () => {
+    await harness.filesystem.write(Uri.parse(`${MEM}/plain.txt`), 'pure', PRINCIPALS);
+
+    expect(await callText('read', { uri: `${MEM}/plain.txt` })).toBe('pure');
+  });
+
+  it('edit 重写记忆文件后 sources 仍在（frontmatter 里的未知键原样保留）', async () => {
+    await writeMemory([ARCHIVE_1, ARCHIVE_2]);
+
+    await callText('edit', {
+      uri: MEMORY_URI,
+      oldString: '严格模式',
+      newString: '严格模式（已确认）',
+    });
+
+    const text = await callText('read', { uri: MEMORY_URI });
+    expect(text).toContain('严格模式（已确认）');
+    expect(text).toContain(`## provenance\nsources:\n  - ${ARCHIVE_1}\n  - ${ARCHIVE_2}`);
+  });
+});
+
 describe('list', () => {
   const ROOT = `${MEM}`;
 
@@ -552,6 +675,25 @@ describe('list', () => {
     const text = await callText('list', { uri: ROOT, recursive: true });
 
     expect(text.split('\n')).toContain('[file] dirA/c.md');
+    // 没超上限时不标记截断。
+    expect(text).not.toContain('... (truncated)');
+  });
+
+  it('recursive 超过节点上限时标记截断，不静默只给前 1000 条', async () => {
+    // 上限与 `tree` 一致（`RECURSIVE_LIMIT = 1000`）。用 store 直接写，只为造
+    // 目录内容，不走逐文件加锁与索引。
+    const many = `${MEM}/many`;
+    for (let index = 0; index < 1001; index += 1) {
+      const name = `f-${String(index).padStart(4, '0')}.md`;
+      await harness.store.writeBytes(Uri.parse(`${many}/${name}`), Uint8Array.from([0x61]));
+    }
+
+    const text = await callText('list', { uri: many, recursive: true });
+    const lines = text.split('\n');
+
+    // 1000 条 + 末尾一行标记：调用方拿到的条数不等于「全部」时有明确信号。
+    expect(lines).toHaveLength(1001);
+    expect(lines.at(-1)).toBe('... (truncated)');
   });
 
   it('sortBy 支持 size 与 _desc', async () => {
@@ -640,6 +782,14 @@ describe('grep', () => {
     expect(await callText('grep', { uri: MEM, pattern: 'needle' })).toContain(
       'Found 0 match(es):',
     );
+  });
+
+  it('空 pattern 是 INVALID_ARGUMENT，不是「匹配所有行」', async () => {
+    // `new RegExp('')` 匹配每一行：不拦的话空 pattern 会拿回 nodeLimit 条命中，
+    // 看起来像「搜索成功了」，实际什么都没查。
+    await expect(callText('grep', { uri: MEM, pattern: '' })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
   });
 });
 
@@ -731,6 +881,20 @@ describe('forget', () => {
   });
 });
 
+describe('空查询参数', () => {
+  // 空串是「什么都没查」，不是「查到 0 条」：HTTP 侧同一入参是 400
+  // `INVALID_ARGUMENT`（`api/http/server.ts` 的 `requireString`），MCP 必须一致。
+  it.each([
+    ['find', { query: '' }],
+    ['search', { query: '' }],
+    ['rule_search', { taskContext: '' }],
+  ] as const)('%s 的空查询是 INVALID_ARGUMENT', async (name, input) => {
+    await expect(callText(name, input)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+  });
+});
+
 describe('health', () => {
   it('返回索引条数与摘要降级标记', async () => {
     await seed(`${MEM}/a.md`, 'a');
@@ -751,6 +915,43 @@ describe('health', () => {
 
     expect(text).toContain(`subject: ${SUBJECT}`);
     expect(text).toContain(`scopes: ${SCOPE}`);
+  });
+
+  it('降级摘要数计入 status（与 GET /health 同源）', async () => {
+    const base = await harness.context.observability.health();
+    const context: McpToolContext = {
+      ...harness.context,
+      observability: {
+        health: async () => ({ ...base, degradedSummaries: 2 }),
+      },
+    };
+
+    const text = await callText('health', {}, context);
+
+    expect(text).toContain('status: degraded');
+    expect(text).toContain('summary.degradedDirs: 2');
+  });
+
+  it('索引计数达到上限时说明是下界', async () => {
+    vi.spyOn(harness.index, 'glob').mockResolvedValue(
+      new Array(100_000).fill('comem://user/alice/mem/a.md'),
+    );
+
+    const text = await callText('health', {});
+
+    expect(text).toContain('index.visibleNodes: 100000');
+    expect(text).toContain('index.visibleNodesTruncated: true');
+  });
+
+  it('索引统计失败时是 degraded 且不冒充 0 条', async () => {
+    // 计数失败不是「服务坏了」，也不能回报 `visibleNodes: 0` 让人以为库是空的。
+    // 与 `GET /health` 共用同一个状态判定，枚举里没有第三种值。
+    vi.spyOn(harness.index, 'glob').mockRejectedValue(new Error('索引不可用'));
+
+    const text = await callText('health', {});
+
+    expect(text).toContain('status: degraded');
+    expect(text).toContain('index.visibleNodes: unavailable');
   });
 });
 
@@ -1026,6 +1227,53 @@ describe('remember / download', () => {
     expect(await archivedTexts(sessionUri)).toEqual(['第一句', '第二句']);
   });
 
+  /**
+   * 跨路径同源：`remember` 与服务端 `stableMessageId` 必须是同一个函数的结果。
+   *
+   * 服务端按 ID 判等去重。两边各算一份时，任何一边改了分隔符或字段顺序，`remember`
+   * 写进去的消息与 `ingest` 写进去的（或已经归档的）就互相认不出来，重投变成重复。
+   * 只锁 `services/session.ts` 那份的单元测试看不出这种漂移，所以这里走工具的真实
+   * 路径：先按服务端那份额度往 live 里放一条，再让 `remember` 追同一组
+   * `(role, text, createdAt)`——命中就只会归档 1 条，ID 也必须是那个固定摘要。
+   */
+  it('remember 的消息 ID 与 stableMessageId 同源（固定摘要与跨路径去重）', async () => {
+    const sessionId = 'shared-message-id-1';
+    const sessionUri = Uri.parse(`${SCOPE}/sessions/${sessionId}`);
+    const createdAt = '2026-11-08T00:00:00.000Z';
+    // 与 `tests/unit/services/stable-message-id.test.ts` 同一组输入：两处共同锁死
+    // 「角色 NUL 正文 NUL 时间戳 的 sha256」，公式要改就得同时想清楚已落盘归档怎么办。
+    const sharedId = stableMessageId('user', 'hello', createdAt);
+    expect(sharedId).toBe('b524dcf734ba6064fe3e7261785142876b8ea19661264f6351c91726bce3f1ef');
+
+    await harness.context.session.ensure(Uri.parse(SCOPE), sessionId, PRINCIPALS);
+    await harness.context.session.addMessage(sessionUri, {
+      id: sharedId,
+      role: 'user',
+      parts: [{ kind: 'text', text: 'hello' }],
+      createdAt,
+    });
+
+    // 同一条消息走 remember：ID 与上面那条相同，所以只归档已经存在的那 1 条。
+    expect(
+      await callText('remember', {
+        sessionId,
+        messages: [{ role: 'user', content: 'hello', createdAt }],
+      }),
+    ).toContain('Archived 1 message(s)');
+
+    const [archiveUri] = await harness.context.session.listArchives(sessionUri);
+    if (archiveUri === undefined) {
+      throw new Error('remember 没有产生归档');
+    }
+    const lines = Buffer.from(await harness.store.readBytes(archiveUri.child('messages.jsonl')))
+      .toString('utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '');
+    expect(lines.map((line) => (JSON.parse(line) as { readonly id: string }).id)).toEqual([
+      sharedId,
+    ]);
+  });
+
   it('不传 sessionId 时每次新建随机会话（向后兼容）', async () => {
     const messages = [{ role: 'user', content: '同一句' }];
 
@@ -1082,6 +1330,20 @@ describe('add_resource / add_skill', () => {
   });
 });
 
+describe('工具描述与实际行为', () => {
+  it('list / read 的描述写明截断标记', () => {
+    // 描述是模型看到的契约：截断行为改了但描述没改，等于又制造一次「描述与实现
+    // 不符」。这里钉住关键词，改文案时若丢掉承诺会失败。
+    expect(tool('list').description).toContain('... (truncated)');
+    expect(tool('read').description).toContain('... (truncated)');
+  });
+
+  it('add_skill 的描述写明覆盖范围（旧文件不会被移除）', () => {
+    expect(tool('add_skill').description).toContain('同路径文件被覆盖');
+    expect(tool('add_skill').description).toContain('上一版存在但本次未提供的文件不会被移除');
+  });
+});
+
 describe('写后物化权限', () => {
   // 三个 ingest 工具都不经过 `FileSystemService` 的观察者（直接写 `ContentStore`）。
   // 物化漏掉时它们返回成功，但 `list` / `tree` / `find` 因为缺 `node_permission` 行
@@ -1097,7 +1359,7 @@ describe('写后物化权限', () => {
     }
   }
 
-  it('add_resource 之后 list(parent) 能看到新文件', async () => {
+  it('add_resource 之后 list(parent) 与 find 都能看到新文件', async () => {
     const parent = `${SCOPE}/resources`;
     await withRealAcl(async (context, filesystem) => {
       await tool('add_resource').execute(
@@ -1110,6 +1372,11 @@ describe('写后物化权限', () => {
 
       const documents = await filesystem.list(Uri.parse(`${parent}/docs`), PRINCIPALS);
       expect(documents.map((entry) => entry.uri.toString())).toEqual([`${parent}/docs/api.md`]);
+
+      // MCP 单入口（没有 HTTP temp-upload）也能用：content-only 导入后必须能被检索到。
+      // 这条断言走真实 `find`：索引行与 `node_permission` 行任一缺失都会返回 0。
+      const found = await callText('find', { query: 'API' }, context);
+      expect(found).toContain(`${parent}/docs/api.md`);
     });
   });
 
@@ -1136,6 +1403,37 @@ describe('写后物化权限', () => {
 
       const nested = await filesystem.list(Uri.parse(`${parent}/demo-skill`), PRINCIPALS);
       expect(nested.map((entry) => entry.uri.name).sort()).toEqual(['SKILL.md', 'scripts']);
+    });
+  });
+
+  it('add_skill 重装同名技能不删除上一版有、本次没提交的文件', async () => {
+    const parent = `${SCOPE}/skills`;
+    await withRealAcl(async (context, filesystem) => {
+      const entry = '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n';
+      await tool('add_skill').execute(
+        {
+          parentUri: parent,
+          name: 'demo-skill',
+          files: [
+            { path: 'SKILL.md', content: entry },
+            { path: 'scripts/old.sh', content: '#!/bin/sh\nexit 0\n' },
+          ],
+        },
+        context,
+      );
+      await tool('add_skill').execute(
+        {
+          parentUri: parent,
+          name: 'demo-skill',
+          files: [{ path: 'SKILL.md', content: entry }],
+        },
+        context,
+      );
+
+      const oldFile = `${parent}/demo-skill/scripts/old.sh`;
+      // 同路径覆盖，但没提交的旧文件既不在磁盘上被删，也不从索引里清掉。
+      expect((await filesystem.stat(Uri.parse(oldFile), PRINCIPALS))?.kind).toBe('file');
+      expect(await callText('find', { query: 'exit' }, context)).toContain(oldFile);
     });
   });
 

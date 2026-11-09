@@ -34,6 +34,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
+import { parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 
 import type { ObservabilityService } from '../../services/observability.js';
@@ -43,9 +44,6 @@ export const REQUEST_ID_HEADER = 'x-request-id';
 
 /** 注入身份的请求头。v1 由反向代理设置。 */
 export const SUBJECT_HEADER = 'x-comem-subject';
-
-/** 通配主体（§12.1）。身份展开时永远追加在末尾。 */
-const USER_WILDCARD = 'user:*';
 
 /**
  * 不认证的路径（§17.1、§17.9）。
@@ -259,7 +257,45 @@ export function createObservabilityMiddleware(
   };
 }
 
-/** 默认身份展开：绑定主体 + 通配主体。v1 没有组。 */
-export function defaultIdentity(subject: string): Identity {
-  return { subject, principals: [subject, USER_WILDCARD] };
+/**
+ * 当前主体的用户 ID（`user:{uid}` 的 uid）。
+ *
+ * 身份中间件把 `subject` 限定为 user 主体（组不能当认证身份），认证失败在
+ * 到达路由之前就 401 了，所以这里不会拿到 `group:` 主体。
+ */
+export function callerUserIdOf(request: FastifyRequest): string {
+  return parsePrincipal(requestContextOf(request).subject).id;
+}
+
+/**
+ * 当前主体是否是 `auth.adminUserIds` 里的系统管理员。
+ *
+ * 名单存的是用户 ID（`app_user.id`），不是 `user:{id}` 主体字符串。
+ */
+export function isSystemAdmin(
+  request: FastifyRequest,
+  adminUserIds: readonly string[],
+): boolean {
+  return adminUserIds.includes(callerUserIdOf(request));
+}
+
+/**
+ * 跨主体端点（全局用户 / 组目录、任务队列）的门禁：只允许系统管理员。
+ *
+ * 这些操作没有「被操作的目标资源」可以求权，也没有可用的 ACL 条目；默认名单为空
+ * → 对所有人 403。部署者显式写自己的 ID 才打开管理面。
+ */
+export function assertSystemAdmin(
+  request: FastifyRequest,
+  adminUserIds: readonly string[],
+): void {
+  const subject = requestContextOf(request).subject;
+  if (isSystemAdmin(request, adminUserIds)) {
+    return;
+  }
+  throw new ComemError(
+    'PERMISSION_DENIED',
+    `需要系统管理员：${subject} 不在 auth.adminUserIds 里。`,
+    { subject },
+  );
 }

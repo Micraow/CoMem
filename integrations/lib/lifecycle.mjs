@@ -42,34 +42,6 @@
 import { ComemHookError } from './http.mjs';
 
 /**
- * 每个 hook 事件的总预算（毫秒），从进程启动算起。
- *
- * | 事件 | 预算 | 依据 |
- * |---|---|---|
- * | `SessionStart` | 4000 | 会话开局一次性；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒用户还能接受」定；本机空载实测 57ms |
- * | `UserPromptSubmit` | 2000 | **每轮按回车都付**。宿主上限 30s（Claude Code 官方默认）远大于可用值；§15.9 典型 60–180ms，本机实测 54ms → 2s 是典型值的 ~10 倍，超了就退化成「本轮没有记忆」 |
- * | `PreToolUse` | 1000 | 纯本地判断，不发请求；本机实测 29ms。值是实测的 ~30 倍，因为它出现在**每次工具调用**前 |
- * | `PostToolUse` | 2000 | 两次顺序 POST；§17.2 采集写入 5–20ms → 2s 是 100 倍 |
- * | `Stop` | 1000 | 主进程只写载荷 + spawn；`stop.test.mjs` 实测 44ms。1s 是 20 倍 |
- * | `PreCompact` | 30000 | **数据可能丢**，必须等提交完成；与 `commitTimeoutMs`、§17.2 的 `rewriteTimeoutMs` 同一个数。宿主默认 600s |
- *
- * `SessionEnd` 走 `SESSION_END_BUDGET_MS` 而不是这里的 30000：Claude Code 给
- * `SessionEnd` 一组 hook 只有 1.5 秒共享预算（官方文档「Hook handler fields」），
- * 等 30 秒等于被宿主先杀掉、并且留下半截提交。
- *
- * **不许超过宿主的上限**：任何一项调大到超过宿主给该事件的超时，宿主会在我们
- * 退出前杀掉进程，输出被丢弃——见 `integrations/README.md` 的「每个 hook 的总预算」。
- */
-export const HOOK_BUDGETS_MS = Object.freeze({
-  SessionStart: 4000,
-  UserPromptSubmit: 2000,
-  PreToolUse: 1000,
-  PostToolUse: 2000,
-  Stop: 1000,
-  PreCompact: 30000,
-});
-
-/**
  * `SessionEnd` 的总预算。
  *
  * 1200 = Claude Code 的 1.5s 共享预算减去 300ms，留给进程启动与退出。它比
@@ -78,6 +50,40 @@ export const HOOK_BUDGETS_MS = Object.freeze({
  * 会重投（§15.4）。
  */
 export const SESSION_END_BUDGET_MS = 1200;
+
+/**
+ * 每个 hook 事件的总预算（毫秒），从进程启动算起。
+ *
+ * 键是**内部事件名**（`lib/events.mjs` 的 snake_case），与上报给服务端的 `event`
+ * 字段、`comem_hook_*` 的 `event` 标签同名——一张表同时回答「等多久」与「记到
+ * 哪个事件上」。
+ *
+ * | 事件 | 预算 | 依据 |
+ * |---|---|---|
+ * | `session_start` | 4000 | 会话开局一次性；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒用户还能接受」定；本机空载实测 57ms |
+ * | `user_prompt_submit` | 2000 | **每轮按回车都付**。宿主上限 30s（Claude Code 官方默认）远大于可用值；§15.9 典型 60–180ms，本机实测 54ms → 2s 是典型值的 ~10 倍，超了就退化成「本轮没有记忆」 |
+ * | `pre_tool_use` | 1000 | 纯本地判断，不发请求；本机实测 29ms。值是实测的 ~30 倍，因为它出现在**每次工具调用**前 |
+ * | `post_tool_use` | 2000 | 两次顺序 POST；§17.2 采集写入 5–20ms → 2s 是 100 倍 |
+ * | `stop` | 1000 | 主进程只写载荷 + spawn；`stop.test.mjs` 实测 44ms。1s 是 20 倍 |
+ * | `pre_compact` | 30000 | **数据可能丢**，必须等提交完成；与 `commitTimeoutMs`、§17.2 的 `rewriteTimeoutMs` 同一个数。宿主默认 600s |
+ * | `session_end` | 1200 | 见 `SESSION_END_BUDGET_MS`：宿主给 `SessionEnd` 只有 1.5 秒共享预算 |
+ *
+ * `pre_compact` 与 `session_end` 走同一个处理器（`servers/pre-compact.mjs`，都是
+ * 「对话要没了，把手上的消息交出去」），但预算是两个数：宿主给它们的超时差 20 倍，
+ * 归一预算等于让 `SessionEnd` 被宿主先杀掉、留下半截提交。
+ *
+ * **不许超过宿主的上限**：任何一项调大到超过宿主给该事件的超时，宿主会在我们
+ * 退出前杀掉进程，输出被丢弃——见 `integrations/README.md` 的「每个 hook 的总预算」。
+ */
+export const HOOK_BUDGETS_MS = Object.freeze({
+  session_start: 4000,
+  user_prompt_submit: 2000,
+  pre_tool_use: 1000,
+  post_tool_use: 2000,
+  stop: 1000,
+  pre_compact: 30000,
+  session_end: SESSION_END_BUDGET_MS,
+});
 
 /**
  * 读 stdin 的上限。
@@ -107,19 +113,16 @@ export function processStartEpochMs() {
 /**
  * 取一个事件的预算。
  *
- * `SessionEnd` 在适配器里已经归一成 `PreCompact`，但预算不能跟着归一：宿主给这
- * 两个事件的超时差 20 倍。所以适配器把原始事件名留在 `rawEventName` 上。
+ * 只查内部事件名这一个键：`pre_compact` 与 `session_end` 是两个键（宿主给它们的
+ * 超时差 20 倍），不再需要从原始载荷名反推。
  *
- * @param {{ event: string, rawEventName?: string | null }} event
+ * @param {{ event: string }} event
  */
 export function budgetForEvent(event) {
-  if (event.rawEventName === 'SessionEnd') {
-    return SESSION_END_BUDGET_MS;
-  }
   const budget = HOOK_BUDGETS_MS[event.event];
   // 适配器会拒绝未知事件，走到这里说明事件表与新代码不同步。退回最长的那个预算
   // 不会把用户等的时间放大到无限：它仍然有上限。
-  return typeof budget === 'number' ? budget : HOOK_BUDGETS_MS.PreCompact;
+  return typeof budget === 'number' ? budget : HOOK_BUDGETS_MS.pre_compact;
 }
 
 /**

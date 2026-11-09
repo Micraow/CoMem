@@ -104,9 +104,10 @@ export interface EvalRunnerDeps {
 /**
  * 默认 top-k。
  *
- * 10 是 §13.2 的 MCP `find` 工具默认值，也是 `SearchService.DEFAULT_RESULT_LIMIT`
- * 的下游（服务层 20 条给工具层留截断余量）。评估要报的是「用户实际拿到的前 k 条」，
- * 所以取工具默认值，而不是服务层的 20。
+ * 10 就是 `DEFAULT_SEARCH_LIMIT`（`src/services/search.ts`）：§13.2 的 MCP `find`
+ * 工具默认值，服务层 `resolveLimit` 与 HTTP / MCP 入口共用同一个常量，不存在
+ * 「服务层多取、工具层截断」的余量。评估要报的是「用户实际拿到的前 k 条」，所以
+ * 取这个数。
  */
 const DEFAULT_K = 10;
 

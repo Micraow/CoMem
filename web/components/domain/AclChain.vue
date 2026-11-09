@@ -39,18 +39,29 @@ const props = defineProps<{
 
 type AclLevel = 1 | 3 | 7
 
-const LEVEL_NAME: Readonly<Record<AclLevel, string>> = {
-  1: 'read',
-  3: 'write',
-  7: 'manage',
+/** 级别与模式的中文名：界面上只出现用户能做的动作，不出现服务端枚举。 */
+const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
+  1: '读取',
+  3: '写入',
+  7: '管理',
 }
 
-function levelNameOf(level: number): string {
-  return level === 1 || level === 3 || level === 7 ? LEVEL_NAME[level] : String(level)
+const MODE_LABEL: Readonly<Record<AclPayload['mode'], string>> = {
+  inherit: '继承父级',
+  restricted: '仅本节点',
+}
+
+function levelLabelOf(level: number): string {
+  return level === 1 || level === 3 || level === 7 ? LEVEL_LABEL[level] : String(level)
 }
 
 function modeOf(level: AclChainLevel): 'inherit' | 'restricted' | null {
   return level.snapshot?.mode ?? null
+}
+
+function modeLabelOf(level: AclChainLevel): string {
+  const mode = modeOf(level)
+  return mode === null ? '' : MODE_LABEL[mode]
 }
 
 function grantsOf(level: AclChainLevel): string {
@@ -63,7 +74,7 @@ function grantsOf(level: AclChainLevel): string {
   return level.snapshot.entries
     .map(
       (entry) =>
-        `${entry.principal} = ${levelNameOf(entry.level)}${entry.effect === 'deny' ? ' · 拒绝' : ''}`,
+        `${entry.principal} = ${levelLabelOf(entry.level)}${entry.effect === 'deny' ? ' · 拒绝' : ''}`,
     )
     .join('，')
 }
@@ -74,25 +85,30 @@ const finalSnapshot = computed<AclPayload | null>(() => {
 })
 
 /** 最终权限：服务端 `effective` 里当前身份的最高级别。没有条目就是「无」。 */
-const finalLabel = computed<string>(() => {
+const finalLevel = computed<AclLevel | null>(() => {
   const effective = finalSnapshot.value?.effective
   if (effective === undefined) {
-    return '无法推导'
+    return null
   }
   const levels = effective[props.subject]
   if (levels === undefined || levels.length === 0) {
-    return '无'
+    return null
   }
-  return levelNameOf(levels.reduce((highest, level) => (level > highest ? level : highest), 1))
+  return levels.reduce<AclLevel>((highest, level) => (level > highest ? level : highest), 1)
+})
+
+const finalLabel = computed<string>(() => {
+  if (finalSnapshot.value?.effective === undefined) {
+    return '无法推导'
+  }
+  return finalLevel.value === null ? '无' : levelLabelOf(finalLevel.value)
 })
 
 const hasGap = computed(() => props.levels.some((level) => level.error !== null))
 
 const finalVariant = computed<'gray' | 'blue' | 'teal'>(() => {
-  if (finalLabel.value === '无' || finalLabel.value === '无法推导') {
-    return 'gray'
-  }
-  return finalLabel.value === 'manage' ? 'blue' : finalLabel.value === 'write' ? 'teal' : 'gray'
+  const level = finalLevel.value
+  return level === 7 ? 'blue' : level === 3 ? 'teal' : 'gray'
 })
 </script>
 
@@ -123,7 +139,7 @@ const finalVariant = computed<'gray' | 'blue' | 'teal'>(() => {
               aria-hidden="true"
             />
             <span class="chain__uri mono">{{ level.uri }}</span>
-            <UiBadge v-if="modeOf(level) !== null" variant="outline">{{ modeOf(level) }}</UiBadge>
+            <UiBadge v-if="modeOf(level) !== null" variant="outline">{{ modeLabelOf(level) }}</UiBadge>
             <UiBadge v-if="modeOf(level) === 'restricted'" variant="red">切断继承</UiBadge>
           </div>
 

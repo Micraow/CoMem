@@ -5,11 +5,17 @@
  * `prompts/*.md` 里，控制台在这里查看与修改。修改落到 SQLite 的
  * `prompt_override` 表，优先级是**仓库默认 < 数据库覆盖**，`DELETE` 即恢复默认。
  *
- * ## 为什么不做 ACL
+ * ## 授权：读开放，写只给系统管理员
  *
- * 提示词是**进程级配置**，不属于任何 `comem://` 命名空间。给一条提示词授「谁能
- * 改」需要先有「谁的配置」这个概念，而 v1 是单租户部署（`AclService` 在构造期
- * 绑定身份，§12.4）。和 `/telemetry`、`/health` 一样不做鉴权：它们都不碰用户内容。
+ * 提示词是**进程级配置**，不属于任何 `comem://` 命名空间，所以不用 ACL 求权——
+ * 硬套会造出「一个不存在的资源」的假身份。
+ *
+ * 读（`GET /`、`GET /:id`）对任何已认证身份开放：提示词会被注入到 agent 上下文，
+ * 本来就不是秘密，控制台也需要在看「有没有覆盖」时读到它。
+ *
+ * 写（`PUT`、`DELETE`、`POST /:id/preview`）只给 `auth.adminUserIds`：改一条
+ * 提示词会影响所有用户与所有 agent，预览也会触发模板渲染（未来若接模型则是真实
+ * 成本）。默认名单为空 = 这些操作对所有人 403。
  *
  * ## 校验留两层
  *
@@ -28,6 +34,7 @@ import {
 } from '../../../domain/prompt.js';
 import type { PromptDetail, PromptSummary } from '../../../services/prompt-service.js';
 import { ok } from '../envelope.js';
+import { assertSystemAdmin } from '../middleware.js';
 import { requireRecord, requireString, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
@@ -92,7 +99,7 @@ function parseVariables(body: Record<string, unknown>): Record<string, string> {
 }
 
 export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { prompts } = services;
+  const { prompts, adminUserIds } = services;
 
   return {
     prefix: '/prompts',
@@ -104,16 +111,21 @@ export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup 
       );
 
       app.put<{ Params: { id: string }; Body: unknown }>('/:id', async (request) => {
+        assertSystemAdmin(request, adminUserIds);
         const id = requirePromptId(request.params.id);
         const body = requireRecord(request.body, 'prompts/:id');
         return ok(serializeDetail(prompts.save(id, requireString(body, 'body'))));
       });
 
-      app.delete<{ Params: { id: string } }>('/:id', async (request) =>
-        ok(serializeDetail(prompts.reset(requirePromptId(request.params.id)))),
-      );
+      app.delete<{ Params: { id: string } }>('/:id', async (request) => {
+        assertSystemAdmin(request, adminUserIds);
+        return ok(serializeDetail(prompts.reset(requirePromptId(request.params.id))));
+      });
 
       app.post<{ Params: { id: string }; Body: unknown }>('/:id/preview', async (request) => {
+        // 预览也要管理员：它复用同一份模板渲染，未来接上模型就是真实成本与
+        // 注入面（模板正文可由管理员改）。
+        assertSystemAdmin(request, adminUserIds);
         const id = requirePromptId(request.params.id);
         const body = request.body === undefined ? {} : requireRecord(request.body, 'prompts/:id/preview');
         return ok({ text: prompts.preview(id, parseVariables(body)) });

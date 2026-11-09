@@ -66,7 +66,10 @@ function createLogger(): Logger & {
   return Object.assign(logger, { warnCalls });
 }
 
-function createProvider(type: 'openai-compatible' | 'anthropic' = 'openai-compatible'): {
+function createProvider(
+  type: 'openai-compatible' | 'anthropic' = 'openai-compatible',
+  overrides: Partial<ConstructorParameters<typeof AiSdkLlmProvider>[0]> = {},
+): {
   provider: InstanceType<typeof AiSdkLlmProvider>;
   logger: ReturnType<typeof createLogger>;
 } {
@@ -78,6 +81,7 @@ function createProvider(type: 'openai-compatible' | 'anthropic' = 'openai-compat
     apiKey: 'sk-test',
     maxTokens: 2048,
     timeoutSeconds: 5,
+    ...overrides,
     logger,
   });
   return { provider, logger };
@@ -208,6 +212,33 @@ describe('complete', () => {
     const result = await provider.complete(PROMPT);
 
     expect(result.usage).toEqual({ promptTokens: 3, completionTokens: 4 });
+  });
+
+  it('timeoutMs 只能收紧配置，不能放宽：配置 1 秒 + timeoutMs 12000 实际按 1000 超时', async () => {
+    const { provider } = createProvider('openai-compatible', { timeoutSeconds: 1 });
+    // 永远不返回，等超时定时器 abort。
+    mocks.generateText.mockImplementation(
+      ({ abortSignal }: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          abortSignal.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
+
+    const startedAt = Date.now();
+    const error = await provider
+      .complete(PROMPT, { timeoutMs: 12_000 })
+      .catch((caught: unknown) => caught);
+    const elapsedMs = Date.now() - startedAt;
+
+    // 错误里带的就是**实际生效**的预算：1000 而不是 12000。
+    expect(error).toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE',
+      details: { timeoutMs: 1000 },
+    });
+    expect(elapsedMs).toBeGreaterThanOrEqual(900);
+    expect(elapsedMs).toBeLessThan(4_000);
   });
 
   it('超时抛 PROVIDER_UNAVAILABLE', async () => {

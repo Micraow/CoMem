@@ -150,8 +150,6 @@ describe('frontmatter', () => {
     '  total_entries: 6',
     '  pending_changes: 0',
     'summary: 代码风格',
-    'summary_digest: 9f2c8a1e',
-    'summary_state: fresh',
     '---',
     '',
     '旧正文',
@@ -164,11 +162,7 @@ describe('frontmatter', () => {
     const document = await store.readText(target);
 
     expect(document.text).toBe('旧正文\n');
-    expect(document.frontmatter).toEqual({
-      summary: '代码风格',
-      summaryDigest: '9f2c8a1e',
-      summaryState: 'fresh',
-    });
+    expect(document.frontmatter).toEqual({ summary: '代码风格' });
   });
 
   it('不传 frontmatter 时保留磁盘上现有的全部键（§10.6 元数据写保护）', async () => {
@@ -184,8 +178,6 @@ describe('frontmatter', () => {
       generated_at: '2026-11-05T16:41:02Z',
       freshness: { total_entries: 6, pending_changes: 0 },
       summary: '代码风格',
-      summary_digest: '9f2c8a1e',
-      summary_state: 'fresh',
     });
   });
 
@@ -193,14 +185,12 @@ describe('frontmatter', () => {
     await seedRaw(target, RAW);
 
     await store.writeText(target, '新正文', {
-      frontmatter: { summary: '新摘要', summaryDigest: 'abc12345', summaryState: 'stale' },
+      frontmatter: { summary: '新摘要' },
     });
 
     const document = await rawDocument(target);
     expect(document.data).toMatchObject({
       summary: '新摘要',
-      summary_digest: 'abc12345',
-      summary_state: 'stale',
       generated_by: 'summary.service',
       freshness: { total_entries: 6, pending_changes: 0 },
     });

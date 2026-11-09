@@ -49,7 +49,11 @@ export interface EmbeddingProvider {
 }
 
 export interface EmbeddingOptions {
-  /** 覆盖构造时的超时，毫秒 */
+  /**
+   * 单次调用超时，毫秒。**只能是上限**：适配器取
+   * `min(配置的 timeoutSeconds * 1000, timeoutMs)`，内部预算不能放宽用户配置的
+   * `providers.embedding.timeoutSeconds`。省略时用配置值。
+   */
   readonly timeoutMs?: number;
   /** 调用方取消（HTTP 断开、进程退出） */
   readonly signal?: AbortSignal;

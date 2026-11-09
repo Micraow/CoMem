@@ -31,7 +31,7 @@ import {
 import { createToolRegistry } from '../../../src/api/mcp/tools/index.js';
 import { configSchema } from '../../../src/config/index.js';
 import type { Logger } from '../../../src/domain/log.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import type { FileSystemService } from '../../../src/services/filesystem.js';
 import type { MemoryService } from '../../../src/services/memory.js';
 import type { ResourceService } from '../../../src/services/resource.js';
@@ -88,6 +88,17 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
     acl: new AllowAllAuthorizer(),
     session: {} as unknown as SessionService,
     memory: {} as unknown as MemoryService,
+    observability: {
+      health: async () => ({
+        pendingReview: 0,
+        staleSummaries: 0,
+        degradedSummaries: 0,
+        orphanTasks: 0,
+        indexNodes: 0,
+        oldestPendingAgeSeconds: null,
+        profileFormat: { checked: 0, invalid: 0, violations: 0, truncated: false },
+      }),
+    },
     resource: {} as unknown as ResourceService,
     skill: {} as unknown as SkillService,
     tasks,

@@ -21,12 +21,18 @@ import { createPathLockManager, type PathLockManager } from '../../../src/adapte
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
+import {
+  RequestLogRepository,
+  type RequestLogRow,
+} from '../../../src/adapters/sqlite/request-log-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import {
   Scheduler,
   type PendingMemoryPort,
   type ReconcilePort,
+  type RequestLogPrunePort,
+  type RequestLogRetention,
   type SchedulerExpiry,
   type SessionAutoCommitPort,
   type StagedUploadSweepPort,
@@ -40,7 +46,7 @@ import { SessionService } from '../../../src/services/session.js';
 import { TaskService } from '../../../src/services/task.js';
 import { TtlService } from '../../../src/services/ttl.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
-import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:alice', 'user:*'];
 
@@ -106,6 +112,7 @@ interface SchedulerHarness {
   readonly staged: StagedUploadSweepPort;
   readonly memories: PendingMemoryPort;
   readonly reconcile: ReconcilePort;
+  readonly requestLog: RequestLogPrunePort;
 }
 
 function createScheduler(options: {
@@ -115,7 +122,10 @@ function createScheduler(options: {
   readonly ttl?: TtlPort;
   readonly staged?: StagedUploadSweepPort;
   readonly reconcile?: ReconcilePort;
+  readonly requestLog?: RequestLogPrunePort;
+  readonly requestLogRetention?: RequestLogRetention;
   readonly ttlSweepBatchSize?: number;
+  readonly now?: () => Date;
 } = {}): SchedulerHarness {
   const sessions = options.sessions ?? createSession();
   const ttlPort = options.ttl ?? ttl;
@@ -124,6 +134,8 @@ function createScheduler(options: {
   const reconcile: ReconcilePort = options.reconcile ?? {
     replay: async () => ({ resolved: 0, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 }),
   };
+  // 默认替身：请求记录裁剪不属于这些用例的观察点；要测它自己时传真实仓储。
+  const requestLog: RequestLogPrunePort = options.requestLog ?? { prune: () => 0 };
   const scheduler = new Scheduler({
     logger,
     dataDir,
@@ -132,10 +144,13 @@ function createScheduler(options: {
     staged,
     reconcile,
     memories,
+    requestLog,
+    requestLogRetention: options.requestLogRetention ?? { retainDays: 7, retainRows: 100_000 },
+    now: options.now ?? ((): Date => new Date()),
     expiry: { ...EXPIRY_OFF, ...options.expiry },
     ttlSweepBatchSize: options.ttlSweepBatchSize ?? 100,
   });
-  return { scheduler, sessions, ttlPort, staged, memories, reconcile };
+  return { scheduler, sessions, ttlPort, staged, memories, reconcile, requestLog };
 }
 
 function message(id: string, text = '消息正文'): Omit<SessionMessage, 'turn'> {
@@ -185,7 +200,14 @@ async function writeMemoryDiff(
 }
 
 function memoryRecord(uri: string, status: MemoryStatus): MemoryRecord {
-  return { uri: Uri.parse(uri), memoryType: 'experiences', fields: {}, status, updatedAt: '2026-01-01T00:00:00.000Z' };
+  return {
+    uri: Uri.parse(uri),
+    memoryType: 'experiences',
+    fields: {},
+    status,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    sources: [],
+  };
 }
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
@@ -545,6 +567,84 @@ describe('临时上传清理', () => {
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('临时上传清理失败'),
       expect.objectContaining({ error: 'tmp 目录被锁' }),
+    );
+  });
+});
+
+describe('请求记录裁剪', () => {
+  /** `request_log` 的一行；`createdAt` 由用例给，裁剪的判据只有时间与行数。 */
+  function requestLogRow(id: string, createdAt: string): RequestLogRow {
+    return {
+      id,
+      requestId: `req_${id}`,
+      method: 'GET',
+      path: '/api/v1/health',
+      statusCode: 200,
+      durationMs: 1,
+      phases: null,
+      errorCode: null,
+      subject: 'user:alice',
+      createdAt,
+    };
+  }
+
+  it('一轮 tick 后超过保留窗口的行被删除，窗口内的保留', async () => {
+    const requestLog = new RequestLogRepository({ db, logger });
+    const now = new Date('2026-11-10T00:00:00.000Z');
+    const day = 24 * 60 * 60 * 1000;
+    requestLog.insert(requestLogRow('stale', new Date(now.getTime() - 8 * day).toISOString()));
+    requestLog.insert(requestLogRow('fresh', new Date(now.getTime() - 1 * day).toISOString()));
+
+    const { scheduler } = createScheduler({
+      requestLog,
+      requestLogRetention: { retainDays: 7, retainRows: 100 },
+      now: () => now,
+    });
+
+    const result = await scheduler.tick();
+
+    expect(result).toMatchObject({ skipped: false, requestLogPruned: 1 });
+    expect(
+      db
+        .prepare('SELECT id FROM request_log ORDER BY created_at DESC')
+        .all()
+        .map((row) => row['id']),
+    ).toEqual(['fresh']);
+    // 有删除动作时轮次摘要进 info，删除行数在摘要里。
+    expect(logger.info).toHaveBeenCalledWith(
+      '调度轮次完成。',
+      expect.objectContaining({ requestLogPruned: 1 }),
+    );
+  });
+
+  it('裁剪失败只记 error，整轮继续，其它任务照跑', async () => {
+    const requestLog: RequestLogPrunePort = {
+      prune: () => {
+        throw new Error('数据库被锁');
+      },
+    };
+    const { scheduler } = createScheduler({
+      requestLog,
+      ttl: { sweep: async () => ({ expired: 2, purged: 0 }) },
+      staged: { sweepStaged: async () => 1 },
+      reconcile: {
+        replay: async () => ({ resolved: 3, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 }),
+      },
+    });
+    await store.mkdir(Uri.parse(`${SCOPE}/sessions/sess_1`), { recursive: true });
+
+    const result = await scheduler.tick();
+
+    expect(result).toMatchObject({
+      skipped: false,
+      ttlArchived: 2,
+      stagedSwept: 1,
+      reconcileResolved: 3,
+      requestLogPruned: 0,
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      '请求记录裁剪失败，下一轮重试。',
+      expect.objectContaining({ error: '数据库被锁' }),
     );
   });
 });

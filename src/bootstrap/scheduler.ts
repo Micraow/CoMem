@@ -1,5 +1,6 @@
 /**
- * 后台调度器（架构文档 §10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL、§10.6 的对账重放）。
+ * 后台调度器（架构文档 §10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL、§10.6 的对账重放、
+ * §17.6 的请求记录裁剪）。
  *
  * ## 为什么需要它
  *
@@ -12,7 +13,7 @@
  * 单元测试看不出来：它们直接构造服务再同步 `await`，绕过了「谁在什么时候调它」
  * （`local/notes/decisions.md` 的 W10 一条，同一个结构性盲区）。
  *
- * ## 五个职责
+ * ## 六个职责
  *
  * | 职责 | 判定 | 动作 |
  * |---|---|---|
@@ -21,13 +22,15 @@
  * | TTL 清扫 | `max(updated_at, last_accessed_at) < now - memory.ttl.defaultDays` | `status = 'archived'`（软过期） |
  * | 临时上传清理 | `stagedAtMs < now - 24 小时` | 删除 `_meta/tmp/` 下的文件与元数据 |
  * | 对账重放 | `_meta/reconcile.log` 里有未解决记录 | 重做 `index` / `permission`，成功后原子清理日志（§10.6） |
+ * | 请求记录裁剪 | `created_at < now - telemetry.requestLog.retainDays` 或超出 `retainRows` | 删除 `request_log` 的行（§17.6） |
  *
  * ## 幂等
  *
- * 五个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
+ * 六个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
  * `commitPhase1` 用路径锁 + 归档序号单调（§10.2），`archive` 对已归档的会话是空操作，
  * `sweep` 的 `status <> 'archived'` 让同一条过期记忆只计数一次，`sweepStaged` 删掉的行
- * 下一轮自然不再出现，`reconcile` 的索引与权限物化都是 upsert。间隔与重叠保护是
+ * 下一轮自然不再出现，`reconcile` 的索引与权限物化都是 upsert，`prune` 的两条 DELETE
+ * 只按时间与行数删、删过的行不会再被匹配。间隔与重叠保护是
  * 「省一次扫描」，不是正确性前提。
  *
  * ## 为什么定时器 `unref`
@@ -103,6 +106,7 @@ const SKIPPED_RESULT: SchedulerTickResult = Object.freeze({
   ttlArchived: 0,
   ttlPurged: 0,
   stagedSwept: 0,
+  requestLogPruned: 0,
   reconcileResolved: 0,
   reconcileFailed: 0,
   reconcileRemaining: 0,
@@ -138,6 +142,28 @@ export interface TtlPort {
  */
 export interface StagedUploadSweepPort {
   sweepStaged(olderThanSeconds: number): Promise<number>;
+}
+
+/**
+ * 请求记录裁剪端口（`RequestLogRepository` 的结构子集）。
+ *
+ * 挂在调度轮次上的理由与 `request_log` 的写入点一致：表只在进程活着的时候长，
+ * 裁剪只在进程启动时跑一次就等于「常驻越久、表越大」。一次裁剪在 10 万行上的
+ * 稳态成本约 1 ms（行数规则先数一次再决定删不删，见仓储的 `prune`），所以每轮
+ * 都调，不另造定时器、不加频率参数。
+ */
+export interface RequestLogPrunePort {
+  prune(options: {
+    readonly retainDays: number;
+    readonly retainRows: number;
+    readonly now: Date;
+  }): number;
+}
+
+/** `telemetry.requestLog.retainDays` / `retainRows`（§17.6、§18）。 */
+export interface RequestLogRetention {
+  readonly retainDays: number;
+  readonly retainRows: number;
 }
 
 /**
@@ -179,6 +205,10 @@ export interface SchedulerOptions {
   readonly staged: StagedUploadSweepPort;
   readonly reconcile: ReconcilePort;
   readonly memories: PendingMemoryPort;
+  /** `request_log` 的裁剪路径（§17.6）；与 TTL 清扫同样每轮调用。 */
+  readonly requestLog: RequestLogPrunePort;
+  /** `telemetry.requestLog.retainDays` / `retainRows`；保留窗口沿用配置，不新增。 */
+  readonly requestLogRetention: RequestLogRetention;
   readonly expiry: SchedulerExpiry;
   /** `memory.ttl.sweepBatchSize`：每轮最多清扫多少条。 */
   readonly ttlSweepBatchSize: number;
@@ -202,6 +232,8 @@ export interface SchedulerTickResult {
   readonly ttlPurged: number;
   /** 这一轮清理掉的超时临时上传数（`_meta/tmp/`） */
   readonly stagedSwept: number;
+  /** 这一轮从 `request_log` 删掉的行数（超保留天数 + 超保留行数） */
+  readonly requestLogPruned: number;
   /** 这一轮对账重放成功（或目标已不存在）的记录数 */
   readonly reconcileResolved: number;
   /** 这一轮重放失败的记录数，仍留在 `reconcile.log` */
@@ -278,6 +310,8 @@ export class Scheduler {
   readonly #staged: StagedUploadSweepPort;
   readonly #reconcile: ReconcilePort;
   readonly #memories: PendingMemoryPort;
+  readonly #requestLog: RequestLogPrunePort;
+  readonly #requestLogRetention: RequestLogRetention;
   readonly #expiry: SchedulerExpiry;
   readonly #ttlSweepBatchSize: number;
   readonly #now: () => Date;
@@ -297,6 +331,8 @@ export class Scheduler {
     this.#staged = options.staged;
     this.#reconcile = options.reconcile;
     this.#memories = options.memories;
+    this.#requestLog = options.requestLog;
+    this.#requestLogRetention = options.requestLogRetention;
     this.#expiry = options.expiry;
     this.#ttlSweepBatchSize = options.ttlSweepBatchSize;
     this.#now = options.now ?? (() => new Date());
@@ -396,6 +432,7 @@ export class Scheduler {
 
     const { archived: ttlArchived, purged: ttlPurged } = await this.#sweepTtl();
     const stagedSwept = await this.#sweepStaged();
+    const requestLogPruned = this.#pruneRequestLog(now);
     const reconcile = await this.#replayReconcile();
 
     const result: SchedulerTickResult = {
@@ -407,6 +444,7 @@ export class Scheduler {
       ttlArchived,
       ttlPurged,
       stagedSwept,
+      requestLogPruned,
       reconcileResolved: reconcile.resolved,
       reconcileFailed: reconcile.failed,
       reconcileRemaining: reconcile.remaining,
@@ -687,6 +725,28 @@ export class Scheduler {
   }
 
   /**
+   * 请求记录裁剪（§17.6）。
+   *
+   * 失败只记 error，下一轮再试：裁剪是维护动作，它失败时这一轮的提交与过期处理
+   * 已经做完了，没必要让整轮跟着失败。保留窗口来自
+   * `telemetry.requestLog.retainDays` / `retainRows`，不在这里另设频率——仓储的
+   * `prune` 在没有超期或超限时只做一次索引查找与一次 `COUNT(*)`，每轮调的成本可以
+   * 忽略（10 万行实测约 1 ms）。
+   */
+  #pruneRequestLog(now: Date): number {
+    try {
+      return this.#requestLog.prune({
+        retainDays: this.#requestLogRetention.retainDays,
+        retainRows: this.#requestLogRetention.retainRows,
+        now,
+      });
+    } catch (error) {
+      this.#logger.error('请求记录裁剪失败，下一轮重试。', { error: errorMessage(error) });
+      return 0;
+    }
+  }
+
+  /**
    * 对账重放。失败只记 error，下一轮再试。
    *
    * `ReconcileService.replay` 内部已经逐条兜底；这里再包一层是因为日志读取 / 重写
@@ -705,8 +765,8 @@ export class Scheduler {
    * 每轮的摘要。
    *
    * 空转记 `debug`：30 秒一轮，一天 2880 轮，全打 `info` 会把真正的动作埋掉。有动作
-   * 时（提交了、过期了、清了 TTL、清了临时上传、重放了对账记录）记 `info`——那条才是
-   * 运维要看的。
+   * 时（提交了、过期了、清了 TTL、清了临时上传、裁了请求记录、重放了对账记录）记
+   * `info`——那条才是运维要看的。
    */
   #logRound(result: SchedulerTickResult): void {
     const summary = {
@@ -717,6 +777,7 @@ export class Scheduler {
       ttlArchived: result.ttlArchived,
       ttlPurged: result.ttlPurged,
       stagedSwept: result.stagedSwept,
+      requestLogPruned: result.requestLogPruned,
       reconcileResolved: result.reconcileResolved,
       reconcileFailed: result.reconcileFailed,
       reconcileRemaining: result.reconcileRemaining,
@@ -727,6 +788,7 @@ export class Scheduler {
         result.ttlArchived +
         result.ttlPurged +
         result.stagedSwept +
+        result.requestLogPruned +
         result.reconcileResolved +
         result.reconcileFailed ===
       0

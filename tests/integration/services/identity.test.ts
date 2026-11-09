@@ -100,8 +100,8 @@ describe('createUser / resolve', () => {
     createUser('alice');
     createGroup('ops');
     createGroup('eng');
-    service.addMember('ops', 'alice', 'member', NOW);
-    service.addMember('eng', 'alice', 'member', NOW);
+    service.addMember('ops', 'alice', NOW);
+    service.addMember('eng', 'alice', NOW);
 
     const identity = service.resolveSubject('user:alice');
     expect(identity?.principals).toEqual(['group:eng', 'group:ops', 'user:alice']);
@@ -173,8 +173,8 @@ describe('用户管理', () => {
     createUser('alice');
     createUser('bob');
     createGroup('eng');
-    service.addMember('eng', 'alice', 'member', NOW);
-    service.addMember('eng', 'bob', 'member', NOW);
+    service.addMember('eng', 'alice', NOW);
+    service.addMember('eng', 'bob', NOW);
 
     service.deleteUser('alice');
 
@@ -227,8 +227,8 @@ describe('组管理', () => {
     createUser('alice');
     createGroup('eng');
     createGroup('ops');
-    service.addMember('eng', 'alice', 'member', NOW);
-    service.addMember('ops', 'alice', 'member', NOW);
+    service.addMember('eng', 'alice', NOW);
+    service.addMember('ops', 'alice', NOW);
 
     service.deleteGroup('ops');
 
@@ -261,26 +261,34 @@ describe('成员管理', () => {
   });
 
   it('默认角色是 member', () => {
-    expect(service.addMember('eng', 'alice', undefined, NOW).role).toBe('member');
+    expect(service.addMember('eng', 'alice', NOW).role).toBe('member');
   });
 
   it('addMember 幂等', () => {
-    service.addMember('eng', 'alice', 'member', NOW);
-    const member = service.addMember('eng', 'alice', 'owner', LATER);
+    service.addMember('eng', 'alice', NOW);
+    const member = service.addMember('eng', 'alice', LATER);
 
-    expect(member.role).toBe('owner');
+    expect(member.role).toBe('member');
     expect(service.listMembers('eng')).toHaveLength(1);
   });
 
+  it('role 派生自组 owner：转移 owner 后同一条成员行的 role 跟着变', () => {
+    service.addMember('eng', 'alice', NOW);
+    expect(service.listMembers('eng')[0]?.role).toBe('member');
+
+    service.setGroupOwner('eng', 'alice', LATER);
+    expect(service.listMembers('eng')[0]?.role).toBe('owner');
+  });
+
   it('组或用户不存在抛 NOT_FOUND', () => {
-    expectCode('NOT_FOUND', () => service.addMember('missing', 'alice', 'member', NOW));
-    expectCode('NOT_FOUND', () => service.addMember('eng', 'missing', 'member', NOW));
+    expectCode('NOT_FOUND', () => service.addMember('missing', 'alice', NOW));
+    expectCode('NOT_FOUND', () => service.addMember('eng', 'missing', NOW));
   });
 
   it('removeMember 对非成员抛 NOT_FOUND', () => {
     expectCode('NOT_FOUND', () => service.removeMember('eng', 'alice'));
 
-    service.addMember('eng', 'alice', 'member', NOW);
+    service.addMember('eng', 'alice', NOW);
     service.removeMember('eng', 'alice');
     expect(service.listMembers('eng')).toEqual([]);
   });
@@ -297,7 +305,7 @@ describe('认证', () => {
 
   it('密码登录展开 user:{uid} 与 group 主体，末尾带通配符', async () => {
     createGroup('eng');
-    service.addMember('eng', 'alice', 'member', NOW);
+    service.addMember('eng', 'alice', NOW);
     await service.setPassword('alice', 'correct-password');
 
     await expect(
@@ -376,7 +384,7 @@ describe('认证', () => {
 
   it('退组立即生效：下一次 resolve 不再包含 group 主体', async () => {
     createGroup('eng');
-    service.addMember('eng', 'alice', 'member', NOW);
+    service.addMember('eng', 'alice', NOW);
 
     const before = await service.resolve({
       kind: 'session',

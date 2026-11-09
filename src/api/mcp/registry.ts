@@ -24,12 +24,13 @@ import { Uri } from '../../domain/uri.js';
 import type { AclAction } from '../../services/authorizer.js';
 import type { RerankFailure, ScoredHit } from '../../services/search.js';
 
-import type { McpToolContext } from './context.js';
 import {
-  MCP_TOOL_DEADLINE_MS,
-  ToolDeadline,
+  API_CALL_DEADLINE_MS,
+  CallDeadline,
   runWithDeadline,
-} from './deadline.js';
+} from '../deadline.js';
+
+import type { McpToolContext } from './context.js';
 
 /** §12.1：read = 1。 */
 const READ: AclAction = 1;
@@ -197,10 +198,10 @@ const DEADLINE_EXCEEDED_CODE = 'TOOL_DEADLINE_EXCEEDED';
  * 到上限时的返回文本。
  *
  * 必须回答「卡在哪」：只说「工具超时」的话，调用方拿不到任何可执行的下一步。
- * 上游由工具上报（`ToolDeadline.mark`）；没上报过说明卡在本地（索引 / 文件系统 /
+ * 上游由工具上报（`CallDeadline.mark`）；没上报过说明卡在本地（索引 / 文件系统 /
  * 锁），也要明确写出来，不能让它看起来像供应商的问题。
  */
-function deadlineMessage(tool: McpToolDefinition, deadline: ToolDeadline): string {
+function deadlineMessage(tool: McpToolDefinition, deadline: CallDeadline): string {
   const upstream = deadline.lastUpstream;
   if (upstream === null) {
     return `工具 ${tool.name} 在 ${deadline.budgetMs} 毫秒内没有返回，且没有进入任何外部上游；卡住的位置在本地（索引 / 文件系统 / 锁）。本次调用已中止等待，不代表没有结果。`;
@@ -219,14 +220,17 @@ function bindDeadline(tool: McpToolDefinition, budgetMs: number): McpToolDefinit
   return {
     ...tool,
     async execute(input, context) {
-      const deadline = context.deadline ?? new ToolDeadline(budgetMs);
+      const deadline = context.deadline ?? new CallDeadline(budgetMs);
       const scoped: McpToolContext = { ...context, deadline };
-      const operation = tool.execute(input, scoped);
-      return runWithDeadline(operation, deadline, () => ({
-        type: 'error',
-        code: DEADLINE_EXCEEDED_CODE,
-        message: deadlineMessage(tool, deadline),
-      }));
+      const outcome = await runWithDeadline(tool.execute(input, scoped), deadline);
+      if (outcome.kind === 'timed_out') {
+        return {
+          type: 'error',
+          code: DEADLINE_EXCEEDED_CODE,
+          message: deadlineMessage(tool, deadline),
+        };
+      }
+      return outcome.value;
     },
   };
 }
@@ -234,7 +238,7 @@ function bindDeadline(tool: McpToolDefinition, budgetMs: number): McpToolDefinit
 /** `ToolRegistry` 的装配参数。 */
 export interface ToolRegistryOptions {
   /**
-   * 单次工具调用的上限（毫秒）。默认 `MCP_TOOL_DEADLINE_MS`，来源见 `deadline.ts`。
+   * 单次工具调用的上限（毫秒）。默认 `API_CALL_DEADLINE_MS`，来源见 `api/deadline.ts`。
    *
    * 仅供装配与测试使用；**不暴露给模型**（不新增工具输入参数）。
    */
@@ -251,8 +255,8 @@ export class ToolRegistry {
     // 有的不能」。
     //
     // 截止时间同样是统一包装：它是「MCP 工具调用不能挂住宿主 agent」的唯一执行点
-    // （`deadline.ts`）。测试传更小的值来验证闸门，生产用默认值。
-    const deadlineMs = options.deadlineMs ?? MCP_TOOL_DEADLINE_MS;
+    // （`api/deadline.ts`）。测试传更小的值来验证闸门，生产用默认值。
+    const deadlineMs = options.deadlineMs ?? API_CALL_DEADLINE_MS;
     this.#tools = tools.map((tool) => bindDeadline(bindSubjectAliases(tool), deadlineMs));
     this.#byName = new Map(this.#tools.map((tool) => [tool.name, tool]));
   }

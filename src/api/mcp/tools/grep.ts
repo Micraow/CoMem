@@ -9,6 +9,8 @@
  * RegExp Modifiers 的运行时）。
  */
 
+import { ComemError } from '../../../domain/errors.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
 import { Uri } from '../../../domain/uri.js';
 import {
   asRecord,
@@ -18,9 +20,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-/** §13.2 的默认值：`nodeLimit=10`。 */
-const DEFAULT_NODE_LIMIT = 10;
 
 /** 把模式包成大小写不敏感的组。 */
 function caseInsensitive(pattern: string): string {
@@ -38,7 +37,7 @@ export const grepTool: McpToolDefinition = {
       uri: { type: 'string', description: '搜索范围的目录 URI；~ 是当前身份的根' },
       pattern: { type: 'string', description: '正则表达式' },
       caseInsensitive: { type: 'boolean', default: false },
-      nodeLimit: { type: 'integer', minimum: 1, default: DEFAULT_NODE_LIMIT },
+      nodeLimit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT },
     },
     required: ['uri', 'pattern'],
   },
@@ -46,8 +45,16 @@ export const grepTool: McpToolDefinition = {
     const args = asRecord(input, 'grep');
     const uri = Uri.parse(requiredString(args, 'uri', 'grep'));
     const pattern = requiredString(args, 'pattern', 'grep');
+    // 空串是合法正则，`new RegExp('')` 匹配每一行：不拦的话调用方什么都不传也能拿
+    // 回 nodeLimit 条命中，看起来像「搜索成功了」。HTTP 侧同样不接受空 pattern。
+    if (pattern === '') {
+      throw new ComemError('INVALID_ARGUMENT', 'grep 的 pattern 不能为空。', {
+        tool: 'grep',
+        field: 'pattern',
+      });
+    }
     const caseInsensitiveFlag = optionalBoolean(args, 'caseInsensitive', false, 'grep');
-    const nodeLimit = positiveInteger(args, 'nodeLimit', DEFAULT_NODE_LIMIT, 'grep');
+    const nodeLimit = positiveInteger(args, 'nodeLimit', DEFAULT_SEARCH_LIMIT, 'grep');
 
     // 出口清单（§12.4）：`SearchService.glob` 只做 filterReadable，不抛
     // PERMISSION_DENIED，所以范围本身必须先求权。

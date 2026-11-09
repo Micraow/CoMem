@@ -4,11 +4,26 @@
  * 这一组端点包装 `IdentityService`：用户目录、组目录、组成员关系的校验与
  * 「不存在 → NOT_FOUND」都在服务层完成，这里只做 HTTP 协议转换。
  *
- * ## 授权
+ * ## 授权：判定对象是目标资源，不是调用方自己的根
  *
- * 每个出口都先对**当前主体自己的根**求 `manage`（§12.4 的出口清单）。v1 是单用户
- * 部署，服务图绑定的主体就是请求身份；对自身根求权仍然是必要的：一旦以后换成
- * 每请求一份服务图，这里漏掉检查就会变成「任何登录用户都能列全部用户」。
+ * **不能对「调用方自己的根」求 `manage`。** user 根的 owner 恒为该用户
+ * （`domain/acl.ts` 的不变量 1），所以「自己的根可 manage」对每个登录用户都成立；
+ * 用它当管理面的门禁等于任何登录用户都是管理员。
+ *
+ * 两类端点分开判定：
+ *
+ * | 类别 | 端点 | 判定 |
+ * |---|---|---|
+ * | 针对具体用户 / 组 | 改密码、签 / 列 / 撤销 key、启用禁用、删除、改资料、加退组成员、改组资料 / owner | 对 `comem://user/{target}` 或 `comem://group/{gid}` 求 `manage` |
+ * | 跨主体（全局） | 列全部用户、创建用户、列全部组、创建组 | 必须是 `auth.adminUserIds` 里的系统管理员 |
+ *
+ * 目标级判定复用现有 ACL 语义，不新造权限：用户根默认只有本人能 manage；组根
+ * 预置 `user:{owner} = manage` + `group:{gid} = write`，所以组 owner 与显式拿到
+ * 组根 manage 的人能管理成员，普通组员只有 write，改不了成员关系。
+ *
+ * 系统管理员在两类端点上都是**显式配置**的旁路（默认空数组 = 没有人是管理员），
+ * 因为它不在 ACL 里，不能通过求权得到。没有「第一个用户自动成为管理员」之类的
+ * 隐式规则：默认值必须是安全的一侧。
  *
  * `Authorizer.assert` 抛的是 `PERMISSION_DENIED`：`ComemErrorCode` 是冻结枚举，
  * 没有 `FORBIDDEN`，403 的稳定码就是它。错误封套走标准的 `toErrorEnvelope`。
@@ -47,15 +62,20 @@
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
-import { groupPrincipal, parsePrincipal, userPrincipal } from '../../../domain/acl.js';
+import { groupPrincipal, userPrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
-import type { GroupMember, User } from '../../../domain/identity.js';
+import type { Group, User } from '../../../domain/identity.js';
 import { assertValidGroupId, assertValidUserId } from '../../../domain/identity.js';
 import { Uri } from '../../../domain/uri.js';
 import type { Authorizer } from '../../../services/authorizer.js';
 import { scopeKeyOf } from '../../../services/recall-ledger.js';
 import { ok } from '../envelope.js';
-import { requestContextOf } from '../middleware.js';
+import {
+  assertSystemAdmin,
+  callerUserIdOf,
+  isSystemAdmin,
+  requestContextOf,
+} from '../middleware.js';
 import {
   optionalQueryInteger,
   optionalString,
@@ -76,7 +96,6 @@ const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 500;
 
 const USER_STATUSES = ['active', 'disabled'] as const;
-const MEMBER_ROLES = ['owner', 'member'] as const;
 
 /**
  * 管理面用到的身份用例。
@@ -118,6 +137,14 @@ export interface AdminAccess {
   permissionCounts(principals: readonly string[]): ReadonlyMap<string, number>;
   /** 每个组的成员数。 */
   memberCounts(groupIds: readonly string[]): ReadonlyMap<string, number>;
+  /**
+   * 一把 API Key 的持有者用户 ID；不存在返回 `null`。
+   *
+   * 撤销 key 的路径是 `DELETE /admin/api-keys/{keyId}`，请求里只有 key 的 ID，
+   * 没有用户 ID——不反查持有者就只能对「调用方自己的根」求权，等于任何登录用户
+   * 都能吊销别人的凭据。SQL 细节留在装配层（`api/` 不 import `adapters/`）。
+   */
+  apiKeyOwner(keyId: string): string | null;
   userCount(): number;
   groupCount(): number;
 }
@@ -144,7 +171,17 @@ export type AdminRecallLedger = Pick<HttpRouteServices['ledger'], 'remove'>;
 export type AdminRouteServices = Pick<
   HttpRouteServices,
   'identity' | 'authorizer' | 'adminAccess'
-> & { readonly acl: AdminAcl; readonly ledger: AdminRecallLedger };
+> & {
+  readonly acl: AdminAcl;
+  readonly ledger: AdminRecallLedger;
+  /**
+   * 系统管理员用户 ID（`config.auth.adminUserIds`）。
+   *
+   * 必填而不是从 `config` 里现取：路由的授权口径应当在一处装配，测试也能直接
+   * 给一个明确的名单（`[]` 表示没有管理员），不需要构造整份配置。
+   */
+  readonly adminUserIds: readonly string[];
+};
 
 function invalidArgument(field: string, expected: string, value: unknown): ComemError {
   return new ComemError('INVALID_ARGUMENT', `参数 ${field} 必须是${expected}。`, {
@@ -191,35 +228,45 @@ function parseStatus(value: unknown): User['status'] {
   return status;
 }
 
-function parseRole(value: unknown): GroupMember['role'] {
-  if (value === undefined) {
-    return 'member';
+/** `comem://user/{uid}` —— 用户的管理面判定对象。 */
+function userRootOf(userId: string): Uri {
+  return Uri.parse(`comem://user/${userId}`);
+}
+
+/** `comem://group/{gid}` —— 组的管理面判定对象。 */
+function groupRootOf(groupId: string): Uri {
+  return Uri.parse(`comem://group/${groupId}`);
+}
+
+/**
+ * 目标资源的门禁：系统管理员，或对该资源所在的根有 `manage`。
+ *
+ * `target` 必须是**被操作的对象**（用户的根、组的根），不能是调用方自己的根——
+ * owner 恒 manage，用自身根判定等于放行任何登录用户。
+ */
+async function assertManageOf(
+  request: FastifyRequest,
+  authorizer: Authorizer,
+  adminUserIds: readonly string[],
+  target: Uri,
+): Promise<void> {
+  if (isSystemAdmin(request, adminUserIds)) {
+    return;
   }
-  const role = MEMBER_ROLES.find((candidate) => candidate === value);
-  if (role === undefined) {
-    throw invalidArgument('role', MEMBER_ROLES.join(' / '), value);
+  await authorizer.assert(target, MANAGE, requestContextOf(request).principals);
+}
+
+/** 取组；不存在抛 `NOT_FOUND`。先于求权：不能对不存在的组根做判定（也没法物化）。 */
+function requireGroup(identity: AdminIdentity, groupId: string): Group {
+  const group = identity.getGroup(groupId);
+  if (group === null) {
+    throw new ComemError('NOT_FOUND', `组不存在：${groupId}`, { groupId });
   }
-  return role;
-}
-
-/** 当前主体自己的根。中间件已经保证 subject 是 `user:` 主体。 */
-function ownRootOf(request: FastifyRequest): Uri {
-  const context = requestContextOf(request);
-  const principal = parsePrincipal(context.subject);
-  return Uri.parse(`comem://user/${principal.id}`);
-}
-
-/** 当前主体的用户 ID（`user:{uid}` 的 uid）。中间件已经保证 subject 是 user。 */
-function callerUserIdOf(request: FastifyRequest): string {
-  return parsePrincipal(requestContextOf(request).subject).id;
-}
-
-async function assertManage(request: FastifyRequest, authorizer: Authorizer): Promise<void> {
-  await authorizer.assert(ownRootOf(request), MANAGE, requestContextOf(request).principals);
+  return group;
 }
 
 export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, acl, ledger } = services;
+  const { identity, authorizer, adminAccess, acl, ledger, adminUserIds } = services;
 
   return {
     prefix: '/admin',
@@ -233,7 +280,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           max: MAX_LIST_LIMIT,
         });
         const offset = optionalQueryInteger(query, 'offset', 0, { min: 0 });
-        await assertManage(request, authorizer);
+        assertSystemAdmin(request, adminUserIds);
 
         const users = identity.listUsers({ limit, offset });
         const counts = adminAccess.permissionCounts(
@@ -255,7 +302,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const id = requireString(body, 'id');
         const displayName = requireString(body, 'displayName');
         const email = optionalNullableString(body, 'email');
-        await assertManage(request, authorizer);
+        assertSystemAdmin(request, adminUserIds);
 
         const user = identity.createUser({
           id,
@@ -274,7 +321,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const displayName = optionalNonEmptyString(body, 'displayName');
         const email = optionalNullableString(body, 'email');
         const status = body['status'] === undefined ? undefined : parseStatus(body['status']);
-        await assertManage(request, authorizer);
+        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
 
         const user = identity.updateUser(id, {
           ...(displayName === undefined ? {} : { displayName }),
@@ -286,7 +333,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
 
       app.delete<{ Params: { id: string } }>('/users/:id', async (request) => {
         const id = assertValidUserId(request.params.id);
-        await assertManage(request, authorizer);
+        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
 
         const principal = userPrincipal(id);
         if (requestContextOf(request).subject === principal) {
@@ -319,7 +366,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           const id = assertValidUserId(request.params.id);
           const body = requireRecord(request.body, 'admin/users/:id/password');
           const password = requireString(body, 'password');
-          await assertManage(request, authorizer);
+          await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
 
           await identity.setPassword(id, password);
           return ok({ id, passwordSet: true });
@@ -338,7 +385,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           const body = requireRecord(request.body, 'admin/users/:id/api-keys');
           const name = requireString(body, 'name');
           const expiresAt = optionalString(body, 'expiresAt');
-          await assertManage(request, authorizer);
+          await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
 
           const { raw, record } = await identity.createApiKey(id, {
             name,
@@ -359,13 +406,19 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
 
       app.get<{ Params: { id: string } }>('/users/:id/api-keys', async (request) => {
         const id = assertValidUserId(request.params.id);
-        await assertManage(request, authorizer);
+        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
         return ok({ keys: identity.listApiKeys(id) });
       });
 
       app.delete<{ Params: { keyId: string } }>('/api-keys/:keyId', async (request) => {
         const keyId = request.params.keyId;
-        await assertManage(request, authorizer);
+        // 请求里只有 key 的 ID：先反查持有者，再对**持有者的根**求权。否则任何
+        // 登录用户都能吊销别人的凭据（拒绝服务），这是同一类「用自身根自证」。
+        const ownerUserId = adminAccess.apiKeyOwner(keyId);
+        if (ownerUserId === null) {
+          throw new ComemError('NOT_FOUND', `API Key 不存在：${keyId}`, { keyId });
+        }
+        await assertManageOf(request, authorizer, adminUserIds, userRootOf(ownerUserId));
         const revoked = identity.revokeApiKey(keyId);
         if (!revoked) {
           throw new ComemError('NOT_FOUND', `API Key 不存在：${keyId}`, { keyId });
@@ -382,7 +435,7 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           max: MAX_LIST_LIMIT,
         });
         const offset = optionalQueryInteger(query, 'offset', 0, { min: 0 });
-        await assertManage(request, authorizer);
+        assertSystemAdmin(request, adminUserIds);
 
         const groups = identity.listGroups({ limit, offset });
         const memberCounts = adminAccess.memberCounts(groups.map((group) => group.id));
@@ -410,7 +463,9 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const id = requireString(body, 'id');
         const displayName = requireString(body, 'displayName');
         const description = optionalNullableString(body, 'description');
-        await assertManage(request, authorizer);
+        // 建组分配的是**全局组目录**里的一个新 ID，没有已存在的目标资源可以
+        // 求权。归到跨主体一类：由系统管理员建组，owner 仍是创建者。
+        assertSystemAdmin(request, adminUserIds);
 
         const ownerUserId = callerUserIdOf(request);
         const group = identity.createGroup({
@@ -433,7 +488,8 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const body = requireRecord(request.body, 'admin/groups/:id');
         const displayName = optionalNonEmptyString(body, 'displayName');
         const description = optionalNullableString(body, 'description');
-        await assertManage(request, authorizer);
+        requireGroup(identity, id);
+        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(id));
 
         const group = identity.updateGroup(id, {
           ...(displayName === undefined ? {} : { displayName }),
@@ -445,9 +501,9 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
       /**
        * 改组的 owner。
        *
-       * **只有当前 owner 或组根的 manage 持有者能改。** 不能只看「自己根的
-       * manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能
-       * 接管别人的组。
+       * **只有当前 owner、组根的 manage 持有者或系统管理员能改。** 不能只看
+       * 「自己根的 manage」：那对任何登录用户都成立（owner 恒 manage），等于
+       * 任何成员都能接管别人的组。
        *
        * 允许「当前 owner」单独成立是为迁移回填的存量组留修复路径：它们的
        * `owner_user_id` 有值，但 `.acl.json` 里还没有 `user:{owner} = manage`
@@ -459,20 +515,20 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         const userId = assertValidUserId(requireString(body, 'userId'));
         const context = requestContextOf(request);
 
-        const group = identity.getGroup(id);
-        if (group === null) {
-          throw new ComemError('NOT_FOUND', `组不存在：${id}`, { groupId: id });
-        }
+        const group = requireGroup(identity, id);
         if (identity.getUser(userId) === null) {
           throw new ComemError('NOT_FOUND', `用户不存在：${userId}`, { userId });
         }
 
-        const groupRoot = Uri.parse(`comem://group/${id}`);
+        const groupRoot = groupRootOf(id);
         // `ownerUserId` 是元数据，不是授权（§12.2）：它只回答「谁是当前 owner」。
         // 为 `NULL` 时没有任何人是当前 owner，必须按组根 `manage` 求权——删账号会
         // 把这一列清空，组里如果没有第二个 manage 持有者，本端点就再也进不来，
         // 恢复只能走 `pnpm group:owner`（§12.6）。
-        if (group.ownerUserId !== callerUserIdOf(request)) {
+        if (
+          group.ownerUserId !== callerUserIdOf(request) &&
+          !isSystemAdmin(request, adminUserIds)
+        ) {
           // 不是当前 owner 时按组根的 manage 求权（Service 层会再求一次纵深防御
           // 之外的那部分由 `setGroupOwner` 跳过，原因见它的注释）。
           await authorizer.assert(groupRoot, MANAGE, context.principals);
@@ -485,7 +541,9 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
 
       app.delete<{ Params: { id: string } }>('/groups/:id', async (request) => {
         const id = assertValidGroupId(request.params.id);
-        await assertManage(request, authorizer);
+        // 先确认组存在再求权：删除路径会撤权、清账本，不能对不存在的组启动。
+        requireGroup(identity, id);
+        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(id));
 
         const principal = groupPrincipal(id);
         // 当前主体属于这个组时，删组会连同它的可读范围一起消失；控制台随后每个
@@ -513,7 +571,8 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
 
       app.get<{ Params: { id: string } }>('/groups/:id/members', async (request) => {
         const groupId = assertValidGroupId(request.params.id);
-        await assertManage(request, authorizer);
+        requireGroup(identity, groupId);
+        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
 
         const members = identity.listMembers(groupId);
         return ok({ groupId, members, total: members.length });
@@ -525,10 +584,23 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
           const groupId = assertValidGroupId(request.params.id);
           const body = requireRecord(request.body, 'admin/groups/:id/members');
           const userId = assertValidUserId(requireString(body, 'userId'));
-          const role = parseRole(body['role']);
-          await assertManage(request, authorizer);
+          // 成员的 `role` 是派生值（`app_group.owner_user_id`），不是可写属性。
+          // 允许显式写入会让响应里出现「owner 但没有任何 owner 能力」的行；改
+          // owner 的入口只有一个。
+          if (body['role'] !== undefined) {
+            throw new ComemError(
+              'INVALID_ARGUMENT',
+              '成员的 role 是派生字段，不能显式写入；改组 owner 用 POST /admin/groups/{id}/owner。',
+              { field: 'role' },
+            );
+          }
+          requireGroup(identity, groupId);
+          // **不能只看「自己的根」**：owner 恒 manage，任何登录用户都满足。加组
+          // 成员会给出 `group:{gid}` 主体，而组根预置 `group:{gid} = write`——
+          // 自助入组等于拿到整棵组子树。判定对象是组根。
+          await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
 
-          const member = identity.addMember(groupId, userId, role);
+          const member = identity.addMember(groupId, userId);
           return ok({ member });
         },
       );
@@ -538,7 +610,8 @@ export function createAdminRoutes(services: AdminRouteServices): HttpRouteGroup 
         async (request) => {
           const groupId = assertValidGroupId(request.params.id);
           const userId = assertValidUserId(request.params.userId);
-          await assertManage(request, authorizer);
+          requireGroup(identity, groupId);
+          await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
 
           identity.removeMember(groupId, userId);
           return ok({ groupId, userId, removed: true });

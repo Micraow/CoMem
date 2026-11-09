@@ -233,6 +233,9 @@ export class MemoryMergeStep extends CommitStep {
       try {
         write = await this.#memory.upsertMemory(context.scopeUri, schema, {
           uri,
+          // 溯源由服务端确定（W97）：这次写入的原始材料就是本次归档本身。抽取模型
+          // 看不到归档 URI，让它输出只会得到幻觉。
+          provenance: { sources: [context.archiveUri] },
           update: (current) => {
             const result = applyOperations({ ...current }, group.operations);
             for (const failure of result.skipped) {
