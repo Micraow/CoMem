@@ -3,9 +3,8 @@
  *
  * 一个技能是 `skills/{name}/` 下的文件树，入口固定为根目录的 `SKILL.md`。安装
  * 走与 `add_resource` 相同的批量路径（§10.6）：全部文件写完后**一次**
- * `index.upsert`，再按父目录去重投递摘要失效。两处逻辑是复制的，不是抽出来的
- * 公共层——`ResourceService` 还带着临时上传、附件命名这些技能不需要的东西，现在
- * 只有一个真实调用点，抽一层只会把两份不同的约束塞进同一个函数。
+ * `index.upsert`，再按父目录去重投递摘要失效。摘要标记与写后物化权限的规则在
+ * `write-through.ts`，与 `ResourceService` 共用一份实现。
  *
  * ## 校验
  *
@@ -30,10 +29,8 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { SummaryService } from './summary.js';
-import type { AclAction, Authorizer } from './authorizer.js';
-
-/** §12.1：write = 3。 */
-const WRITE: AclAction = 3;
+import type { Authorizer } from './authorizer.js';
+import { invalidateParentSummaries, materializeAncestorPermissions } from './write-through.js';
 
 /** 技能入口文件名。 */
 const SKILL_ENTRY_FILE = 'SKILL.md';
@@ -247,10 +244,14 @@ export class SkillService {
       await this.#index.upsert(records);
       // §12.4 的「写时算」：技能文件不经过 `FileSystemService`，观察者收不到通知。
       // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。
-      await this.#materialize([skillUri, ...written], options.principals);
+      await materializeAncestorPermissions(
+        { authorizer: this.#authorizer, logger: this.#logger, nodeLabel: '技能节点' },
+        [skillUri, ...written],
+        options.principals,
+      );
     });
 
-    await this.#invalidateDirectories(written);
+    await invalidateParentSummaries({ summary: this.#summary, logger: this.#logger }, written);
 
     this.#logger.info('技能已安装', {
       skill: skillUri.toString(),
@@ -300,79 +301,6 @@ export class SkillService {
       visible: readable.size,
     });
     return candidates.filter((uri) => readable.has(uri.toString()));
-  }
-
-  // ── 内部 ──
-
-  /**
-   * 为新建 / 覆盖的节点物化权限（含 `writeBytes` 顺手建出来的中间目录）。
-   *
-   * 技能包可能是 `scripts/check.sh` 这种嵌套路径，`scripts/` 目录同样需要自己的
-   * 行，否则它在 `tree` 里整个消失。逐级 `materializeNode` 是幂等的，去重之后
-   * 100 个文件只多出「目录数」条 UPSERT。
-   *
-   * 失败只记日志：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
-   */
-  async #materialize(
-    uris: readonly Uri[],
-    principals: readonly string[],
-  ): Promise<void> {
-    const directories = new Map<string, Uri>();
-    for (const uri of uris) {
-      let current: Uri | null = uri;
-      while (current !== null) {
-        const key = current.toString();
-        if (directories.has(key)) {
-          // 祖先链已经收过，再往上都是重复。
-          break;
-        }
-        directories.set(key, current);
-        current = current.parent();
-      }
-    }
-
-    for (const [key, uri] of directories) {
-      try {
-        await this.#authorizer.assert(uri, WRITE, principals);
-      } catch (error) {
-        this.#logger.error('技能节点权限物化失败，已忽略。', {
-          uri: key,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-  }
-
-  /**
-   * 摘要失效投递：按直接父目录去重。
-   *
-   * **必须用 `markStale` 而不是 `invalidate`。** 批量路径先写文件再批量 upsert 索引，
-   * 等标脏时索引里已经是新 digest，`invalidate` 的正文比较必然相等，传播链被静默
-   * 跳过——文件写了、目录摘要永远不重算。
-   */
-  async #invalidateDirectories(written: readonly Uri[]): Promise<void> {
-    const directories = new Map<string, Uri>();
-    for (const uri of written) {
-      const parent = uri.parent();
-      if (parent === null) {
-        continue;
-      }
-      const key = parent.toString();
-      if (!directories.has(key)) {
-        directories.set(key, parent);
-      }
-    }
-
-    for (const [directory, directoryUri] of directories) {
-      try {
-        await this.#summary.markStale(directoryUri);
-      } catch (error) {
-        this.#logger.error('摘要失效投递失败，已忽略。', {
-          directory,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
   }
 }
 

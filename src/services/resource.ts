@@ -43,8 +43,9 @@ import { stableDigest } from '../domain/node.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
-import type { AclAction, Authorizer } from './authorizer.js';
+import type { Authorizer } from './authorizer.js';
 import type { SummaryService } from './summary.js';
+import { invalidateParentSummaries, materializeAncestorPermissions } from './write-through.js';
 
 /**
  * 单文件大小上限默认值：50MB（52,428,800 字节）。
@@ -177,9 +178,6 @@ export interface ResourceServiceDeps {
   /** 默认 `DEFAULT_MAX_FILES` */
   readonly maxFiles?: number;
 }
-
-/** §12.1：write = 3。 */
-const WRITE: AclAction = 3;
 
 /** 资源文件的索引层级：原文件是 L2（L0 / L1 是目录摘要，§9.1）。 */
 const RESOURCE_LEVEL = 'L2';
@@ -439,12 +437,24 @@ export class ResourceService {
       // 放在 `index.upsert` 之后：`materializeNode` 从 `node` 表读 kind 决定链的
       // 起点。索引写失败时仍然要物化——权限是独立的派生数据，而且 `kind` 缺失时
       // 的兜底（按目录算）得到的是同一条有效权限。
-      await this.#materialize([...written, ...attachments], options.principals);
+      await materializeAncestorPermissions(
+        {
+          authorizer: this.#authorizer,
+          logger: this.#logger,
+          nodeLabel: '资源节点',
+          onFailure: (uri, reason) => this.#recordReconcile('permission', uri, reason),
+        },
+        [...written, ...attachments],
+        options.principals,
+      );
     });
 
     // §10.6 第 3 步：提交后统一投递摘要重算，每个父目录一次。
     if (!indexFailed) {
-      await this.#invalidateDirectories(written);
+      await invalidateParentSummaries(
+        { summary: this.#summary, logger: this.#logger },
+        written,
+      );
     }
 
     const elapsedMs = Date.now() - startedAt;
@@ -586,79 +596,6 @@ export class ResourceService {
       const suffixed = attachmentsDirectory.child(`${stem}-${index}${extension}`);
       if (!(await this.#store.exists(suffixed))) {
         return suffixed;
-      }
-    }
-  }
-
-  /**
-   * 摘要失效投递：按直接父目录去重。
-   *
-   * **必须用 `markStale` 而不是 `invalidate`。** 批量路径的顺序是「写文件 → 批量
-   * `index.upsert` → 标脏」，等标脏被调用时索引里已经是新 digest，`invalidate` 的
-   * 正文比较必然相等，整条传播链会被静默跳过——文件写了、目录摘要永远不重算。
-   *
-   * 去重口径是**直接父目录**：批量导入 100 个文件落在 10 个目录时，只应该标 10 次。
-   */
-  async #invalidateDirectories(written: readonly Uri[]): Promise<void> {
-    const directories = new Map<string, Uri>();
-    for (const uri of written) {
-      const parent = uri.parent();
-      if (parent === null) {
-        continue;
-      }
-      const key = parent.toString();
-      if (!directories.has(key)) {
-        directories.set(key, parent);
-      }
-    }
-
-    for (const [directory, directoryUri] of directories) {
-      try {
-        await this.#summary.markStale(directoryUri);
-      } catch (error) {
-        this.#logger.error('摘要失效投递失败，已忽略。', {
-          directory,
-          error: errorMessage(error),
-        });
-      }
-    }
-  }
-
-  /**
-   * 为新建 / 覆盖的节点物化权限（含 `mkdir -p` 顺手建出来的中间目录）。
-   *
-   * 只对「写出来的 URI」物化不够：`writeText` 写 `docs/api/spec.md` 时会建出
-   * `docs/` 与 `docs/api/`，这两个目录没有自己的行时会在 `list` / `tree` 里整个
-   * 消失（`filterReadable` 是纯 SQL 查询）。逐级 `materializeNode` 是幂等的，去重
-   * 之后 100 个文件只会多出「目录数」条 UPSERT。
-   *
-   * 失败只记日志 + 对账：文件已经落盘，回滚反而丢数据（§7 的同一原则）。
-   */
-  async #materialize(
-    uris: readonly Uri[],
-    principals: readonly string[],
-  ): Promise<void> {
-    const directories = new Map<string, Uri>();
-    for (const uri of uris) {
-      let current: Uri | null = uri;
-      while (current !== null) {
-        const key = current.toString();
-        if (directories.has(key)) {
-          // 祖先链已经收过，再往上都是重复。
-          break;
-        }
-        directories.set(key, current);
-        current = current.parent();
-      }
-    }
-
-    for (const [key, uri] of directories) {
-      try {
-        await this.#authorizer.assert(uri, WRITE, principals);
-      } catch (error) {
-        const reason = errorMessage(error);
-        this.#logger.error('资源节点权限物化失败，已忽略。', { uri: key, reason });
-        await this.#recordReconcile('permission', key, reason);
       }
     }
   }
