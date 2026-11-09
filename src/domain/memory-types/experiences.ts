@@ -3,8 +3,10 @@ import type { MemoryTypeSchema } from '../memory-type.js';
 /**
  * 从执行结果蒸馏的经验（架构文档 §11.1、§6.5 的 `experiences/monorepo-migration.md`）。
  *
- * 走「复核闸门」：抽取产出的是 `pending` 记录，人工通过后才进检索（§11.6）。
- * 一个话题一个文件，旧的结论被新经验修正时用 patch 合并。
+ * 走「复核闸门」：写 experiences 的是阶段二第 5 步 `experience_distill`（§10.1），
+ * 它读本次会话与已有经验后整段重写该 topic 的正文，写入后 `status = 'pending'`，
+ * 人工通过后才进检索（§11.6）。一个话题一个文件；`content` 的 `merge: 'patch'`
+ * 只描述抽取路径的字段级语义，归纳路径由服务端在 `upsertMemory` 的锁内整段覆盖。
  */
 export const experiencesMemoryType = {
   type: 'experiences',

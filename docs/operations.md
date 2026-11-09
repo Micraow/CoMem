@@ -392,11 +392,12 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
 
 ## 提示词
 
-六条提示词的静态骨架在仓库的 `prompts/` 下，随代码一起发布：
+内置提示词的静态骨架在仓库的 `prompts/` 下，随代码一起发布：
 
 | 文件 | 什么时候发给模型 |
 |---|---|
 | `extract-system.md` / `extract-user.md` | 记忆抽取（§11.3、§11.4） |
+| `experience-system.md` / `experience-user.md` | 经验归纳（§10.1 第 5 步） |
 | `summarize-system.md` / `summarize-user.md` | 目录摘要（§9.2） |
 | `rewrite-system.md` / `rewrite-user.md` | 查询重写（§8.4） |
 
@@ -1437,7 +1438,7 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 | 组 | 指标 | 用途 |
 |---|---|---|
 | HTTP | `comem_http_request_duration_seconds_sum` / `_count` | 请求完整耗时的累加与次数。v1 是 summary 形态，没有分位数 |
-| Hook 开销 | `comem_hook_overhead_seconds{event,phase}`、`comem_hook_overhead_total_seconds{event}`、`comem_hook_async_seconds{phase}` | 回答「用 CoMem 让每一轮多花了多少毫秒」。`phase` 是 `process_start` / `recall` / `serialize` / `capture`；`total` 是单轮阻塞合计；`async` 是后台部分，`phase` 是 `archive` / `extract` / `merge` / `summary`，**不挂 `event`**（同一份进程级快照不属于任何事件） |
+| Hook 开销 | `comem_hook_overhead_seconds{event,phase}`、`comem_hook_overhead_total_seconds{event}`、`comem_hook_async_seconds{phase}` | 回答「用 CoMem 让每一轮多花了多少毫秒」。`phase` 是 `process_start` / `recall` / `serialize` / `capture`；`total` 是单轮阻塞合计；`async` 是后台部分，`phase` 是 `archive` / `extract` / `merge` / `summary` / `distill`，**不挂 `event`**（同一份进程级快照不属于任何事件） |
 | 模型 | `comem_llm_tokens_total{kind="prompt"\|"completion"}`、`comem_llm_cost_usd_total`（配了单价才有）、`comem_llm_pricing_configured` | 钱花在哪。成本按 `providers.llm.default.pricing` 换算 |
 | 业务 | `comem_index_nodes`、`comem_pending_review` | 索引规模与待复核积压 |
 
@@ -1448,7 +1449,7 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 `comem_llm_duration_seconds`、`comem_llm_errors_total`。设计文档写了标签与含义，代码里没有对应的
 累加器——接 Grafana 之前先按这张表核对一遍，不要照文档写查询。
 
-**阻塞与异步分开统计**（§17.2）：归档 / 抽取 / 合并 / 摘要在后台跑，用户没等它，
+**阻塞与异步分开统计**（§17.2）：归档 / 抽取 / 合并 / 摘要 / 经验归纳在后台跑，用户没等它，
 不能算进「CoMem 让请求慢了多少」。混在一起会把 12 秒的后台处理算成延迟。
 
 `/health` 与 `/metrics` 同时挂在根路径与 `/api/v1` 下，两处都能抓（§17.1）。
@@ -2047,12 +2048,15 @@ COMEM_SERVER_PORT=8080 pnpm dev
     30 秒是推导值：28 秒上游预算（意图分析 10 + 嵌入 6 + 重排 12）+ 2 秒本地余量。
     三条路径是 `/search/find`、`/search/search` 的 `mode=list` 与 `mode=context`。
 
-    **`POST /search/grep`、`/search/glob` 与 fs / read / list / tree 等纯本地端点有意
-    不设时间上限。** 三条理由：30 秒是上面的推导值，套给纯本地操作就是「一个数字两套
-    来源」；grep 的代价只有结构性上界（`GREP_CANDIDATE_LIMIT = 200` 个候选文件），不是
-    时间上界，同一个常数对它们没有意义；风险方向是「HTTP 更宽松」而不是相反——MCP
-    同步阻塞宿主 agent，所以先收紧，HTTP 的 grep / glob 只被控制台与脚本调用，而 Hook
-    的召回走 `/search/find`，已经在闸门下。
+    **`POST /search/grep`、`/search/glob` 与 fs / read / list / tree 等不调模型的端点
+    有意不设时间上限。** 这两条检索路由不是纯本地扫描：`glob` 是一次索引查询
+    （`index.glob` 在 SQL 里按 `node_permission` 过滤，服务层再过一遍 `filterReadable`），
+    `grep` 的候选集同样来自 `index.glob`（上限 `GREP_CANDIDATE_LIMIT = 200` 个候选
+    文件），只有逐文件读盘与行匹配发生在本地（架构文档 §8.4）。三条理由：30 秒是上面
+    的推导值，套给不调模型的操作就是「一个数字两套来源」；grep 的代价只有结构性上界
+    （候选文件数 × 每个文件的行匹配），不是时间上界，同一个常数对它们没有意义；风险
+    方向是「HTTP 更宽松」而不是相反——MCP 同步阻塞宿主 agent，所以先收紧，HTTP 的
+    grep / glob 只被控制台与脚本调用，而 Hook 的召回走 `/search/find`，已经在闸门下。
 
     **用户可观察的后果**：大库加慢盘时，同一个能力会在 MCP 侧 30 秒返回错误、在 HTTP
     侧继续等待。`providers.*.timeoutSeconds` 仍然只校验正数（写 3600 就真的等 3600
@@ -2104,3 +2108,42 @@ COMEM_SERVER_PORT=8080 pnpm dev
     `comem_http_request_duration_seconds` 从一条全局序列变成每账号一条（`account` 标签，
     未认证请求归 `anonymous`），条数随账号数线性增长，Prometheus 侧的存储与查询成本随之
     上升。单账号部署默认关闭是对的；多账号环境打开前先确认抓取端能承受。
+
+36. **悬空符号链接会被写入替换掉。** `ContentStore` 用 `stat` 判断目标是否存在（跟随
+    符号链接），用「同目录临时文件 + `rename`」落盘（`src/adapters/fs/content-store.ts`
+    的 `exists` 与 `#writeAtomically`）。目标是一个指向不存在路径的符号链接时，`stat`
+    返回 `ENOENT`，被当成「这里没有文件」，随后的 `rename` 把链接**本身**换成普通文件：
+    目录里原本那个链接静默消失。丢掉的只是一个本来就指向虚无的链接，没有覆盖任何真实
+    内容；但「这里有个链接」这件事无法从写入结果里看出来。`write` 与 `add_resource` 都走
+    这条路径。要堵住需要不跟随符号链接的 `lstat`（先判定「这是个链接」再决定拒绝还是写
+    穿），`src/` 里没有这个方法。
+
+37. **`memory_link` 没有重建入口。** 记忆文件写成功、links 写失败时只记 `error`，归档
+    照常完成（`MemoryMergeStep` / `ExperienceDistillStep`），口径是「`sources` 是真相、
+    `memory_link` 是派生读模型，丢了能重建」。但重建只是原则，不是命令：`pnpm reindex`
+    只重建 `node` / `node_fts` / `node_embedding`，不碰 `memory_link`。写失败的边、删错的
+    行、手工改过 `sources` 之后的边，只能按 `sources` 手工补 SQL 或重新触发归档；
+    `GET /memories/{uri}/links?direction=backlinks` 读到的是表里的现状，不是文件的现状。
+
+38. **`GET /health` 返回全库聚合计数。** `index.totalNodes`、`queue.pending`、
+    `queue.processing`、`memory.pendingReview`、`memory.orphanTasks`、
+    `summary.pendingDirs` / `degradedDirs` 都是跨全部用户与组的计数，不带主体过滤；端点
+    在公开路径上（与 `/metrics` 一样，见上面第 32 条），任何能访问服务的人都能读到这些
+    数字。它们是计数，不含 URI、正文或别的记录枚举。控制台的概览页依赖它（§16）。
+
+39. **`supersedes` 只跟一跳，版本文件被删后 `reject` 退化成删除。** `reject` 只读当前
+    pending 文件的 `supersedes`，把那一份版本写回规范 URI；它不沿链回溯
+    （`src/services/memory.ts` 的 `#restoreSuperseded`）。版本文件被 TTL 物理删除
+    （`memory.ttl.retentionDays > 0`）或被「每个 identity 只留 5 份」截断之后，恢复失败
+    只记一条 `warn`（「指向的文件不存在，拒绝时按删除处理」），终态是这条记忆被删除，
+    不是回到更早的版本。`retentionDays > 0` 的部署更容易遇到：非豁免类型的版本文件与
+    普通记忆走同一条 TTL 路径，归档满保留期后一起物理删除（`rules` 的版本文件因类型
+    豁免不受 TTL 影响，但仍会被 5 份截断删掉，见架构文档 §11.11）。
+
+40. **`prefetch` 只返回 `active`，未复核的经验对下一轮归纳不可见。** 经验归纳步骤
+    （`experience_distill`）用 `MemoryService.prefetch` 取同一 topic 的旧正文，而
+    `prefetch` 按 `status = 'active'` 过滤（`src/services/memory.ts:1383`）。上一轮写入的
+    经验还在 `pending`、没被复核时，下一轮归纳看不到它，模型按「没有旧经验」整段重写，
+    旧结论被无合并覆盖（`pending` 旧值也不做版本快照，见架构文档 §11.11）。这是复核闸门
+    的既有语义——未生效的结论不参与检索与预取——不是新缺陷；要让下一轮看到未复核的经验，
+    得把 pending 纳入 `prefetch`，那会改变「pending 不进检索」的契约。

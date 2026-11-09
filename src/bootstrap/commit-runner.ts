@@ -4,8 +4,8 @@
  * ## 为什么需要它
  *
  * `POST /sessions/{id}/commit` 只做阶段一的同步部分：落归档目录、写
- * `messages.jsonl`、写 `phase1.status = ready`、建任务。阶段二的四个步骤
- * （归档摘要 → 记忆抽取 → 补丁合并 → 摘要失效）**没有任何执行入口**。
+ * `messages.jsonl`、写 `phase1.status = ready`、建任务。阶段二的五个步骤
+ * （归档摘要 → 记忆抽取 → 补丁合并 → 摘要失效 → 经验归纳）**没有任何执行入口**。
  *
  * 没有这个循环的后果不是「慢」而是「永远不跑」：任务停在 `pending`，
  * `memories/pending` 永远为空，`.done` 永远不写。单元测试**看不出来**——

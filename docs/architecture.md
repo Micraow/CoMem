@@ -480,6 +480,7 @@ docker run -d \
 memory_type: preferences
 topic: code-style
 uri: comem://user/alice/memories/preferences/code-style
+valid_from: 2026-11-05T16:40:00Z
 sources:
   - comem://user/alice/sessions/s1/history/archive_001
 status: active
@@ -493,6 +494,23 @@ updated_at: 2026-11-05T16:40:00Z
 ```
 
 **`sources` 为空时不写这个键。** 没有溯源信息的记忆（W97 之前的存量、不由归档产生的写入）与改动前逐字节相同。
+
+**`valid_from` / `valid_until` / `supersedes` 是三个保留键，只能由服务端写。** 它们不在
+`schema.fields` 里，值来自 `MemoryDocument` 的元数据：
+
+- `valid_from`：这一版从何时开始有效。`upsertMemory` 每次写入都写，值是本次写入时刻；
+  `approve` / `reject` 也是整份重写，但沿用读到的值（复核与回退不改变「从何时开始
+  有效」）。
+- `valid_until`：只有旧值快照（`.history` 版本文件）写；非空表示「已失效」，检索默认
+  过滤掉。当前值不写这个键。
+- `supersedes`：被这条记忆顶替掉的版本文件 URI；`reject` 时回吐的目标。没有顶替任何
+  版本时不写这个键。
+
+模型改不了它们：`parseMemoryDocument` 把保留键从 `fields` 里剔掉
+（`src/services/memory.ts:808`），`serializeMemoryDocument` 只写 `schema.fields` 与保留键
+（`:766`），三个键的值取自元数据（`:746`–`:752`）。`fields` 里出现同名键也不会落盘——
+整份重写时被丢弃。保留键集合在 `src/services/memory.ts:342`。版本文件的完整语义见
+§11.11。
 
 **`user/alice/memories/.abstract.md`** —— 这个目录的 L0
 
@@ -604,7 +622,7 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
     "archivedMessageIds": ["msg_01", "msg_02", "msg_03"],
     "retainedMessageIds": []
   },
-  "stepsDone": ["archive_summary", "memory_extract", "memory_merge", "summary_invalidate"],
+  "stepsDone": ["archive_summary", "memory_extract", "memory_merge", "summary_invalidate", "experience_distill"],
   "skippedSteps": [],
   "taskId": "task_b41e"
 }
@@ -737,6 +755,10 @@ CREATE TABLE node (
   size           INTEGER NOT NULL,
   updated_at     TEXT NOT NULL,
   status         TEXT NOT NULL,      -- active | pending | archived
+  -- 记忆的有效区间（§11.11）。ISO 8601 UTC（Date#toISOString() 形态），TEXT
+  -- 比较即时间比较。NULL = 这一侧没有边界：valid_from 无下界、valid_until 仍有效
+  valid_from     TEXT,
+  valid_until    TEXT,
   -- 目录摘要的新鲜度（§9.3）。只在 kind = 'directory' 的行上有意义
   summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
   summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
@@ -908,6 +930,18 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
   需要把 `node_embedding` / `vec0` 的主键改成 `(uri, level)` 并给摘要服务接嵌入——那是
   另一个迁移，不在本次范围内。
 
+**`valid_from` / `valid_until` 是记忆的有效区间（`0007_node_validity.sql`）。** 一条记忆
+被覆盖后旧值仍留在磁盘上（`.history` 版本文件，§11.11），`node` 里也多出一行；检索默认
+看不到它，靠的就是这两列。判据是半开区间 `valid_from <= now < valid_until`。NULL 表示
+**这一侧没有边界**：`valid_from` 为 NULL 即不设下界（迁移前的存量行都读成这样），
+`valid_until` 为 NULL 即仍然有效；过滤时按「该侧不设条件」放行，不是「值缺失所以这一列
+不可信」。对存量行，没有下界也等于「不知道从何时开始有效」——两种说法在过滤行为上是
+同一件事。旧行不重写：`ADD COLUMN` 只补 NULL，所以本迁移之前写入的每个节点自动是无界，
+检索行为与迁移前逐字相同。两列都存 `Date#toISOString()` 形态，带偏移的手写值由
+`parseValidityInstant` 归一化后再写。**不建索引**：查询入口永远是 `node_fts MATCH` 或
+`n.uri` 的 GLOB 范围，这两列只作为逐候选行的谓词；迁移注释里记了 5000 行的
+`EXPLAIN QUERY PLAN` 实测，建索引后两条 plan 不变，只多出每次 `upsert` 的两棵 B 树维护。
+
 **迁移清单**（`src/adapters/sqlite/migrations/`）：
 
 | 序号 | 文件 | 内容 |
@@ -918,6 +952,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 | 0004 | `0004_node_level_rows.sql` | `node` 主键改 `(uri, level)`、`node_fts` 加 `level` 列：目录的 L1 概览行 |
 | 0005 | `0005_sliding_ttl.sql` | 删 `node.expires_at` 与 `idx_node_expires`：TTL 判据改为清扫时现算（§11.7） |
 | 0006 | `0006_drop_request_log_indexes.sql` | 删 `request_log` 的 `status_code` / `request_id` / `subject` 索引：这张表没有读出口（§17.6） |
+| 0007 | `0007_node_validity.sql` | `node.valid_from` / `node.valid_until`：记忆的有效区间，NULL = 无界（§11.11） |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -1110,7 +1145,22 @@ export interface RetrievalIndex {
 
 **合并规则**：多条 TypedQuery 各跑一次 `find`，按 URI 去重取最高分，`matchedQuery` 记是哪条命中。这样「同一条记忆被两个改写查询命中」不会在结果里出现两次。
 
-**MCP 的 16 个工具全部在 30 秒总上限下，HTTP 只有两个检索路由（三条调用路径）。** MCP 侧由 `ToolRegistry` 的 `bindDeadline` 统一包装（§13.3），所以 `grep` / `glob` 在 MCP 里也有上限；HTTP 侧是 `/search/find` 与 `/search/search`（后者分 `list` / `context` 两种 `mode`），到点返回 503 `PROVIDER_UNAVAILABLE`，而 `/search/grep` 与 `/search/glob` 是本地枚举，上限只有候选文件数（见 `docs/operations.md` 已知限制 28）。向量与重排在到期之前先降级（FTS5 / 融合分）并把 `Degraded` 写进结果。
+**MCP 的 16 个工具全部在 30 秒总上限下，HTTP 只有两个检索路由（三条调用路径）。** MCP 侧由 `ToolRegistry` 的 `bindDeadline` 统一包装（§13.3），所以 `grep` / `glob` 在 MCP 里也有上限；HTTP 侧是 `/search/find` 与 `/search/search`（后者分 `list` / `context` 两种 `mode`），到点返回 503 `PROVIDER_UNAVAILABLE`；`/search/grep` 与 `/search/glob` 不调模型，没有这一层；两者也不是纯本地扫描：`glob` 是一次索引查询（`index.glob` 在 SQL 里按 `node_permission` 过滤，服务层再过一遍 `filterReadable`），`grep` 的候选集同样来自 `index.glob`（上限 `GREP_CANDIDATE_LIMIT = 200` 个候选文件），只有逐文件读盘与行匹配发生在本地（见 `docs/operations.md` 已知限制 28）。向量与重排在到期之前先降级（FTS5 / 融合分）并把 `Degraded` 写进结果。
+
+**检索默认只看「现在有效」的记忆。** `find` 与 `search` 的命中都在索引侧按
+`valid_from <= now < valid_until` 过滤（NULL 表示该侧无界，§8.1）。`search` 先取一次
+`asOf`，FTS 臂与向量臂的候选集用同一个时刻；向量候选集来自 `SearchService` 内部那次
+`index.glob`，它也带着同一个 `asOf`，否则 kNN 的名额会被同一段正文的旧版本占掉。多条
+TypedQuery 各自跑一次 `find` 后再按 URI 合并，所以**合并后的命中清单**不会重新引入已
+失效的版本。`asOf` 不对外暴露：MCP 的 16 个工具与 HTTP 查询参数都没有这一项，所有入口
+都用「请求到达的时刻」。
+
+**`glob` / `grep` / `list` / `tree` / `download` 是路径工具，契约是磁盘。** 它们能看到
+`memories/{type}/.history/` 下的版本文件；`glob` 虽然查的是索引，但不传 `asOf`，同样不
+按有效期过滤（§13.2 的 `glob` 契约是「文件 URI 列表」，不是「检索命中」）。同一份数据
+在检索面与路径面得到不同结果，这是两个出口的契约差异，不是索引缺数据：版本文件有非空
+的 `valid_until`，检索面按它过滤，路径面按磁盘枚举。要看历史值就按版本文件的 URI 直接
+`read` / `download`，或走路径工具；没有为版本文件单独开的工具或接口。
 
 ### 8.5 层级加权
 
@@ -1457,10 +1507,21 @@ commit(sessionId, options)
     2. 从归档消息抽取记忆操作，写 memory_operations.json
     3. 应用补丁合并，写 memory_diff.json
     4. 标记祖先摘要失效并重算
-    5. 写 .done（最后写）
+    5. 归纳经验：读本次会话与已有经验，整段重写该 topic 的经验正文
+    6. 写 .done（最后写）
 ```
 
 **阶段二的第 3 步在锁内应用补丁。** `memory_merge` 不读正文快照，补丁作为转换函数交给 `upsertMemory`，在 `exact(uri)` 锁内基于磁盘上的最新正文执行（§18「并发控制」）。`task.concurrency: 4` 下四个归档同时合并同一条记忆时，读在锁外会让后写者用陈旧正文覆盖先写者——`profile` 只有一个 `content` 字段，字段级合并保护不到它。
+
+**第 5 步 `experience_distill` 只写 `experiences`。** 它读「本次会话 + 已有经验」（`prefetch`
+只返回 `active`），一次 LLM 调用产出每个 topic 的**整段正文**，服务端用 `upsertMemory`
+整段覆盖；写入后 `status = 'pending'`（默认 `reviewRequired` 含 `experiences`，§11.6）。
+缺模型时它与抽取、合并一起并入 `llm_disabled` 跳过；非法 topic（`renderPath` 拼不出合法
+路径）与空 `content` 记 `warn` 跳过，一条坏经验不让整个归档失败。抽取端不再产出
+`experiences`：`prompts/extract-system.md` 有一句隔离（同一份消息被两条路径各写一次会让
+同一个 topic 被覆盖两次，而抽取是补丁、归纳是整段重写，合并语义不同）。**隔离靠提示词，
+不是代码拒绝**：抽取的类型清单仍然来自 `BUILTIN_MEMORY_TYPES`，提示词被改回时抽取仍然
+可以产出 `experiences` 补丁。
 
 **消息的 part 类型。** 一条消息由若干 part 组成，抽取时都参与：
 
@@ -1479,7 +1540,7 @@ commit(sessionId, options)
 
 **「跑过」必须同时意味着「产物还在」。** `stepsDone` 只记进度不记产物的话，重放会跳过产物只存在内存里的步骤，下游拿到空输入。每个步骤的产物都必须落在归档目录里，跳过时由 `CommitStep.rehydrate` 读回 `state`——见 §10.4 的表格。
 
-**部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把这两步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
+**部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把 `memory_extract` / `memory_merge` / `experience_distill` 这三步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
 
 ### 10.2 归档边界
 
@@ -1489,15 +1550,15 @@ commit(sessionId, options)
 
 **记忆延迟最大的来源不是抽取慢，是根本没人触发提交。** agent 不会主动调 `commit`，用户聊两小时，记忆一条没进库。
 
-五个阈值，判定在 `domain/session.ts` 的 `shouldAutoCommit`，触发者是服务端的后台调度器（§10.7）：
+四个判定参数（token / 消息数 / 空闲 / 最小间隔），判定在 `domain/session.ts` 的 `shouldAutoCommit`，触发者是服务端的后台调度器（§10.7）。`keepRecentCount` 也在这个策略里，但不参与判定：它决定阶段一提交时保留多少条 live 消息，消费方是 `services/session.ts` 的 `commitPhase1`。
 
-| 参数 | 默认 | 触发条件 |
+| 参数 | 默认 | 作用 |
 |---|---|---|
 | `pendingTokenThreshold` | 150000 | 未提交 token **严格大于**该值 |
 | `messageCountThreshold` | 100 | 未提交消息数 **严格大于**该值 |
 | `minCommitIntervalSeconds` | 0 | 两次自动提交的最小间隔（全局闸门） |
 | `idleTimeoutSeconds` | 0（关） | 空闲这么久且有未提交内容 |
-| `keepRecentCount` | 0 | 自动提交时保留最近 N 条 |
+| `keepRecentCount` | 0 | 不是判定阈值：提交时保留最近 N 条 live 消息 |
 
 **为什么阈值是「严格大于」**：默认 100 条，用户发第 100 条时不该提交，第 101 条才提交。这样「阈值 100」和「每 100 条提交一次」是同一个意思。
 
@@ -1543,13 +1604,13 @@ class CommitPipeline {
 }
 ```
 
-Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → 记录」的骨架，变化点是四个步骤的实现。新增步骤不改骨架。`skippedSteps` 是装配期传入的 `Map<CommitStepName, CommitStepSkipReason>`（目前只有 `llm_disabled`）：它表示「这个部署里这一步不可能成功」，重试没有意义。
+Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → 记录」的骨架，变化点是五个步骤的实现。新增步骤不改骨架。`skippedSteps` 是装配期传入的 `Map<CommitStepName, CommitStepSkipReason>`（目前只有 `llm_disabled`）：它表示「这个部署里这一步不可能成功」，重试没有意义。
 
 ### 10.4 任务恢复
 
 - 认领：`UPDATE task SET status='running', lease_until=now+60s WHERE id=? AND (status='pending' OR (status='running' AND lease_until < now))`
 - 心跳：每 20 秒续租
-- 启动扫描：`status='running'` 且租约过期 → 重置为 `pending`，`attempts += 1`
+- 启动扫描：`status='running'` 且租约过期 → 重置为 `pending`、`lease_until = NULL`，**不动 `attempts`**（下次认领时才 `attempts += 1`；与「失败回 `pending`」同一条口径，认领才是执行次数的计数点）
 - 重试上限 3 次。超限置 `failed`，错误写进 `error` 字段和 `error.log`
 
 **每个步骤的产物必须持久化。** 这是设计约束，不是实现细节。`stepsDone` 是重放判据：重放会跳过它记下的步骤。如果某一步的产物只存在 `StepContext.state`（进程内存）里，那么这一步之后的**任何**一次瞬态失败（供应商 503、SQLite 写冲突、租约过期、进程重启）都会让重放跳过它、下游拿到空输入。记忆操作不幂等，所以步骤不能被重跑；能做的只有让「跳过」不丢产物。
@@ -1560,6 +1621,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 | `memory_extract` | 抽取出的操作列表 | `archive_NNN/memory_operations.json` | `rehydrate` 读回 `state` |
 | `memory_merge` | 真正写过 / 删过的文件集合 | `archive_NNN/memory_diff.json` | `rehydrate` 从 diff 推出 `written` / `deleted` |
 | `summary_invalidate` | 无（副作用是摘要的待刷新计数 `node.summary_pending`） | — | 跳过即正确；重跑会重复累加脏计数 |
+| `experience_distill` | 经验记忆文件（`memories/experiences/{topic}.md`） | 盘 | 跳过即恢复：产物本来就在盘上，没有下游步骤读 `state`；重跑会再调一次模型，同一 topic 仍整段覆盖 |
 
 `CommitStep.rehydrate(context)` 是这条契约的落点：管线跳过已完成的步骤时先调用它，把产物从归档目录读回 `state`，再继续。此前 `memory_extract` 与 `memory_merge` 的产物都只存在 `state` 里，`memory_merge` 之后的一次 503 会让归档**永久**停在「`stepsDone` 声称抽取完成、产物却不存在」，而错误信息写着「步骤顺序被改过」——完全指错方向。
 
@@ -1891,11 +1953,13 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 ### 11.6 复核闸门
 
-`experiences` 与 `rules` 两类记忆走 `pending → active`：
+复核闸门按记忆类型打开，默认 `experiences` 与 `rules`（`memory.reviewRequired`）：
 
-- 抽取产生的是 `pending` 记录，不进检索结果
+- 这两类写入时是 `pending`，不进检索结果。`rules` 来自抽取与补丁合并，`experiences`
+  来自阶段二第 5 步的经验归纳（§10.1）
 - 控制台「记忆复核」页展示 diff（before/after）
-- 人工通过 → `active`；拒绝 → 删除并记录原因
+- 人工通过 → `active`；拒绝 → 回退到被顶替的版本，没有版本可回时删除并记录原因
+  （§11.11）
 - 其余类型直接 `active`
 
 ### 11.7 记忆 TTL 与过期清扫
@@ -2466,19 +2530,33 @@ frontmatter 字段。理由：
 记忆是否存在，SQLite 无从校验。悬空边写时不拦、读时容忍——删一条记忆不级联删边，
 但反查只回答「谁指向这个 URI」，悬空边不会污染别的记忆的查询。
 
-#### 谁产生 links：产生端只支持显式给定（最小可行）
+#### 谁产生 links：归档管线的两个写入步骤
 
-本次只做**存储层 + 查询 API**，产生端只接受调用方显式给出的 `links`。**抽取时让 LLM
-在实体之间产出链接需要改抽取提示词**（`prompts/extract-*.md` 与 `memory-extract` 的
-输出解析），那是大改动，不在本次范围。数据结构和查询先站住，产生端以后再补。
+**`sources`（frontmatter）是真相，`memory_link` 是它的派生读模型。** 一条记忆从哪几次
+归档来，答案写在文件的 `sources` 里；`memory_link` 只补 `sources` 回答不了的反查
+（「这次归档产生了哪些记忆」）。
 
-- 不做「抽取时 LLM 产出 entity 间链接」：它要改提示词与 `memory_extract` / `memory_merge`
-  两步的输出契约，成本从「中」变「大」。
-- 不做「资源摄取时自动建立资源 → 记忆链接」：`add_resource` 写的是资源，不产出记忆；
-  记忆由后续抽取产生，两者不在同一步。等抽取端能产出链接时再接。
-- **本次唯一入口是服务 API**：`MemoryLinkService.addLinks(fromUri, links)`。HTTP 层
-  目前只暴露读端点（见下），写端点等产生端定了再开——先不开一个「谁能写边」的
-  授权面。
+产生端是归档管线的两个写入步骤，都在记忆文件写成功之后写 `derived_from` 边：
+
+- `MemoryMergeStep`（阶段二第 3 步）：每条记忆 `upsertMemory` 成功后，写入一条
+  `from = 记忆 URI`、`to = 本次归档 URI` 的边。这次写入的原始材料就是本次归档，
+  抽取模型看不到归档 URI；`sources` 里更早的归档，边在各自那次归档里已经写过。
+- `ExperienceDistillStep`（阶段二第 5 步）：每条经验写盘后，同样写入一条指向本次
+  归档的 `derived_from` 边。
+
+**links 写失败只记 `error`，不让归档失败。** 记忆文件已经正确落盘，派生物晚一步或
+缺失可以由 `sources` 重建；为了派生读模型回滚真相、或者把一次归档标成失败，方向都是
+反的。先写文件、后写派生也是同一个理由：反过来会让派生物比真相更早存在。
+
+**目前没有重建命令。** `pnpm reindex` 只重建 `node` / `node_fts` / `node_embedding`
+（`src/commands/reindex.ts`），不碰 `memory_link`。「从 `sources` 重建」是一条原则，
+不是一条现成命令：写失败的边、删错的行、手工改过 `sources` 之后的边，现在只能重新
+触发归档或手工补 SQL。反查（`direction=backlinks`）读到的永远是 `memory_link` 的现状，
+不是 `sources` 的现状。
+
+HTTP 层仍然只暴露读端点（见下），没有写端点：不开一个「谁能写边」的授权面。抽取端
+也不产出实体间链接——那要改抽取提示词与 `memory_extract` 的输出契约；`add_resource`
+不建资源 → 记忆的边，它写资源，不产出记忆。
 
 #### 查询面：HTTP 端点，links 不进 `read`
 
@@ -2496,16 +2574,80 @@ MCP 契约变更。`links` 不是「读这条记忆的正文」的一部分—�
 派生读模型，`sources` 是文件 frontmatter 里的真相，`read` 本来就是读这份文件；块只在
 `sources` 非空时出现，旧文件与普通资源的输出逐字节不变（§11.1、§13.2）。
 
-#### `link_merge` 去重：weight 取 max，不累加
+#### 去重口径：weight 取 max，不累加
 
 同一条边（同 `from_uri` + `to_uri` + `match_text`）被写两次时，`weight` **取 max**：
 
 - `weight` 是这条关联的**强度判断**，不是「被看见的次数」。累加会把「反复跑同一批
   抽取」混进「有多相关」，跑 10 次的边会比真正强关联的边更重。
 - max 保留产生方给出的最强判断；重复写不改变它，重跑幂等。
-- 这与参考实现 `link_merge` 的去重一致（`url + to + match_text` 命中后 weight 取
-  max）。`link_type` / `description` 以最新一次写入为准（说明是文字，取最新比留多版本
-  好）。
+- 去重键就是 `(from_uri, to_uri, match_text)`：撞键时 `weight` 取两者较大值，
+  `link_type` / `description` 以最新一次写入为准（说明是文字，取最新比留多版本好）。
+
+### 11.11 记忆版本文件与回退
+
+**覆盖写不销毁旧值。** `upsertMemory` 在三个条件同时成立时，把磁盘上的旧文档**原样**
+写成一份版本文件：旧文档 `status = 'active'`、记忆类型的 `operationMode` 是 `upsert`、
+正文真的变了（`src/services/memory.ts` 的 `contentChanged` 与 `snapshot` 判据）。快照放在
+记忆类型目录下的 `.history/`，路径镜像 identity 的相对路径：
+
+```
+memories/preferences/code-style.md                        ← 规范文件（当前有效）
+memories/preferences/.history/code-style.md--20261110T022746123Z.md
+                                                          ← 旧值，valid_until 非空
+```
+
+`rules` 的 `{scenario}/{rule}.md` 两层在 `.history` 里同样镜像
+（`.history/{scenario}/{rule}.md--{stamp}.md`）。文件名时间戳是 `YYYYMMDDTHHMMSSmmmZ`，
+同一毫秒撞名时追加 `-1`、`-2`。版本文件与原文档的差别只有三处：`uri` 换成版本文件自己
+的地址、`valid_until = 本次写入时刻`、`valid_from` 沿用旧值自己的起点（缺键时退回
+`created_at`）。写入后规范文件是 `valid_from = 本次写入时刻`、不写 `valid_until`、
+`supersedes = 版本文件 URI`（§6.6）。
+
+**正文没变不写快照。** 同一份正文再写一遍（重放、补 `sources`）没有旧值可丢，快照只会
+凭空多出几份一样的文件。`addOnly` 类型（`events`）不允许覆盖写，不会走到这里。`pending`
+旧值同样不快照——`pending` 不是有效值，没有「正确的旧值」可回退；但新文档**继承**它的
+`supersedes`（`src/services/memory.ts:1004`），否则拒绝一次基于 `pending` 的覆盖写会丢掉
+上一条有效版本的指向。
+
+**每个 identity 只留最新 5 份**（`MAX_VERSIONS`，`src/services/memory.ts:321`）。来源是
+经验假设：「回到上一次正确值」的粒度是上一次覆盖写，5 步够覆盖连续几次错误写入，同时把
+每个 identity 的历史占用固定在 5 份以内（一份与规范文件同量级）。`memory.ttl.defaultDays`
+默认 0 时滑动 TTL 不跑，版本文件不会被自动清理，所以磁盘有界靠这次截断兜，不靠 TTL。
+截断失败只记 `warn`：写盘已经成功，下一轮覆盖写会再试一次。
+
+**`approve` 保留三个键。** 复核通过也是一次完整重写，`sources` 与 `valid_from` /
+`valid_until` / `supersedes` 都原样带过来（`src/services/memory.ts` 的 `approve`，`:1176`
+起）；通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
+
+**`reject` 先回退，回退不了才删。** `reject` 读当前文件的 `supersedes`：是合法 URI、
+指向的文件存在、且能读出记忆类型时，把那份版本写回规范 URI 并清掉 `valid_until`（它现在
+又有效了）；字段与时间戳取版本文件自己的——目标是「与写入前的那份文件相同」，所以不刷新
+`updated_at`，也不再过一次复核闸门（那个版本本来就是 `active`）。版本文件本身留在
+`.history`，`valid_until` 仍非空，检索看不到它。`supersedes` 为空、不是合法 URI、文件
+不存在、类型读不出来时，维持原来的行为：删掉 pending 文件。`supersedes` 为空没有目标，
+不记 warn；另外三种失败各记一条 `warn`（`src/services/memory.ts` 的
+`#restoreSuperseded`，`:1268` 起）。
+
+**`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
+覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
+的内容。`SummaryService` 对路径里含 `.history` 的目录直接返回 `unchanged`，摘要传播在
+那里停（`src/services/summary.ts:499`）。
+
+**`reconcile` 重放必须带上 `valid_*`。** 从磁盘重建索引行时，有效期从 frontmatter 重新
+解析（`src/services/reconcile.ts:372`），不取旧行。漏掉这一步（或退回只重放 status 与
+正文的旧实现）会让 `valid_until` 变成 NULL：一份已经失效的历史版本在重放之后重新出现在
+`find` / `search` 里。`reindex` 整行覆盖 `node`，所以这是现有实现里**唯一**会静默破坏
+「检索只看当前值」这条不变量的路径——写路径的 `parseValidityInstant` 与索引观察者的
+`parseValidityField` 口径由 `frontmatter-validity-consistency` 测试对拍，不会把非空
+`valid_until` 写丢；重放器只要少读一次这两列就会。
+
+**`supersedes` 只跟一跳，不回溯链。** `reject` 只读当前文档的 `supersedes`，恢复那份
+版本后不会再沿它的 `supersedes` 往上找。版本文件被 TTL 物理删除
+（`memory.ttl.retentionDays > 0`）或被 5 份截断之后，`reject` 静默退化成「删除」：日志里
+是「指向的文件不存在，拒绝时按删除处理」的 `warn`，终态是这条记忆消失，不是回到更早的
+版本。没有沿链回溯的代码；要做需要 `supersedes` 指向的每一跳都还在盘上，而 TTL 与截断
+都不保证这一点。
 
 ## 12. 权限模型
 
@@ -2599,6 +2741,8 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | `read` / `stat` / `abstract` / `overview` | read |
 | `list` / `tree` | 逐条 read |
 | `find` / `search` / `grep` / `glob` | 逐条 read |
+| `GET /memories/pending` | scope 根 read，再逐条按记录 URI 求 read |
+| `GET /memories/{uri}/links` | 查询 URI read，边的另一端也求 read |
 | `write` / `edit` / `mkdir` | write |
 | `rm` / `mv` | manage |
 | `getAcl` / `setAcl` | manage |
@@ -2610,7 +2754,10 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | 提示词（`PUT` / `DELETE` / `preview`） | 系统管理员 |
 | 列全部用户 / 建用户 / 列全部组 / 建组、`/tasks` 三个端点 | 系统管理员 |
 
-**列表语义**：无权限节点完全不出现，不返回「存在但无权」的占位。文件名和摘要本身就是信息。
+**列表语义**：无权限节点完全不出现，不返回「存在但无权」的占位。文件名和摘要本身就是信息。两个容易漏的出口按这条原则各多做一道求权：
+
+- `GET /memories/pending`：`listPending` 递归扫 `memories/`，走的是**不传 `principals`** 的 `rawFilesystem`——`restricted` 切断或显式 `deny` 的子目录照样会被列出，而一条待复核记录的 URI、`fields`、`sources` 全是内容。路由层在 scope 根求 read 之后，再按**每条记录自己的 URI** 逐条求 read，无权限的记录整条不返回。
+- `GET /memories/{uri}/links`：查询的 URI 已求 read，边的**另一端**是独立资源，要再求一次 read（`links` 查 `to`，`backlinks` 查 `from`）。`backlinks` 列出的 `comem://user/bob/memories/profile/health-condition.md` 已经说出了 Bob 有哪些记忆，所以无权限的边也整条不返回，不留占位或打码。
 
 **管理端点判定的是目标资源，不是调用方自己的根。** 对「自己的根」求 `manage` 对每个登录用户都成立（user 根 owner 恒为本人），用它当门禁等于任何登录用户都是管理员。所以改密码、改资料、启用禁用、删除用户，签发 / 列出 / 吊销 API Key，改组资料、删除组、加退组成员，一律对目标用户根或组根求 `manage`。吊销 API Key 的请求里只有 key ID，先反查持有者，再对持有者的根求权——否则任何登录用户都能吊销别人的凭据。组 owner 变更不能只看组根 manage 的历史原因见下。
 
@@ -2778,7 +2925,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 | `rule_search` | `taskContext`、`threshold=0.65`（相对阈值） | 文本：适用规则的完整正文块 |
 | `read` | `uri` 或 `uris[]`、`offset=0`、`limit=-1` | 文本；记忆的返回末尾可能带 `## provenance` 块（`sources`），该块在 `offset` / `limit` 切片之后拼接，所以分页读也拿到完整一份；无 `sources` 时与改动前逐字节相同。`find` / `search` 的命中不带溯源（注入预算）。图片 / 音频返回二进制块。切片之后如果还有码点没返回，正文末尾另起一行 `... (truncated)`；`limit=-1` 与恰好切到末尾（`offset + 返回码点数 == 总码点数`）都不标记，多 URI 时每段正文各自标记 |
 | `list` | `uri`、`recursive=false`、`offset`、`limit`、`sortBy` | 文本：`[dir] name` / `[file] name`。`recursive=true` 的展开超过深度（64）或节点（1000）上限时末尾追加一行 `... (truncated)`，不静默截断 |
-| `tree` | `uri`、`levelLimit=3`、`includeAbstract=false` | 文本树形，缩进表示层级 |
+| `tree` | `uri`、`levelLimit=3` | 文本树形，缩进表示层级 |
 | `grep` | `uri`、`pattern`、`caseInsensitive=false`、`nodeLimit=10` | 文本：`Found N match(es):` + `uri` + `  L42 [pattern]: 内容` |
 | `glob` | `pattern`、`uri`、`nodeLimit=100` | 文本：`Found N file(s):` + `  uri` |
 | `download` | `uri` | 短期签名 URL（10 分钟） |
@@ -2845,7 +2992,7 @@ interface AddResourceInput {
 
 ### 13.3 工具的时间上限与降级
 
-**每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「本地操作不该限时」，而是 30 秒是检索路径的推导值，对纯本地操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
+**每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「不读模型就不该限时」，而是 30 秒是检索路径的推导值，对不调模型、只查索引与读盘的操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
 
 30000 是**推导值**：MCP 检索路径的三段上游预算之和是 10000（意图分析）+ 6000（查询嵌入）+ 12000（重排）= 28000 毫秒，留 2000 给本地索引、ACL 与序列化。三段预算的来源见 `services/search.ts` 的 `REWRITE_TIMEOUT_MS` / `QUERY_EMBED_TIMEOUT_MS` / `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
 
@@ -3162,10 +3309,16 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 | 记忆复核 | `pending` 列表 + diff 视图（before/after）；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
-| 会话与任务 | 会话列表、归档列表、任务状态、僵尸回收记录；没有重试入口（理由见下） |
+| 会话与任务 | 会话列表、归档列表、任务状态；没有重试入口，也没有回收记录列表（理由见下） |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
-| 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
+| 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 | 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
+
+**一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。三处按这条原则实现：
+
+- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（`assertSystemAdmin`，名单是 `auth.adminUserIds`，默认 `[]`），因为 `task` 表没有可求权的目标（§12.4）；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
+- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
+- **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 
 **身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
 `web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`GET /auth/config`
@@ -3220,6 +3373,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 - 每张 Hook 事件卡里的「后台处理」行**并成全局一行**：后台耗时按阶段，同一份进程级快照不属于任何事件（§17.2）。
 - 「模型成本累计」卡片在没配 `providers.llm.default.pricing` 时显示「未配置单价，成本不可计算」，不显示 `$0.0000`；配了单价时真实花费 0 才显示 0（§17.4）。
 - 任务表与会话页**没有重试按钮**：`POST /tasks/{id}/retry` 只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期），界面上永远点不到一个能重试的行；重启会把租约过期的任务重置回排队。要重试只能走接口。
+- 会话页**没有「回收记录」**：`TaskService.recover()` 在启动时把租约过期的 `running` 重置回 `pending`，只返回重置条数（`bootstrap/main.ts:134` 把它记进一条日志）；`task` 表不留回收历史，也没有端点返回逐条记录。控制台只能看到任务当前状态——被回收的任务重新出现在待处理里，但不显示「它是被回收的」。
 - 概览页「最近任务」改名「待处理任务」，并删掉「已完成 / 失败」两个状态文案：`GET /tasks` 不返回这两种状态。
 - 文件详情里**文档的 L1「概览」档删掉**：`GET /content/overview` 对 document 恒返回 `overview: null`，前端没有合成逻辑；目录的 L1 是真实的（来自摘要文件），保留。
 - 记忆复核页的**「置信度」徽章删掉**：`confidence` 只出现在查询改写的结果里（§8.8），抽取产出的记忆没有这个字段，徽章从来不会显示。
@@ -3261,7 +3415,7 @@ Prometheus 文本              JSON 诊断快照
 | 检索（`find` / `search`） | **是** | 20–100ms |
 | 注入序列化 | **是** | < 5ms |
 | 写 worker 载荷（`Stop`） | **是** | 5–20ms |
-| 归档 + 抽取 + 合并 + 摘要 | 否（后台） | 几秒到几十秒 |
+| 归档 + 抽取 + 合并 + 摘要 + 经验归纳 | 否（后台） | 几秒到几十秒 |
 
 **服务端采集与提交在 detached worker 里，不阻塞用户。** `Stop` 只写 worker 载荷并 spawn（`integrations/servers/stop.mjs` 的 `main`）；`/messages` 与 `/commit` 的 HTTP 往返都在 `detached: true` + `unref()` 的子进程里。
 
@@ -3269,7 +3423,7 @@ Prometheus 文本              JSON 诊断快照
 
 **为什么必须单独测进程启动**：hook 起一个新 Node 进程就是 30–50ms 纯开销。把它藏在「检索 20ms」后面会误导人，让人以为 CoMem 只花 20ms。
 
-**异步阶段里嵌入是最贵的一段，所以它必须批量、必须缓存。** 归档、抽取、合并、摘要、嵌入都在 `IndexObserver` 的排期里跑（内容落盘之后），不计入上面那 60–180ms。**嵌入的单价不随条数摊薄**——它随 token 数线性增长，批量省下的是请求数，不是算力。本地 GPU（`Qwen3-Embedding-0.6B`，`local/bench/embedding-stage.ts`，走完整写路径 + `drain()`）实测：
+**异步阶段里嵌入是最贵的一段，所以它必须批量、必须缓存。** 归档的五个步骤（归档摘要 → 记忆抽取 → 补丁合并 → 摘要失效 → 经验归纳）由 `CommitRunner` 轮询 `task` 表、按租约认领后依次执行（`config.task.concurrency` 控制同时在跑的任务数），不计入上面那 60–180ms。`IndexObserver` 只负责派生数据的排期：节点落盘后的 `index.upsert`、权限物化、摘要失效投递，以及 `#scheduleEmbedding` 的嵌入批。**嵌入的单价不随条数摊薄**——它随 token 数线性增长，批量省下的是请求数，不是算力。本地 GPU（`Qwen3-Embedding-0.6B`，`local/bench/embedding-stage.ts`，走完整写路径 + `drain()`）实测：
 
 | 场景 | 逐条（`maxBatchSize: 1`） | 批量（`maxBatchSize: 128`） | 请求数 |
 |---|---:|---:|---:|
@@ -3288,10 +3442,10 @@ Prometheus 文本              JSON 诊断快照
 ```
 comem_hook_overhead_seconds{event, phase}      # phase = process_start | recall | serialize | capture
 comem_hook_overhead_total_seconds{event}        # 单轮合计
-comem_hook_async_seconds{phase}                 # 后台部分耗时，phase = archive | extract | merge | summary
+comem_hook_async_seconds{phase}                 # 后台部分耗时，phase = archive | extract | merge | summary | distill
 ```
 
-**四段后台计时落在 `CommitPipeline` 的四个步骤上**：`archive` → `archive_summary`（生成 `archive_NNN/` 的摘要）、`extract` → `memory_extract`、`merge` → `memory_merge`、`summary` → `summary_invalidate`。阶段一（写归档目录、建任务）是请求内的同步工作，不计入后台；把它算进来会把用户等过的时间重复计一次。管线用 `phase()` 包住整段 `run`（含重试），后台任务不在请求作用域里，因此值写进进程级 `#asyncPhases`，`/metrics` 直接按阶段输出 `comem_hook_async_seconds{phase}`——**不依赖下一次 hook 上报，也不挂任何事件**。`phase` 是真维度（四个操作各记各的耗时），`event` 是假维度（同一份进程级快照会被贴到多个事件上，看起来像每个事件都有各自的后台耗时）。省略 `phase` 的管线（单测直接构造）原样执行，不记。
+**五段后台计时落在 `CommitPipeline` 的五个步骤上**：`archive` → `archive_summary`（生成 `archive_NNN/` 的摘要）、`extract` → `memory_extract`、`merge` → `memory_merge`、`summary` → `summary_invalidate`、`distill` → `experience_distill`。阶段一（写归档目录、建任务）是请求内的同步工作，不计入后台；把它算进来会把用户等过的时间重复计一次。管线用 `phase()` 包住整段 `run`（含重试），后台任务不在请求作用域里，因此值写进进程级 `#asyncPhases`，`/metrics` 直接按阶段输出 `comem_hook_async_seconds{phase}`——**不依赖下一次 hook 上报，也不挂任何事件**。`phase` 是真维度（五个操作各记各的耗时），`event` 是假维度（同一份进程级快照会被贴到多个事件上，看起来像每个事件都有各自的后台耗时）。省略 `phase` 的管线（单测直接构造）原样执行，不记。
 
 **报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端**按事件覆盖保存最近一次的值**（gauge），不存直方图：历史分布由 Prometheus 按抓取间隔自己算（§17.10）。
 
@@ -3697,7 +3851,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 
 ### 18.1 提示词
 
-六条提示词的静态骨架在仓库的 `prompts/*.md`，动态部分由 `services/prompts/*.ts` 渲染成
+提示词的静态骨架在仓库的 `prompts/*.md`，动态部分由 `services/prompts/*.ts` 渲染成
 字符串后用 `{{name}}` 注入。存储是两层：
 
 | 层 | 位置 | 谁改 | 优先级 |
@@ -3720,8 +3874,9 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 引用了定义外的变量（拼写错误）、模板需要的变量没有传。第三条是「代码少传了」的失败——
 渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
 
-**渲染器是进程级绑定。** 三条提示词的调用点（`services/search.ts`、`services/summary.ts`、
-`services/commit/steps/memory-extract.ts`）不在本 wave 的文件所有权内，而
+**渲染器是进程级绑定。** 提示词的调用点有四个（`services/search.ts`、`services/summary.ts`、
+`services/commit/steps/memory-extract.ts`、`services/commit/steps/experience-distill.ts`，
+每处渲染一对系统 / 用户提示词），这些文件不在本 wave 的文件所有权内，而
 `REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
 没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入
 渲染路径。**这是为「不改别人的文件」付的代价**：下一个 wave 把 `PromptService` 注入

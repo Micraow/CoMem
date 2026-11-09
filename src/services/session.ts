@@ -3,7 +3,7 @@
  * 形状）。
  *
  * 这一层是**阶段一**：分配归档序号 → 写归档消息 → 写 `preparing` 元数据 → 重写
- * live 消息 → 元数据置 `ready` → 建任务。阶段二的四个步骤在 `services/commit/`，
+ * live 消息 → 元数据置 `ready` → 建任务。阶段二的五个步骤在 `services/commit/`，
  * 归档元数据通过 `readArchiveMeta` 读回，写入在 `#meta.writeArchive`，由 `TaskService` 接入。
  *
  * ## `.meta.json` 的读写不在这里

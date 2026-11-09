@@ -151,7 +151,7 @@ function isCjk(codePoint: number): boolean {
 }
 
 /**
- * 该不该自动提交（架构文档 §10.2.1 的四个条件）。
+ * 该不该自动提交（架构文档 §10.2.1 的阈值）。
  *
  * 触发条件（满足任一）：
  * - 未提交 token **严格大于** `pendingTokenThreshold`；
@@ -160,6 +160,9 @@ function isCjk(codePoint: number): boolean {
  *
  * 两个条件默认关闭：`minCommitIntervalSeconds = 0` 不限速，`idleTimeoutSeconds = 0`
  * 不启用空闲提交（它需要服务端常驻扫描器）。
+ *
+ * `keepRecentCount` 也在 `AutoCommitPolicy` 里，但它只在提交时决定保留多少条 live
+ * 消息（`services/session.ts` 的阶段一），不参与这个判定。
  *
  * 为什么阈值是「严格大于」：阈值 100 表示「第 101 条才提交」，这样「阈值 100」
  * 与「每 100 条提交一次」是同一个意思。

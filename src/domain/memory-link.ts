@@ -19,7 +19,7 @@ import type { Uri } from './uri.js';
  */
 export type MemoryLinkType = 'references' | 'derived_from' | 'related' | (string & {});
 
-/** 一条关联边。字段与参考实现对齐（`from` / `to` / 类型 / 权重 / 出处 / 说明）。 */
+/** 一条关联边：起点、终点、语义标签、权重、原文出处、说明。 */
 export interface MemoryLink {
   /** 边的起点 URI。 */
   readonly fromUri: Uri;
@@ -50,7 +50,8 @@ export interface MemoryLinkInput {
  * 同一条边被写两次（例如两个产生端都看到「A 引用了 B」），`weight` 代表的是这条
  * 关联的**强度判断**，不是「被看见的次数」。累加会让反复跑同一批抽取的边无限变重，
  * 把「跑了几次」混进「有多相关」；max 保留产生方给出的最强判断，重复写不改变它。
- * 这与参考实现的 `link_merge` 去重一致（url + to + match_text 命中后 weight 取 max）。
+ * 唯一键是 `(from_uri, to_uri, match_text)`：三条都相同算同一条边，撞键时
+ * `weight` 取 max，`link_type` / `description` 以最新一次写入为准。
  */
 export function mergeWeight(existing: number, next: number): number {
   return next > existing ? next : existing;

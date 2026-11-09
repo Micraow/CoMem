@@ -25,8 +25,9 @@ CREATE TABLE memory_link (
   updated_at   TEXT NOT NULL      -- ISO 8601；weight 被 max 抬高时刷新
 );
 
--- 去重键：同一起点 + 同一终点 + 同一出处视为同一条边（与参考实现的 url+to+match_text
--- 一致）。撞键时由写入方把 weight 取 max 更新，而不是新增一行。
+-- 去重键：同一起点 + 同一终点 + 同一出处视为同一条边（唯一键
+-- `(from_uri, to_uri, match_text)`，见架构文档 §11.10）。撞键时由写入方把 weight 取
+-- max 更新，而不是新增一行。
 CREATE UNIQUE INDEX memory_link_unique ON memory_link(from_uri, to_uri, match_text);
 
 -- 反查 backlinks 的主索引：给一个 to_uri，列出所有指向它的边。
