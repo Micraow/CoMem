@@ -890,8 +890,14 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 - **L1 行的 `node_fts.abstract` 列是空的**：L0 是从 L1 正文提取的（§9.1），概览正文
   已经包含它；同一段文字进两列会让 `bm25()` 把同一处匹配算两遍（它按列累加词频）。
   `node.abstract` 仍然存 L0 原文，检索结果展示的是那一列。
-- **「节点自身那一行」= `NOT (kind = 'directory' AND level = 'L1')`**，只在
-  `node-repository.ts` 的 `nodeSelfRowSql()` 定义一次。按 URI 读节点的路径（`get` /
+- **「节点自身那一行」= `NOT (kind = 'directory' AND level = 'L1')`**。这一个谓词在
+  源码里存在两份：`adapters/sqlite/node-repository.ts` 的 `nodeSelfRowSql()`（适配层
+  内所有仓储都调它）与 `services/observability.ts` 的 `NODE_SELF_ROW` 常量。分两份是
+  分层的代价——`services/` 不能 import `adapters/` 的值（§4.2），而 `domain/` 不该知道
+  SQL 片段；`identity.ts` 与 `fs/path.ts` 的 `RESERVED_NAMES` 是同一处境的先例。
+  两份由 `tests/integration/sqlite/node-self-row-consistency.test.ts` 做行为级对拍
+  （逐 `kind × level` 比对筛出的 URI 集合），改了其中一份而没改另一份会红。
+  按 URI 读节点的路径（`get` /
   `children` / `descendants` / `listByScope` / `count` / `stat` / 热度 / `glob` / TTL
   候选）都带这条谓词，否则一个目录会变成两条节点：`tree` 出现重复、`metrics` 的
   `comem_index_nodes` 虚高、`sweepExpired` 把同一个目录返回两次。

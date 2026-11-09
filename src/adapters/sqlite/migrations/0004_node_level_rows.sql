@@ -15,8 +15,10 @@
 -- | 目录概览 | L1 | L0 摘要（展示用，与 L0 行相同） | L1 概览正文 |
 --
 -- 「节点自身那一行」= `NOT (kind = 'directory' AND level = 'L1')`。按 URI 读一个节点（`get` / `children` /
--- `stat` / 计数 / TTL）必须带上这条谓词，否则一个目录会变成两条节点；谓词只在
--- `node-repository.ts` 定义一次（`nodeSelfRowSql()`），各仓储调用它。
+-- `stat` / 计数 / TTL）必须带上这条谓词，否则一个目录会变成两条节点；各仓储调用
+-- `node-repository.ts` 的 `nodeSelfRowSql()`。`services/observability.ts` 另存一份
+-- 同名常量（`services/` 不能 import `adapters/` 的值，架构文档 §4.2），两份由
+-- `tests/integration/sqlite/node-self-row-consistency.test.ts` 对拍。
 --
 -- `node_fts` 也要跟着加 `level`：它原来只靠 `uri` 与 `node` 关联，一个 URI 两行时
 -- 两行会互相 join 成四条。`level` 同样是 `UNINDEXED`——它只用于对齐，不参与匹配。
