@@ -694,7 +694,7 @@ summary_state: fresh            # fresh | stale
 | 代价 | 对策 |
 |---|---|
 | 每次鉴权要 open `.acl.json` | 每请求一份 `Map<uri, Acl>` 缓存，请求结束丢弃 |
-| 没有跨文件事务 | 先写内容再更新索引；索引失败时追加 `_meta/reconcile.log`（启动对账未实现，见 §10.6） |
+| 没有跨文件事务 | 先写内容再更新索引；索引失败时追加 `_meta/reconcile.log`，启动时与调度器每一轮重放（§10.6） |
 | 写入需要先 mkdir | `write` 内部自动建父目录，调用方不用关心 |
 
 **反查表也是派生数据，以文件为准。** `acl_entry` 从 `.acl.json` 推出，只服务授权反查（控制台 ACL 页、删账号撤权）。它可能不全：手工改过文件、`mv` 之后丢过行、从备份恢复过文件。`AclService.purgePrincipal` 因此不能只按表找目录——它取「反查表行 ∪ 数据根下所有带 `.acl.json` 的目录」的并集，文件里没有该主体就只删行、不写盘。扫描有目录数上限（`MAX_PURGE_SCAN_DIRECTORIES = 10000`，经验假设：撤权是低频管理操作，10,000 个目录在本地 SSD 上约亚秒级；超出时记 `truncated: true` 并继续，残余风险见 `docs/operations.md` 的已知限制）。
@@ -737,20 +737,15 @@ CREATE TABLE node (
   summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
   summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
   summary_entries  INTEGER NOT NULL DEFAULT 0,   -- 生成摘要时的直接子项数
-  -- 访问热度（§11.7 的热度衰减输入）
+  -- 访问热度（§17.5 的热度衰减输入）与 TTL 的判据（§11.7）：记忆的最后使用
+  -- 时刻是 max(updated_at, last_accessed_at)，不另存绝对过期时刻
   access_count     INTEGER NOT NULL DEFAULT 0,
   last_accessed_at TEXT,
-  -- 记忆的过期时间。NULL = 永不过期；存**绝对时刻**而不是「N 天后」，
-  -- 因为相对时长每次读都要重算「从什么时候开始算」（§11.7）
-  expires_at     TEXT,
   PRIMARY KEY (uri, level)            -- 目录有 L0 与 L1 两行，主键必须是两者的组合
 );
 CREATE INDEX node_parent ON node(parent_uri);
 CREATE INDEX node_scope  ON node(scope, context_type);
 CREATE INDEX idx_node_last_accessed ON node(last_accessed_at);
--- 部分索引：只收录有过期时间的行。默认配置（memory.ttl.defaultDays = 0）下整张
--- 索引是空的，不为「没人用 TTL」的部署付索引维护成本（§11.7）
-CREATE INDEX idx_node_expires ON node(expires_at) WHERE expires_at IS NOT NULL;
 
 -- 全文检索
 -- 注意 content / abstract 存的是「切分后」的文本，不是原文（见下面的中文切分）
@@ -902,9 +897,8 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
   `children` / `descendants` / `listByScope` / `count` / `stat` / 热度 / `glob` / TTL
   候选）都带这条谓词，否则一个目录会变成两条节点：`tree` 出现重复、`metrics` 的
   `comem_index_nodes` 虚高、`sweepExpired` 把同一个目录返回两次。
-- **归档、过期、删除是按 URI 的**：`setExpiry` / `sweepExpired` 的状态转移、`deleteByUri`
-  的删除都会覆盖同一个 URI 的两行——只改 L0 行会让已归档的目录继续从概览正文里被
-  检索到。
+- **归档、过期、删除是按 URI 的**：`sweepExpired` 的状态转移、`deleteByUri` 的删除
+  都会覆盖同一个 URI 的两行——只改 L0 行会让已归档的目录继续从概览正文里被检索到。
 - **概览行只在 FTS 臂上**：向量臂按 URI 一条（`node_embedding` 的主键是 `uri`），
   目录本来就不产生向量，L1 也不会。代价是纯语义查询（`retrieval.engine: vector`）
   命不中概览正文，只有 `fts5` / `hybrid` 的 BM25 臂能命中。要让概览参与语义检索，
@@ -919,6 +913,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 | 0002 | `0002_archived_at.sql` | `node.archived_at`（TTL 两段式，§11.7） |
 | 0003 | `0003_memory_link.sql` | `memory_link`（记忆之间的关联，§11.10） |
 | 0004 | `0004_node_level_rows.sql` | `node` 主键改 `(uri, level)`、`node_fts` 加 `level` 列：目录的 L1 概览行 |
+| 0005 | `0005_sliding_ttl.sql` | 删 `node.expires_at` 与 `idx_node_expires`：TTL 判据改为清扫时现算（§11.7） |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -933,8 +928,8 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 
 - `app_user`（含 `password_hash`、`session_epoch`）/ `app_group`（含 `owner_user_id` 外键
   `ON DELETE SET NULL`）/ `group_member`（`ON DELETE CASCADE`）/ `api_key`（`ON DELETE CASCADE`）
-- `node`（含摘要新鲜度三列、`access_count` / `last_accessed_at`、`expires_at`）及其索引、
-  `node_fts`（FTS5）
+- `node`（含摘要新鲜度三列、`access_count` / `last_accessed_at`）及其索引、
+  `node_fts`（FTS5）。`expires_at` 已由 0005 删除（§11.7 的滑动窗口改为清扫时现算）
 - `node_permission`（含 `effect`）/ `acl_entry`
 - `task` / `request_log`
 - `embedding_model` / `embedding_cache`
@@ -1634,10 +1629,23 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 写文件成功、更新索引失败时，文件在磁盘上但检索不到。处理：
 
 1. 写索引失败 → 往 `_meta/reconcile.log` 追加一条 `{op, uri, error, at}`
-2. 启动时扫这个日志重放；定期任务也扫——**未实现**
-3. 重放成功才删除日志条目——**未实现**，日志只增不删
+2. 启动时扫这个日志重放一次，HTTP 开始监听之前完成；调度器每一轮（默认 30 秒）也重放。
+   `op = index` 从磁盘重建索引记录，`op = permission` 调 `AclService.materializeNode`；
+   两者都是 upsert，重复执行安全。
+3. 重放成功后原子重写日志，只保留未解决的条目（临时文件 + `rename`）。重写前会在
+   串行队列里重新读一次文件，重放期间新追加的记录因此不会被覆盖。坏行记 warn 后丢弃；
+   `write` / `attachment` 的失败记录没有可重放的输入（正文或原始字节不在日志里），保留
+   待人工处理。目标 URI 已经不存在时按已解决移出。
 
-**v1 只做了第 1 步。** 写侧的记录是真的（批量导入、附件、权限物化失败都会追加），但没有读侧：启动扫描、定期重放、成功后删除都没有代码。所以「索引双写补偿」目前只是「把失败记下来等人看」，见 `docs/operations.md` 已知限制 8 与排障一节的重放办法。
+**启动顺序**：重放在 `main.ts` 的 `task.recover()` 之后、`commitRunner.start()` 与 HTTP
+监听之前。监听之后跑会与用户请求争同一批 SQLite 写事务与文件锁，而且第一批请求可能
+读到「文件在、检索不到」的旧状态；重放本身只读一个小文件，记录为 0 时成本是一次
+`ENOENT`。**定期重放**不能省：启动扫描只覆盖上次退出前的记录，一个跑几个月的进程
+如果只在启动时对账，运行期间新产生的失败会沉默到下次重启。调度器本身因三个维护开关全关而不启动时，只有启动那一次重放。
+
+**仍然无法重放的形态**：`write` / `attachment`（日志里没有可重放的输入）；`add_skill`
+的索引失败（`SkillService` 目前不写对账记录）；跨进程同时追加（串行队列只覆盖本进程，
+v1 不支持多进程共享同一数据根）。见 `docs/operations.md` 已知限制 8。
 
 **为什么不是回滚文件**：文件已经是对的，回滚反而丢数据。补偿的方向是「把索引追上来」，不是「把文件退回去」。
 
@@ -1679,7 +1687,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 |---|---|---|---|
 | 自动提交 | `SessionService.shouldAutoCommit`（§10.2.1） | 走现有的阶段一 `commitPhase1` | 路径锁 + 归档序号单调 |
 | 会话过期 | `now - 最后活动 >= session.expiry.idleTimeoutSeconds` | `archive`（默认）或 `delete` | 已归档的会话跳过 |
-| TTL 清扫 | `node.expires_at < now`（§11.7） | `status = 'archived'` | `status <> 'archived'` |
+| TTL 清扫 | `max(node.updated_at, node.last_accessed_at) < now - memory.ttl.defaultDays`（§11.7） | `status = 'archived'` | `status <> 'archived'` |
 
 **间隔 30 秒。** 来源未知（经验假设）：自动提交的判定是量级判断（15 万 token / 100 条消息），30 秒延迟相对对话时长可以忽略；更短的间隔只会让每条会话每 30 秒被 `load` 一次，而没有新消息时那次读不会有任何变化。
 
@@ -1838,27 +1846,71 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 ### 11.7 记忆 TTL 与过期清扫
 
-记忆可以有过期时间：`node.expires_at`（`0001_init.sql` 的 `node` 表，见 §8.1）。清扫由后台调度器
-（§10.7）周期性执行，**两段式：先归档、再物理删**。
+记忆有存活时间，判据是**最后一次被使用**，不是写入时间：一条记忆在
+`max(node.updated_at, node.last_accessed_at) + memory.ttl.defaultDays` 之前都算活着。
+检索命中会写 `last_accessed_at`（与 `access_count` 同一句 `UPDATE`，§17.5 的热度衰减
+也读这两列），所以天天被读到的偏好和从没被打开过的事件不会同时到期。
+
+清扫由后台调度器（§10.7）周期性执行，**两段式：先归档、再物理删**。
 
 | 概念 | 语义 |
 |---|---|
-| `memory.ttl.defaultDays` | 记忆默认存活天数。`0`（默认）= 永不过期。写入时算成绝对时刻 |
+| `memory.ttl.defaultDays` | 滑动窗口长度（天），从最后一次被使用（写入或检索命中）起算。`0`（默认）= 永不过期 |
 | `memory.ttl.sweepBatchSize` | 每轮最多清扫多少条（默认 100），给一次 UPDATE 一个上界 |
 | `memory.ttl.retentionDays` | 归档后保留多少天才物理删除。`0`（默认）= 永不物理删，只软归档 |
-| `TtlService.setExpiry(uris, at)` | 显式设过期时间；`null` = 取消过期 |
-| `TtlService.sweep()` | 第一段：`expires_at < now` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行 |
+| `TtlService.sweep()` | 第一段：最后使用时刻早于 `now - defaultDays` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行 |
+
+**TTL 是一个统一策略，不是逐条属性。** 早期有一个 `TtlService.setExpiry(uris, at)`，
+给指定 URI 设一个绝对过期时刻。它没有任何生产调用方（HTTP 没有路由、MCP 没有工具、
+控制台没有入口），而且与「滑动窗口 + 类型豁免」是两套互相矛盾的语义：一条被豁免的
+记忆可以被 `setExpiry` 强行设成明天过期。现在删除 `setExpiry` 与它的仓储方法，
+`node.expires_at` 列一并删除（`0005_sliding_ttl.sql`）。没有「这一条不过期」的逐条
+开关：要让某条记忆不过期，改它的类型（四类豁免），或把 `defaultDays` 设为 0。
+
+**判据在清扫时现算，不存绝对时刻。** 三个后果：
+
+- 改 `defaultDays` 立即对存量生效，不需要追平脚本，也不会有「按旧配置算出的陈旧
+  过期时刻」；
+- 检索命中路径（`recordAccess`）不用多写一列——它本来就在写 `last_accessed_at`；
+- 第一段每轮做一次顺序扫描（`context_type = 'memory'` 且未归档的行），按表达式排序，
+  用不上普通索引。**实测**（Node 26 的 `node:sqlite`，SQLite 3.54.0，`:memory:`，
+  5 万行 `node`，取前 100 条）这条 `SELECT` 是 5.0–5.4 ms。没有为这个表达式建索引：
+  索引会在 `recordAccess`（每次检索命中的写路径）上多维护一条索引项，而默认配置
+  （`defaultDays = 0`）下第一段整体不跑。
+
+**取最大值，不是「有访问就看访问」。** `max(updated_at, last_accessed_at)`：一条记忆
+可能先被访问、之后正文又被改写。只用 `COALESCE(last_accessed_at, updated_at)` 会挑
+那条更早的访问时刻，让刚写过的记忆立刻成为过期候选。
+
+**类型豁免：四类永不过期。** `profile`（用户画像）、`identity`（agent 身份）、
+`soul`（原则）、`rules`（规则）是**稳定的身份与约束**。它们会被反复读到，但「最近
+没被读到」不等于「不再重要」——一条规则可能整月没有触发场景。让它们到期等于让
+agent 忘掉自己是谁、忘掉用户是谁、忘掉约定；TTL 要清理的是 `events` /
+`experiences` 这类时效性内容。
+
+豁免集合是**硬编码**的，在 `domain/memory-types/index.ts` 的
+`TTL_EXEMPT_MEMORY_TYPES`（与记忆类型定义同一处，类型名从各类型的 `type` 字段取，
+SQL 里不出现字面量列表）。不做配置项：哪些类型承载身份是记忆模型的语义，不是部署
+偏好，做成配置只会多一个「配错之后 agent 忘了自己是谁」的入口（§6）。
+
+类型从 `node.memory_type` 取。`memory_type` 为 `NULL` 的行（目录行、frontmatter
+读不出类型的历史行）**不豁免**：它们不是「未知所以不敢动」的对象——第一段只改
+`status`，可逆；留成永不过期才会让 TTL 失去意义。
+
+**只对 `context_type = 'memory'` 生效。** `memory.ttl` 描述记忆的存活时间，
+`resources` / `skills` 不参与。
 
 **两段式。** 第一段是软过期（`status = 'archived'`，写 `archived_at`）；第二段在归档
-后超过 `retentionDays` 时才物理删除。中间隔一个保留期，既让「配错 TTL」（把 7 天写成
-7 秒）在保留期里可观测、可撤销，又让 `memory.ttl.*` 真的能省磁盘——只有第一段时
-archived 行越积越多、磁盘一分没省。
+后超过 `retentionDays` 时才物理删除。中间隔一个保留期，既让「配错 TTL」（把 30 天
+写成 1 天）在保留期里可观测、可撤销，又让 `memory.ttl.*` 真的能省磁盘——只有第一段
+时 archived 行越积越多、磁盘一分没省。
 
 **「归档多久」怎么算。** `node.archived_at`（`0002_archived_at.sql`）在第一段归档的
-同一句 `UPDATE` 里写。`expires_at` 只说明「何时该过期」，`updated_at` 是内容写盘时间
-（归档不是内容修改，不动它），两者都算不出「归档了多久」。`archived_at IS NULL` 表示
-「不知道归档时刻」——迁移前就已是 archived 的历史行、或非 TTL 途径产生的 archived 行
-——第二段**永不删它们**：物理删除不可逆，不把未知当成「很久以前」。
+同一句 `UPDATE` 里写，值是**清扫时刻**，不是过期边界 `now - defaultDays`——用后者会
+让保留期提前 `defaultDays` 天走完（配了「30 天过期、再保留 30 天」时，归档当天就满足
+物理删除条件）。`archived_at IS NULL` 表示「不知道归档时刻」——迁移前就已是 archived
+的历史行、或非 TTL 途径产生的 archived 行——第二段**永不删它们**：物理删除不可逆，
+不把未知当成「很久以前」。
 
 **第二段的安全性。** 只删 `status = 'archived' AND archived_at < cutoff AND
 kind = 'document'`（叶子文档，目录节点不入选——目录里可能有没归档的兄弟记忆）。删除
@@ -1867,29 +1919,32 @@ kind = 'document'`（叶子文档，目录节点不入选——目录里可能�
 单条删除失败只记 warn 跳过，不打断整轮。`retentionDays` 配得小时（< 7 天）记 warn，
 危险操作不静默。
 
-**为什么存绝对时间而不是相对时长。** 相对时长在写入时算成绝对时间，语义才稳定；存
-「30 天后过期」这种相对值，每次读都要重新算，而「从什么时候开始算」会漂。
-
 **为什么第一段仍是软过期。** 第一段只改 `status`，不删文件、不动 `node_permission`。
-TTL 配错（把 7 天写成 7 秒）时归档状态还能改回来，物理删除没有回滚；保留期就是这个
+TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删除没有回滚；保留期就是这个
 「还能改回来」的窗口。**归档只影响检索面**：§8.4 的四个面（`find` / `search` /
 `grep` / `glob`）都只返回 `status = 'active'` 的节点，`grep` 与向量检索的候选集由
 `glob` 枚举，共用同一条 SQL 谓词（`src/adapters/sqlite/retrieval-index.ts` 的
 `ACTIVE_STATUS_PREDICATE`）。`read` / `download` 按路径仍然拿得到内容；`list` /
 `tree` 是目录浏览、`stat` 是状态读取，它们**不按归档状态过滤**——文件还在磁盘上，
-控制台要能看见归档内容并把它改回 `active`。**物理删除只在第二段、且
-`retentionDays > 0` 时发生**；默认
-`retentionDays = 0` 时物理删除仍是运维的显式动作（`forget` / `rm`）。
+控制台要能看见归档内容并把它改回 `active`。
+
+**两个默认值都是 0。** `defaultDays = 0` 关闭第一段：一条都不过期（第一段整段跳过，
+不是「截止时刻 = 现在」——那会一次归档光）。`retentionDays = 0` 关闭第二段：归档
+就是终点，与「只做软归档」的历史行为一致。物理删除不可逆，默认不能删任何东西；要省
+磁盘必须显式配一个正数保留期，先观察一轮归档量再决定。两段互不依赖：只配
+`retentionDays` 而不配 `defaultDays` 能清掉「上一轮配置留下的 archived 行」，`sweep`
+不会因为第一段关闭就提前返回。
 
 **幂等。** `sweep` 的 `WHERE status <> 'archived'` 让同一条过期记忆只被计数一次；
-重复调用返回 0，不会把「已经归档」重复写一遍。
+重复调用返回 0，不会把「已经归档」重复写一遍。第二段删掉行以后自然不再命中。
 
-**不清 `updated_at`。** 设置过期时间是运维动作，不是内容修改。把读 / 治理动作当成
-写入会让热度衰减（§17.5）把一条从没改过的老记忆算成「刚更新过」。
+**归档不是内容修改。** 第一段不改 `updated_at`：它是热度衰减（§17.5）与滑动窗口
+判据的输入，把治理动作当成内容写入会让一条从没改过的记忆看起来刚被更新过。
 
-**默认值只影响之后写入的记忆。** `defaultDays` 在 `node` 行的写入点（`SqliteFtsIndex.upsert`）
-算成绝对时刻，且只对 `context_type = 'memory'` 生效。已有的记忆保持原值（包括 NULL）；
-要追平存量用 `TtlService.setExpiry` 批量设。
+**恢复一条被误归档的记忆**：把 `defaultDays` 改回 0（或正确值）并重启，再把
+`node.status` 改回 `active`（见 `docs/operations.md`「TTL 配错了」）。归档行保留
+`last_accessed_at`，所以只要第一段还开着，「改回 active 但确实很久没用过」的记忆会在
+下一轮再次被归档——这是滑动窗口的语义，不是缺陷。
 
 ### 11.8 记忆合并（agentic 循环）
 
@@ -3039,6 +3094,17 @@ comem_hook_async_seconds{event}                 # 后台部分耗时，与阻塞
 
 **报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端**按事件覆盖保存最近一次的值**（gauge），不存直方图：历史分布由 Prometheus 按抓取间隔自己算（§17.10）。
 
+**服务端只测得到其中两个阶段。** `request_log.phases`（§17.6）落的是**单个 HTTP 请求**的阶段，不是整轮：`processStart` 是 hook 进程启动（`performance.timeOrigin`），`serialize` 是 hook 把命中格式化成注入块（`formatRecallBlock`），两者都只发生在 hook 进程里，服务端没有对应边界——**不要为了凑齐四个阶段在这里造一个**。服务端包得出边界的只有两个：
+
+| 阶段 | 边界 | 说明 |
+|---|---|---|
+| `recall` | `src/api/http/routes/search.ts` 的 `/search/find` 与 `/search/search` | 包住 `SearchService` 的 `find` / `search` / `context`；`mode=context` 的上下文组装与渲染在 `SearchService.context` 内部，随它一起计时，所以这段 `recall` 偏大 |
+| `capture` | `src/api/http/routes/sessions.ts` 的 `POST /sessions/{id}/messages` | 包住逐条 `SessionService.addMessage`；hook 侧「写 worker 载荷 + spawn」在客户端，不在这里 |
+
+**记录入口只有一个：`ObservabilityService.phase(name, fn)`。** 它用 `performance.now()`（单调时钟，NTP 校时不会让它倒退），同名阶段**累加**——一次请求里 `recall` 可能跑几轮，累加保住「这一段总共花了多少」，覆盖会只留下最后一轮。不在 `withRequestScope()` 里调用时阶段被丢弃并记一条 `warn`（后台阶段是例外：它们在任务里跑，不挂在某个请求下，记进程级 gauge）。HTTP 路由之外没有别的调用点：MCP 工具不记 HTTP 阶段。
+
+**阶段之和是下界，不是等式。** 请求里还有身份解析、路由、参数校验、请求体解析、响应编码这些没被计时的部分，所以 `sum(phases) ≤ durationMs`，差额是未归因间隙（`attribute()` 的 `unattributedMs`）。只有阶段之和**超过**总耗时（容差 0.5ms）才记 `warn`——那说明同一段被套了两层 `phase()`，不是间隙。§20 的验收点按这个口径。
+
 **控制台怎么展示**：
 
 ```
@@ -3113,7 +3179,7 @@ comem_llm_cost_usd_total                              # 无标签，按配置单
 }
 ```
 
-它依赖按会话聚合请求记录与请求阶段耗时，而 `request_log` 没有会话列，`phases` 也恒为 NULL（§17.6：没有 HTTP 路由调用 `phase()`）。所以 `latency.recallP50` / `latency.commitP50` / `overhead` 这三组字段没有数据来源；要落地，先让请求带上会话标识并给阶段计时，再定聚合口径（P50 还得先决定取哪个时间窗口的样本）。已知限制同步写在 `docs/operations.md`。
+它依赖按会话聚合请求记录与请求阶段耗时，而 `request_log` 没有会话列——`phases` 现在有数据（§17.2：`recall` 在 `/search/find`、`/search/search`，`capture` 在 `POST /sessions/{id}/messages`），但请求行不带 `sessionId`，阶段也只在部分路由上存在。所以 `latency.recallP50` / `latency.commitP50` / `overhead` 这三组字段仍然没有数据来源；要落地，先让请求带上会话标识，再定聚合口径（P50 还得先决定取哪个时间窗口的样本）。已知限制同步写在 `docs/operations.md`。
 
 **热度的算法**：`sigmoid(log1p(activeCount)) × exp(-ln2 × ageHours / halfLifeHours)`。`activeCount` 是记忆被检索命中并注入的次数，`halfLifeHours` 默认 168（一周）。分桶：≥0.7 热、≥0.3 温、其余冷。实现是 `domain/hotness.ts` 的 `hotnessScore` / `hotnessTier`，检索热路径与本端点共用同一份——不另造第二套阈值。
 
@@ -3146,7 +3212,7 @@ comem_llm_cost_usd_total                              # 无标签，按配置单
 
 **只有完整耗时，没有 TTFB 与响应体大小。** `request_log` 没有 `ttfb_ms` / `response_bytes` 列（`0001_init.sql`）：TTFB 只在流式响应上与总耗时不同，v1 不采这个点；响应体大小也不落库。
 
-**JSON 里的键是展示用的短名，落库映射见建表注释**：`at` → `created_at`、`route` → `path`、`status` → `status_code`、`userId` → `subject`。`phases` 列只在请求作用域里调过 `phase()` 时非空，当前没有 HTTP 路由调用它，因此实际写 NULL。
+**JSON 里的键是展示用的短名，落库映射见建表注释**：`at` → `created_at`、`route` → `path`、`status` → `status_code`、`userId` → `subject`。`phases` 列只在请求作用域里调过 `phase()` 时非空：当前落地的是 `recall`（`/search/find`、`/search/search`）与 `capture`（`POST /sessions/{id}/messages`），§17.2 的 `processStart` / `serialize` 发生在 hook 进程里，不会出现在这一列。没有任何阶段边界的路由（`/health`、`/sessions` 等）仍然写 NULL——**NULL 表示「没计时」，不是「花了 0ms」**。阶段之和是总耗时的下界，差额是未归因间隙（§17.2）。
 
 **保留策略**：默认 7 天或 10 万条，先到先删。可配置。
 
@@ -3310,7 +3376,7 @@ memory:
     enabled: false        # 开它会多一次 LLM 调用。没有可用 LLM 时启动失败（没有规则生成器，不能降级）
   # 记忆的 TTL。两段式：先软归档（status = archived），归档满 retentionDays 天再物理删除。
   ttl:
-    defaultDays: 0        # 记忆默认存活天数。0 = 永不过期（默认）
+    defaultDays: 0        # 滑动窗口：最后一次使用后多少天过期。0 = 永不过期（默认）
     sweepBatchSize: 100   # 每轮最多清扫多少条，防止一次清太多把库锁住
     retentionDays: 0      # 归档后保留多少天再物理删除。0 = 永不物理删除（默认）
   # 记忆合并（§11.8）。默认关：它会 delete，是破坏性操作，必须显式开启。
@@ -3381,7 +3447,7 @@ task:
 
 **`telemetry.requestLog.retainDays` / `retainRows` 在启动时执行一次。** 不做定时任务：单机部署的启动清理已经能挡住无限增长，常驻定时器要多一个生命周期与并发问题。
 
-**`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**三个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0`。`memory.ttl.defaultDays` 在 `node` 行的写入点算成绝对时刻，只对 `context_type = 'memory'` 生效——`resources` / `skills` 不会被套上记忆的存活时间。
+**`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**三个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0`。`memory.ttl.defaultDays` 在清扫时与 `max(node.updated_at, node.last_accessed_at)` 比较（滑动窗口，§11.7），只对 `context_type = 'memory'` 生效——`resources` / `skills` 不会被套上记忆的存活时间。
 
 **检索参数只留 `retrieval.engine` 与 `retrieval.rerank`。** 查询扩展由
 `search` 的意图分析承担（§8.4），没有独立的召回模式配置；需要更细的召回控制时再加配置。
@@ -3553,7 +3619,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | 链路 | 验收点 |
 |---|---|
 | 并发 | 路径锁 EXACT / TREE 互斥；`rm -r` 与后台写摘要不产生孤儿；`commit` 与 `add_message` 不丢消息；元数据 frontmatter 写不坏 |
-| 可观测性 | 开销归因的四阶段相加等于总耗时；`requestId` 从 HTTP 贯穿到后台任务与日志；`/metrics` 输出能被 Prometheus 解析 |
+| 可观测性 | `request_log.phases` 落服务端可测的阶段（`recall` / `capture`），阶段之和不超过总耗时、差额即未归因间隙；`requestId` 从 HTTP 贯穿到后台任务与日志；`/metrics` 输出能被 Prometheus 解析 |
 
 测试在本地跑。核心链路测试用 `fs.mkdtemp()` 造临时数据根、用 SQLite `:memory:` 造索引，不需要内存替身（AGENTS.md §9）。
 
@@ -3567,7 +3633,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | P4 | 摘要：生成、失效、降级 | 失效链路测试通过 | ✅ |
 | P5 | 会话与管线：归档、抽取、**预取**、合并、**规则合并**、复核、**并发锁**、**ToolPart** | 提交链路端到端通过 | ✅ |
 | P6 | ACL 与用户组 | 权限链路测试通过 | ✅ |
-| P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 | 部分完成：批量写入与 `add_skill` 已做；双写补偿只做了写入侧（追加 `_meta/reconcile.log`），没有重放器，见 `docs/operations.md` 已知限制 8 |
+| P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 | 完成：批量写入与 `add_skill` 已做；双写补偿的写入侧、启动重放、调度器定期重放与日志原子清理都已接线（§10.6） |
 | P8 | MCP 16 工具 | MCP 客户端可连 | ✅ |
 | P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 能看到「CoMem 让每个请求多花多少毫秒」 | ✅ |
 | P10 | 控制台十个页面 | 完整演示路径 | ✅ |

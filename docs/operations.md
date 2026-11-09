@@ -82,7 +82,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `session.autoCommit.keepRecentCount` | `0` | 归档时保留最近 N 条在 live 会话里 |
 | `session.expiry.idleTimeoutSeconds` | `0` | 空闲多久后**归档**（或删除）。0 = 关。与上面那个是两个独立开关 |
 | `session.expiry.action` | `archive` | `archive`（只改 `status`，可逆）或 `delete`（物理删除会话目录，不可逆） |
-| `memory.ttl.defaultDays` | `0` | 记忆默认存活天数。0 = 永不过期。只影响之后写入的记忆 |
+| `memory.ttl.defaultDays` | `0` | 滑动窗口长度：最后一次使用（写入或检索命中）后多少天过期。0 = 永不过期。改它对存量立即生效 |
 | `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
 | `memory.ttl.retentionDays` | `0` | 归档后保留多少天才物理删除文件与索引行。`0` = 永不物理删除（默认），只软归档 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
@@ -850,7 +850,7 @@ XDG 路径」的失败因此不再出现。
 |---|---|---|
 | 自动提交 | `session.autoCommit.enabled`（默认开） | 走阶段一，产出 `sessions/<id>/history/archive_NNN/` |
 | 会话过期 | `session.expiry.idleTimeoutSeconds > 0` | `archive`（默认，只改 `status`）或 `delete`（物理删除） |
-| 记忆 TTL 清扫 | `memory.ttl.defaultDays > 0` | 过期记忆的 `status` 置 `archived` |
+| 记忆 TTL 清扫 | `memory.ttl.defaultDays > 0` | 最后使用时刻超出滑动窗口的记忆 `status` 置 `archived`（`profile` / `identity` / `soul` / `rules` 除外） |
 
 **三个开关全关时不起定时器**，启动日志是 `调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。`；
 否则有一行 `调度器已启动。` 带间隔与三个开关的状态。**改了配置要重启**：开关在
@@ -898,19 +898,27 @@ session:
 ```yaml
 memory:
   ttl:
-    defaultDays: 30       # 新写入的记忆 30 天后归档
+    defaultDays: 30       # 最后一次使用后 30 天归档（写入或检索命中都算「使用」）
     sweepBatchSize: 100   # 每轮最多清 100 条
     retentionDays: 90     # 归档后再保留 90 天，物理删除文件与索引（默认 0 = 永不删）
 ```
+
+**判据是滑动窗口：`max(updated_at, last_accessed_at) + defaultDays`。** 检索命中会写
+`last_accessed_at`（与热度衰减同一列），所以天天被读到的记忆不会到期；改 `defaultDays`
+对存量**立即生效**，不需要追平脚本。
+
+**四类永不过期**：`profile`（用户画像）、`identity`（agent 身份）、`soul`（原则）、
+`rules`（规则）。它们承载稳定的身份与约束，「最近没人读」不等于「不再重要」。这个
+豁免是硬编码的（`domain/memory-types/index.ts` 的 `TTL_EXEMPT_MEMORY_TYPES`），没有
+配置项。
 
 **两段式。** `defaultDays` 只负责归档（`status = 'archived'`，文件还在）。要把磁盘真正
 省下来，配 `retentionDays` 一个正数：归档满这么多天后，文件 + 索引行一起删掉，删了不
 可恢复。默认 `0` 表示永不物理删——只软归档。保留期配得很小（比如 1 天）时调度器日志会
 打 warning；先按默认 `0` 观察一轮归档量，再决定保留期。
 
-**只影响之后写入的记忆**：过期时间在写入时算成绝对时刻（`updated_at + defaultDays`），
-已有的记忆保持原值。要追平存量，只有显式设过期时间（v1 没有对应的 HTTP 接口，见
-「已知限制」）。
+TTL 是统一策略，没有逐条设置过期时间的接口（`TtlService.setExpiry` 已删除）：想让某条
+记忆不过期，改它的类型，或把 `defaultDays` 设回 0。
 
 ### 怎么开记忆合并
 
@@ -1111,12 +1119,12 @@ $COMEM_DATA_DIR/
 ## 备份与恢复
 
 **内容文件是真相，SQLite 是派生。** 判据是「这东西属于哪一类」（§7）。检索索引可以
-重建（`pnpm reindex`），`reconcile.log` 的重放还没有实现。
+重建（`pnpm reindex`）；`reconcile.log` 由启动扫描与调度器自动重放，不需要为它手工重建索引。
 
 | 能丢 | 不能丢 |
 |---|---|
 | `_meta/tmp/`（还没被引用的上传暂存） | `user/`、`group/` 下的内容文件 |
-| `_meta/reconcile.log`（重放了就该删，但 v1 没有重放） | 目录里的 `.acl.json`（丢了等于所有人失去访问权） |
+| `_meta/reconcile.log`（只是失败线索；重放器会清理已解决的条目） | 目录里的 `.acl.json`（丢了等于所有人失去访问权） |
 | `_meta/recall/*.recall_log.json`（丢了只多投一次） | `.abstract.md` / `.overview.md`（重算要调模型，花钱） |
 | `request_log` 表（只是观测数据） | `_meta/comem.sqlite`（**见下面的警告**） |
 
@@ -1551,8 +1559,11 @@ Codex」，导出目录是一次性的。
    （§8.1）。短语匹配要求字符**相邻**：搜「门禁」不会命中「跑完全部门禁」，除非这两个字在
    原文里连续出现。
 3. **索引写入失败**。看 `_meta/reconcile.log`——批量导入时写文件成功、写索引失败，那条记录
-   会在这里。**没有自动重放**，处理办法是再写一次同一路径（走 `FileSystemService`，观察者会
-   重新索引），或者接受它暂时检索不到。
+   会在这里。重放已经自动执行：启动时（HTTP 监听前）跑一次，调度器每一轮（默认 30 秒）也跑。
+   文件还在的话通常不需要人工介入；如果同一 URI 的记录一直留着，日志里有
+   `对账记录重放失败，保留待下次重试。` 的 warn，按上面的 `error` 字段排查。
+   `op = write` / `attachment` 的记录没有可重放的输入，重放器会保留它们——需要重新提交那次
+   导入。
 4. **权限过滤**。`find` 只返回调用方有 `read` 的节点（§12.4），无权限节点完全不出现。
 
 **处理**：先用 `grep` 按行确认内容在文件里，再确认 `status`，最后看 `reconcile.log`。
@@ -1685,27 +1696,32 @@ COMEM_SERVER_PORT=8080 pnpm dev
 **症状**：`find` / `search` 查不到某批记忆，`GET /content/read` 按路径还能读到；
 `node.status` 是 `archived`。
 
-**原因**：`memory.ttl.defaultDays` 设小了（比如想写 365 天，写成了 1），调度器把过期
-的记忆软过期了。**不会丢文件**——`sweep` 只改 `status`，不删内容、不动
-`node_permission`。
+**原因**：`memory.ttl.defaultDays` 设小了（比如想写 365 天，写成了 1），调度器把
+最后使用时刻超出窗口的记忆软过期了。**不会丢文件**——`sweep` 只改 `status`，不删内容、
+不动 `node_permission`。
 
 **处理**：
 
-1. 把 `defaultDays` 改回 `0`（或正确的天数）并重启：已经归档的行不会自动恢复。
-2. 用 SQL 把它们改回来（`read` / `download` 一直可用，检索只认 `status = 'active'`）：
+1. 把 `defaultDays` 改回 `0`（或正确的天数）并重启。第一段整体不跑之后，已归档的行
+   **不会自动恢复**。
+2. 用 SQL 把它们改回来（`read` / `download` 一直可用，检索只认 `status = 'active'`）。
+   判据是最后使用时刻，没有「过期时间」列可清：
 
    ```sql
-   -- 先看影响面
-   SELECT uri, expires_at FROM node WHERE status = 'archived' AND expires_at IS NOT NULL;
+   -- 先看影响面：归档时刻就是被 TTL 收走的时间
+   SELECT uri, memory_type, updated_at, last_accessed_at, archived_at
+     FROM node WHERE status = 'archived' AND archived_at IS NOT NULL;
    -- 再按需收窄、恢复
-   UPDATE node SET status = 'active' WHERE status = 'archived' AND expires_at IS NOT NULL;
+   UPDATE node SET status = 'active', archived_at = NULL
+    WHERE status = 'archived' AND archived_at IS NOT NULL;
    ```
 
    不要指望「重写一遍文件」恢复：观察者会按记忆文件的 frontmatter 重写 `status`，而
    `experiences` / `rules` 因此会回到 `pending`（复核闸门），需要再复核一次。
 
-**想彻底清掉过期时间**（让这些记忆永不过期）再加一句
-`UPDATE node SET expires_at = NULL WHERE expires_at IS NOT NULL;`。
+**注意**：如果 `defaultDays` 仍然开着，一条确实很久没用过的记忆改回 `active` 后会在
+下一轮清扫里再次被归档——这是滑动窗口的正常行为。要么把窗口调大，要么把这批记忆改成
+四类豁免之一的类型（不是推荐做法，豁免是给身份与规则用的）。
 
 ### 会话被自动删除了
 
@@ -1726,9 +1742,10 @@ COMEM_SERVER_PORT=8080 pnpm dev
    `.meta.json`、任务行）在请求里同步完成，阶段二（归档摘要 → 记忆抽取 → 补丁合并 →
    摘要失效）由 `CommitRunner` 认领任务执行，而它只在 `src/bootstrap/main.ts` 里启动。
    用 `createContainer()` 自己写脚本时不会自动跑，任务会停在 `pending`。
-2. **TTL 没有「给已有记忆批量设过期时间」的接口。** `memory.ttl.defaultDays` 只影响之后
-   写入的记忆；存量要追平得直接改库（见「TTL 配错了」一节的 SQL）。`TtlService.setExpiry`
-   是服务层方法，没有对应的 HTTP 路由。
+2. **TTL 没有逐条设置过期时间的能力。** 它是一个统一策略：滑动窗口
+   （`memory.ttl.defaultDays`）+ 四类类型豁免。`node.expires_at` 列与
+   `TtlService.setExpiry` 都已删除（`0005_sliding_ttl.sql`）。要让某条记忆永不过期，
+   改它的类型或把 `defaultDays` 设回 0。
 3. **认证默认关闭。** `auth.enabled: false` 时身份来自 `x-comem-subject`，且必须等于
    `server.subject`（`src/bootstrap/container.ts` 的 `resolveIdentityOf`）——这是单用户
    形态，控制台不需要登录。打开 `auth.enabled` 后身份来自凭据（session token 或 API Key），
@@ -1752,8 +1769,12 @@ COMEM_SERVER_PORT=8080 pnpm dev
 7. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
    `services/` 不能 `import node:fs`、`ContentStore` 也没有 chmod 入口，所以脚本装进去之后
    不可执行。要补需要给 `ContentStore` 加一个 chmod 方法，现在没有。
-8. **`reconcile.log` 没有重放。** 日志在写（批量导入的索引失败会追加一行），但没有启动扫描
-    去重放它。所以「索引双写补偿」只做了「记下来」这一半。处理办法见排障一节。
+8. **`reconcile.log` 里的部分失败无法自动恢复。** 重放已实现：启动时（HTTP 监听之前）与
+    调度器每一轮都会重放 `op = index` / `permission`，成功后原子重写日志只保留未解决条目；
+    目标 URI 已删除视为已解决，坏行记 warn 后丢弃。仍然修不了的是 `write` / `attachment`
+    的失败记录（日志里没有正文或原始字节，只能重新提交导入），以及 `add_skill` 的索引失败
+    （`SkillService` 目前不写对账记录）。跨进程共享同一数据根时追加与重写没有互斥，v1 不支持
+    这种部署。清理与并发语义见架构文档 §10.6。
 9. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
     `node:fs` 构造不出来。为一条几乎走不到的分支给生产类加可注入接缝，成本大于收益。
 10. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
