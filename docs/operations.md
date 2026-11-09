@@ -103,7 +103,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。同上 |
 | `telemetry.requestLog.sampleRate` | `1.0` | 采样率。**错误请求永远全量记录** |
 | `telemetry.hookOverhead.enabled` | `true` | 关掉时 Hook 阻塞开销直接丢弃，不累加指标 |
-| `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 只做冷热标记，不参与排序；非 0 时 `find` 会多查一次访问统计，并把本次命中累加进 `node.access_count`（fire-and-forget，不等它完成） |
+| `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 只做冷热标记，不参与排序。**记访问与是否参与排序是两件事**：无论 `weight` 是几，检索命中与按 URI 读取都会写 `node.access_count` / `last_accessed_at`（TTL 的滑动窗口读后者）；`weight` 非 0 只是让 `find` 多查一次访问统计并把它算进排序 |
 | `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。调小让热度掉得更快 |
 | `task.leaseSeconds` | `60` | 任务租约。到期未续租会被启动扫描回收（§10.4） |
 | `task.maxAttempts` | `3` | 单个任务最多执行 3 次，超限置 `failed` |
@@ -217,8 +217,8 @@ pnpm check:orphans
 `commands/`、`ingest/`、`eval/` 调用算有调用方；端口实现（显式 `implements`，或结构上
 满足只声明方法的消费方契约）按接口另一端的调用判定，另一端没人调仍算孤儿。
 
-**遗留债务**：`scripts/check-orphans.ts` 的 `BASELINE` 记录 49 条存量，每条带一句判断
-（该删 / 该接线 / 误报）。清单只允许缩小：修掉一条删一行，留着会报「清单过期」。
+**遗留债务**：`scripts/check-orphans.ts` 的 `BASELINE` 记录 11 条存量（首跑 49 条，已清 38 条），
+每条带一句判断（待删 / 该接线 / 待收窄）。清单只允许缩小：修掉一条删一行，留着会报「清单过期」。
 新增孤儿直接失败——不要为了让检查通过而加白名单。
 
 **残余**：它只证明「有人写了这个方法名」，不证明「调用真的发生并产生效果」。字符串
@@ -883,9 +883,32 @@ XDG 路径」的失败因此不再出现。
 | 会话过期 | `session.expiry.idleTimeoutSeconds > 0` | `archive`（默认，只改 `status`）或 `delete`（物理删除） |
 | 记忆 TTL 清扫 | `memory.ttl.defaultDays > 0` | 最后使用时刻超出滑动窗口的记忆 `status` 置 `archived`（`profile` / `identity` / `soul` / `rules` 除外） |
 
-**三个开关全关时不起定时器**，启动日志是 `调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。`；
-否则有一行 `调度器已启动。` 带间隔与三个开关的状态。**改了配置要重启**：开关在
+启动条件是下面四个开关任一打开（`session.autoCommit.enabled`、`session.expiry.idleTimeoutSeconds > 0`、
+`memory.ttl.defaultDays > 0`、`memory.ttl.retentionDays > 0`）。**四个全关时不起定时器**，启动日志是
+`调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。`；
+否则有一行 `调度器已启动。` 带间隔与四个开关的状态。**改了配置要重启**：开关在
 `createContainer` 里读一次。
+
+### 已知限制
+
+- **定时维护只在服务端进程常驻时发生。** 自动提交、会话过期、记忆 TTL（含 `retentionDays`
+  的物理删除）都由进程内的 30 秒定时器驱动。用 MCP stdio 代理、一次性 CLI，或只调
+  `commitPhase1` 而没有进程持续轮询时，这些动作一次都不会发生。可观察到的现象是启动日志
+  没有 `调度器已启动。`、会话不自动归档、`memory.ttl` 打开后 `status` 始终是 `active`、
+  归档超期的文件不消失。规避方式：用 `pnpm dev:server` 或 Docker 服务把服务端作为长驻
+  进程运行；一次性脚本需要清扫时显式 `await scheduler.tick()`。
+
+- **调度器的定时器是 `unref()` 的，不能当成进程保活手段。** 30 秒轮询不会阻止 Node 进程
+  退出，所以短命脚本里 `createContainer` 之后等它自动清扫，脚本会先退出，一轮都不会跑。
+  可观察到的现象是日志有 `调度器已启动。`、进程随后正常退出，但没有任何
+  `调度轮次完成。` 或清扫记录。
+
+- **索引对账的重放同样挂在调度器上。** 运行期文件写成功、索引或权限物化失败时只记
+  `_meta/reconcile.log`，由 `main.ts` 启动时重放一次，以及调度器每轮里的重放消费；
+  调度器未启动或进程在重放前被终止，这条记录会一直留着。可观察到的现象是文件在、
+  `find` / `glob` 却找不到，`_meta/reconcile.log` 行数只增不减，重启服务后恢复。
+  规避方式：保持调度器运行（任一开关打开，包括只配 `retentionDays`），监控
+  `_meta/reconcile.log` 与调度轮次日志里的 `reconcileResolved` / `reconcileRemaining`。
 
 ### 怎么开自动提交
 

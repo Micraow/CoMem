@@ -84,7 +84,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 **为什么 `domain` 和 `services` 分开。** `domain` 是规则，`services` 是流程。ACL 求值是规则（给定树和身份，算出一个布尔值，纯函数）；提交管线是流程（有 IO、有重试、有后台恢复）。混在一起，ACL 就只能在跑通整条管线之后才能测。
 
-**为什么检索与合并的规则收进 `domain`，不留独立目录。** `patch.ts`（SEARCH/REPLACE 块的匹配与应用）是纯字符串函数，`ranking.ts`（打分与截断）是纯数值函数，两者跟存储和协议都无关，属于领域规则。只有「调模型做意图分析」属于应用编排。按「规则进 `domain`、编排进 `services`」拆，首层就不会出现两个语义模糊的目录。
+**为什么检索与合并的规则收进 `domain`，不留独立目录。** `patch.ts`（补丁块的应用）是纯字符串函数，`ranking.ts`（打分、去重与单条预算）是纯数值函数，两者跟存储和协议都无关，属于领域规则。只有「调模型做意图分析」属于应用编排。按「规则进 `domain`、编排进 `services`」拆，首层就不会出现两个语义模糊的目录。
 
 ### 4.4 接口清单
 
@@ -149,14 +149,14 @@ CoMem/
 │   │   ├── summary.ts                # 摘要三层 + 新鲜度
 │   │   ├── acl.ts                    # Principal / AclEntry / Acl 求值
 │   │   ├── memory-type.ts            # 记忆 schema 与字段
-│   │   ├── patch.ts                  # SEARCH/REPLACE 块匹配与应用
+│   │   ├── patch.ts                  # 补丁块的应用（不解析文本格式）
 │   │   ├── merge-op.ts               # patch / replace / sum / immutable
-│   │   ├── ranking.ts                # 打分与截断
+│   │   ├── ranking.ts                # 打分、去重与单条预算
 │   │   ├── retrieval.ts              # RetrievalIndex 接口 + 查询类型
 │   │   ├── llm.ts                    # LlmProvider 接口
 │   │   ├── log.ts                    # Logger 接口
 │   │   ├── session.ts                # 会话与归档
-│   │   ├── task.ts                   # 任务状态机
+│   │   ├── task.ts                   # 任务形状与重试判定（状态转移在仓储 SQL）
 │   │   ├── errors.ts                 # ComemError 与错误码
 │   │   └── memory-types/             # 内置记忆类型（TS 常量，非 YAML）
 │   │       ├── index.ts
@@ -894,8 +894,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
   两份由 `tests/integration/sqlite/node-self-row-consistency.test.ts` 做行为级对拍
   （逐 `kind × level` 比对筛出的 URI 集合），改了其中一份而没改另一份会红。
   按 URI 读节点的路径（`get` /
-  `children` / `descendants` / `listByScope` / `count` / `stat` / 热度 / `glob` / TTL
-  候选）都带这条谓词，否则一个目录会变成两条节点：`tree` 出现重复、`metrics` 的
+  `descendants` / `stat` / 热度 / `glob` / TTL 候选）都带这条谓词，否则一个目录会变成两条节点：`tree` 出现重复、`metrics` 的
   `comem_index_nodes` 虚高、`sweepExpired` 把同一个目录返回两次。
 - **归档、过期、删除是按 URI 的**：`sweepExpired` 的状态转移、`deleteByUri` 的删除
   都会覆盖同一个 URI 的两行——只改 L0 行会让已归档的目录继续从概览正文里被检索到。
@@ -1202,6 +1201,9 @@ L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` �
 
 **为什么这一层是分水岭**：没有它，「检索」只解决「找到什么」，没解决「给多少、给多细、重复几次」。三个问题里任何一个没解决，模型看到的上下文都是次优的。而且它**不依赖向量库**——纯 FTS5 也能做预算、分层、去重、配额。
 
+**`items` 就是注入集合。** 调用方的上下文由它渲染，所以访问记账（§11.7 的
+「什么算一次使用」）只认落在 `items` 里的 URI；命中候选集不是交付物，不记。
+
 ### 8.7 召回账本（Recall Ledger）
 
 **文件按作用域分片，条目按会话过滤。** 账本文件是 `{dataDir}/_meta/recall/{scopeKey}.recall_log.json`（如 `user_alice.recall_log.json`），每条记录带 `sessionId`，写的是「哪个会话在第 N 轮给模型投喂了哪些 URI、投喂到什么粒度」。下一轮召回时，**同一个会话**在 `dedup_turns` 轮内投过的**不重复投**。
@@ -1228,7 +1230,7 @@ entry.sessionId === sessionId && entry.turn > turn - dedup_turns && entry.turn <
 
 **与去重的区别**：8.6 的去重是**同一次请求内**的重复（同一 URI 命中多条记录）；账本是**跨请求**的重复（上一轮给过，这一轮不再给）。两者都要做。
 
-**写侧调用点。** `SearchService.context` 在组装完成后调用 `RecallLedger.record(scopeKey, sessionId, turn, items)`，只记 `detail !== null` 的条目（规则 1）。`turn` 取会话消息总数（`SessionService.load` 的 `messageCount`），`sessionId` 取会话 ID，`scopeKey` 取会话 URI 的作用域部分（`user_{uid}`）。
+**写侧调用点。** `SearchService.context` 在组装完成后调用 `RecallLedger.record(scopeKey, sessionId, turn, items)`，只记 `detail !== null` 的条目（规则 1）。同一个 `items` 也是访问记账的输入（§11.7）：账本只记给了正文的，访问记账记全部注入条目——两件事的窗口不同（账本管下一轮还发不发，TTL 管这条记忆还留不留）。`turn` 取会话消息总数（`SessionService.load` 的 `messageCount`），`sessionId` 取会话 ID，`scopeKey` 取会话 URI 的作用域部分（`user_{uid}`）。
 
 **没有 `sessionId` 时不做跨轮去重，也不写账本。** 没有会话就没有东西能推进 `turn`；用一个常量会让账本在 500 条之后永久排除所有候选——静默失效比不去重更糟。`excludeDelivered` 是给离线脚本与测试的显式时钟（`scopeKey` + `sessionId` + `turn`），传了它就不再读会话。
 
@@ -1673,7 +1675,9 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 2. 持父目录 `TREE` 锁写全部文件 → 一次 `index.upsert`（内部一个事务）→ `materializeAncestorPermissions` 逐级物化权限
 3. 锁释放后，`invalidateParentSummaries` 对每个直接父目录调一次 `markStale`；再往上的祖先链由 `markStale` 自己传播（§9.3），批量路径不展开
 
-**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。唯一的已知差异用 `onFailure` 回调保住——资源侧物化失败时额外往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），技能侧不记。索引批量写失败则两边都会追加 `op: 'index'`：技能装成功、文件在盘上，但 `find` 搜不到时，重放器必须看得见这次失败。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
+**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。两边都用 `onFailure` 回调：物化失败时往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），重放器据此重算该节点的物化权限。索引批量写失败则两边都会追加 `op: 'index'`：技能装成功、文件在盘上，但 `find` 搜不到时，重放器必须看得见这次失败。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
+
+**索引行从磁盘构造只有一份实现。** `add_skill` 的技能索引记录由 `skillIndexRecord` 从落盘字节构造，重放器的 `context_type === 'skill'` 分支调用同一个函数。技能的可检索摘要是 frontmatter 的 `description`，通用资源规则读的是 `summary`；两边各写一份的话，「重放成功」之后技能的索引行会与原状态不同——重放要恢复的是原本该有的样子。
 
 **标记摘要失效只能用 `markStale`，不能用 `invalidate`。** 规则与后果见 §9.3。
 
@@ -1850,16 +1854,81 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 记忆有存活时间，判据是**最后一次被使用**，不是写入时间：一条记忆在
 `max(node.updated_at, node.last_accessed_at) + memory.ttl.defaultDays` 之前都算活着。
-检索命中会写 `last_accessed_at`（与 `access_count` 同一句 `UPDATE`，§17.5 的热度衰减
-也读这两列），所以天天被读到的偏好和从没被打开过的事件不会同时到期。
+交付给调用方的检索结果与按 URI 读到的正文会写 `last_accessed_at`（与
+`access_count` 同一句 `UPDATE`，§17.5 的热度衰减也读这两列），所以天天被读到的偏好
+和从没被打开过的事件不会同时到期。
 
-**什么算一次使用。** 两条路径：检索命中（`find` / `search` 返回给调用方的命中，`SearchService.#recordHits`），以及**按 URI 读到正文**（HTTP `GET /content/read` 与 MCP `read`，实现点统一在 `FileSystemService.read`）。`list` / `tree` / `stat` / 控制台浏览不算：它们只证明有人看到了路径或摘要，没有读内容；把这些算进来会让「刷新一次列表」把整棵子树的 TTL 一起刷新，滑动窗口就失去意义。`readBytes`（下载 / 二进制块）也不记：TTL 只作用于 `context_type = 'memory'` 的文本记忆。**已知缺口**：`#recordHits` 目前只在 `telemetry.hotness.weight > 0` 时执行，默认 `weight = 0` 的部署里检索命中不写 `last_accessed_at`，只有按 URI 读取会写。
+**什么算一次使用。** 「使用」= **进入了调用方的上下文**。不是「被检索到」，也不是
+「被模型引用」——后者不可观测（模型有没有在回答里用上一条注入的记忆，服务端拿不到
+证据），不追求。
+
+| 路径 | 进入调用方上下文的部分 | 记不记 | 实现点（`src/services/search.ts` / `filesystem.ts`） |
+|---|---|---|---|
+| `find` | 返回的命中列表 | 记 | `findWithDiagnostics` 里的 `#recordHits(outcome.hits)` |
+| `search` `mode=list` | 合并去重后的命中列表 | 记 | `search()` 在 `mergeHits` 之后 `#recordHits(hits)` |
+| `search` `mode=context` | 组装后注入块里的条目（`AssemblyResult.items`） | **只记这些** | `contextWithDiagnostics` 在 `assemble` 之后 `#recordHits(result.items)` |
+| `rule_search` | 返回的规则列表 | 记 | 走 `findWithDiagnostics`，同一处 |
+| `read` | 读到的正文 | 记 | `FileSystemService.read` → `#touchAccess` |
+| `grep` / `glob` / `list` / `tree` / `stat` | 文件名 / 行匹配 / 目录结构 | 不记 | 无记账点 |
+
+命中列表本身就是交付物，所以 `find` 与 `mode=list` 记全部返回的命中。`mode=context`
+交付的是**组装之后**的注入块：§8.6 的预算、分层、去重、配额会把候选砍掉一大半
+（实测见下）。记候选集等于把从未进入调用方上下文的记忆窗口推后——一条宽泛查询就
+能刷新一大批记忆的 TTL，「曾经被搜到过」退化成「永不过期」，滑动窗口失去治理作用。
+所以记账点在组装之后，用的集合是组装层返回的 `items`，**不拿候选集再推一遍预算**：
+预算只有 `assembleContext` 一份实现，重复推导会立刻漂移（§8.6 第 1、2、4 步任何一
+处调参都会漏）。
+
+**组装内部读过、但没进注入块的不算。** `readOverview` / `readBody` 可能读了文件又被
+预算丢掉，也读过之后降到「只有 URI」。读的是磁盘，交付的是 `items`：记账点只认后者。
+这和 §8.7 的账本口径一致（只记账真的给了正文的条目）。
+
+**只剩 URI 的条目算注入。** `detail === null` 的条目渲染成单行
+`<memory uri="..." />`，地址本身进了调用方的上下文，所以访问记账仍然记它；§8.7 的
+账本不记它，因为下一轮还得把正文补上。两个集合的差别就这一条（账本 ⊂ 注入），
+是刻意的：TTL 问「这条记忆还有没有被用到」，账本问「下一轮还用不用再发」。
+
+**`rule_search` 有一处同类的残余。** 它的相对阈值（默认 0.65）在工具层生效
+（`src/api/mcp/tools/rule-search.ts:95`），而记账发生在服务层的 `findWithDiagnostics`：
+被阈值裁掉、没进返回文本的规则也会记一次。上界是 `RULE_LIMIT`（5）条，且被裁掉的规则不会
+再随后的 `read` 续一次，量级可以接受；要消掉它得给 `find` 加一个「不记账」的入口，
+那是一个只为工具层服务的开关，不值。
+
+**`grep` / `glob` / `list` / `tree` / `stat` 不记。** 它们交付的是文件名、行匹配、
+目录结构——「这里可能有我要的东西」，不是「我用了这条记忆」。把这些算进来，刷新一次
+列表就能把整棵子树的 TTL 一起续命，滑动窗口立刻失去意义；控制台浏览同理（否则一个
+开着目录页的窗口会不停给整个目录续期）。反过来也不吃亏：真要这条记忆，下一步一定是
+`read`（记）或 `search mode=context`（记）。
+
+**`readBytes`（`download` 的字节传输、二进制 `read`）不记。** TTL 只作用于
+`context_type = 'memory'` 的文本记忆，二进制资源不在清扫范围；文本记忆在 MCP `read`
+里走的是文本路径（记）。**已知偏差**：把一条文本记忆当附件下载（`GET /content/download`）
+经过 `readBytes`，因此不刷新窗口。这一处按「资源下载」处理，没有按内容类型分流：
+`readBytes` 同时服务二进制读取与资源下载，在这一层统一记会把资源也写进访问列；
+分流需要在读取路径上加一次 `node` 查询。
+
+**实测（`mode=context` 的截断比例）。** 60 条记忆（正文逐条不同、每条约 600 字），
+宽泛查询 `记忆` 命中全部 60 条，`assembly.maxTokens = 1600`、`quotaPreset = coding`：
+`find` 返回 60 条、`mode=list` 合并后 60 条、`mode=context` 的候选也是 60 条，组装后
+**注入 3 条、被截断 57 条**（`items = 3`、`dropped = 57`、`tokensUsed = 343`）。这里
+砍掉的主因是配额而不是预算：`coding` 给 `memory` 3 条（§8.6 第 4 步），token 只用掉
+343/1600。同一份数据下三条路径写入 `last_accessed_at` 的行数分别是 60、60、3——旧实现
+（在组装之前记候选集）第三条也是 60。
+
+**记访问与热度排序是两件事。** `telemetry.hotness.weight` 只决定热度要不要进检索排序
+（§17.5），**不决定条目算不算一次使用**。`last_accessed_at` 有两个读者：热度排序
+（`weight` 控制）与 TTL 清扫的滑动窗口（没有开关）。默认部署 `weight = 0`，如果因此
+跳过写 `last_accessed_at`，agent 最典型的用法（通过 `find` / `search` / `rule_search`
+拿到记忆）对 TTL 就完全不可见，被反复检索到的记忆仍会按写入时间过期。所以
+`#recordHits` 只要交付了条目就记，与 `weight` 无关，同一请求内按 URI 去重。
+
+**写代价。** `NodeRepository.recordAccess` 对整批 URI 只 `BEGIN IMMEDIATE` 一次、只预编译一条 `UPDATE`，N 条命中是 N 次 `run`，不是 N 个写事务。实测（Node 26.13、`node:sqlite`、WAL 文件库，各 20 轮中位数，两次测量）：1 条 0.5–0.6 ms、10 条 0.6 ms、50 条 0.8–0.9 ms、200 条 1.2–1.3 ms；UPDATE 语句数 = 命中条数，事务数恒为 1。`#recordHits` 仍然 fire-and-forget，写失败只 warn——访问统计不是检索正确性的一部分。注意 `node:sqlite` 是同步 API：不 await 只是不让调用方等 Promise，写事务本身仍在这条同步段里执行（上面的耗时就是它），所以这不是「零成本」，只是「不改变返回时机」。
 
 清扫由后台调度器（§10.7）周期性执行，**两段式：先归档、再物理删**。
 
 | 概念 | 语义 |
 |---|---|
-| `memory.ttl.defaultDays` | 滑动窗口长度（天），从最后一次被使用（写入或检索命中）起算。`0`（默认）= 永不过期 |
+| `memory.ttl.defaultDays` | 滑动窗口长度（天），从最后一次被使用（写入、检索结果被交付、正文被读取）起算。`0`（默认）= 永不过期 |
 | `memory.ttl.sweepBatchSize` | 每轮最多清扫多少条（默认 100），给一次 UPDATE 一个上界 |
 | `memory.ttl.retentionDays` | 归档后保留多少天才物理删除。`0`（默认）= 永不物理删，只软归档 |
 | `TtlService.sweep()` | 第一段：最后使用时刻早于 `now - defaultDays` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行 |
@@ -3192,6 +3261,8 @@ comem_llm_cost_usd_total                              # 无标签，按配置单
 **陈旧线（7 天 / 30 天）的来源**：7 天 = 与热度默认半衰期同一个数（过了半衰期权重减半，正是「该被想起来」的临界）；30 天 = 运维决定「一个月没碰就该清」的常见保守线。两者是经验值，不是测量结果；要调改 `stats.ts` 的 `STALE_DAYS_7` / `STALE_DAYS_30`。`oldestMemoryAgeDays` 用 `MIN(updated_at)`（`node` 表没有 `created_at`，`updated_at` 最小即存在最久的记忆；记忆被编辑会刷新它，此时「最老」指内容最老的）。
 
 **`weight` 默认 0 时不影响排序**：热度是治理指标（「哪些记忆该清理」），不是检索指标。混进排序会让老记忆永远赢，新记忆永远出不来。这一档不查 `node.access_count`，`hotness` 恒为 `null`（「没算」），与「算出来是 0」（从没被访问过）不是一回事。
+
+**`weight = 0` 不等于不记访问。** 交付给调用方的检索结果（`find` / `search` 返回的命中列表，或 `mode=context` 注入的条目）与按 URI 读取仍然写 `node.access_count` / `node.last_accessed_at`（§11.7 的滑动窗口依赖后者，它没有开关）。所以默认部署下本端点的 `hotness` 分桶与 `staleness`（`notAccessed7d` / `notAccessed30d`）现在反映真实的检索命中，而不是「全冷、全都很久没访问」；变化只影响治理视图，不影响 `find` / `search` 的排序分。
 
 **非 0 时是乘性加权**：`finalScore = score × (1 + weight × hotness)`，`hotness ∈ [0, 1]`，`weight = 1` 时最高把相关性分翻倍。
 
