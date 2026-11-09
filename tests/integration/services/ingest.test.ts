@@ -51,6 +51,19 @@ let sessions: SessionService;
 let cursors: IngestCursorRepository;
 let taskRepository: TaskRepository;
 
+/** 游标行数；`count` 已删，测试直接查表。 */
+function cursorRows(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM ingest_cursor').get()?.['total'] ?? 0);
+}
+
+/** 游标里记的会话 URI，按宿主与原生 ID 排序。 */
+function cursorSessionUris(): string[] {
+  return db
+    .prepare('SELECT session_uri FROM ingest_cursor ORDER BY harness, native_session_id')
+    .all()
+    .map((row) => String(row['session_uri']));
+}
+
 function createLogger(): Logger {
   const mock: Logger = {
     trace: vi.fn(),
@@ -292,12 +305,12 @@ describe('IngestService', () => {
     expect(qwen?.failed).toBe(1);
     expect(qwen?.errors[0]?.message).toContain('不是合法 JSON');
 
-    expect(cursors.count()).toBe(6);
+    expect(cursorRows()).toBe(6);
     expect(taskRepository.countByStatus('pending')).toBe(6);
 
     const archived = await Promise.all(
-      cursors.list().map(async (row) => {
-        const sessionUri = Uri.parse(row.sessionUri);
+      cursorSessionUris().map(async (sessionUriText) => {
+        const sessionUri = Uri.parse(sessionUriText);
         const archiveUri = sessionUri.child('history', 'archive_001');
         return Buffer.from(await store.readBytes(archiveUri.child('messages.jsonl'))).toString('utf8');
       }),
@@ -355,7 +368,7 @@ describe('IngestService', () => {
     expect(addMessage).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
     expect(upsert).not.toHaveBeenCalled();
-    expect(cursors.count()).toBe(0);
+    expect(cursorRows()).toBe(0);
   });
 
   it('since 过滤：早于时间点的会话全部跳过', async () => {
@@ -365,7 +378,7 @@ describe('IngestService', () => {
     });
     expect(report.harnesses.every((source) => source.imported === 0)).toBe(true);
     expect(report.harnesses[0]?.skipped).toBe(3);
-    expect(cursors.count()).toBe(0);
+    expect(cursorRows()).toBe(0);
   });
 
   it('只导指定来源', async () => {
@@ -373,7 +386,7 @@ describe('IngestService', () => {
     expect(report.harnesses).toHaveLength(1);
     expect(report.harnesses[0]?.harness).toBe('codex');
     expect(report.harnesses[0]?.imported).toBe(1);
-    expect(cursors.count()).toBe(1);
+    expect(cursorRows()).toBe(1);
   });
 
   it('未知来源明确报错', async () => {

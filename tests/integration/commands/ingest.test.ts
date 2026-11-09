@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,5 +33,26 @@ describe('pnpm ingest 的配置入口', () => {
         dryRun: true,
       }),
     ).rejects.toThrow(/YAML/);
+  });
+
+  /**
+   * `ingest.enabled` 默认 false。开关的**关闭**分支此前没有任何测试：服务层与命令
+   * 层的用例都在配置里显式写了 `enabled: true`。关着时必须在建容器 / 写库 / 读源
+   * 之前拒绝——先建库再报错会留下一个「看起来导入过」的 `_meta/`，那正是把
+   * 「没生效」伪装成正常状态。
+   */
+  it('ingest.enabled 默认 false 时拒绝真正导入，且不创建数据根', async () => {
+    const configPath = join(tempDir, 'config.yaml');
+    await writeFile(configPath, ['ingest:', '  enabled: false'].join('\n'), 'utf8');
+    const dataDir = join(tempDir, 'data');
+
+    await expect(
+      runIngest({ configPath, dataDir, source: 'claude-code' }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { field: 'ingest.enabled' },
+    });
+
+    await expect(stat(dataDir)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
