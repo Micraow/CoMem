@@ -18,6 +18,7 @@ import type { FastifyInstance } from 'fastify';
 import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
+import type { Authorizer } from '../../../services/authorizer.js';
 import type { ConsolidationResult } from '../../../services/consolidation.js';
 import type { MemoryLink } from '../../../domain/memory-link.js';
 import type { MemoryRecord } from '../../../services/memory.js';
@@ -82,7 +83,26 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const scope = Uri.parse(scopeUri);
         await authorizer.assert(scope, READ, context.principals);
         const records = await memory.listPending(scope, { limit });
-        return ok({ scope: scope.toString(), memories: records.map(serializeRecord) });
+        // §12.4：scope 根可读不代表子树可读。`listPending` 走的是**不传 principals**
+        // 的 `rawFilesystem`，`restricted` 切断或显式 deny 的子目录照样会被递归列出；
+        // 而一条待复核记录的 URI、`fields`、`sources` 全都是内容。所以按**记录自己的
+        // URI** 逐条求 read，无权限的整条不返回——不返回空字段，也不打码。
+        //
+        // `limit` 约束的是扫描条数（`listPending` 在服务层），不是返回条数：被过滤掉
+        // 的条目不会换成更深处的记录。
+        //
+        // 不逐条 `assert` + try/catch：那会把 SQL / 物化表 / IO 故障也归成「无权限」，
+        // 把真实的存储问题静默隐藏成「这里没有记录」。
+        const readable = await authorizer.filterReadable(
+          records.map((record) => record.uri),
+          context.principals,
+        );
+        return ok({
+          scope: scope.toString(),
+          memories: records
+            .filter((record) => readable.has(record.uri.toString()))
+            .map(serializeRecord),
+        });
       });
 
       app.post<{ Body: unknown }>('/consolidate', async (request) => {
@@ -132,6 +152,10 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
 
       // 记忆关联边（§11.10）。**只读**：`links` 是派生/关联数据，产生端在写入路径上。
       // `direction` 决定返回正向（谁指向别人）还是派生（谁指向我）。
+      //
+      // 两条方向都只返回**另一端也可读**的边（§12.4）：URI 本身就是内容，
+      // `backlinks` 列出的 `comem://user/bob/memories/profile/health-condition.md`
+      // 已经说出了 Bob 有哪些记忆。
       app.get<{ Params: { uri: string }; Querystring: Record<string, unknown> }>(
         '/:uri/links',
         async (request) => {
@@ -142,7 +166,13 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
           await authorizer.assert(uri, READ, context.principals);
           const links =
             direction === 'backlinks' ? memoryLink.backlinksOf(uri) : memoryLink.linksOf(uri);
-          return ok({ uri: uri.toString(), direction, links: links.map(serializeLink) });
+          const readable = await readableLinks(
+            authorizer,
+            links,
+            direction,
+            context.principals,
+          );
+          return ok({ uri: uri.toString(), direction, links: readable.map(serializeLink) });
         },
       );
     },
@@ -176,6 +206,41 @@ function serializeLink(link: MemoryLink): Record<string, unknown> {
     matchText: link.matchText,
     description: link.description,
   };
+}
+
+/**
+ * 只保留「另一端也可读」的边（§12.4）。
+ *
+ * 查询的 URI 已经在路由里 `assert` 过；边的另一端是一个独立资源，要单独求 read：
+ * `links` 查 `to`、`backlinks` 查 `from`。不查的后果是 `backlinks` 会把「哪些记忆
+ * 来自这次归档」列给一个读不到那些记忆的调用方，而 URI 自己就是内容。
+ *
+ * 无权限的边**整条不返回**。占位（`to: null`）或打码（`comem://***`）仍在回答「这里
+ * 有一条边」，而边的存在与否也是信息；安静地少一条不构成侧面提示。
+ *
+ * 用 `Authorizer` 已有的 `filterReadable`：它的语义正是 §12.4 的「无权限节点完全
+ * 不出现」，一次查询拿到可读集合。不用逐条 `assert` 吞 `PERMISSION_DENIED`——那样
+ * 还得区分权限错误与真实的存储故障，而把故障当成无权限会静默隐藏问题。
+ */
+async function readableLinks(
+  authorizer: Authorizer,
+  links: readonly MemoryLink[],
+  direction: 'links' | 'backlinks',
+  principals: readonly string[],
+): Promise<readonly MemoryLink[]> {
+  if (links.length === 0) {
+    return links;
+  }
+  const otherEndOf = (link: MemoryLink): Uri =>
+    direction === 'backlinks' ? link.fromUri : link.toUri;
+  // 按字符串去重：同一个另一端在多条边上重复出现时只求一次权。
+  const otherEnds = new Map<string, Uri>();
+  for (const link of links) {
+    const otherEnd = otherEndOf(link);
+    otherEnds.set(otherEnd.toString(), otherEnd);
+  }
+  const readable = await authorizer.filterReadable([...otherEnds.values()], principals);
+  return links.filter((link) => readable.has(otherEndOf(link).toString()));
 }
 
 function requireRecordReason(body: Record<string, unknown>): string {
