@@ -9,6 +9,7 @@ import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { ReconcileLog } from '../../../src/adapters/fs/reconcile-log.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
@@ -109,7 +110,16 @@ beforeEach(async () => {
   await acl.ensureRootPreset(Uri.parse(SCOPE));
   const authorizer = new InheritingAuthorizer(acl, store);
   filesystem = new FileSystemService({ store, locks, authorizer, logger });
-  service = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
+  service = new SkillService({
+    store,
+    locks,
+    index,
+    summary,
+    reconcile: new ReconcileLog({ dataDir, logger }),
+    permissions,
+    logger,
+    authorizer,
+  });
 });
 
 afterEach(async () => {

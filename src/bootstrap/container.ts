@@ -851,12 +851,21 @@ async function ensureUserNamespace(userId: string): Promise<void> {
   });
 
   const authorizer = new InheritingAuthorizer(acl, store);
+  // 访问计数的唯一写入口：检索命中与按 URI 读取共用同一条 UPDATE。
+  // `SearchService` 内部已经 catch，这个闭包不能写成 `async`（返回的 Promise 会被
+  // 丢掉，拒绝就没人接）；`FileSystemService` 自己 catch 并记 warn。
+  const recordAccess = (uris: readonly string[]): void => {
+    nodes.recordAccess(uris, new Date());
+  };
   const filesystem = new FileSystemService({
     store,
     locks,
     authorizer,
     logger,
     observers: [indexObserver],
+    // `read` 是公开读路径（HTTP `/content/read` 与 MCP `read`）：按 URI 读到正文
+    // 也算一次使用，否则天天被读、从没被检索命中的记忆会被 TTL 误归档（§11.7）。
+    recordAccess,
   });
 
   const ledger = new RecallLedger({
@@ -924,11 +933,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     hotnessWeight: config.telemetry.hotness.weight,
     hotnessHalfLifeHours: config.telemetry.hotness.halfLifeHours,
     accessStats: (uris) => nodes.readAccessStats(uris),
-    // `recordAccess` 是 fire-and-forget：`SearchService` 内部已经 catch，闭包不能
-    // 写成 `async`（返回的 Promise 会被丢掉，拒绝就没人接）。
-    recordAccess: (uris) => {
-      nodes.recordAccess(uris, new Date());
-    },
+    recordAccess,
   });
 
   /**
@@ -1027,7 +1032,17 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     logger,
   });
 
-  const skill = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
+  // 技能与资源共用同一个 `ReconcileLog`：索引失败的对账记录由同一个重放器消费。
+  const skill = new SkillService({
+    store,
+    locks,
+    index,
+    summary,
+    reconcile: reconcileLog,
+    permissions,
+    logger,
+    authorizer,
+  });
 
   /**
    * 阶段二执行器（§10.1、§10.3、§10.4）。
@@ -1099,6 +1114,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
         ],
         ports,
         skippedSteps: commitSkippedSteps,
+        // 后台阶段计时（§17.2）：管线在任务里跑，`phase()` 会写进程级 gauge。
+        // `observability` 在下方才构造，但 `createPipeline` 只在任务执行时调用。
+        phase: (name, fn) => observability.phase(name, fn),
         logger,
       });
     },

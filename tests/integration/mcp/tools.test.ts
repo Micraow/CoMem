@@ -284,7 +284,16 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     logger,
     authorizer,
   });
-  const skill = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
+  const skill = new SkillService({
+    store,
+    locks,
+    index,
+    summary,
+    reconcile: { append: async () => undefined },
+    permissions,
+    logger,
+    authorizer,
+  });
 
   const context: McpToolContext = {
     filesystem,

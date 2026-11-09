@@ -147,6 +147,16 @@ export interface FileSystemServiceDeps {
   readonly logger: Logger;
   /** 派生数据的写入通知；顺序即调用顺序，实现方之间不应有依赖。 */
   readonly observers?: readonly NodeWriteObserver[];
+  /**
+   * 按 URI 读到内容时累加访问计数（`NodeRepository.recordAccess`，§17.5 / §11.7）。
+   *
+   * 这是「用户通过公开接口读到了这个节点」的边界：HTTP `GET /content/read` 与 MCP
+   * `read` 都走 `read`。不记在 `stat` / `list` / `tree` 上——浏览目录不等于读了
+   * 正文，`last_accessed_at` 不能因为控制台刷了一次列表就刷新。
+   *
+   * 省略时不记（只读部署没有这个写端口）。生产装配注入，见 `container.ts`。
+   */
+  readonly recordAccess?: (uris: readonly string[]) => unknown;
 }
 
 export class FileSystemService {
@@ -155,6 +165,7 @@ export class FileSystemService {
   readonly #authorizer: Authorizer;
   readonly #logger: Logger;
   readonly #observers: readonly NodeWriteObserver[];
+  readonly #recordAccess: FileSystemServiceDeps['recordAccess'];
 
   constructor(deps: FileSystemServiceDeps) {
     this.#store = deps.store;
@@ -162,12 +173,39 @@ export class FileSystemService {
     this.#authorizer = deps.authorizer;
     this.#logger = deps.logger;
     this.#observers = deps.observers ?? [];
+    this.#recordAccess = deps.recordAccess;
   }
 
   /** 读正文。**不拿路径锁**：写入是原子的，锁只会让读等后台写者（见文件头）。 */
   async read(uri: Uri, principals: readonly string[]): Promise<TextDocument> {
     await this.#authorizer.assert(uri, READ, principals);
-    return this.#store.readText(uri);
+    const document = await this.#store.readText(uri);
+    this.#touchAccess(uri);
+    return document;
+  }
+
+  /**
+   * 读成功之后累加访问计数。**不 await**：`read` 是热路径，一次 UPDATE 的写事务
+   * 不该让读等它；写失败只记 warn，访问统计不是读取正确性的一部分。
+   *
+   * 只记 `read`，不记 `readBytes`：TTL 只作用于 `context_type = 'memory'` 的文本
+   * 记忆，二进制资源没有滑动窗口语义。
+   */
+  #touchAccess(uri: Uri): void {
+    const record = this.#recordAccess;
+    if (record === undefined) {
+      return;
+    }
+    void (async () => {
+      try {
+        await record([uri.toString()]);
+      } catch (error) {
+        this.#logger.warn('读取访问计数写入失败', {
+          uri: uri.toString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
   }
 
   async readBytes(uri: Uri, principals: readonly string[]): Promise<Uint8Array> {

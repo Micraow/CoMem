@@ -25,6 +25,7 @@ import type { PermissionRepository } from '../adapters/sqlite/permission-reposit
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest } from '../domain/node.js';
+import type { ReconcileEntry } from '../domain/reconcile.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
@@ -70,11 +71,23 @@ export interface AddSkillResult {
   readonly fileCount: number;
 }
 
+/**
+ * 写失败时追加一条 `_meta/reconcile.log` 记录（§10.6「索引双写补偿」）。
+ *
+ * 形状与 `ReconcileLog.append` 一致；由 bootstrap 注入同一个 `ReconcileLog` 实例，
+ * 与重放器共用队列。技能文件已经落盘，索引只是派生数据——失败要留下线索，让
+ * `ReconcileService.replay()` 之后能从 `find` 搜到它。
+ */
+export interface SkillReconcileLog {
+  append(entry: ReconcileEntry): Promise<void>;
+}
+
 export interface SkillServiceDeps {
   readonly store: ContentStore;
   readonly locks: PathLockManager;
   readonly index: RetrievalIndex;
   readonly summary: Pick<SummaryService, 'markStale'>;
+  readonly reconcile: SkillReconcileLog;
   /** 权限反查走物化表（§8.2）：`principals` 来自调用方身份，不重新展开组。 */
   readonly permissions: Pick<PermissionRepository, 'readableUris'>;
   /**
@@ -182,6 +195,7 @@ export class SkillService {
   readonly #locks: PathLockManager;
   readonly #index: RetrievalIndex;
   readonly #summary: Pick<SummaryService, 'markStale'>;
+  readonly #reconcile: SkillReconcileLog;
   readonly #permissions: Pick<PermissionRepository, 'readableUris'>;
   readonly #authorizer: Authorizer;
   readonly #logger: Logger;
@@ -191,6 +205,7 @@ export class SkillService {
     this.#locks = deps.locks;
     this.#index = deps.index;
     this.#summary = deps.summary;
+    this.#reconcile = deps.reconcile;
     this.#permissions = deps.permissions;
     this.#authorizer = deps.authorizer;
     this.#logger = deps.logger;
@@ -218,6 +233,7 @@ export class SkillService {
 
     const records: IndexRecord[] = [];
     const written: Uri[] = [];
+    let indexFailed = false;
 
     await this.#locks.withLock(skillUri, 'tree', async () => {
       for (const file of files) {
@@ -241,9 +257,28 @@ export class SkillService {
         written.push(file.uri);
       }
 
-      await this.#index.upsert(records);
+      // 与 `ResourceService` 同一判据：文件已经落盘，索引失败不回滚内容，而是留下
+      // 一条 `op: 'index'` 的对账记录。没有这条记录时失败完全静默——技能装成功、
+      // 文件在磁盘上，但 `find` / `listSkills` 永远看不到它，重放器也无从下手。
+      try {
+        await this.#index.upsert(records);
+      } catch (error) {
+        indexFailed = true;
+        const reason = errorMessage(error);
+        this.#logger.error('技能索引批量写入失败，已写入的文件保持不变，记录待重放。', {
+          skill: skillUri.toString(),
+          count: records.length,
+          error: reason,
+        });
+        for (const record of records) {
+          await this.#recordReconcile('index', record.uri, reason);
+        }
+      }
+
       // §12.4 的「写时算」：技能文件不经过 `FileSystemService`，观察者收不到通知。
-      // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。
+      // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。索引失败
+      // 时仍然物化：权限是独立的派生数据，而且 `kind` 缺失时按目录兜底得到的是同
+      // 一条有效权限。
       await materializeAncestorPermissions(
         { authorizer: this.#authorizer, logger: this.#logger, nodeLabel: '技能节点' },
         [skillUri, ...written],
@@ -251,7 +286,10 @@ export class SkillService {
       );
     });
 
-    await invalidateParentSummaries({ summary: this.#summary, logger: this.#logger }, written);
+    // 索引没写成时摘要失效也读不到新节点；等重放补上索引后再标脏（与资源路径同）。
+    if (!indexFailed) {
+      await invalidateParentSummaries({ summary: this.#summary, logger: this.#logger }, written);
+    }
 
     this.#logger.info('技能已安装', {
       skill: skillUri.toString(),
@@ -261,6 +299,19 @@ export class SkillService {
     });
 
     return { skillUri, fileCount: records.length };
+  }
+
+  /** 对账日志写失败不能让安装失败：它只是补偿线索，不是真相。 */
+  async #recordReconcile(op: string, uri: string, error: string): Promise<void> {
+    try {
+      await this.#reconcile.append({ op, uri, error, at: new Date().toISOString() });
+    } catch (appendError) {
+      this.#logger.error('对账日志写入失败，已忽略。', {
+        op,
+        uri,
+        error: errorMessage(appendError),
+      });
+    }
   }
 
   /**
@@ -302,6 +353,10 @@ export class SkillService {
     });
     return candidates.filter((uri) => readable.has(uri.toString()));
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** 逐段校验技能内路径；同一路径重复出现时后者覆盖前者。 */

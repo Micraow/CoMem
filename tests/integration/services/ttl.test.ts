@@ -162,6 +162,9 @@ beforeEach(async () => {
     authorizer: new AllowAllAuthorizer(),
     logger,
     observers: [indexCleanup],
+    recordAccess: (uris) => {
+      nodes.recordAccess(uris, NOW);
+    },
   });
   ttl = createTtl({ ttlDays: TTL_DAYS });
 });
@@ -196,6 +199,29 @@ describe('sweep 第一段：滑动窗口归档', () => {
     expect(nodes.readAccessStats([OLD])).toEqual([
       { uri: OLD, accessCount: 1, lastAccessedAt: atDaysAgo(2).toISOString() },
     ]);
+  });
+
+  it('按 URI read 过的记忆不归档；同条件没读过的归档', async () => {
+    // 两条都是 100 天前写入，都在窗口外。区别只有一个：其中一条被用户按 URI
+    // `read` 过一次。`read` 不算使用的话，它会被误归档——这正是「天天读、从没被
+    // 检索命中」的记忆的失效形态。
+    await createMemoryFile(OLD);
+    await createMemoryFile(COLD);
+    db.prepare('UPDATE node SET updated_at = ? WHERE uri IN (?, ?)').run(
+      daysAgo(100),
+      OLD,
+      COLD,
+    );
+
+    await filesystem.read(Uri.parse(OLD), PRINCIPALS);
+    // `recordAccess` 是 fire-and-forget；等一个宏任务再清扫，不依赖实现细节。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(nodes.readAccessStats([OLD])[0]?.lastAccessedAt).toBe(NOW.toISOString());
+
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
+
+    expect(statusOf(OLD)).toBe('active');
+    expect(statusOf(COLD)).toBe('archived');
   });
 
   it('访问时刻早于内容更新时间：从内容更新时间起算（取最大值，不是「有访问就用访问」）', async () => {

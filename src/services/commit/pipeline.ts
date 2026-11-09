@@ -99,10 +99,26 @@ export abstract class CommitStep {
   }
 }
 
+/**
+ * 后台阶段计时入口（§17.2）。
+ *
+ * 形状就是 `ObservabilityService.phase` 的方法签名：`CommitPipeline` 不 import
+ * 那个服务，装配方传进来即可。省略时原样执行 `fn`（单测直接 `new CommitPipeline`
+ * 不需要为了计时造一个可观测服务）。
+ */
+export type CommitPhase = <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+
 export interface CommitPipelineOptions {
   readonly steps: readonly CommitStep[];
   readonly ports: StepContextPorts;
   readonly logger: Logger;
+  /**
+   * 给四个后台步骤计时。生产装配传 `observability.phase`；省略时不记。
+   *
+   * 后台阶段不在 HTTP 请求里，`ObservabilityService.phase` 会把它们记进进程级
+   * `#asyncPhases`（见该方法注释），因此这里不需要请求作用域。
+   */
+  readonly phase?: CommitPhase;
   /** 单步失败重试次数，默认 1（§11.4「解析失败只重试一次」） */
   readonly stepAttempts?: number;
   /**
@@ -128,12 +144,33 @@ const SKIP_REASON_LABELS: Readonly<Record<CommitStepSkipReason, string>> = {
   llm_disabled: 'providers.llm.default.type 是 disabled',
 };
 
+/**
+ * 四个管线步骤 → §17.2 的后台阶段名。
+ *
+ * 一一对应：`archive_summary` 是归档阶段（生成 `archive_NNN/` 的摘要），
+ * `summary_invalidate` 是摘要阶段（标记目录摘要失效）。阶段一（写归档目录）是请求
+ * 内的同步工作，不在这里——把它算进「后台耗时」会把用户等过的时间重复计一次。
+ *
+ * 用 `Record<CommitStepName, string>` 而不是普通对象：新增步骤时类型检查会强制
+ * 给出阶段名，避免新步骤静默不计时。
+ */
+const STEP_PHASE: Readonly<Record<CommitStepName, string>> = {
+  archive_summary: 'archive',
+  memory_extract: 'extract',
+  memory_merge: 'merge',
+  summary_invalidate: 'summary',
+};
+
+/** 没有装配计时器时原样执行。 */
+const IDENTITY_PHASE: CommitPhase = <T>(_name: string, fn: () => Promise<T>): Promise<T> => fn();
+
 export class CommitPipeline {
   readonly #steps: readonly CommitStep[];
   readonly #ports: StepContextPorts;
   readonly #logger: Logger;
   readonly #stepAttempts: number;
   readonly #skippedSteps: ReadonlyMap<CommitStepName, CommitStepSkipReason>;
+  readonly #phase: CommitPhase;
 
   constructor(options: CommitPipelineOptions) {
     this.#steps = options.steps;
@@ -141,6 +178,7 @@ export class CommitPipeline {
     this.#logger = options.logger;
     this.#stepAttempts = Math.max(0, options.stepAttempts ?? DEFAULT_STEP_ATTEMPTS);
     this.#skippedSteps = options.skippedSteps ?? new Map();
+    this.#phase = options.phase ?? IDENTITY_PHASE;
   }
 
   async run(archiveUri: Uri, scopeUri: Uri): Promise<void> {
@@ -219,7 +257,8 @@ export class CommitPipeline {
         continue;
       }
 
-      await this.#runWithRetry(step, context);
+      // 包住整段真实工作（含重试）：这一段就是 §17.2 表格里的后台阶段。
+      await this.#phase(STEP_PHASE[step.name], () => this.#runWithRetry(step, context));
       await markStepDone(step.name);
     }
 

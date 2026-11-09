@@ -27,6 +27,7 @@ import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fa
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
+import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { createArchiveArtifacts, createArchivePorts } from '../../../src/bootstrap/archive-ports.js';
@@ -40,6 +41,7 @@ import { Uri } from '../../../src/domain/uri.js';
 import {
   CommitPipeline,
   CommitStep,
+  type CommitPhase,
   type StepContext,
   type StepContextPorts,
 } from '../../../src/services/commit/pipeline.js';
@@ -50,6 +52,7 @@ import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summar
 import { AclService } from '../../../src/services/acl.js';
 import { LlmService } from '../../../src/services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../../../src/services/memory.js';
+import { ObservabilityService } from '../../../src/services/observability.js';
 import { SessionService } from '../../../src/services/session.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
@@ -233,7 +236,11 @@ interface RunnerHarness {
 /** 与 `container.ts` 同构的装配：端口按归档现造，四个步骤顺序固定。 */
 function createRunner(
   responses: readonly FakeResponse[],
-  options: { readonly concurrency?: number; readonly stepAttempts?: number } = {},
+  options: {
+    readonly concurrency?: number;
+    readonly stepAttempts?: number;
+    readonly phase?: CommitPhase;
+  } = {},
 ): RunnerHarness {
   const provider = new FakeLlmProvider(responses);
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
@@ -266,6 +273,7 @@ function createRunner(
         ],
         ports: createArchivePorts(archiveUri, deps),
         ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),
+        ...(options.phase === undefined ? undefined : { phase: options.phase }),
         logger,
       });
   });
@@ -280,6 +288,20 @@ function createRunner(
     createPipeline,
     provider,
   };
+}
+
+/** 与容器同构的观测服务：指标走公开的 `recordHookOverhead` / `renderMetrics`。 */
+function createObservability(): ObservabilityService {
+  const llm = new LlmService({ provider: new FakeLlmProvider([]), logger, retryBaseDelayMs: 0 });
+  return new ObservabilityService({
+    requestLog: new RequestLogRepository({ db, logger }),
+    db,
+    metadata,
+    llm,
+    profileBodies: { readContent: async () => null },
+    logger,
+    now: () => new Date(),
+  });
 }
 
 function payload(archiveId = ARCHIVE_ID): ArchiveTaskPayload {
@@ -645,6 +667,38 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
 
     expect(provider.calls).toHaveLength(1);
     expect((await metadata.readArchive(committed.archiveUri))?.stepsDone).toEqual([]);
+
+    await runner.stop();
+  });
+
+  /**
+   * 回归：四个后台步骤以前没有任何 `phase()` 调用点，`comem_hook_async_seconds`
+   * 恒为 0。这里跑一次真实提交，再走公开上报 + 指标渲染，断言它非 0。
+   */
+  it('后台阶段耗时进 comem_hook_async_seconds（非 0）', async () => {
+    const observability = createObservability();
+    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }], {
+      phase: (name, fn) => observability.phase(name, fn),
+    });
+
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
+    await session.addMessage(sessionUri, message('msg_1', '项目里不用 any，需要收窄时用 unknown。'));
+    await session.commitPhase1(sessionUri);
+    await runner.tick();
+
+    // 指标值来自 `recordHookOverhead` 对进程级后台阶段的一次快照。
+    await observability.recordHookOverhead({
+      event: 'stop',
+      sessionId: 'sess_1',
+      phases: { processStartMs: 0, recallMs: 0, serializeMs: 0, captureMs: 0 },
+    });
+    const line = observability
+      .renderMetrics()
+      .split('\n')
+      .find((entry) => entry.startsWith('comem_hook_async_seconds{event="stop"}'));
+    expect(line).toBeDefined();
+    const asyncSeconds = Number(line?.split(' ').at(-1));
+    expect(asyncSeconds).toBeGreaterThan(0);
 
     await runner.stop();
   });

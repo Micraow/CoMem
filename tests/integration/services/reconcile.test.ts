@@ -31,12 +31,22 @@ import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService } from '../../../src/services/filesystem.js';
 import { ReconcileService } from '../../../src/services/reconcile.js';
 import { ResourceService } from '../../../src/services/resource.js';
+import { SkillService } from '../../../src/services/skill.js';
 import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 
-const PARENT = 'comem://user/alice/resources';
-const DOCS = `${PARENT}/docs`;
 const SCOPE = 'comem://user/alice';
+const PARENT = `${SCOPE}/resources`;
+const DOCS = `${PARENT}/docs`;
+const SKILLS = `${SCOPE}/skills`;
+const SKILL = `${SKILLS}/code-review`;
+const SKILL_MD = `---
+name: code-review
+description: 代码审查清单
+---
+
+# Code Review
+`;
 const PRINCIPALS: readonly string[] = ['user:alice'];
 
 const RETRIEVAL: RetrievalSettings = {
@@ -65,6 +75,7 @@ let summary: SummaryService;
 let logger: RecordingLogger;
 let log: ReconcileLog;
 let resource: ResourceService;
+let skill: SkillService;
 let search: SearchService;
 let reconcile: ReconcileService;
 
@@ -104,11 +115,12 @@ beforeEach(async () => {
   locks = createPathLockManager({ dataDir, logger, pollIntervalMs: 5, defaultTimeoutMs: 2000 });
   index = new SqliteFtsIndex({ db, logger });
   nodes = new NodeRepository({ db, logger });
+  const permissions = new PermissionRepository({ db, logger });
   acl = new AclService({
     dataDir,
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
-    permissions: new PermissionRepository({ db, logger }),
+    permissions,
     nodes,
     logger,
     locks,
@@ -156,6 +168,16 @@ beforeEach(async () => {
     hotnessHalfLifeHours: 168,
   });
   reconcile = new ReconcileService({ store, index, acl, nodes, log, logger });
+  skill = new SkillService({
+    store,
+    locks,
+    index,
+    summary,
+    reconcile: log,
+    permissions,
+    logger,
+    authorizer,
+  });
 });
 
 afterEach(async () => {
@@ -231,6 +253,50 @@ describe('真实失败链路', () => {
     // 再跑一次没有可做的事；索引还在。
     await expect(reconcile.replay()).resolves.toMatchObject({ scanned: 0, resolved: 0 });
     expect((await search.find('orbital-teapot', FIND_OPTIONS)).map((hit) => hit.uri)).toContain(uri);
+  });
+});
+
+describe('技能的真实失败链路', () => {
+  it('索引写失败 → 对账记录 → 重放 → find 能搜到技能入口', async () => {
+    const upsert = vi.spyOn(index, 'upsert').mockRejectedValueOnce(new Error('索引坏了'));
+
+    const result = await skill.addSkill({
+      parentUri: Uri.parse(SKILLS),
+      name: 'code-review',
+      files: [{ path: 'SKILL.md', content: new Uint8Array(Buffer.from(SKILL_MD, 'utf8')) }],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+
+    const uri = `${SKILL}/SKILL.md`;
+    expect(result.fileCount).toBe(1);
+    // 文件落盘了、索引没写成；没有这条记录时重放器完全看不见这次失败。
+    expect(await readLog()).toContain(uri);
+    expect(await readLog()).toContain('"op":"index"');
+    expect(
+      await search.find('Code Review', {
+        scopes: [SCOPE],
+        subject: 'user:alice',
+        principals: PRINCIPALS,
+      }),
+    ).toEqual([]);
+
+    upsert.mockRestore();
+    await expect(reconcile.replay()).resolves.toMatchObject({
+      scanned: 1,
+      resolved: 1,
+      failed: 0,
+      remaining: 0,
+      compacted: true,
+    });
+
+    const hits = await search.find('Code Review', {
+      scopes: [SCOPE],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+    expect(hits.map((hit) => hit.uri)).toContain(uri);
+    expect(await readLog()).toBe('');
   });
 });
 

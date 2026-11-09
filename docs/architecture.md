@@ -1643,9 +1643,11 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 `ENOENT`。**定期重放**不能省：启动扫描只覆盖上次退出前的记录，一个跑几个月的进程
 如果只在启动时对账，运行期间新产生的失败会沉默到下次重启。调度器本身因三个维护开关全关而不启动时，只有启动那一次重放。
 
-**仍然无法重放的形态**：`write` / `attachment`（日志里没有可重放的输入）；`add_skill`
-的索引失败（`SkillService` 目前不写对账记录）；跨进程同时追加（串行队列只覆盖本进程，
-v1 不支持多进程共享同一数据根）。见 `docs/operations.md` 已知限制 8。
+**仍然无法重放的形态**：`write` / `attachment`（日志里没有可重放的输入）；跨进程同时
+追加（串行队列只覆盖本进程，v1 不支持多进程共享同一数据根）。见
+`docs/operations.md` 已知限制 8。`add_resource` 与 `add_skill` 的索引失败都会写
+`op: 'index'`，重放器从磁盘重建；技能侧的权限物化失败仍只记日志，不写 `permission`
+记录（与资源侧的唯一剩余差异）。
 
 **为什么不是回滚文件**：文件已经是对的，回滚反而丢数据。补偿的方向是「把索引追上来」，不是「把文件退回去」。
 
@@ -1671,7 +1673,7 @@ v1 不支持多进程共享同一数据根）。见 `docs/operations.md` 已知�
 2. 持父目录 `TREE` 锁写全部文件 → 一次 `index.upsert`（内部一个事务）→ `materializeAncestorPermissions` 逐级物化权限
 3. 锁释放后，`invalidateParentSummaries` 对每个直接父目录调一次 `markStale`；再往上的祖先链由 `markStale` 自己传播（§9.3），批量路径不展开
 
-**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。唯一的已知差异用 `onFailure` 回调保住——资源侧物化失败时额外往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），技能侧不需要。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
+**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。唯一的已知差异用 `onFailure` 回调保住——资源侧物化失败时额外往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），技能侧不记。索引批量写失败则两边都会追加 `op: 'index'`：技能装成功、文件在盘上，但 `find` 搜不到时，重放器必须看得见这次失败。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
 
 **标记摘要失效只能用 `markStale`，不能用 `invalidate`。** 规则与后果见 §9.3。
 
@@ -1850,6 +1852,8 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 `max(node.updated_at, node.last_accessed_at) + memory.ttl.defaultDays` 之前都算活着。
 检索命中会写 `last_accessed_at`（与 `access_count` 同一句 `UPDATE`，§17.5 的热度衰减
 也读这两列），所以天天被读到的偏好和从没被打开过的事件不会同时到期。
+
+**什么算一次使用。** 两条路径：检索命中（`find` / `search` 返回给调用方的命中，`SearchService.#recordHits`），以及**按 URI 读到正文**（HTTP `GET /content/read` 与 MCP `read`，实现点统一在 `FileSystemService.read`）。`list` / `tree` / `stat` / 控制台浏览不算：它们只证明有人看到了路径或摘要，没有读内容；把这些算进来会让「刷新一次列表」把整棵子树的 TTL 一起刷新，滑动窗口就失去意义。`readBytes`（下载 / 二进制块）也不记：TTL 只作用于 `context_type = 'memory'` 的文本记忆。**已知缺口**：`#recordHits` 目前只在 `telemetry.hotness.weight > 0` 时执行，默认 `weight = 0` 的部署里检索命中不写 `last_accessed_at`，只有按 URI 读取会写。
 
 清扫由后台调度器（§10.7）周期性执行，**两段式：先归档、再物理删**。
 
@@ -3091,6 +3095,8 @@ comem_hook_overhead_seconds{event, phase}      # phase = process_start | recall 
 comem_hook_overhead_total_seconds{event}        # 单轮合计
 comem_hook_async_seconds{event}                 # 后台部分耗时，与阻塞部分分开
 ```
+
+**四段后台计时落在 `CommitPipeline` 的四个步骤上**：`archive` → `archive_summary`（生成 `archive_NNN/` 的摘要）、`extract` → `memory_extract`、`merge` → `memory_merge`、`summary` → `summary_invalidate`。阶段一（写归档目录、建任务）是请求内的同步工作，不计入后台；把它算进来会把用户等过的时间重复计一次。管线用 `phase()` 包住整段 `run`（含重试），后台任务不在请求作用域里，因此值写进进程级 `#asyncPhases`；下一次 hook 上报时 `recordHookOverhead` 把它快照成 `comem_hook_async_seconds{event}` 的最近一次值。省略 `phase` 的管线（单测直接构造）原样执行，不记。
 
 **报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端**按事件覆盖保存最近一次的值**（gauge），不存直方图：历史分布由 Prometheus 按抓取间隔自己算（§17.10）。
 
