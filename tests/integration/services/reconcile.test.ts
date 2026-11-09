@@ -297,6 +297,74 @@ describe('技能的真实失败链路', () => {
     });
     expect(hits.map((hit) => hit.uri)).toContain(uri);
     expect(await readLog()).toBe('');
+
+    // 重放的定义是「恢复到原本该有的样子」：索引行必须与写路径逐字段一致，
+    // 不是「非空」或「大致能用」。同一份 SKILL.md 正常安装一次作为对照。
+    await skill.addSkill({
+      parentUri: Uri.parse(SKILLS),
+      name: 'replay-control',
+      files: [{ path: 'SKILL.md', content: new Uint8Array(Buffer.from(SKILL_MD, 'utf8')) }],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+    const rowOf = (target: string): Record<string, unknown> | undefined =>
+      db
+        .prepare(
+          `SELECT n.abstract, n.body_digest, n.size, f.content
+             FROM node n JOIN node_fts f ON f.uri = n.uri AND f.level = n.level
+            WHERE n.uri = ?`,
+        )
+        .get(target) as Record<string, unknown> | undefined;
+    const replayed = rowOf(uri);
+    const written = rowOf(`${SKILLS}/replay-control/SKILL.md`);
+    // 具体值：技能写路径把 frontmatter 的 description 当可检索摘要。
+    expect(replayed).toMatchObject({
+      abstract: '代码审查清单',
+      size: Buffer.byteLength(SKILL_MD, 'utf8'),
+    });
+    // 正文是**整个文件原文**（含 frontmatter）：这是写路径的口径，重放必须复现它，
+    // 而不是按资源文件的「去掉 frontmatter」重建。
+    expect(String(replayed?.['content'])).toContain('code-review');
+    // 不是「非空就行」：逐字段与同内容正常安装一次的对照行相同。
+    expect(replayed).toEqual(written);
+  });
+
+  it('权限物化失败 → 对账记录 → 重放 → 技能节点出现 node_permission 行', async () => {
+    // 持续失败（而不是只失败一次）：`addSkill` 之后的摘要失效会再物化一遍目录链，
+    // 一次性失败会被那条路径顺手修好，测不到「失败留痕 + 重放修复」。
+    const materialize = vi
+      .spyOn(acl, 'materializeNode')
+      .mockRejectedValue(new Error('权限表坏了'));
+
+    await skill.addSkill({
+      parentUri: Uri.parse(SKILLS),
+      name: 'code-review',
+      files: [{ path: 'SKILL.md', content: new Uint8Array(Buffer.from(SKILL_MD, 'utf8')) }],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+    materialize.mockRestore();
+
+    // 与资源路径同一形状：技能权限物化失败也要留下 `op: 'permission'` 的补偿线索，
+    // 否则重放器不知道这次失败，技能装了却一直不在列表里。
+    const logText = await readLog();
+    expect(logText).toContain('"op":"permission"');
+    expect(logText).toContain(SKILL);
+    const before = db
+      .prepare('SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ?')
+      .get(SKILL);
+    expect(Number(before?.['total'])).toBe(0);
+
+    await expect(reconcile.replay()).resolves.toMatchObject({
+      failed: 0,
+      remaining: 0,
+    });
+
+    const after = db
+      .prepare('SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ?')
+      .get(SKILL);
+    expect(Number(after?.['total'])).toBeGreaterThan(0);
+    expect(await readLog()).toBe('');
   });
 });
 

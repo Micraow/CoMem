@@ -81,8 +81,9 @@ export interface AncestorPermissionDeps {
   /** 错误日志的主语：「资源节点」/「技能节点」。 */
   readonly nodeLabel: string;
   /**
-   * 物化失败之后的额外处理。`ResourceService` 用它往 `_meta/reconcile.log` 追加一条
-   * `permission` 记录（§10.6「索引双写补偿」）；`SkillService` 不需要，所以可选。
+   * 物化失败之后的额外处理。`ResourceService` 与 `SkillService` 都用它往
+   * `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6「索引双写补偿」）；
+   * 省略时只记日志。
    */
   readonly onFailure?: (uri: string, reason: string) => Promise<void>;
 }

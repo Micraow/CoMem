@@ -24,7 +24,7 @@ import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
-import { stableDigest } from '../domain/node.js';
+import { stableDigest, type NodeStatus } from '../domain/node.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
@@ -142,26 +142,12 @@ function unquote(value: string): string {
  * 我们自己定义的，不需要完整 YAML 解析器（`services/` 也不能值 import 适配层的
  * 编解码实现）。
  */
-function requireSkillFrontmatter(text: string, skillUri: Uri): { readonly description: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
-  const body = match?.[1];
-  if (body === undefined) {
+function requireSkillFrontmatter(text: string, skillUri: Uri): void {
+  const fields = parseSkillFrontmatter(text);
+  if (fields === null) {
     throw invalidArgument(`${SKILL_ENTRY_FILE} 缺少 frontmatter：${skillUri.toString()}。`, {
       uri: skillUri.toString(),
     });
-  }
-
-  const fields = new Map<string, string>();
-  for (const line of body.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) {
-      continue;
-    }
-    const separator = trimmed.indexOf(':');
-    if (separator <= 0) {
-      continue;
-    }
-    fields.set(trimmed.slice(0, separator).trim(), unquote(trimmed.slice(separator + 1).trim()));
   }
 
   const name = fields.get('name');
@@ -178,7 +164,37 @@ function requireSkillFrontmatter(text: string, skillUri: Uri): { readonly descri
       { uri: skillUri.toString(), field: 'description' },
     );
   }
-  return { description };
+}
+
+/**
+ * 拆出技能文件的 frontmatter 字段；没有 frontmatter 块时返回 `null`。
+ *
+ * 写路径与重放路径共用这一份解析（`skillIndexRecord`），否则两边对「description
+ * 是哪个值」会各自解释：写路径知道自己在安装，重放器手里只有磁盘上的字节。
+ *
+ * 逐行 `key: value` 而不是通用 YAML：见 `requireSkillFrontmatter` 的说明。解析失败
+ * 不抛错——技能里可以有不是 SKILL.md 的文件，它们的 frontmatter 与安装无关。
+ */
+function parseSkillFrontmatter(text: string): ReadonlyMap<string, string> | null {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  const body = match?.[1];
+  if (body === undefined) {
+    return null;
+  }
+
+  const fields = new Map<string, string>();
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) {
+      continue;
+    }
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0) {
+      continue;
+    }
+    fields.set(trimmed.slice(0, separator).trim(), unquote(trimmed.slice(separator + 1).trim()));
+  }
+  return fields;
 }
 
 function assertSkillName(name: string): void {
@@ -188,6 +204,58 @@ function assertSkillName(name: string): void {
       { name },
     );
   }
+}
+
+/** 构造一条技能索引记录所需的输入：磁盘字节 + 已有行的元数据。 */
+export interface SkillIndexSource {
+  readonly uri: Uri;
+  /** 磁盘上的原始字节（与 `writeBytes` 写入的完全一致） */
+  readonly bytes: Uint8Array;
+  /** 磁盘 mtime（`StoredStat.updatedAt`） */
+  readonly updatedAt: string;
+  /** 已有索引行的值；写路径没有旧行，传 `null` / `'active'`。 */
+  readonly memoryType: string | null;
+  readonly status: NodeStatus;
+}
+
+/**
+ * 从技能文件的磁盘字节构造一条 `IndexRecord`（§9.1、§10.6）。
+ *
+ * **写路径（`addSkill`）与对账重放（`ReconcileService`）共用这一份实现。** 两条
+ * 路径的输入本来就相同——都是落盘后的字节——分开写必然漂移：重放器曾经按通用资源
+ * 规则读 frontmatter 的 `summary`，而技能写的是 `description`，于是「重放成功」之后
+ * 技能的可检索摘要与原状态不同。
+ *
+ * 字段口径与写路径逐字一致：
+ * - `abstract` 是 frontmatter 的 `description`（技能自己的一句话摘要），没有就是
+ *   `null`；非入口文件通常没有这个键；
+ * - `content` 是**整个文件原文**（含 frontmatter）。不是「去掉 frontmatter 的正文」：
+ *   技能文件是按原始字节写入的，`name` 之类只存在于 frontmatter 里的字段也要能被
+ *   `find` 搜到。重放必须复现原索引行，而不是按资源文件的规范化口径重建。
+ * - `size` 是磁盘字节数，`bodyDigest` 是原文摘要。
+ *
+ * 二进制（严格 UTF-8 解码失败）按空正文索引：写路径本来就不索引字节内容，把替换
+ * 字符写进 FTS 只会污染检索。
+ */
+export function skillIndexRecord(source: SkillIndexSource): IndexRecord {
+  const text = decodeText(source.bytes);
+  const fields = parseSkillFrontmatter(text);
+  const description = fields?.get('description');
+  return {
+    uri: source.uri.toString(),
+    parentUri: source.uri.parent()?.toString() ?? '',
+    scope: source.uri.scope,
+    kind: 'document',
+    contextType: 'skill',
+    memoryType: source.memoryType,
+    level: SKILL_LEVEL,
+    abstract: description === undefined || description === '' ? null : description,
+    content: text,
+    bodyDigest: stableDigest(text),
+    size: source.bytes.byteLength,
+    updatedAt: source.updatedAt,
+    status: source.status,
+  };
 }
 
 export class SkillService {
@@ -229,7 +297,7 @@ export class SkillService {
         { name: options.name, uri: skillUri.toString() },
       );
     }
-    const { description } = requireSkillFrontmatter(entry.text, skillUri);
+    requireSkillFrontmatter(entry.text, skillUri);
 
     const records: IndexRecord[] = [];
     const written: Uri[] = [];
@@ -238,22 +306,17 @@ export class SkillService {
     await this.#locks.withLock(skillUri, 'tree', async () => {
       for (const file of files) {
         const stat = await this.#store.writeBytes(file.uri, file.content);
-        records.push({
-          uri: file.uri.toString(),
-          parentUri: file.uri.parent()?.toString() ?? '',
-          scope: file.uri.scope,
-          kind: 'document',
-          contextType: 'skill',
-          memoryType: null,
-          level: SKILL_LEVEL,
-          // 入口文件的 description 就是技能的一句话摘要；其余文件没有摘要。
-          abstract: file.isEntry ? description : null,
-          content: file.text,
-          bodyDigest: stableDigest(file.text),
-          size: file.content.byteLength,
-          updatedAt: stat.updatedAt,
-          status: 'active',
-        });
+        // 索引行从**落盘后的字节**构造，与重放路径调用同一个 `skillIndexRecord`：
+        // 写路径与重放器对 `abstract` / `content` 的口径只有一处定义。
+        records.push(
+          skillIndexRecord({
+            uri: file.uri,
+            bytes: file.content,
+            updatedAt: stat.updatedAt,
+            memoryType: null,
+            status: 'active',
+          }),
+        );
         written.push(file.uri);
       }
 
@@ -279,8 +342,16 @@ export class SkillService {
       // 一起物化技能根目录——`listSkills` 列的就是它，缺行等于技能不存在。索引失败
       // 时仍然物化：权限是独立的派生数据，而且 `kind` 缺失时按目录兜底得到的是同
       // 一条有效权限。
+      // 物化失败与 `ResourceService` 同一处理：写一条 `op: 'permission'` 的对账记录。
+      // 重放器能修它（`AclService.materializeNode`），漏记就等于让「权限表坏了」永久
+      // 静默——技能装了，列表里却没有。
       await materializeAncestorPermissions(
-        { authorizer: this.#authorizer, logger: this.#logger, nodeLabel: '技能节点' },
+        {
+          authorizer: this.#authorizer,
+          logger: this.#logger,
+          nodeLabel: '技能节点',
+          onFailure: (uri, reason) => this.#recordReconcile('permission', uri, reason),
+        },
         [skillUri, ...written],
         options.principals,
       );

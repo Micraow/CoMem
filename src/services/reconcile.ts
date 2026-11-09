@@ -46,6 +46,7 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
+import { skillIndexRecord } from './skill.js';
 
 /** 资源文件的索引层级（与 `ResourceService` 一致，§9.1）。 */
 const RESOURCE_LEVEL = 'L2';
@@ -283,11 +284,17 @@ export class ReconcileService {
   }
 
   /**
-   * 从磁盘重建一条资源文件的索引记录。
+   * 从磁盘重建一条文件的索引记录。
    *
-   * 与写路径的 `toIndexRecord` 对齐：正文是去掉 frontmatter 的文本，`abstract` 是
-   * frontmatter 的 `summary`，层级固定 L2。`context_type` / `memory_type` / `status`
-   * 优先取索引里的旧行——重放是「补写丢掉的派生数据」，不该顺手改写已有元数据。
+   * **技能走共享实现**：`context_type === 'skill'` 时由 `skillIndexRecord` 构造，
+   * 与 `SkillService.addSkill` 调用的是同一个函数（§10.6）。不做这一层分流，重放器
+   * 会按通用资源口径读 frontmatter 的 `summary`，而技能写路径写的是 `description`
+   * ——「重放成功」之后技能的索引行与原状态不同，重放就不再是「恢复原样」。
+   *
+   * 其余文件与写路径的 `toIndexRecord` 对齐：正文是去掉 frontmatter 的文本，
+   * `abstract` 是 frontmatter 的 `summary`，层级固定 L2。`context_type` /
+   * `memory_type` / `status` 优先取索引里的旧行——重放是「补写丢掉的派生数据」，
+   * 不该顺手改写已有元数据。
    *
    * 二进制（严格 UTF-8 解码失败）按附件处理：正文为空。附件写路径本来就不索引
    * 字节内容；把解码出来的替换字符写进 FTS 只会污染检索。
@@ -302,18 +309,33 @@ export class ReconcileService {
     }
 
     const existing = this.#nodes.get(uri.toString());
+    const contextType = existing?.contextType ?? contextTypeOf(uri);
+    const bytes = await this.#store.readBytes(uri);
+
+    if (contextType === 'skill') {
+      await this.#index.upsert([
+        skillIndexRecord({
+          uri,
+          bytes,
+          updatedAt: stat.updatedAt,
+          memoryType: existing?.memoryType ?? null,
+          status: existing?.status ?? 'active',
+        }),
+      ]);
+      return { kind: 'indexed' };
+    }
+
     const base = {
       uri: uri.toString(),
       parentUri: uri.parent()?.toString() ?? '',
       scope: uri.scope,
       kind: 'document' as const,
-      contextType: existing?.contextType ?? contextTypeOf(uri),
+      contextType,
       memoryType: existing?.memoryType ?? null,
       level: RESOURCE_LEVEL,
       status: existing?.status ?? 'active',
     } satisfies Omit<IndexRecord, 'abstract' | 'content' | 'bodyDigest' | 'size' | 'updatedAt'>;
 
-    const bytes = await this.#store.readBytes(uri);
     const text = decodeText(bytes);
     if (text === null) {
       await this.#index.upsert([
