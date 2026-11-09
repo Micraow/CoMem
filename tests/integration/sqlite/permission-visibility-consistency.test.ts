@@ -1,0 +1,333 @@
+/**
+ * 「这个 URI 对当前主体可不可读」的两份 SQL 谓词的行为对拍（架构文档 §8.2、§12.2）。
+ *
+ * 同一个判定有两份实现：
+ *
+ * - `adapters/sqlite/retrieval-index.ts` 的 `permissionPredicate`：折进 `search` /
+ *   `glob` 的 `EXISTS` 子查询，一次查询完成「匹配 + 权限」；
+ * - `adapters/sqlite/permission-repository.ts` 的 `readableUris`：批量 `IN (...)`，
+ *   服务「候选已经在内存里」的路径（`grep` 的前置过滤、技能列表、`list` / `tree`）。
+ *
+ * 两处漂移的后果是可见集合分叉：同一次请求里 `search` 看得到的节点 `grep` 看不到
+ * （或反之），用户只能理解为「检索坏了」。`retrieval-index.ts` 文件头写着「两处必须
+ * 用同一套谓词」，但两侧各自有测试只保证各自没坏，没有一条用例拿同一份
+ * `node_permission` 对拍过。
+ *
+ * 这里的 fixture 走**生产写路径**物化：`AclService.ensureRootPreset` + `setAcl`
+ * 写出 `.acl.json` 并重算整棵子树。所以「祖先目录的授权对子文件生效」是真实继承的
+ * 结果（子文件自己没有 ACL 文件，行是物化时按链算出来的），不是用例手抄的行。
+ * 另外两格由直接写入构造，因为生产路径在这份 fixture 里写不出来，见 `seedRawStates`。
+ *
+ * **比较集合，不比较 SQL 字符串**：谓词换个写法不该让测试变红，判定结果变了才该红。
+ *
+ * 不在本用例要求范围内的口径（只报告，不改）：
+ * - `services/acl.ts` 的 `#maxLevel` 取 `MAX(level)` 且不带 `level >= 1`，服务
+ *   `write` / `manage` 检查；
+ * - `glob` 还有 `status = 'active'` 与「节点自身那一行」的过滤，`readableUris` 只
+ *   回答「入参列表里哪些可读」——所以对拍的口径是「同一个节点集合里哪些可读」，
+ *   见 `universe()`。
+ */
+
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
+import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
+import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { NodeRepository, globPrefixPattern, nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import type { AclEffect, AclEntry, AclLevel } from '../../../src/domain/acl.js';
+import type { Level } from '../../../src/domain/level.js';
+import type { Logger } from '../../../src/domain/log.js';
+import type { NodeKind } from '../../../src/domain/node.js';
+import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import { Uri } from '../../../src/domain/uri.js';
+import { AclService } from '../../../src/services/acl.js';
+
+const ROOT = 'comem://user/alice';
+const NOW = new Date('2026-11-09T00:00:00.000Z');
+
+/** 域外且不存在的 URI：不在 `node` 表里，也没有任何权限行。 */
+const OUTSIDE = 'comem://user/bob/elsewhere/x.md';
+
+/** 手工写入的 level 0 行所在节点。 */
+const LEGACY_ZERO = `${ROOT}/legacy-zero.md`;
+
+/**
+ * 物化之后才出现的节点。
+ *
+ * 索引滞后时这是真实状态（`src/services/index-observer.ts` 有专门的补写路径）：
+ * 节点在 `node` 表里，`node_permission` 里一行都没有。它也是矩阵里「被 deny 的
+ * 祖先下的子文件、子文件自己没有权限行」那一格。
+ */
+const LATE = `${ROOT}/deny-dir/late.md`;
+
+interface SeedNode {
+  readonly uri: string;
+  readonly kind: NodeKind;
+  readonly level: Level;
+  /** 这一格在矩阵里的意思，失败时帮助定位。 */
+  readonly cell: string;
+}
+
+/**
+ * 物化之前就存在的节点。目录只写 L0（节点自身那一行），文件写 L2，与真实索引一致。
+ *
+ * `deny-dir/` 的 ACL 是「allow group:eng + deny user:bob」，子文件自己没有任何
+ * `.acl.json`；物化会把这两行继承下去，所以子文件在矩阵里是「祖先 deny 对子文件
+ * 生效」的证据，而不是「子文件没有行」。
+ */
+const NODES: readonly SeedNode[] = [
+  { uri: `${ROOT}/read-dir`, kind: 'directory', level: 'L0', cell: '直接 read（level 1）' },
+  { uri: `${ROOT}/read-dir/note.md`, kind: 'document', level: 'L2', cell: '祖先 read 继承到子文件' },
+  { uri: `${ROOT}/write-dir`, kind: 'directory', level: 'L0', cell: '直接 write（level 3）' },
+  { uri: `${ROOT}/write-dir/note.md`, kind: 'document', level: 'L2', cell: '祖先 write 继承到子文件' },
+  { uri: `${ROOT}/manage-dir`, kind: 'directory', level: 'L0', cell: '直接 manage（level 7）' },
+  { uri: `${ROOT}/manage-dir/note.md`, kind: 'document', level: 'L2', cell: '祖先 manage 继承到子文件' },
+  { uri: `${ROOT}/deny-dir`, kind: 'directory', level: 'L0', cell: 'allow + deny 同节点，deny 优先' },
+  { uri: `${ROOT}/deny-dir/blocked.md`, kind: 'document', level: 'L2', cell: '祖先 deny 继承到子文件' },
+  { uri: `${ROOT}/private`, kind: 'directory', level: 'L0', cell: '没有 bob 的权限行' },
+  { uri: `${ROOT}/private/secret.md`, kind: 'document', level: 'L2', cell: '没有 bob 的权限行' },
+  { uri: `${ROOT}/carol-dir`, kind: 'directory', level: 'L0', cell: '只授权 carol，bob 不可见' },
+  { uri: `${ROOT}/carol-dir/note.md`, kind: 'document', level: 'L2', cell: 'carol 的授权继承到子文件' },
+  { uri: LEGACY_ZERO, kind: 'document', level: 'L2', cell: 'level 0 的 allow 行不算 read' },
+];
+
+/** 三个主体。`user:*` 与 `AclService.resolvePrincipals` 的输出同形；fixture 没有通配条目。 */
+const SUBJECTS = [
+  { name: 'bob（组员）', principals: ['user:bob', 'group:eng', 'user:*'] },
+  { name: 'carol', principals: ['user:carol', 'user:*'] },
+  { name: 'alice（owner）', principals: ['user:alice', 'user:*'] },
+] as const;
+
+let dataDir: string;
+let db: DatabaseSync;
+let logger: Logger;
+let permissions: PermissionRepository;
+let index: SqliteFtsIndex;
+
+function createLogger(): Logger {
+  const mock: Logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+  return mock;
+}
+
+function record(uri: string, kind: NodeKind, level: Level): IndexRecord {
+  return {
+    uri,
+    parentUri: uri.slice(0, uri.lastIndexOf('/')),
+    scope: 'user',
+    kind,
+    contextType: kind === 'directory' ? 'resource' : 'memory',
+    memoryType: kind === 'document' ? 'preferences' : null,
+    level,
+    abstract: null,
+    content: '',
+    bodyDigest: 'digest',
+    size: 0,
+    updatedAt: NOW.toISOString(),
+    status: 'active',
+  };
+}
+
+function entry(principal: string, level: AclLevel, effect: AclEffect = 'allow'): AclEntry {
+  return { principal, level, effect };
+}
+
+async function setDirAcl(
+  acl: AclService,
+  owner: readonly string[],
+  uri: string,
+  entries: readonly AclEntry[],
+): Promise<void> {
+  await acl.setAcl(Uri.parse(uri), { mode: 'inherit', entries }, 'user:alice', owner);
+}
+
+/** 1) 索引行：根 + 物化前就存在的节点。 */
+async function seedIndex(): Promise<void> {
+  await index.upsert([
+    { ...record(ROOT, 'directory', 'L0'), parentUri: '' },
+    ...NODES.map((node) => record(node.uri, node.kind, node.level)),
+  ]);
+}
+
+/** 2) 生产写路径：根预置（owner 恒 manage）+ 五条子目录 ACL，各自重算整棵子树。 */
+async function materializeAcl(): Promise<void> {
+  const acl = new AclService({
+    db,
+    aclFile: new AclFileStore({ dataDir, logger }),
+    permissions,
+    nodes: new NodeRepository({ db, logger }),
+    logger,
+    locks: createPathLockManager({ dataDir, logger, pollIntervalMs: 1 }),
+  });
+  const owner = acl.resolvePrincipals('user:alice', []);
+
+  await acl.ensureRootPreset(Uri.parse(ROOT));
+  await setDirAcl(acl, owner, `${ROOT}/read-dir`, [entry('user:bob', 1)]);
+  await setDirAcl(acl, owner, `${ROOT}/write-dir`, [entry('user:bob', 3)]);
+  await setDirAcl(acl, owner, `${ROOT}/manage-dir`, [entry('user:bob', 7)]);
+  // 同一目录上同时 allow 与 deny：deny 优先（§12.2 不变量 2）。物化把 bob 写成
+  // deny 行、group:eng 写成 allow 行；因为没有 allow 行，光看「有没有 allow」的
+  // 谓词会把 bob 放进来，必须靠 deny 子查询压掉。
+  await setDirAcl(acl, owner, `${ROOT}/deny-dir`, [
+    entry('group:eng', 1),
+    entry('user:bob', 1, 'deny'),
+  ]);
+  await setDirAcl(acl, owner, `${ROOT}/carol-dir`, [entry('user:carol', 1)]);
+}
+
+/**
+ * 3) 生产路径在这份 fixture 里写不出来的两格。
+ *
+ * - level 0 的 allow 行：`level >= 1` 是对拍双方的共同条件，没有这一行，去掉任何
+ *   一侧的 `level >= 1` 都不会改变结果，测试就没有区分力。物化永远写 `maxLevel()`
+ *   （至少是 read），但旧数据与手工插入会留下任意整数。
+ * - 物化之后才出现的节点：插在 `materializeAcl()` 之后，保证它真的一行都没有。
+ */
+async function seedRawStates(): Promise<void> {
+  db.prepare(
+    'INSERT INTO node_permission (node_uri, principal, level, effect) VALUES (?, ?, ?, ?)',
+  ).run(LEGACY_ZERO, 'user:bob', 0, 'allow');
+  await index.upsert([record(LATE, 'document', 'L2')]);
+}
+
+beforeEach(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'comem-permission-visible-'));
+  logger = createLogger();
+  db = openDatabase(':memory:');
+  runMigrations(db);
+  permissions = new PermissionRepository({ db, logger });
+  index = new SqliteFtsIndex({ db, logger });
+  await seedIndex();
+  await materializeAcl();
+  await seedRawStates();
+});
+
+afterEach(async () => {
+  db.close();
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+/**
+ * 对拍的口径：`node` 表里根的子节点（「节点自身那一行」），再加一条域外 URI。
+ *
+ * 根自己不在口径里：`glob` 的 `**` 匹配的是「根之下」，而 `readableUris` 只要在
+ * 入参里就会回答。把根放进来比较，两边差的是路径范围，不是权限谓词。
+ */
+function universe(): string[] {
+  return [
+    ...db
+      .prepare(`SELECT uri FROM node WHERE uri GLOB ? AND ${nodeSelfRowSql()} ORDER BY uri`)
+      .all(globPrefixPattern(ROOT))
+      .map((row) => String(row['uri'])),
+    OUTSIDE,
+  ];
+}
+
+function sorted(values: Iterable<string>): string[] {
+  return [...values].sort();
+}
+
+/** 路径 A：批量 `IN (...)` 过滤（`grep` 候选、技能列表、`list` / `tree` 用）。 */
+function readableVisible(principals: readonly string[]): string[] {
+  return sorted(permissions.readableUris(universe(), principals));
+}
+
+/** 路径 B：`permissionPredicate` 折进 SQL 的 `glob`（外部可观察的那条）。 */
+async function globVisible(principals: readonly string[]): Promise<string[]> {
+  return sorted(
+    await index.glob({ pattern: '**', scopes: [ROOT], principals, limit: 100 }),
+  );
+}
+
+/** bob：只有三条 allow 子树的节点可读。 */
+const BOB_VISIBLE = [
+  `${ROOT}/manage-dir`,
+  `${ROOT}/manage-dir/note.md`,
+  `${ROOT}/read-dir`,
+  `${ROOT}/read-dir/note.md`,
+  `${ROOT}/write-dir`,
+  `${ROOT}/write-dir/note.md`,
+];
+
+/** carol：只有自己那条授权可读。 */
+const CAROL_VISIBLE = [`${ROOT}/carol-dir`, `${ROOT}/carol-dir/note.md`];
+
+/** alice：owner 恒 manage，所以物化过的节点全部可读；`LATE` 没有行，owner 也查不到。 */
+const ALICE_VISIBLE = sorted(NODES.map((node) => node.uri));
+
+describe('ACL 可读谓词：readableUris 与 glob', () => {
+  it('同一份 node_permission：三个主体的可见集合完全相同', async () => {
+    expect(universe()).toEqual(sorted([...NODES.map((node) => node.uri), LATE, OUTSIDE]));
+
+    for (const subject of SUBJECTS) {
+      const viaBatch = readableVisible(subject.principals);
+      const viaGlob = await globVisible(subject.principals);
+
+      expect(viaGlob, `${subject.name}：glob 与 readableUris 的可见集合`).toEqual(viaBatch);
+    }
+  });
+
+  it('矩阵：read / write / manage、继承、无行、level 0、域外都按节点上的行判定', () => {
+    expect(readableVisible(SUBJECTS[0].principals)).toEqual(BOB_VISIBLE);
+    expect(readableVisible(SUBJECTS[1].principals)).toEqual(CAROL_VISIBLE);
+    expect(readableVisible(SUBJECTS[2].principals)).toEqual(ALICE_VISIBLE);
+
+    // 不是「都返回全集」：两个非 owner 主体的集合不同，也都不等于 owner 的集合。
+    expect(BOB_VISIBLE).not.toEqual(CAROL_VISIBLE);
+    expect(BOB_VISIBLE).not.toEqual(ALICE_VISIBLE);
+    expect(CAROL_VISIBLE).not.toEqual(ALICE_VISIBLE);
+  });
+
+  it('deny 优先：allow group:eng 与 deny bob 并存时 bob 不可见，子文件同样', async () => {
+    const denied = `${ROOT}/deny-dir`;
+    const inherited = `${ROOT}/deny-dir/blocked.md`;
+
+    for (const visible of [
+      readableVisible(SUBJECTS[0].principals),
+      await globVisible(SUBJECTS[0].principals),
+    ]) {
+      expect(visible).not.toContain(denied);
+      expect(visible).not.toContain(inherited);
+    }
+    // 同一张表里 group:eng 的 allow 是存在的：deny 挡住的是「同请求主体集合里的
+    // 某个人被拒」，不是「这条 grant 不存在」。
+    expect(
+      db
+        .prepare(
+          `SELECT principal, level, effect FROM node_permission
+            WHERE node_uri = ? ORDER BY principal ASC`,
+        )
+        .all(denied)
+        .map((row) => [String(row['principal']), Number(row['level']), String(row['effect'])]),
+    ).toEqual([
+      ['group:eng', 1, 'allow'],
+      ['user:alice', 7, 'allow'],
+      ['user:bob', 1, 'deny'],
+    ]);
+  });
+
+  it('level 0 的 allow 行不算 read：两条路径都不返回', async () => {
+    for (const visible of [
+      readableVisible(SUBJECTS[0].principals),
+      await globVisible(SUBJECTS[0].principals),
+    ]) {
+      expect(visible).not.toContain(LEGACY_ZERO);
+    }
+    expect(
+      db
+        .prepare('SELECT level, effect FROM node_permission WHERE node_uri = ? AND principal = ?')
+        .get(LEGACY_ZERO, 'user:bob'),
+    ).toMatchObject({ level: 0, effect: 'allow' });
+  });
+});
