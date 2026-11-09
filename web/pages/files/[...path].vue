@@ -15,6 +15,12 @@
  *
  * 右栏的摘要来源与新鲜度只展示服务端真的有的字段：单节点的生成时间、模型、
  * 版本当前没有出口，界面写「未知」而不是拿全站数字冒充单节点状态。
+ *
+ * ## 摘要失败不连坐正文
+ *
+ * `/fs/stat` 与 `/content/abstract` 对同一 URI 都是读权限，摘要取不到不代表节点
+ * 读不了。两个请求各自处理结果：摘要失败只在摘要区说明，元信息与正文照常渲染；
+ * 只有 stat 失败（节点不存在、读不了）才整页失败。
  */
 import { AlertTriangle, Copy, FolderOpen, Info } from 'lucide-vue-next'
 
@@ -71,6 +77,8 @@ const health = useState<HealthPayload | null>('comem-health', () => null)
 
 const stat = ref<FsStatPayload['stat']>(null)
 const abstractText = ref<string | null>(null)
+/** 摘要请求失败：与「这个节点还没有摘要」分开，前者不是数据状态。 */
+const abstractFailed = ref(false)
 const overviewText = ref<string | null>(null)
 const contentText = ref<string | null>(null)
 const children = ref<readonly TreeEntryPayload[] | null>(null)
@@ -129,6 +137,7 @@ async function loadNode(uri: string): Promise<void> {
   layerError.value = null
   stat.value = null
   abstractText.value = null
+  abstractFailed.value = false
   overviewText.value = null
   contentText.value = null
   children.value = null
@@ -140,14 +149,8 @@ async function loadNode(uri: string): Promise<void> {
   loadedLayers.value = new Set<Layer>(['l0'])
 
   try {
-    const [statPayload, abstractPayload] = await Promise.all([
-      api.get<FsStatPayload>('/fs/stat', { uri }),
-      api.get<SummaryLayerPayload>('/content/abstract', { uri }),
-    ])
-
+    const statPayload = await api.get<FsStatPayload>('/fs/stat', { uri })
     stat.value = statPayload.stat
-    abstractText.value = abstractPayload.abstract ?? null
-    degraded.value = abstractPayload.degraded
 
     if (statPayload.stat === null) {
       error.value = `节点不存在或已被删除：${uri}`
@@ -163,10 +166,23 @@ async function loadNode(uri: string): Promise<void> {
       statPayload.stat.kind === 'directory' ? uri : uri.slice(0, uri.lastIndexOf('/'))
     aclScope.value = aclUri
     void loadAcl(aclUri)
+
+    // 摘要单独取、单独报错：失败时 `abstractFailed` 置位，`error` 保持 null。
+    await loadAbstract(uri)
   } catch (caught) {
     error.value = errorMessageOf(caught)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadAbstract(uri: string): Promise<void> {
+  try {
+    const payload = await api.get<SummaryLayerPayload>('/content/abstract', { uri })
+    abstractText.value = payload.abstract ?? null
+    degraded.value = payload.degraded
+  } catch {
+    abstractFailed.value = true
   }
 }
 
@@ -341,6 +357,9 @@ onBeforeUnmount(() => {
                     <div class="abstract__foot">
                       <span>{{ abstractText.length }} 字符</span>
                     </div>
+                  </div>
+                  <div v-else-if="abstractFailed" class="empty">
+                    <span class="empty__title">摘要没有取到</span>
                   </div>
                   <div v-else class="empty">
                     <span class="empty__title">还没有摘要</span>

@@ -15,10 +15,21 @@
  *
  * 列表加载失败说明这一屏没有数据；创建、编辑、删除、加成员失败只说明**刚才那个
  * 动作**没生效。前者进页面内的提示条，后者走 toast，不把整页标成坏的。
+ *
+ * ## 权限不足不是故障
+ *
+ * `/admin/users` 与 `/admin/groups` 都只给系统管理员（`auth.adminUserIds` 默认空，
+ * 普通用户 403）。403 的服务端原文里写着配置项名，照抄到界面只会让用户去搜文档
+ * （§11）；这里与概览页、任务表一致，显示「需要管理员权限」的空态，不显示成错误。
+ * 重试不会改变结果。其它失败仍显示服务端消息——那是排查用的诊断信息。
+ *
+ * 侧栏入口不做角色隐藏：前端不知道谁是管理员（那需要后端暴露一个权限标志）。
+ * 页内的「新建」按钮在 forbidden 时收起——页面已经说明了不能用，就不留一个注定
+ * 失败的入口。
  */
-import { AlertTriangle, Copy, Plus } from 'lucide-vue-next'
+import { AlertTriangle, Copy, Plus, ShieldAlert } from 'lucide-vue-next'
 
-import { errorMessageOf, useApi } from '~/composables/useApi'
+import { ApiClientError, errorMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
 import type { UserRowPayload } from '~/components/domain/UserTable.vue'
@@ -88,6 +99,9 @@ const groupsTotal = ref(0)
 const groupsOffset = ref(0)
 const groupsLoading = ref(false)
 const groupsError = ref<string | null>(null)
+
+/** 当前账号不是系统管理员。两个列表的门禁相同，所以一个状态就够，不显示成错误。 */
+const forbidden = ref(false)
 
 const userDialogOpen = ref(false)
 const editingUser = ref<UserRowPayload | null>(null)
@@ -179,6 +193,7 @@ const deleteMessage = computed(() => {
 async function loadUsers(): Promise<void> {
   usersLoading.value = true
   usersError.value = null
+  forbidden.value = false
   try {
     const payload = await api.get<UserListPayload>('/admin/users', {
       limit: PAGE_SIZE,
@@ -187,9 +202,13 @@ async function loadUsers(): Promise<void> {
     users.value = payload.users
     usersTotal.value = payload.total
   } catch (caught) {
-    usersError.value = errorMessageOf(caught)
     users.value = []
     usersTotal.value = 0
+    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+      forbidden.value = true
+    } else {
+      usersError.value = errorMessageOf(caught)
+    }
   } finally {
     usersLoading.value = false
   }
@@ -198,6 +217,7 @@ async function loadUsers(): Promise<void> {
 async function loadGroups(): Promise<void> {
   groupsLoading.value = true
   groupsError.value = null
+  forbidden.value = false
   try {
     const payload = await api.get<GroupListPayload>('/admin/groups', {
       limit: PAGE_SIZE,
@@ -206,9 +226,13 @@ async function loadGroups(): Promise<void> {
     groups.value = payload.groups
     groupsTotal.value = payload.total
   } catch (caught) {
-    groupsError.value = errorMessageOf(caught)
     groups.value = []
     groupsTotal.value = 0
+    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+      forbidden.value = true
+    } else {
+      groupsError.value = errorMessageOf(caught)
+    }
   } finally {
     groupsLoading.value = false
   }
@@ -457,7 +481,7 @@ onMounted(() => {
   <div class="content">
     <div class="page">
       <DomainPageHeader title="用户与组">
-        <template #actions>
+        <template v-if="!forbidden" #actions>
           <UiButton variant="primary" size="sm" @click="openCreate">
             <Plus :size="14" :stroke-width="1.8" />
             {{ createLabel }}
@@ -468,8 +492,17 @@ onMounted(() => {
       <UiTabs v-model="tab" :items="TABS" aria-label="用户与组" />
 
       <div class="mt-16">
+        <UiCard v-if="forbidden" :title="tab === 'users' ? '用户' : '组'" panel flush>
+          <div class="empty">
+            <span class="empty__icon">
+              <ShieldAlert :size="20" :stroke-width="1.4" />
+            </span>
+            <span class="empty__title">需要管理员权限</span>
+          </div>
+        </UiCard>
+
         <DomainUserTable
-          v-if="tab === 'users'"
+          v-else-if="tab === 'users'"
           :users="users"
           :total="usersTotal"
           :limit="PAGE_SIZE"

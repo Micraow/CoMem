@@ -11,10 +11,19 @@
  *
  * 「最近请求」没有对应端点：`request_log` 只落 SQLite，没有 HTTP 读出口。
  * 这里退一步展示任务队列——它是同一批后台工作里唯一可读的部分。
+ *
+ * ## 两个请求分开加载
+ *
+ * `GET /tasks` 是**系统管理员专属**（`auth.adminUserIds` 默认空 → 普通用户 403），
+ * `GET /health` 对所有人可见。两者共用一个 `Promise.all` 加一个 `catch` 时，一次
+ * 403 会把健康徽标和三张指标卡一起置空：部署者按文档起来，打开首页看到的是一片
+ * 空白，没有任何错误说明。现在两个请求各带自己的加载态与错误，任务卡在 403 时
+ * 直接说明需要管理员权限。
  */
-import { AlertTriangle, CheckCircle2, Inbox, RefreshCw } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, RefreshCw, ShieldAlert } from 'lucide-vue-next'
 
 import {
+  ApiClientError,
   errorMessageOf,
   useApi,
   type HealthPayload,
@@ -30,8 +39,13 @@ const api = useApi()
 
 const health = useState<HealthPayload | null>('comem-health', () => null)
 const tasks = useState<readonly TaskPayload[] | null>('comem-tasks', () => null)
-const loading = ref(false)
-const error = ref<string | null>(null)
+
+const loadingHealth = ref(false)
+const loadingTasks = ref(false)
+const healthError = ref<string | null>(null)
+const tasksError = ref<string | null>(null)
+/** 任务列表要系统管理员；这个状态与「取失败了」分开表达。 */
+const tasksForbidden = ref(false)
 
 const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
   archive: '归档',
@@ -98,25 +112,44 @@ function formatDateTime(value: string): string {
   })
 }
 
-async function load(): Promise<void> {
-  loading.value = true
-  error.value = null
+async function loadHealth(): Promise<void> {
+  loadingHealth.value = true
+  healthError.value = null
   try {
-    const [healthPayload, taskPayload] = await Promise.all([
-      api.get<HealthPayload>('/health'),
-      api.get<{ tasks: readonly TaskPayload[]; total: number }>('/tasks', {
-        limit: TASK_PREVIEW_LIMIT,
-      }),
-    ])
-    health.value = healthPayload
-    tasks.value = taskPayload.tasks
+    health.value = await api.get<HealthPayload>('/health')
   } catch (caught) {
-    error.value = errorMessageOf(caught)
+    healthError.value = errorMessageOf(caught)
     health.value = null
-    tasks.value = null
   } finally {
-    loading.value = false
+    loadingHealth.value = false
   }
+}
+
+async function loadTasks(): Promise<void> {
+  loadingTasks.value = true
+  tasksError.value = null
+  tasksForbidden.value = false
+  try {
+    const payload = await api.get<{ tasks: readonly TaskPayload[]; total: number }>('/tasks', {
+      limit: TASK_PREVIEW_LIMIT,
+    })
+    tasks.value = payload.tasks
+  } catch (caught) {
+    tasks.value = null
+    // `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`）。这不是故障，是
+    // 「当前账号不是系统管理员」，重试不会改变结果，所以不显示成错误。
+    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+      tasksForbidden.value = true
+    } else {
+      tasksError.value = errorMessageOf(caught)
+    }
+  } finally {
+    loadingTasks.value = false
+  }
+}
+
+async function load(): Promise<void> {
+  await Promise.all([loadHealth(), loadTasks()])
 }
 
 onMounted(load)
@@ -130,21 +163,26 @@ onMounted(load)
           <UiBadge v-if="health !== null" :variant="health.status === 'degraded' ? 'orange' : 'green'">
             {{ health.status === 'degraded' ? '降级运行' : '运行正常' }}
           </UiBadge>
-          <UiButton variant="secondary" size="sm" :disabled="loading" @click="load">
+          <UiButton
+            variant="secondary"
+            size="sm"
+            :disabled="loadingHealth || loadingTasks"
+            @click="load"
+          >
             <RefreshCw :size="14" :stroke-width="1.5" />
             刷新
           </UiButton>
         </template>
       </DomainPageHeader>
 
-      <div v-if="error !== null" class="callout callout--danger mb-24">
+      <div v-if="healthError !== null" class="callout callout--danger mb-24">
         <AlertTriangle :size="15" :stroke-width="1.4" />
-        <div>{{ error }}</div>
+        <div>{{ healthError }}</div>
       </div>
 
       <div class="stats mb-24">
         <div v-for="stat in stats" :key="stat.key" class="stat rise">
-          <UiSkeleton v-if="loading && health === null" width="56px" height="26px" />
+          <UiSkeleton v-if="health === null && healthError === null" width="56px" height="26px" />
           <span v-else class="stat__v" :class="stat.tone">{{ stat.value }}</span>
           <span class="stat__k">{{ stat.label }}</span>
         </div>
@@ -155,18 +193,33 @@ onMounted(load)
           <span class="caption">最早创建优先，只含可认领的任务</span>
         </template>
 
-        <div v-if="loading && tasks === null" class="stack-12">
+        <div v-if="tasksForbidden" class="empty">
+          <span class="empty__icon">
+            <ShieldAlert :size="20" :stroke-width="1.4" />
+          </span>
+          <span class="empty__title">需要管理员权限</span>
+        </div>
+
+        <div v-else-if="tasksError !== null" class="empty">
+          <span class="empty__icon">
+            <AlertTriangle :size="20" :stroke-width="1.4" />
+          </span>
+          <span class="empty__title">任务列表没有取到</span>
+          <span class="empty__text">{{ tasksError }}</span>
+        </div>
+
+        <div v-else-if="tasks === null" class="stack-12" aria-busy="true">
           <UiSkeleton v-for="index in 5" :key="index" :width="`${64 - index * 6}%`" height="14px" />
         </div>
 
-        <div v-else-if="tasks !== null && tasks.length === 0" class="empty">
+        <div v-else-if="tasks.length === 0" class="empty">
           <span class="empty__icon">
             <CheckCircle2 :size="20" :stroke-width="1.4" />
           </span>
           <span class="empty__title">队列是空的</span>
         </div>
 
-        <UiTable v-else-if="tasks !== null" caption="待处理任务">
+        <UiTable v-else caption="待处理任务">
           <thead>
             <tr>
               <th>任务</th>
@@ -190,13 +243,6 @@ onMounted(load)
             </tr>
           </tbody>
         </UiTable>
-
-        <div v-else class="empty">
-          <span class="empty__icon">
-            <Inbox :size="20" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">还没有任务</span>
-        </div>
       </UiCard>
     </div>
   </div>

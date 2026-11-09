@@ -17,6 +17,13 @@
  *
  * §16.1：不用颜色单独表意。两个状态用强调色的深浅（实心 → 描边）加文字表达，
  * 深浅两套外观都成立，色盲用户也读得出来。
+ *
+ * ## 权限不足不是故障
+ *
+ * `GET /tasks` 只有系统管理员能读（`auth.adminUserIds` 为空时普通用户 403）。
+ * 403 的服务端原文里写着配置项名，照抄到界面只会让用户去搜文档（§11）；这里
+ * 显示「需要管理员权限」，与概览页一致。重试不会改变结果，所以不显示成错误。
+ * 其它错误仍然显示服务端消息——那是排查用的诊断信息。
  */
 
 /** `GET /tasks` 的任务行。只声明控制台读到的字段（`payload` / `stepsDone` 不读）。 */
@@ -102,17 +109,19 @@ export function isLeaseExpired(task: TaskRowPayload, now: number = Date.now()): 
 </script>
 
 <script setup lang="ts">
-import { AlertTriangle, RotateCcw } from 'lucide-vue-next'
+import { AlertTriangle, RotateCcw, ShieldAlert } from 'lucide-vue-next'
 
 const props = withDefaults(
   defineProps<{
     tasks: readonly TaskRowPayload[]
     loading: boolean
     error: string | null
+    /** 当前账号不是系统管理员：与「取失败了」分开表达。 */
+    forbidden: boolean
     /** 刚提交的会话产出的任务 ID：高亮并滚到可视区。 */
     highlightId: string | null
   }>(),
-  { highlightId: null },
+  { forbidden: false, highlightId: null },
 )
 
 const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
@@ -174,12 +183,24 @@ function depthOf(status: string): string {
       </div>
     </div>
 
-    <UiCard v-if="props.error === null || props.tasks.length > 0" title="任务" panel flush>
+    <UiCard
+      v-if="props.forbidden || props.error === null || props.tasks.length > 0"
+      title="任务"
+      panel
+      flush
+    >
       <template #actions>
         <span class="caption">按创建时间升序，只含可认领的任务</span>
       </template>
 
-      <div v-if="props.loading && props.tasks.length === 0" class="task-skeleton">
+      <div v-if="props.forbidden" class="empty">
+        <span class="empty__icon">
+          <ShieldAlert :size="20" :stroke-width="1.4" />
+        </span>
+        <span class="empty__title">需要管理员权限</span>
+      </div>
+
+      <div v-else-if="props.loading && props.tasks.length === 0" class="task-skeleton">
         <UiSkeleton v-for="index in 5" :key="index" :width="`${78 - index * 5}%`" height="14px" />
       </div>
 

@@ -23,7 +23,7 @@ import { useIntervalFn } from '@vueuse/core'
 
 import type { SessionListPayload, SessionSummaryPayload } from '~/components/domain/SessionList.vue'
 import type { TaskListPayload, TaskRowPayload } from '~/components/domain/TaskTable.vue'
-import { errorMessageOf, useApi } from '~/composables/useApi'
+import { ApiClientError, errorMessageOf, useApi } from '~/composables/useApi'
 
 useHead({ title: '会话与任务 · CoMem 控制台' })
 
@@ -48,6 +48,8 @@ const loadingTasks = ref(false)
 
 const sessionsError = ref<string | null>(null)
 const tasksError = ref<string | null>(null)
+/** 任务列表要系统管理员；这个状态与「取失败了」分开表达（与概览页一致）。 */
+const tasksForbidden = ref(false)
 /** 提交这类单次动作的错误，与列表加载错误分开。 */
 const actionError = ref<string | null>(null)
 
@@ -80,10 +82,20 @@ async function loadTasks(silent = false): Promise<void> {
     const payload = await api.get<TaskListPayload>('/tasks')
     tasks.value = payload.tasks
     tasksError.value = null
+    tasksForbidden.value = false
   } catch (caught) {
-    tasksError.value = errorMessageOf(caught)
-    if (!silent) {
+    // `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`）。这不是故障，是
+    // 「当前账号不是系统管理员」，服务端消息里的配置项名不进界面（§11）。
+    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+      tasksForbidden.value = true
+      tasksError.value = null
       tasks.value = []
+    } else {
+      tasksError.value = errorMessageOf(caught)
+      tasksForbidden.value = false
+      if (!silent) {
+        tasks.value = []
+      }
     }
   } finally {
     loadingTasks.value = false
@@ -200,6 +212,7 @@ watch(scopeRoot, () => {
           :tasks="tasks"
           :loading="loadingTasks"
           :error="tasksError"
+          :forbidden="tasksForbidden"
           :highlight-id="highlightTaskId"
         />
       </div>
