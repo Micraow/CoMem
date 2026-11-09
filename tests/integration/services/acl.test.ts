@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
+import { AclFileStore, type AclFile } from '../../../src/adapters/fs/acl-file.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
@@ -926,4 +926,103 @@ describe('并发写入不丢条目（§10.6 锁契约回归）', () => {
 
     await expect(done).resolves.toBeDefined();
   }, 8000);
+});
+
+/**
+ * 回归：撤权的回滚只有一条路径（`#commitAclRewrites`）。
+ *
+ * 撤权顺序是「先写 `.acl.json`、再改索引」。中间失败的形态是**提权**：磁盘上
+ * 授权已撤、`node_permission` 还留着 allow，求值继续放行，而且不报错。两条撤权
+ * 路径（`purgeSubtree` / `purgePrincipal`）各有一份实现时，修好一份不保证另一份
+ * 也修好——所以这里对两条路径分别构造「磁盘写成功、索引写入失败」。
+ *
+ * 断言三件事：失败前磁盘确实被写过清空后的内容（否则回滚是空操作，测了个寂寞）、
+ * 失败后磁盘恢复成原内容、索引行停在原值。去掉回滚后磁盘那两条断言会变红。
+ */
+describe('撤权回滚：磁盘已写、索引写失败', () => {
+  /** 记录每次 `.acl.json` 写入并真的落盘，用来确认「先写了清空版本」。 */
+  function recordWrites(): { written: AclFile[]; restore: () => void } {
+    const written: AclFile[] = [];
+    const original = aclFile.write.bind(aclFile);
+    const spy = vi.spyOn(aclFile, 'write').mockImplementation(async (uri, file) => {
+      written.push(file);
+      await original(uri, file);
+    });
+    return { written, restore: () => spy.mockRestore() };
+  }
+
+  it('purgeSubtree：物化写入失败时恢复 .acl.json，node_permission 维持原状', async () => {
+    seed(ROOT, `${ROOT}/a`);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(ROOT),
+      { mode: 'inherit', entries: [allow('group:eng', 1)] },
+      'user:alice',
+    );
+
+    const diskBefore = await aclFile.read(Uri.parse(ROOT));
+    const rowsBefore = permissionsOf(ROOT);
+    expect(rowsBefore.length).toBeGreaterThan(0);
+
+    const writes = recordWrites();
+    const failIndex = vi.spyOn(permissions, 'replaceSubtree').mockImplementation(() => {
+      throw new Error('索引写入失败');
+    });
+
+    try {
+      await expect(service.purgeSubtree(Uri.parse(ROOT))).rejects.toThrow('索引写入失败');
+    } finally {
+      writes.restore();
+      failIndex.mockRestore();
+    }
+
+    // 失败之前文件已经写成了「条目清空」的版本：回滚不是空操作。
+    expect(writes.written[0]?.entries).toEqual([]);
+    expect(writes.written.at(-1)).toEqual(diskBefore);
+    expect(await aclFile.read(Uri.parse(ROOT))).toEqual(diskBefore);
+    expect(permissionsOf(ROOT)).toEqual(rowsBefore);
+  });
+
+  it('purgePrincipal：索引行删除失败时恢复 .acl.json，node_permission 维持原状', async () => {
+    seed(ROOT);
+    const service = createService();
+    await service.ensureRootPreset(Uri.parse(ROOT));
+    await service.setAcl(
+      Uri.parse(ROOT),
+      { mode: 'inherit', entries: [allow('group:eng', 1)] },
+      'user:alice',
+    );
+
+    const diskBefore = await aclFile.read(Uri.parse(ROOT));
+    const rowsBefore = permissionsOf(ROOT);
+    const entryRowsBefore = permissions.entriesOf(ROOT);
+    expect(diskBefore?.entries).toEqual([
+      { principal: 'group:eng', level: 'read', effect: 'allow' },
+    ]);
+
+    const writes = recordWrites();
+    // 让 `DELETE FROM acl_entry` 先执行成功，再让 `DELETE FROM node_permission`
+    // 失败：回滚必须把前一条删除也撤销掉。
+    const originalPrepare = db.prepare.bind(db);
+    const failIndex = vi.spyOn(db, 'prepare').mockImplementation((sql: string) => {
+      if (sql.includes('DELETE FROM node_permission')) {
+        throw new Error('索引写入失败');
+      }
+      return originalPrepare(sql);
+    });
+
+    try {
+      await expect(service.purgePrincipal('group:eng')).rejects.toThrow('索引写入失败');
+    } finally {
+      writes.restore();
+      failIndex.mockRestore();
+    }
+
+    expect(writes.written[0]?.entries).toEqual([]);
+    expect(writes.written.at(-1)).toEqual(diskBefore);
+    expect(await aclFile.read(Uri.parse(ROOT))).toEqual(diskBefore);
+    expect(permissionsOf(ROOT)).toEqual(rowsBefore);
+    expect(permissions.entriesOf(ROOT)).toEqual(entryRowsBefore);
+  });
 });

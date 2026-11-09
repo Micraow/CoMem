@@ -76,7 +76,12 @@
  * 调用——这里再加锁就是上面那条「自己等自己」。
  */
 
-import type { AclFile, AclFileEntry, AclFileStore } from '../adapters/fs/acl-file.js';
+import type {
+  AclDirectoryScan,
+  AclFile,
+  AclFileEntry,
+  AclFileStore,
+} from '../adapters/fs/acl-file.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { NodeRepository, NodeRow } from '../adapters/sqlite/node-repository.js';
 import type {
@@ -742,17 +747,7 @@ export class AclService implements Authorizer {
     const prefix = root.toString();
 
     return this.#locks.withLock(root, 'tree', async () => {
-      const scan = await this.#aclFile.scanDirectories({
-        maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
-      });
-      if (scan.truncated) {
-        this.#logger.warn('清空子树授权达到目录上限，上限之外的 .acl.json 未检查', {
-          uri: prefix,
-          limit: MAX_PURGE_SCAN_DIRECTORIES,
-          scannedDirectories: scan.directoriesScanned,
-          aclFiles: scan.uris.length,
-        });
-      }
+      const scan = await this.#scanAclDirectories('清空子树授权', { uri: prefix });
 
       const rewrites: PurgeRewrite[] = [];
       for (const uri of scan.uris) {
@@ -767,22 +762,13 @@ export class AclService implements Authorizer {
         rewrites.push({ uri, previous, next: { mode: previous.mode, entries: [] } });
       }
 
-      this.#db.exec('BEGIN IMMEDIATE');
-      try {
-        for (const rewrite of rewrites) {
-          await this.#aclFile.write(rewrite.uri, rewrite.next);
-        }
+      await this.#commitAclRewrites(rewrites, async () => {
         const permissions = await this.#materializeSubtree(root);
         this.#runInTransaction(() => {
           this.#permissions.replaceSubtree(prefix, permissions);
           this.#permissions.deleteEntriesSubtree(prefix);
         });
-        this.#db.exec('COMMIT');
-      } catch (error) {
-        this.#db.exec('ROLLBACK');
-        await this.#restoreAclFiles(rewrites);
-        throw error;
-      }
+      });
 
       this.#logger.info('子树授权已清空', {
         uri: prefix,
@@ -830,19 +816,9 @@ export class AclService implements Authorizer {
     for (const row of this.#permissions.entriesByPrincipal(principal)) {
       targets.set(row.uri, Uri.parse(row.uri));
     }
-    const scan = await this.#aclFile.scanDirectories({
-      maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
-    });
+    const scan = await this.#scanAclDirectories('撤权扫描', { principal });
     for (const uri of scan.uris) {
       targets.set(uri.toString(), uri);
-    }
-    if (scan.truncated) {
-      this.#logger.warn('撤权扫描达到目录上限，上限之外的 .acl.json 未检查', {
-        principal,
-        limit: MAX_PURGE_SCAN_DIRECTORIES,
-        scannedDirectories: scan.directoriesScanned,
-        aclFiles: scan.uris.length,
-      });
     }
 
     // 按 URI 升序：回滚顺序与日志顺序可复现，不依赖 Map 的插入来源。
@@ -879,19 +855,8 @@ export class AclService implements Authorizer {
         rewrites.push({ uri, previous, next: { mode: previous.mode, entries } });
       }
 
-      this.#db.exec('BEGIN IMMEDIATE');
-      try {
-        for (const rewrite of rewrites) {
-          await this.#aclFile.write(rewrite.uri, rewrite.next);
-        }
-        this.#deletePrincipalRows(principal);
-        this.#db.exec('COMMIT');
-      } catch (error) {
-        this.#db.exec('ROLLBACK');
-        // 回滚仍在锁内：锁外回滚会覆盖并发写者刚写进去的条目。
-        await this.#restoreAclFiles(rewrites);
-        throw error;
-      }
+      // 回滚仍在锁内：锁外回滚会覆盖并发写者刚写进去的条目。
+      await this.#commitAclRewrites(rewrites, () => this.#deletePrincipalRows(principal));
 
       this.#logger.info('主体授权已撤销', {
         principal,
@@ -1178,6 +1143,69 @@ export class AclService implements Authorizer {
     const file = await this.#aclFile.read(directory);
     cache.set(key, file);
     return file;
+  }
+
+  /**
+   * 扫描数据根下所有带 `.acl.json` 的目录，截断时记 warn（`purgeSubtree` /
+   * `purgePrincipal` 共用）。
+   *
+   * `reasonLabel` 是两种撤销场景各自的文案前缀（「清空子树授权」/「撤权扫描」），
+   * `detail` 是各自的定位字段（`uri` / `principal`）。拆成两个入参是为了让截断
+   * 判据与上限只在这里维护，同时保持两条路径原有的日志字段与顺序不变。
+   *
+   * **本方法不拿锁，由调用方决定扫描位置。** `purgeSubtree` 在 `tree(root)` 内
+   * 调用：扫描与写回必须在同一把锁里，否则扫描之后新建的目录会漏撤；
+   * `purgePrincipal` 在取锁之前调用：撤权横跨整库、锁在扫描之后才拿（见该方法）。
+   */
+  async #scanAclDirectories(
+    reasonLabel: string,
+    detail: Readonly<Record<string, string>>,
+  ): Promise<AclDirectoryScan> {
+    const scan = await this.#aclFile.scanDirectories({
+      maxDirectories: MAX_PURGE_SCAN_DIRECTORIES,
+    });
+    if (scan.truncated) {
+      this.#logger.warn(`${reasonLabel}达到目录上限，上限之外的 .acl.json 未检查`, {
+        ...detail,
+        limit: MAX_PURGE_SCAN_DIRECTORIES,
+        scannedDirectories: scan.directoriesScanned,
+        aclFiles: scan.uris.length,
+      });
+    }
+    return scan;
+  }
+
+  /**
+   * 在一个 `BEGIN IMMEDIATE` 里写回 `rewrites` 的 `.acl.json`，再执行 `mutate`
+   * 更新索引；失败时 `ROLLBACK` 并把已经写出去的文件恢复成 `previous`。
+   *
+   * **为什么两条撤销路径共用它。** 磁盘 `.acl.json` 已撤、`node_permission` 没撤
+   * 的失效形态是**提权**：文件说 deny、求值说 allow，而且不报错。两份实现时修好
+   * 一份不保证另一份也修好；回滚只有这一条路径才能保证「索引写失败就恢复磁盘」。
+   *
+   * **`BEGIN` 放在 `try` 之外**：开事务失败时没有任何文件被写过，不需要 ROLLBACK
+   * 或恢复。抛出的异常原样向上传，不包装、不改错误码。
+   *
+   * **调用方必须仍持有 `rewrites` 里每个 URI 的锁，并在锁释放前 await 本方法。**
+   * 回滚是在并发写者可能刚写过的新内容上再覆盖一次；锁外回滚会把对方的条目一起
+   * 抹掉，那正是本次要修的缺陷。
+   */
+  async #commitAclRewrites(
+    rewrites: readonly PurgeRewrite[],
+    mutate: () => void | Promise<void>,
+  ): Promise<void> {
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const rewrite of rewrites) {
+        await this.#aclFile.write(rewrite.uri, rewrite.next);
+      }
+      await mutate();
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      await this.#restoreAclFiles(rewrites);
+      throw error;
+    }
   }
 
   /**
