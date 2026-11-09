@@ -152,6 +152,18 @@ function seedDocument(uri: string): void {
   nodes.upsert([nodeRow(uri, 'document')]);
 }
 
+function aclEntriesOf(uri: string): readonly { uri: string; principal: string; level: number; effect: string }[] {
+  return db
+    .prepare('SELECT uri, principal, level, effect FROM acl_entry WHERE uri = ? ORDER BY principal ASC')
+    .all(uri)
+    .map((row) => ({
+      uri: String(row['uri']),
+      principal: String(row['principal']),
+      level: Number(row['level']),
+      effect: String(row['effect']),
+    }));
+}
+
 function permissionsOf(nodeUri: string): readonly PermissionRow[] {
   return db
     .prepare(
@@ -586,7 +598,7 @@ describe('事务与反查表', () => {
 
     await service.setAcl(Uri.parse(ROOT), { mode: 'inherit', entries: [allow('group:eng', 1)] }, 'user:alice');
 
-    expect(permissions.entriesOf(ROOT)).toEqual([
+    expect(aclEntriesOf(ROOT)).toEqual([
       { uri: ROOT, principal: 'group:eng', level: 1, effect: 'allow' },
     ]);
     expect(permissionsOf(ROOT)).toEqual([
@@ -996,7 +1008,7 @@ describe('撤权回滚：磁盘已写、索引写失败', () => {
 
     const diskBefore = await aclFile.read(Uri.parse(ROOT));
     const rowsBefore = permissionsOf(ROOT);
-    const entryRowsBefore = permissions.entriesOf(ROOT);
+    const entryRowsBefore = aclEntriesOf(ROOT);
     expect(diskBefore?.entries).toEqual([
       { principal: 'group:eng', level: 'read', effect: 'allow' },
     ]);
@@ -1023,6 +1035,6 @@ describe('撤权回滚：磁盘已写、索引写失败', () => {
     expect(writes.written.at(-1)).toEqual(diskBefore);
     expect(await aclFile.read(Uri.parse(ROOT))).toEqual(diskBefore);
     expect(permissionsOf(ROOT)).toEqual(rowsBefore);
-    expect(permissions.entriesOf(ROOT)).toEqual(entryRowsBefore);
+    expect(aclEntriesOf(ROOT)).toEqual(entryRowsBefore);
   });
 });

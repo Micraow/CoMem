@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
-import { NodeRepository, nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
+import { nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -37,7 +37,6 @@ const CASE_DIR = `${ROOT}/case`;
 let dataDir: string;
 let db: DatabaseSync;
 let logger: Logger;
-let repository: NodeRepository;
 let service: ObservabilityService;
 
 interface MatrixEntry {
@@ -132,7 +131,6 @@ beforeEach(async () => {
   logger = createLogger();
   db = openDatabase(':memory:');
   runMigrations(db);
-  repository = new NodeRepository({ db, logger });
   service = new ObservabilityService({
     requestLog: new RequestLogRepository({ db, logger }),
     db,
@@ -221,6 +219,12 @@ describe('ObservabilityService.health() 与仓储谓词', () => {
     expect(health.indexNodes).toBe(1);
     expect(health.pendingReview).toBe(1);
     expect(health.oldestPendingAgeSeconds).toBe(86_400);
-    expect(repository.count()).toBe(1);
+    expect(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS total FROM node WHERE NOT (kind = 'directory' AND level = 'L1')",
+        )
+        .get(),
+    ).toMatchObject({ total: 1 });
   });
 });

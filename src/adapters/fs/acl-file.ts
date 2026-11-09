@@ -27,7 +27,7 @@
 
 import type { Dirent } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
-import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { parsePrincipal } from '../../domain/acl.js';
@@ -101,8 +101,7 @@ const ENTRY_KEYS = ['principal', 'level', 'effect'] as const;
  * 本适配器的 errno → `ComemError` 映射（架构文档 §19）。公共表与机制在
  * `error-map.ts`，这里只声明覆盖项与本层自己的文案。
  *
- * **`ENOTDIR` 覆盖成 `NOT_FOUND`**：这里面对的是「没有这个 ACL 文件」。`read` /
- * `exists` / `remove` 在多处直接把 `ENOTDIR` 当成「没有 ACL 文件」吞掉（目录路径段
+ * **`ENOTDIR` 覆盖成 `NOT_FOUND`**：这里面对的是「没有这个 ACL 文件」。`read` 直接把 `ENOTDIR` 当成「没有 ACL 文件」吞掉（目录路径段
  * 其实是个文件），映射成 `INVALID_ARGUMENT` 会把一次「没有 ACL」变成异常，改变
  * 继承语义。`content-store` 对 `ENOTDIR` 用 `INVALID_ARGUMENT`（路径段是文件），
  * 那是有意保留的差异，见 `tests/integration/fs/error-map-consistency.test.ts`。
@@ -331,40 +330,6 @@ export class AclFileStore {
       entries: acl.entries.length,
       bytes: content.length,
     });
-  }
-
-  /** 只删 ACL 文件，不动目录里的内容。不存在不算错误（`rm -f` 语义）。 */
-  async remove(directoryUri: Uri): Promise<void> {
-    const absolute = this.#path(directoryUri);
-    try {
-      await rm(absolute, { force: true });
-    } catch (error) {
-      const fsCode = fsErrorCode(error);
-      if (fsCode === 'ENOENT' || fsCode === 'ENOTDIR') {
-        return;
-      }
-      throw mapFsError(error, directoryUri);
-    }
-    this.#logger.debug('删除 ACL 文件', { uri: directoryUri.toString() });
-  }
-
-  /**
-   * 目录下是否有 ACL 文件。
-   *
-   * 用 `stat().isFile()` 而不是「能 stat 到就算」：一个名叫 `.acl.json` 的**目录**
-   * 不是 ACL 文件，把它当成已存在会让根预置跳过写盘。
-   */
-  async exists(directoryUri: Uri): Promise<boolean> {
-    const absolute = this.#path(directoryUri);
-    try {
-      return (await stat(absolute)).isFile();
-    } catch (error) {
-      const fsCode = fsErrorCode(error);
-      if (fsCode === 'ENOENT' || fsCode === 'ENOTDIR') {
-        return false;
-      }
-      throw mapFsError(error, directoryUri);
-    }
   }
 
   /**

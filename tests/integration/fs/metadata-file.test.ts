@@ -286,34 +286,6 @@ describe('writeSummary', () => {
   });
 });
 
-describe('removeSummary', () => {
-  it('只删摘要文件，不动目录里的内容', async () => {
-    await store.writeSummary(DIRECTORY, 'L0', 'L1');
-    await writeFile(join(directoryPath(), 'note.md'), '内容\n', 'utf8');
-
-    await store.removeSummary(DIRECTORY);
-
-    expect(await readdir(directoryPath())).toEqual(['note.md']);
-    await expect(store.readSummary(DIRECTORY)).resolves.toEqual({
-      abstract: '',
-      overview: '',
-      complete: false,
-      generation: null,
-    });
-  });
-
-  it('摘要不存在时是空操作', async () => {
-    await expect(store.removeSummary(DIRECTORY)).resolves.toBeUndefined();
-  });
-
-  it('可以重复调用', async () => {
-    await store.writeSummary(DIRECTORY, 'L0', 'L1');
-    await store.removeSummary(DIRECTORY);
-
-    await expect(store.removeSummary(DIRECTORY)).resolves.toBeUndefined();
-  });
-});
-
 /** 直接把一段文本写进目标目录的 `.meta.json`，模拟「磁盘上的文件被改坏」。 */
 async function writeRawMeta(target: Uri, content: string): Promise<void> {
   const directory = directoryPath(target);

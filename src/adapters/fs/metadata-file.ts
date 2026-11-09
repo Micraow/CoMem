@@ -414,24 +414,6 @@ export class MetadataFileStore {
   }
 
   /**
-   * 只删摘要文件，不动目录里的内容。
-   *
-   * 文件不存在不算错误（`rm -f` 语义）：摘要失效之后重算之前，调用方不需要先判断
-   * 它存不存在。
-   */
-  async removeSummary(directoryUri: Uri): Promise<void> {
-    const directory = toDiskPath(this.#dataDir, directoryUri);
-    for (const name of [ABSTRACT_FILE_NAME, OVERVIEW_FILE_NAME]) {
-      try {
-        await rm(join(directory, name), { force: true });
-      } catch (error) {
-        throw mapFsError(error, directoryUri);
-      }
-    }
-    this.#logger.debug('删除目录摘要', { uri: directoryUri.toString() });
-  }
-
-  /**
    * 读会话元数据（`sessions/sess_NNN/.meta.json`）。不存在返回 `null`。
    *
    * 与 `readSummary` 同一套语义：**没有文件是正常状态**，不是错误。会话是否存在的

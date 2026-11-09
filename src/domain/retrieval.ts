@@ -452,20 +452,6 @@ export function validateSearchQuery(query: SearchQuery): void {
   validateMetadataFilter(query);
 }
 
-/** 校验 `grep` 查询；正则本身也要能编译。 */
-export function validateGrepQuery(query: GrepQuery): void {
-  validateQueryEnvelope(query);
-  validateText(query.pattern, 'pattern');
-  if (!Number.isInteger(query.contextLines) || query.contextLines < 0) {
-    throw invalidArgument('contextLines 必须是非负整数。', { contextLines: query.contextLines });
-  }
-  try {
-    new RegExp(query.pattern);
-  } catch {
-    throw invalidArgument('pattern 不是合法的正则表达式。', { pattern: query.pattern });
-  }
-}
-
 /**
  * 把模型产出的条目收敛成合法 `TypedQuery`（§8.4 的三条约束）。
  *

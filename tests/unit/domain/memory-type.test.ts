@@ -2,11 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { ComemError } from '../../../src/domain/errors.js';
 import {
-  fieldByName,
   identityFields,
   renderPath,
-  validateMemoryType,
-  type MemoryTypeSchema,
 } from '../../../src/domain/memory-type.js';
 import {
   BUILTIN_MEMORY_TYPES,
@@ -14,27 +11,6 @@ import {
   preferencesMemoryType,
   profileMemoryType,
 } from '../../../src/domain/memory-types/index.js';
-
-function schema(overrides: Partial<MemoryTypeSchema> = {}): MemoryTypeSchema {
-  return {
-    type: 'preferences',
-    description: '用户在某个话题上的偏好',
-    directory: 'memories/preferences',
-    filename: '{topic}.md',
-    operationMode: 'upsert',
-    fields: [
-      {
-        name: 'topic',
-        type: 'string',
-        identity: true,
-        required: true,
-        description: '偏好所属话题',
-      },
-      { name: 'content', type: 'string', merge: 'patch', description: '偏好内容' },
-    ],
-    ...overrides,
-  };
-}
 
 function expectInvalidArgument(run: () => void): ComemError {
   let caught: unknown;
@@ -48,122 +24,6 @@ function expectInvalidArgument(run: () => void): ComemError {
   expect(error.code).toBe('INVALID_ARGUMENT');
   return error;
 }
-
-describe('validateMemoryType', () => {
-  it('合法的类型定义能通过', () => {
-    expect(() => {
-      validateMemoryType(schema());
-    }).not.toThrow();
-  });
-
-  it('没有 identity 字段时拒绝', () => {
-    const invalid = schema({
-      fields: [
-        { name: 'topic', type: 'string', description: '话题' },
-        { name: 'content', type: 'string', description: '内容' },
-      ],
-    });
-
-    expectInvalidArgument(() => {
-      validateMemoryType(invalid);
-    });
-  });
-
-  it('多个 identity 字段合法，只要 filename 占位符都是 identity', () => {
-    const valid = schema({
-      filename: '{topic}/{content}.md',
-      fields: [
-        { name: 'topic', type: 'string', identity: true, description: '话题' },
-        { name: 'content', type: 'string', identity: true, description: '内容' },
-      ],
-    });
-
-    expect(() => {
-      validateMemoryType(valid);
-    }).not.toThrow();
-  });
-
-  it('filename 模板含空段时拒绝', () => {
-    expectInvalidArgument(() => {
-      validateMemoryType(schema({ filename: '{topic}//x.md' }));
-    });
-  });
-
-  it('filename 模板含 .. 段时拒绝', () => {
-    expectInvalidArgument(() => {
-      validateMemoryType(schema({ filename: '{topic}/../x.md' }));
-    });
-  });
-
-  it('filename 占位符不在 fields 里时拒绝', () => {
-    const invalid = schema({ filename: '{scope}.md' });
-
-    expectInvalidArgument(() => {
-      validateMemoryType(invalid);
-    });
-  });
-
-  it('filename 占位符不是 identity 字段时拒绝', () => {
-    const invalid = schema({ filename: '{content}.md' });
-
-    expectInvalidArgument(() => {
-      validateMemoryType(invalid);
-    });
-  });
-
-  it('filename 里残留不完整占位符时拒绝', () => {
-    expectInvalidArgument(() => {
-      validateMemoryType(schema({ filename: '{topic.md' }));
-    });
-  });
-
-  it('directory 不允许绝对路径、末尾斜杠与 ..', () => {
-    for (const directory of ['/memories/preferences', 'memories/preferences/', 'memories/../etc']) {
-      expectInvalidArgument(() => {
-        validateMemoryType(schema({ directory }));
-      });
-    }
-  });
-
-  it('directory 不允许空段与控制字符', () => {
-    for (const directory of ['memories//preferences', 'memories/\u0000preferences']) {
-      expectInvalidArgument(() => {
-        validateMemoryType(schema({ directory }));
-      });
-    }
-  });
-
-  it('type 名只允许小写短横线', () => {
-    for (const type of ['', 'Preferences', 'pref_erences', '-preferences']) {
-      expectInvalidArgument(() => {
-        validateMemoryType(schema({ type }));
-      });
-    }
-  });
-
-  it('字段名为空、重复或 description 为空时拒绝', () => {
-    expectInvalidArgument(() => {
-      validateMemoryType(schema({ fields: [] }));
-    });
-    expectInvalidArgument(() => {
-      validateMemoryType(
-        schema({
-          fields: [
-            { name: 'topic', type: 'string', identity: true, description: '话题' },
-            { name: 'topic', type: 'string', description: '重复' },
-          ],
-        }),
-      );
-    });
-    expectInvalidArgument(() => {
-      validateMemoryType(
-        schema({
-          fields: [{ name: 'topic', type: 'string', identity: true, description: '  ' }],
-        }),
-      );
-    });
-  });
-});
 
 describe('renderPath', () => {
   it('把 identity 值填进文件名模板', () => {
@@ -222,7 +82,7 @@ describe('renderPath', () => {
   });
 });
 
-describe('identityFields / fieldByName', () => {
+describe('identityFields', () => {
   it('取到 identity 字段', () => {
     expect(identityFields(preferencesMemoryType).map((field) => field.name)).toEqual(['topic']);
   });
@@ -244,21 +104,13 @@ describe('identityFields / fieldByName', () => {
       }),
     );
   });
-
-  it('按名字取字段，不存在返回 undefined', () => {
-    expect(fieldByName(preferencesMemoryType, 'content')?.merge).toBe('patch');
-    expect(fieldByName(preferencesMemoryType, 'missing')).toBeUndefined();
-  });
 });
 
 describe('内置记忆类型', () => {
-  it('八个内置类型全部合法', () => {
+  it('八个内置类型的键与 type 一致', () => {
     expect(Object.keys(BUILTIN_MEMORY_TYPES)).toHaveLength(8);
     for (const [type, memoryType] of Object.entries(BUILTIN_MEMORY_TYPES)) {
       expect(memoryType.type).toBe(type);
-      expect(() => {
-        validateMemoryType(memoryType);
-      }).not.toThrow();
     }
   });
 

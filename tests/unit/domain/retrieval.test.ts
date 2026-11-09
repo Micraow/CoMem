@@ -5,10 +5,8 @@ import {
   canonicalInstant,
   reciprocalRankFusion,
   validateGlobQuery,
-  validateGrepQuery,
   validateSearchQuery,
   type GlobQuery,
-  type GrepQuery,
   type SearchHit,
   type SearchQuery,
 } from '../../../src/domain/retrieval.js';
@@ -34,14 +32,6 @@ const SEARCH: SearchQuery = {
   levels: ['L0', 'L1'],
   limit: 10,
   scoreThreshold: 0.5,
-};
-
-const GREP: GrepQuery = {
-  pattern: 'strict',
-  scopes: ['comem://user/alice'],
-  principals: ['user:alice'],
-  limit: 10,
-  contextLines: 2,
 };
 
 const GLOB: GlobQuery = {
@@ -151,46 +141,6 @@ describe('canonicalInstant', () => {
   it('非法输入抛 INVALID_ARGUMENT', () => {
     expectInvalidArgument(() => {
       canonicalInstant('2026-13-40', 'updatedAfter');
-    });
-  });
-});
-
-describe('validateGrepQuery', () => {
-  it('合法查询通过', () => {
-    expect(() => {
-      validateGrepQuery(GREP);
-    }).not.toThrow();
-  });
-
-  it('pattern 不能为空', () => {
-    expectInvalidArgument(() => {
-      validateGrepQuery({ ...GREP, pattern: '' });
-    });
-  });
-
-  it('pattern 必须能编译成正则', () => {
-    expectInvalidArgument(() => {
-      validateGrepQuery({ ...GREP, pattern: '(' });
-    });
-  });
-
-  it('contextLines 必须是非负整数', () => {
-    for (const contextLines of [-1, 1.5, Number.NaN]) {
-      expectInvalidArgument(() => {
-        validateGrepQuery({ ...GREP, contextLines });
-      });
-    }
-  });
-
-  it('共享的 scope / principal / limit 校验同样生效', () => {
-    expectInvalidArgument(() => {
-      validateGrepQuery({ ...GREP, limit: 0 });
-    });
-    expectInvalidArgument(() => {
-      validateGrepQuery({ ...GREP, scopes: [] });
-    });
-    expectInvalidArgument(() => {
-      validateGrepQuery({ ...GREP, principals: [] });
     });
   });
 });

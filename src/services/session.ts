@@ -4,7 +4,7 @@
  *
  * 这一层是**阶段一**：分配归档序号 → 写归档消息 → 写 `preparing` 元数据 → 重写
  * live 消息 → 元数据置 `ready` → 建任务。阶段二的四个步骤在 `services/commit/`，
- * 它们通过 `readArchiveMeta` / `writeArchiveMeta` 与 `TaskService` 接入。
+ * 归档元数据通过 `readArchiveMeta` 读回，写入在 `#meta.writeArchive`，由 `TaskService` 接入。
  *
  * ## `.meta.json` 的读写不在这里
  *
@@ -455,11 +455,6 @@ export class SessionService {
   /** 阶段二的状态查询（`.meta.json` 的 `stepsDone`）。归档不存在返回 `null`。 */
   async readArchiveMeta(archiveUri: Uri): Promise<ArchiveMeta | null> {
     return this.#meta.readArchive(archiveUri);
-  }
-
-  /** 写归档元数据（提交管线用）。 */
-  async writeArchiveMeta(archiveUri: Uri, meta: ArchiveMeta): Promise<void> {
-    return this.#meta.writeArchive(archiveUri, meta);
   }
 
   /** 自动提交判定（§10.2.1）。纯判定，不提交。 */

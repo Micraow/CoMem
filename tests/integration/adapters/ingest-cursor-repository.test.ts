@@ -38,8 +38,6 @@ describe('IngestCursorRepository', () => {
     repository.upsert(ROW);
     expect(repository.get('claude-code', 'native-1')).toEqual(ROW);
     expect(repository.get('codex', 'native-1')).toBeNull();
-    expect(repository.count()).toBe(1);
-    expect(repository.count('claude-code')).toBe(1);
   });
 
   it('主键冲突时更新游标与会话 URI，不产生第二行', () => {
@@ -53,7 +51,6 @@ describe('IngestCursorRepository', () => {
       updatedAt: '2026-11-08T01:00:00.000Z',
     });
 
-    expect(repository.count()).toBe(1);
     expect(repository.get('claude-code', 'native-1')).toEqual({
       ...ROW,
       sessionUri: 'comem://user/alice/sessions/sess_2',
@@ -63,20 +60,16 @@ describe('IngestCursorRepository', () => {
     });
   });
 
-  it('同一原生 ID 在不同宿主是两行', () => {
+  it('同一原生 ID 在不同宿主互不覆盖', () => {
     const repository = createRepository();
     repository.upsert(ROW);
-    repository.upsert({ ...ROW, harness: 'codex' });
-    expect(repository.count()).toBe(2);
-    expect(repository.list('codex').map((row) => row.harness)).toEqual(['codex']);
-    expect(repository.list()).toHaveLength(2);
-  });
+    repository.upsert({ ...ROW, harness: 'codex', sessionUri: 'comem://user/alice/sessions/sess_2' });
 
-  it('delete 返回是否真的删到了行', () => {
-    const repository = createRepository();
-    repository.upsert(ROW);
-    expect(repository.delete('claude-code', 'native-1')).toBe(true);
-    expect(repository.delete('claude-code', 'native-1')).toBe(false);
-    expect(repository.get('claude-code', 'native-1')).toBeNull();
+    expect(repository.get('claude-code', 'native-1')).toEqual(ROW);
+    expect(repository.get('codex', 'native-1')).toEqual({
+      ...ROW,
+      harness: 'codex',
+      sessionUri: 'comem://user/alice/sessions/sess_2',
+    });
   });
 });

@@ -164,12 +164,11 @@ export class TaskRepository {
    * 认领（架构文档 §10.4）。
    *
    * 一条 UPDATE，条件写进 `WHERE`：`pending` 随时可领，`running` 只在租约过期后
-   * 可领。`lease_until IS NULL` 的 `running` 行按已过期处理——与
-   * `domain/task.ts` 的 `isLeaseExpired` 一致：认领一定会写租约，出现这种行说明
-   * 数据被改坏了，让它能被捞回来而不是永远卡在 `running`。
+   * 可领。`lease_until IS NULL` 的 `running` 行按已过期处理：认领一定会写租约，
+   * 出现这种行说明数据被改坏了，让它能被捞回来而不是永远卡在 `running`。
    *
    * 认领不递增 `attempts`：递增在「这次执行结束」时（失败回队列、或恢复扫描重置
-   * 僵尸任务），一次失败只算一次（`domain/task.ts` 的 `claim` 注释）。
+   * 僵尸任务），一次失败只算一次。
    */
   tryClaim(id: string, now: Date, leaseSeconds: number): boolean {
     const nowIso = now.toISOString();

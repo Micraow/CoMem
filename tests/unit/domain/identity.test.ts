@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import { RESERVED_NAMES } from '../../../src/adapters/fs/path.js';
-import { groupIdOf, groupPrincipal, userIdOf, userPrincipal } from '../../../src/domain/acl.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import {
   assertValidGroupId,
@@ -85,30 +84,5 @@ describe('buildIdentity', () => {
     });
     // 同一份成员关系重复展开必须得到同一个数组（可重放）。
     expect(buildIdentity('alice', ['eng', 'ops']).principals).toEqual(identity.principals);
-  });
-});
-
-describe('groupPrincipal / userPrincipal 往返', () => {
-  it('格式与解析互逆', () => {
-    expect(groupPrincipal('eng')).toBe('group:eng');
-    expect(userPrincipal('alice')).toBe('user:alice');
-    expect(groupIdOf(groupPrincipal('eng'))).toBe('eng');
-    expect(userIdOf(userPrincipal('alice'))).toBe('alice');
-  });
-
-  it('kind 不匹配返回 null', () => {
-    expect(groupIdOf('user:alice')).toBeNull();
-    expect(userIdOf('group:eng')).toBeNull();
-  });
-
-  it('畸形主体返回 null 而不是抛错', () => {
-    for (const principal of ['bad', '', 'group:', 'group:*', 'group:a:b', 'admin:alice']) {
-      expect(groupIdOf(principal)).toBeNull();
-      expect(userIdOf(principal)).toBeNull();
-    }
-  });
-
-  it('user:* 的用户 ID 是通配符本身', () => {
-    expect(userIdOf('user:*')).toBe('*');
   });
 });

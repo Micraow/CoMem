@@ -87,23 +87,6 @@ describe('create / get', () => {
   });
 });
 
-describe('getMany', () => {
-  it('空数组返回空结果（不生成 IN ()）', () => {
-    expect(repository.getMany([])).toEqual([]);
-  });
-
-  it('返回命中的子集，按 id 升序', () => {
-    repository.create(input({ id: 'carol' }), NOW);
-    repository.create(input({ id: 'alice' }), NOW);
-    repository.create(input({ id: 'bob' }), NOW);
-
-    expect(repository.getMany(['carol', 'alice']).map((user) => user.id)).toEqual([
-      'alice',
-      'carol',
-    ]);
-  });
-});
-
 describe('list', () => {
   beforeEach(() => {
     for (const id of ['alice', 'bob', 'carol']) {

@@ -7,7 +7,7 @@
  * 否则某个仓储漏转义 `*` 就会在「带星号的目录名」上产生越权候选。
  */
 
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 
 import { ComemError } from '../../domain/errors.js';
 import type { Level } from '../../domain/level.js';
@@ -94,8 +94,8 @@ const LAST_USED_AT_SQL = 'MAX(updated_at, COALESCE(last_accessed_at, updated_at)
  *
  * 一个目录在 `node` 里最多两行：L0 摘要行（节点自身）与 L1 概览行
  * （`0004_node_level_rows.sql`）。L1 是**附加的检索行**——它只携带概览正文，不携带
- * 节点身份。按 URI 读一个节点（`get` / `children` / `descendants` / `listByScope` /
- * `count` / `stat` / 热度 / TTL）都必须带上这条谓词，否则一个目录会变成两条节点：
+ * 节点身份。按 URI 读一个节点（`get` / `descendants` / 热度 / TTL）都必须带上这条
+ * 谓词，否则一个目录会变成两条节点：
  * `tree` 里出现重复、计数翻倍、`sweepExpired` 把同一个目录返回两次。
  *
  * 条件是「目录 + L1」而不是「任何 L1」：附加行的定义就是「目录的概览行」（由
@@ -188,24 +188,7 @@ export class NodeRepository {
     return row === undefined ? null : toNodeRow(row);
   }
 
-  /**
-   * 直接子节点，按 name 升序。
-   *
-   * 同一父目录下的子节点共享 `parentUri + '/'` 前缀，所以按完整 URI 升序等价于按
-   * 最后一段的码点升序，不需要 SQLite 没有的 `basename()`。
-   */
-  children(parentUri: string): readonly NodeRow[] {
-    return this.#db
-      .prepare(
-        `SELECT ${NODE_COLUMNS} FROM node
-          WHERE parent_uri = ? AND ${nodeSelfRowSql()}
-          ORDER BY uri ASC`,
-      )
-      .all(parentUri)
-      .map(toNodeRow);
-  }
 
-  /** 子树全部节点（不含自身），按 uri 升序。 */
   descendants(uri: string): readonly NodeRow[] {
     return this.#db
       .prepare(
@@ -262,58 +245,6 @@ export class NodeRepository {
       }
     });
     this.#logger.debug('节点索引写入', { count: rows.length });
-  }
-
-  /**
-   * 删除自身与子树，返回删除的行数。
-   *
-   * 只删 `node`。`node_fts` 由 `SqliteFtsIndex.deleteByUri` 负责：两张表属于同一个
-   * 写事务的调用方（索引重建、`forget`），拆开是为了让「删索引」这件事只有一个入口。
-   */
-  deleteTree(uri: string): number {
-    const deleted = Number(
-      withWriteTransaction(this.#db, () =>
-        this.#db
-          .prepare(`DELETE FROM node WHERE uri = ? OR uri GLOB ?`)
-          .run(uri, globPrefixPattern(uri))
-          .changes,
-      ),
-    );
-    this.#logger.debug('节点索引子树删除', { uri, deleted });
-    return deleted;
-  }
-
-  /**
-   * 路径前缀匹配：自身或子树，按 uri 升序。
-   *
-   * `limit` 省略时返回全部。负数或非整数不做特殊处理——它来自已校验的配置，
-   * 这里再加一层校验只会把「配置错误」变成「静默返回空」。
-   */
-  listByScope(prefix: string, options: { readonly limit?: number } = {}): readonly NodeRow[] {
-    const params: SQLInputValue[] = [prefix, globPrefixPattern(prefix)];
-    const limit = options.limit;
-    const sql =
-      limit === undefined
-        ? `SELECT ${NODE_COLUMNS} FROM node
-            WHERE (uri = ? OR uri GLOB ?) AND ${nodeSelfRowSql()}
-            ORDER BY uri ASC`
-        : `SELECT ${NODE_COLUMNS} FROM node
-            WHERE (uri = ? OR uri GLOB ?) AND ${nodeSelfRowSql()}
-            ORDER BY uri ASC LIMIT ?`;
-    if (limit !== undefined) {
-      params.push(limit);
-    }
-    return this.#db
-      .prepare(sql)
-      .all(...params)
-      .map(toNodeRow);
-  }
-
-  count(): number {
-    const row = this.#db
-      .prepare(`SELECT COUNT(*) AS total FROM node WHERE ${nodeSelfRowSql()}`)
-      .get();
-    return Number(row?.['total'] ?? 0);
   }
 
   /**

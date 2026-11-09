@@ -290,36 +290,6 @@ describe('原子写', () => {
   });
 });
 
-describe('remove / exists', () => {
-  it('只删 ACL 文件，不动目录内容', async () => {
-    await store.write(DIRECTORY, SAMPLE);
-    await writeFile(join(directoryPath(), 'note.md'), '内容\n', 'utf8');
-
-    await store.remove(DIRECTORY);
-
-    await expect(readdir(directoryPath())).resolves.toEqual(['note.md']);
-    await expect(store.read(DIRECTORY)).resolves.toBeNull();
-  });
-
-  it('不存在时是空操作，可以重复调用', async () => {
-    await expect(store.remove(DIRECTORY)).resolves.toBeUndefined();
-    await expect(store.remove(DIRECTORY)).resolves.toBeUndefined();
-  });
-
-  it('exists 判断文件是否存在', async () => {
-    await expect(store.exists(DIRECTORY)).resolves.toBe(false);
-    await store.write(DIRECTORY, SAMPLE);
-    await expect(store.exists(DIRECTORY)).resolves.toBe(true);
-    await store.remove(DIRECTORY);
-    await expect(store.exists(DIRECTORY)).resolves.toBe(false);
-  });
-
-  it('名叫 .acl.json 的目录不算 ACL 文件', async () => {
-    await mkdir(aclPath(), { recursive: true });
-    await expect(store.exists(DIRECTORY)).resolves.toBe(false);
-  });
-});
-
 describe('scanDirectories', () => {
   it('只返回带 .acl.json 的目录，按 URI 升序；不进入 _meta', async () => {
     await store.write(Uri.parse('comem://user/alice/memories'), SAMPLE);

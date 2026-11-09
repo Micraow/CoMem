@@ -24,8 +24,6 @@ import type { FastifyInstance, InjectOptions } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createHttpServer } from '../../../src/api/http/server.js';
-import type { RequestLogRow } from '../../../src/adapters/sqlite/request-log-repository.js';
-import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import { Uri } from '../../../src/domain/uri.js';
 
@@ -41,7 +39,6 @@ const REQUEST_LOG_TIMEOUT_MS = 2000;
 
 let dataDir: string;
 let container: Container;
-let requestLog: RequestLogRepository;
 let app: FastifyInstance;
 
 beforeEach(async () => {
@@ -64,7 +61,6 @@ beforeEach(async () => {
     },
   });
   await container.services.acl.ensureRootPreset(Uri.parse(ROOT));
-  requestLog = new RequestLogRepository({ db: container.db, logger: container.logger });
   app = await createHttpServer({
     config: container.config,
     logger: container.logger,
@@ -89,15 +85,31 @@ function inject(options: InjectOptions & { readonly requestId: string }) {
   return app.inject({ ...rest, headers: { ...rest.headers, 'x-request-id': requestId } });
 }
 
+interface RequestLogProbe {
+  readonly requestId: string;
+  readonly path: string;
+  readonly durationMs: number;
+  readonly phases: string | null;
+}
+
 /** 等 `request_log` 里出现这条请求；没出现就是接线断了，让断言失败而不是等超时。 */
-async function waitForRow(requestId: string): Promise<RequestLogRow> {
+async function waitForRow(requestId: string): Promise<RequestLogProbe> {
   const deadline = Date.now() + REQUEST_LOG_TIMEOUT_MS;
   for (;;) {
-    const row = requestLog
-      .list({ limit: 1000 })
-      .find((candidate) => candidate.requestId === requestId);
+    const row = container.db
+      .prepare(
+        `SELECT request_id, path, duration_ms, phases FROM request_log
+          WHERE request_id = ?
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .get(requestId);
     if (row !== undefined) {
-      return row;
+      return {
+        requestId: String(row['request_id']),
+        path: String(row['path']),
+        durationMs: Number(row['duration_ms']),
+        phases: typeof row['phases'] === 'string' ? row['phases'] : null,
+      };
     }
     if (Date.now() > deadline) {
       throw new Error(`request_log 里没有 request_id=${requestId} 的行。`);
@@ -107,11 +119,15 @@ async function waitForRow(requestId: string): Promise<RequestLogRow> {
 }
 
 /** 非 NULL 的阶段对象。NULL 说明请求作用域或落库那条链路断了。 */
-function phasesOf(row: RequestLogRow): Record<string, number | null> {
+function phasesOf(row: RequestLogProbe): Record<string, number | null> {
   if (row.phases === null) {
     throw new Error(`请求 ${row.requestId}（${row.path}）的 phases 是 NULL。`);
   }
-  return row.phases;
+  const parsed: unknown = JSON.parse(row.phases);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`请求 ${row.requestId}（${row.path}）的 phases 不是对象。`);
+  }
+  return parsed as Record<string, number | null>;
 }
 
 function sumOf(phases: Readonly<Record<string, number | null>>): number {

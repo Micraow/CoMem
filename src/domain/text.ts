@@ -20,28 +20,15 @@
  * CJK 码点区间（架构文档 §8.1）：假名 `\u3040-\u30ff`、扩展 A `\u3400-\u4dbf`、
  * 基本区 `\u4e00-\u9fff`、兼容区 `\uf900-\ufaff`。
  *
- * 只维护这一份字符串，两个正则都从这里构造：分词与判字符必须用同一组区间，
- * 否则「切了但不认」这类不一致会以「部分中文查不到」的形式出现。
+ * 只维护这一份字符串，分词正则从这里构造，避免区间在多处各写一遍后漂移。
  */
 const CJK_CODE_POINTS = '\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff';
-
-/** 单个 CJK 字符。用 `^...$` 锚定，多字符与补充平面字符都返回 `false`。 */
-const CJK_CHAR = new RegExp(`^[${CJK_CODE_POINTS}]$`);
 
 /** 全局匹配版本，供 `segmentCjk` 一次扫描替换。 */
 const CJK_GLOBAL = new RegExp(`[${CJK_CODE_POINTS}]`, 'g');
 
 /** 连续空白折叠成单个空格。`segmentCjk` 的第二步。 */
 const WHITESPACE_RUN = /\s+/g;
-
-/**
- * 是否是 CJK 字符（含扩展 A、兼容区、假名、注音）。
- *
- * 只接受单个字符：多字符输入返回 `false`，调用方不需要额外判长度。
- */
-export function isCjkChar(char: string): boolean {
-  return CJK_CHAR.test(char);
-}
 
 /**
  * CJK 单字切分：每个 CJK 字符两侧补空格，再合并空白。非 CJK 文本原样保留。
@@ -61,13 +48,3 @@ export function segmentCjk(text: string): string {
   return text.replace(CJK_GLOBAL, (char) => ` ${char} `).replace(WHITESPACE_RUN, ' ').trim();
 }
 
-/**
- * 把文本切成 token 序列，供测试断言。
- *
- * 这是 `segmentCjk` 的逆运算：先切分，再按单空格拆开。空串（以及纯空白）返回空数组，
- * 不返回 `['']`——调用方大多直接 `for...of` 使用，空 token 没有意义。
- */
-export function tokenize(text: string): readonly string[] {
-  const segmented = segmentCjk(text);
-  return segmented === '' ? [] : segmented.split(' ');
-}

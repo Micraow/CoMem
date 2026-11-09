@@ -136,7 +136,7 @@ export class EmbeddingRepository {
    * 让语义检索永久返回空且不报错——使用者只会看到「记忆里明明有这条，就是搜不到」。
    *
    * `model` 也一起写进元数据：它是「当前库里的向量属于哪个向量空间」的标注，换模型
-   * 后旧行靠 `model = ?` 过滤，清理是 `deleteByModel` 的显式操作。
+   * 后旧行靠 `model = ?` 过滤；清理靠重建向量表。
    */
   ensureSchema(dimension: number, model: string): void {
     const stored = this.storedDimension();
@@ -238,23 +238,6 @@ export class EmbeddingRepository {
     return deleted;
   }
 
-  /** 按模型过滤；换模型后清空用。返回删除行数。 */
-  deleteByModel(model: string): number {
-    const deleted = withWriteTransaction(this.#db, () =>
-      Number(this.#db.prepare('DELETE FROM node_embedding WHERE model = ?').run(model).changes),
-    );
-    this.#logger.debug('嵌入按模型删除', { model, deleted });
-    return deleted;
-  }
-
-  count(model?: string): number {
-    const row =
-      model === undefined
-        ? this.#db.prepare('SELECT COUNT(*) AS total FROM node_embedding').get()
-        : this.#db.prepare('SELECT COUNT(*) AS total FROM node_embedding WHERE model = ?').get(model);
-    return Number(row?.['total'] ?? 0);
-  }
-
   /**
    * 回填用：返回还没有嵌入的 URI（按 URI 排序保证可重放）。
    *
@@ -263,7 +246,7 @@ export class EmbeddingRepository {
    * 按 URI 排序 + 严格大于游标，重放几次都只会拿到同一批。
    *
    * 「还没嵌入」按 `model` 判定：换模型后旧向量还在表里，但它们对这个模型而言是
-   * 缺失的，回填会全部重算。要清空用 `deleteByModel`，两件事分开做。
+   * 缺失的，回填会全部重算。清空靠重建向量表，两件事分开做。
    *
    * `NOT EXISTS` 相关子查询在 `vec0` 上成立（走主键点查，不是全表扫），所以不需要
    * 「把已嵌入 URI 读进内存 Set 再差集」。代价实测：1 万 `node` 行 × 1 万向量行

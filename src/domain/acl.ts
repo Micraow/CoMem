@@ -146,36 +146,6 @@ export function assertOwnerUserId(userId: string): void {
 }
 
 /**
- * 从 principal 里取出组 ID；不是组返回 null。
- *
- * 复用 `parsePrincipal` 而不是自己比前缀：`group:*`（§12.1 明确拒绝）、
- * `group:`、`group:a:b` 这些畸形串在解析层就被挡掉，这里不必各写一份判断。
- */
-export function groupIdOf(principal: string): string | null {
-  try {
-    const parsed = parsePrincipal(principal);
-    return parsed.kind === 'group' ? parsed.id : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 从 principal 里取出用户 ID；不是 user 返回 null。
- *
- * `user:*` 返回 `'*'`：它是合法的 user 主体，但不是真实用户。调用方拿它查用户
- * 目录会得到 null，正是通配符该有的行为。
- */
-export function userIdOf(principal: string): string | null {
-  try {
-    const parsed = parsePrincipal(principal);
-    return parsed.kind === 'user' ? parsed.id : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * `granted` 是否覆盖 `required`（§12.1「高位包含低位」）。
  *
  * 位运算比大小表意更直接：7 & 3 === 3，7 & 1 === 1，3 & 1 === 1。
@@ -248,24 +218,6 @@ export function effectiveAcl(
   return effective;
 }
 
-/**
- * 主体在目标节点上是否满足所需级别（§12.2 的 `check`）。
- *
- * 有效集合里只要有一个级别覆盖 `required` 就算通过——manage 自动覆盖 read/write。
- */
-export function checkAction(
-  chain: readonly AclNode[],
-  subject: string,
-  required: AclLevel,
-): boolean {
-  for (const level of effectiveAcl(chain, subject)) {
-    if (levelSatisfies(level, required)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 export interface RootPresetOptions {
   /**
    * 组的所有者。为空时组根只有 `group:{gid} = write`——这个组还没有人管。
@@ -334,38 +286,3 @@ export function rootPreset(uri: Uri, options: RootPresetOptions = {}): RootPrese
   return { entries, ownerMissing: ownerUserId === null || ownerUserId === '' };
 }
 
-/** 只有 manage 能改 ACL（§12.2 第 3 条）。`setAcl` 的前置检查。 */
-export function canModifyAcl(chain: readonly AclNode[], subject: string): boolean {
-  return checkAction(chain, subject, MANAGE_LEVEL);
-}
-
-/**
- * 请求级 ACL 缓存容器（§12.3）。
- *
- * 架构文档要求「每请求维护一份 `Map<uri, Acl>`，请求结束丢弃」。这里只提供容器，
- * 不提供全局单例：每次请求调用 `createAclCache()` 拿一份新的，避免跨请求串权限。
- */
-export interface AclCache {
-  get(uri: Uri, subject: string): ReadonlySet<AclLevel> | undefined;
-  set(uri: Uri, subject: string, value: ReadonlySet<AclLevel>): void;
-  clear(): void;
-}
-
-export function createAclCache(): AclCache {
-  const cache = new Map<string, ReadonlySet<AclLevel>>();
-
-  // URI 不能包含控制字符，用 NUL 拼接不会和主体串冲突。
-  const key = (uri: Uri, subject: string): string => `${uri.toString()}\u0000${subject}`;
-
-  return {
-    get(uri, subject) {
-      return cache.get(key(uri, subject));
-    },
-    set(uri, subject, value) {
-      cache.set(key(uri, subject), value);
-    },
-    clear() {
-      cache.clear();
-    },
-  };
-}

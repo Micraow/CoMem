@@ -48,16 +48,15 @@ afterEach(() => {
   db.close();
 });
 
-describe('replaceEntries / entriesOf / entriesByPrincipal', () => {
+describe('replaceEntries / entriesByPrincipal', () => {
   it('写入后能按节点与主体两个方向反查', () => {
     repository.replaceEntries('comem://user/alice/mem', [
       entry('comem://user/alice/mem', 'user:bob', 1, 'allow'),
       entry('comem://user/alice/mem', 'group:eng', 7, 'allow'),
     ]);
 
-    expect(repository.entriesOf('comem://user/alice/mem')).toEqual([
+    expect(repository.entriesByPrincipal('group:eng')).toEqual([
       { uri: 'comem://user/alice/mem', principal: 'group:eng', level: 7, effect: 'allow' },
-      { uri: 'comem://user/alice/mem', principal: 'user:bob', level: 1, effect: 'allow' },
     ]);
     expect(repository.entriesByPrincipal('user:bob')).toEqual([
       { uri: 'comem://user/alice/mem', principal: 'user:bob', level: 1, effect: 'allow' },
@@ -69,7 +68,7 @@ describe('replaceEntries / entriesOf / entriesByPrincipal', () => {
     repository.replaceEntries(uri, [entry(uri, 'user:bob', 1, 'allow')]);
     repository.replaceEntries(uri, [entry(uri, 'user:bob', 3, 'allow')]);
 
-    expect(repository.entriesOf(uri)).toEqual([
+    expect(repository.entriesByPrincipal('user:bob')).toEqual([
       { uri, principal: 'user:bob', level: 3, effect: 'allow' },
     ]);
   });
@@ -79,8 +78,16 @@ describe('replaceEntries / entriesOf / entriesByPrincipal', () => {
     repository.replaceEntries('comem://user/alice/b', [entry('comem://user/alice/b', 'user:bob', 1, 'allow')]);
     repository.replaceEntries('comem://user/alice/a', []);
 
-    expect(repository.entriesOf('comem://user/alice/a')).toEqual([]);
-    expect(repository.entriesOf('comem://user/alice/b')).toHaveLength(1);
+    expect(
+      repository
+        .entriesByPrincipal('user:bob')
+        .filter((row) => row.uri === 'comem://user/alice/a'),
+    ).toEqual([]);
+    expect(
+      repository
+        .entriesByPrincipal('user:bob')
+        .filter((row) => row.uri === 'comem://user/alice/b'),
+    ).toHaveLength(1);
   });
 
   it('deny 条目也按原样保存', () => {
@@ -94,7 +101,6 @@ describe('replaceEntries / entriesOf / entriesByPrincipal', () => {
   });
 
   it('没有记录时返回空数组', () => {
-    expect(repository.entriesOf('comem://user/alice/none')).toEqual([]);
     expect(repository.entriesByPrincipal('user:nobody')).toEqual([]);
   });
 });
@@ -213,7 +219,11 @@ describe('deleteSubtree', () => {
     ]);
 
     expect(repository.deleteSubtree('comem://user/alice/dir')).toBe(2);
-    expect(repository.entriesOf('comem://user/alice/dir/a.md')).toEqual([]);
+    expect(
+      repository
+        .entriesByPrincipal('user:bob')
+        .filter((row) => row.uri === 'comem://user/alice/dir/a.md'),
+    ).toEqual([]);
     expect(repository.readableUris(['comem://user/alice/other/b.md'], ['user:bob'])).toEqual(
       new Set(['comem://user/alice/other/b.md']),
     );

@@ -43,6 +43,11 @@ const { runReindex } = await import('../../../src/commands/reindex.js');
 
 const SUBJECT = 'user:alice';
 const ROOT = 'comem://user/alice';
+
+/** `node_embedding` 的行数；`count` 已删，测试直接查表。 */
+function embeddingRows(db: DatabaseSync): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM node_embedding').get()?.['total'] ?? 0);
+}
 const MODEL = 'test-embedding';
 const DIMENSION = 3;
 
@@ -230,8 +235,7 @@ describe('embeddings 重建', () => {
 
     const db = openDb();
     try {
-      const embeddings = new EmbeddingRepository({ db, logger });
-      expect(embeddings.count()).toBe(5);
+      expect(embeddingRows(db)).toBe(5);
     } finally {
       db.close();
     }
@@ -257,7 +261,7 @@ describe('embeddings 重建', () => {
     try {
       const embeddings = new EmbeddingRepository({ db, logger });
       expect(embeddings.storedDimension()).toBe(4);
-      expect(embeddings.count()).toBe(1);
+      expect(embeddingRows(db)).toBe(1);
       expect(embeddings.get(file)?.vector).toHaveLength(4);
       // 成功之后备份表不留在库里。
       const backup = db

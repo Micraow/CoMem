@@ -201,29 +201,11 @@ export class UserRepository {
   }
 
   /**
-   * 按 ID 批量取，按 `id` 升序。
-   *
-   * 一次 `IN (...)` 查询；空数组直接返回空——`IN ()` 是语法错误。结果按 `id`
-   * 排序而不是按入参顺序：调用方（管理面列表、ACL 页）要的是稳定输出。
-   */
-  getMany(ids: readonly string[]): readonly User[] {
-    if (ids.length === 0) {
-      return [];
-    }
-    return this.#db
-      .prepare(
-        `SELECT ${USER_COLUMNS} FROM app_user WHERE id IN (${placeholders(ids.length)}) ORDER BY id ASC`,
-      )
-      .all(...ids)
-      .map(toUserRow);
-  }
-
-  /**
    * 分页列表，按 `id` 升序。
    *
    * `limit` / `offset` 省略时取默认值。`limit` 传 0 返回空、传负数由 SQLite 当作
    * 「不限」——入参来自已校验的查询参数，这里不再写第二遍校验（与
-   * `NodeRepository.listByScope` 同一判据）。
+   * 其它仓储的 `limit` 处理一致）。
    */
   list(
     options: {

@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  canModifyAcl,
-  checkAction,
-  createAclCache,
   effectiveAcl,
   formatPrincipal,
   levelSatisfies,
@@ -274,55 +271,6 @@ describe('effectiveAcl', () => {
   });
 });
 
-describe('checkAction', () => {
-  it('manage 满足 read / write / manage', () => {
-    const chain = [node('comem://user/alice', { owner: 'user:alice' })];
-    expect(checkAction(chain, 'user:alice', 1)).toBe(true);
-    expect(checkAction(chain, 'user:alice', 3)).toBe(true);
-    expect(checkAction(chain, 'user:alice', 7)).toBe(true);
-  });
-
-  it('write 满足 read，不满足 manage', () => {
-    const chain = [node('comem://user/alice', { entries: [allow('user:alice', 3)] })];
-    expect(checkAction(chain, 'user:alice', 1)).toBe(true);
-    expect(checkAction(chain, 'user:alice', 3)).toBe(true);
-    expect(checkAction(chain, 'user:alice', 7)).toBe(false);
-  });
-
-  it('read 只满足 read', () => {
-    const chain = [node('comem://user/alice', { entries: [allow('user:alice', 1)] })];
-    expect(checkAction(chain, 'user:alice', 1)).toBe(true);
-    expect(checkAction(chain, 'user:alice', 3)).toBe(false);
-    expect(checkAction(chain, 'user:alice', 7)).toBe(false);
-  });
-
-  it('空链不满足任何级别', () => {
-    expect(checkAction([], 'user:alice', 1)).toBe(false);
-    expect(checkAction([], 'user:alice', 7)).toBe(false);
-  });
-});
-
-describe('canModifyAcl', () => {
-  it('owner 可以改 ACL', () => {
-    const chain = [node('comem://user/alice', { owner: 'user:alice' })];
-    expect(canModifyAcl(chain, 'user:alice')).toBe(true);
-  });
-
-  it('只有 write 不能改 ACL', () => {
-    const chain = [node('comem://user/alice', { entries: [allow('user:alice', 3)] })];
-    expect(canModifyAcl(chain, 'user:alice')).toBe(false);
-  });
-
-  it('manage 授权可以改 ACL', () => {
-    const chain = [node('comem://user/alice', { entries: [allow('user:alice', 7)] })];
-    expect(canModifyAcl(chain, 'user:alice')).toBe(true);
-  });
-
-  it('没有权限时不能改 ACL', () => {
-    expect(canModifyAcl([node('comem://user/alice')], 'user:alice')).toBe(false);
-  });
-});
-
 describe('rootPreset', () => {
   it('user 根预置 owner = manage', () => {
     expect(rootPreset(Uri.parse('comem://user/alice'))).toEqual({
@@ -358,45 +306,5 @@ describe('rootPreset', () => {
       ],
       ownerMissing: false,
     });
-  });
-});
-
-describe('createAclCache', () => {
-  it('未写入时返回 undefined', () => {
-    const cache = createAclCache();
-    expect(cache.get(Uri.parse('comem://user/alice'), 'user:alice')).toBeUndefined();
-  });
-
-  it('set / get 按 URI 与主体隔离', () => {
-    const cache = createAclCache();
-    const alice = Uri.parse('comem://user/alice');
-    const bob = Uri.parse('comem://user/bob');
-    const value = new Set<AclLevel>([1, 3]);
-
-    cache.set(alice, 'user:alice', value);
-
-    expect(cache.get(alice, 'user:alice')).toBe(value);
-    expect(cache.get(bob, 'user:alice')).toBeUndefined();
-    expect(cache.get(alice, 'user:bob')).toBeUndefined();
-  });
-
-  it('clear 清空全部条目', () => {
-    const cache = createAclCache();
-    const alice = Uri.parse('comem://user/alice');
-
-    cache.set(alice, 'user:alice', new Set<AclLevel>([7]));
-    cache.clear();
-
-    expect(cache.get(alice, 'user:alice')).toBeUndefined();
-  });
-
-  it('不同实例之间不共享状态（没有全局单例）', () => {
-    const first = createAclCache();
-    const second = createAclCache();
-    const alice = Uri.parse('comem://user/alice');
-
-    first.set(alice, 'user:alice', new Set<AclLevel>([7]));
-
-    expect(second.get(alice, 'user:alice')).toBeUndefined();
   });
 });

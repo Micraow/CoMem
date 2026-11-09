@@ -235,10 +235,6 @@ export class LlmService {
     return { ...this.totals };
   }
 
-  resetStats(): void {
-    this.totals = this.emptyStats();
-  }
-
   /**
    * 失败收尾：记日志、计数、返回要抛的错误。
    *

@@ -341,9 +341,9 @@ async function countMessages(sessionUri: Uri): Promise<number> {
 
 /** 游标行里记的会话 URI（导入的唯一会话）。 */
 function onlySessionUri(): Uri {
-  const [row] = cursors.list();
+  const row = db.prepare('SELECT session_uri FROM ingest_cursor LIMIT 1').get();
   if (row === undefined) {
     throw new Error('导入没有写下游标行。');
   }
-  return Uri.parse(row.sessionUri);
+  return Uri.parse(String(row['session_uri']));
 }

@@ -185,29 +185,10 @@ export class EmbeddingCacheRepository {
     });
   }
 
-  /** 行数。`model` 省略时数全部模型的行。 */
-  count(model?: string): number {
-    const row =
-      model === undefined
-        ? this.#db.prepare('SELECT COUNT(*) AS total FROM embedding_cache').get()
-        : this.#db
-            .prepare('SELECT COUNT(*) AS total FROM embedding_cache WHERE model = ?')
-            .get(model);
+  /** 行数。只服务 `#trim` 的上限判断，不对外。 */
+  #count(): number {
+    const row = this.#db.prepare('SELECT COUNT(*) AS total FROM embedding_cache').get();
     return Number(row?.['total'] ?? 0);
-  }
-
-  /** 清空。返回删除行数。换模型后想立刻释放磁盘时用。 */
-  clear(model?: string): number {
-    const deleted = withWriteTransaction(this.#db, () =>
-      Number(
-        (model === undefined
-          ? this.#db.prepare('DELETE FROM embedding_cache')
-          : this.#db.prepare('DELETE FROM embedding_cache WHERE model = ?')
-        ).run(...(model === undefined ? [] : [model])).changes,
-      ),
-    );
-    this.#logger.debug('嵌入缓存清空', { model: model ?? '*', deleted });
-    return deleted;
   }
 
   /**
@@ -217,7 +198,7 @@ export class EmbeddingCacheRepository {
    * 要么一起回滚，不会出现「插进去但没淘汰」把上限顶破一个窗口。
    */
   #trim(): void {
-    const total = this.count();
+    const total = this.#count();
     if (total <= this.#maxEntries) {
       return;
     }

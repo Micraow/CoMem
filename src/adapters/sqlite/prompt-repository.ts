@@ -67,13 +67,6 @@ export class PromptRepository {
       .map(toRow);
   }
 
-  get(promptId: PromptId): PromptOverrideRow | null {
-    const row = this.#db
-      .prepare(`SELECT ${OVERRIDE_COLUMNS} FROM prompt_override WHERE prompt_id = ?`)
-      .get(promptId);
-    return row === undefined ? null : toRow(row);
-  }
-
   /** 插入或整篇替换。覆盖没有「部分更新」的语义。 */
   upsert(row: PromptOverrideRow): void {
     withWriteTransaction(this.#db, () => {

@@ -468,32 +468,14 @@ describe('重放', () => {
   });
 });
 
-describe('readArchiveMeta / writeArchiveMeta', () => {
+describe('readArchiveMeta', () => {
   it('不存在的归档返回 null', async () => {
     expect(
       await service.readArchiveMeta(Uri.parse(`${SCOPE_ROOT}/sessions/sess_x/history/archive_999`)),
     ).toBeNull();
   });
 
-  it('写入后原样读回（阶段二用）', async () => {
-    const archiveUri = Uri.parse(`${SCOPE_ROOT}/sessions/sess_x/history/archive_001`);
-    const meta = {
-      archiveId: 'archive_001',
-      phase1: {
-        status: 'ready' as const,
-        messagesSha256: 'a'.repeat(64),
-        archivedMessageIds: ['m1'],
-        retainedMessageIds: [],
-      },
-      stepsDone: ['archive_summary' as const],
-      skippedSteps: [],
-      taskId: 'task-1',
-    };
 
-    await service.writeArchiveMeta(archiveUri, meta);
-
-    expect(await service.readArchiveMeta(archiveUri)).toEqual(meta);
-  });
 });
 
 describe('并发', () => {

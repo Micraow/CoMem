@@ -169,23 +169,6 @@ describe('generate', () => {
     expect(service.stats.costUsd).toBeNull();
   });
 
-  it('resetStats 清零', async () => {
-    const { service } = createService([
-      { text: 'x', usage: { promptTokens: 1, completionTokens: 1 } },
-    ]);
-    await service.generate(PROMPT);
-
-    service.resetStats();
-
-    expect(service.stats).toEqual({
-      calls: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      costUsd: null,
-      truncated: 0,
-      failed: 0,
-    });
-  });
 });
 
 describe('generateJson', () => {

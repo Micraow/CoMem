@@ -1,5 +1,5 @@
 /**
- * 检索结果的打分、去重与截断（架构文档 §8.5、§8.6）。
+ * 检索结果的打分与去重（架构文档 §8.5、§8.6）。
  *
  * 排序分 = BM25 × levelWeight[level]。层级本身带信息：L0 是别人总结过的一句话，
  * 信噪比高于 L2 原文。
@@ -126,42 +126,6 @@ export function dedupeByRenderedText(
 
   const winnerIndices = new Set([...bestByRendered.values()].map((best) => best.index));
   return candidates.filter((_, index) => winnerIndices.has(index));
-}
-
-/** token 估算函数。具体怎么切 token 由调用方注入（模型/provider 相关）。 */
-export type TokenEstimator = (text: string) => number;
-
-/**
- * 按 token 预算截断候选（§8.6 第 1 步）。
- *
- * 按输入顺序贪心装入：放得下的保留，放不下的跳过，继续尝试后面的候选——后面的短
- * 候选可能还装得下，直接 `break` 会白白浪费预算。`estimate` 由调用方注入，领域层
- * 不硬编码 `length / 4` 之类的近似（不同模型的分词器不一样）。
- *
- * 预算为 0 或负数时返回空数组；NaN 同样视为没有可用预算。
- */
-export function truncateByTokenBudget(
-  candidates: readonly RankedCandidate[],
-  budgetTokens: number,
-  estimate: TokenEstimator,
-): RankedCandidate[] {
-  if (Number.isNaN(budgetTokens) || budgetTokens < 0) {
-    return [];
-  }
-
-  const kept: RankedCandidate[] = [];
-  let used = 0;
-
-  for (const candidate of candidates) {
-    const cost = estimate(candidate.rendered);
-    if (used + cost > budgetTokens) {
-      continue;
-    }
-    kept.push(candidate);
-    used += cost;
-  }
-
-  return kept;
 }
 
 /**

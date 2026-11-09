@@ -41,6 +41,11 @@ const MODEL = 'test-embedding';
 let db: DatabaseSync;
 let logger: Logger;
 
+/** `embedding_cache` 的行数；`count` 是仓储私有方法，测试直接查表。 */
+function cacheRows(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM embedding_cache').get()?.['total'] ?? 0);
+}
+
 function createLogger(): Logger {
   const created: Logger = {
     trace: vi.fn(),
@@ -108,7 +113,7 @@ describe('嵌入缓存', () => {
     const first = await service.embed(['一段记忆']);
     expect(provider.embed).toHaveBeenCalledTimes(1);
     // 第一次的结果写进了缓存。
-    expect(cache.count()).toBe(1);
+    expect(cacheRows()).toBe(1);
 
     const second = await service.embed(['一段记忆']);
     expect(provider.embed).toHaveBeenCalledTimes(1);
@@ -139,7 +144,7 @@ describe('嵌入缓存', () => {
     await createService(second, cache).embed(['同一段文本']);
     expect(second.embed).toHaveBeenCalledTimes(1);
     // 两个模型各一行，同一个 digest 不互相覆盖。
-    expect(cache.count()).toBe(2);
+    expect(cacheRows()).toBe(2);
   });
 
   it('部分命中时只把未命中的送供应商', async () => {

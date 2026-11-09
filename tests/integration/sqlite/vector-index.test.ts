@@ -11,8 +11,8 @@ import { SqliteVectorIndex } from '../../../src/adapters/sqlite/vector-index.js'
 import type { Logger } from '../../../src/domain/log.js';
 
 const MODEL = 'text-embedding-3-small';
-const OLD_MODEL = 'text-embedding-ada-002';
 const SCOPE = 'comem://user/alice';
+const OLD_MODEL = 'text-embedding-ada-002';
 
 /** 规模测试：1 万条 × 1024 维。 */
 const SCALE_ROWS = 10_000;
@@ -45,6 +45,11 @@ function openIndex(dimension: number): void {
   embeddings = new EmbeddingRepository({ db, logger });
   embeddings.ensureSchema(dimension, MODEL);
   index = new SqliteVectorIndex({ db, logger });
+}
+
+/** `node_embedding` 的物理行数。 */
+function embeddingCount(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM node_embedding').get()?.['total'] ?? 0);
 }
 
 function store(uri: string, vector: readonly number[], model = MODEL): void {
@@ -296,7 +301,7 @@ describe('删除', () => {
     expect(deleted).toBe(3);
     const hits = await index.search({ vector: [1, 0], model: MODEL, limit: 10 });
     expect(hits.map((hit) => hit.uri)).toEqual([sibling]);
-    expect(embeddings.count()).toBe(1);
+    expect(embeddingCount()).toBe(1);
   });
 
   it('deleteByUri 不带 recursive 只删自己', async () => {
@@ -307,18 +312,10 @@ describe('删除', () => {
     store(child, angle(0));
 
     expect(embeddings.deleteByUri(directory)).toBe(1);
-    expect(embeddings.count()).toBe(1);
+    expect(embeddingCount()).toBe(1);
   });
 
-  it('deleteByModel 只删指定模型的行', async () => {
-    openIndex(2);
-    store(uriFor('a'), angle(0), MODEL);
-    store(uriFor('b'), angle(0), OLD_MODEL);
 
-    expect(embeddings.deleteByModel(OLD_MODEL)).toBe(1);
-    expect(embeddings.count()).toBe(1);
-    expect(embeddings.count(MODEL)).toBe(1);
-  });
 });
 
 describe('规模', () => {
@@ -396,7 +393,7 @@ describe('规模', () => {
       });
     }
     embeddings.upsert(rows);
-    expect(embeddings.count()).toBe(SCALE_ROWS);
+    expect(embeddingCount()).toBe(SCALE_ROWS);
 
     const query = new Array<number>(SCALE_DIMENSION).fill(0);
     query[0] = 1;

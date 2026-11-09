@@ -1,15 +1,8 @@
 /**
- * SEARCH/REPLACE 补丁块（架构文档 §11.2、§11.5）。
+ * 补丁块（架构文档 §11.2、§11.5）。
  *
- * 格式：
- *
- * ```
- * <<<<<<< SEARCH
- * 原文
- * =======
- * 替换文本
- * >>>>>>> REPLACE
- * ```
+ * 一个补丁由若干 `{ search, replace }` 块组成。块由调用方从 JSON body 或 MCP 工具
+ * 参数里解析后交给 `applyPatch`，这一层不解析文本格式。
  *
  * 三条语义由架构文档固定：
  *
@@ -21,14 +14,7 @@
  * 换行处理：匹配前把 `\r\n` 归一化成 `\n`（正文与块体都归一化），输出统一使用
  * `\n`。这样同一段记忆从 Windows 客户端写入再从 Linux 读取不会因为换行不同而
  * 匹配失败。单独的 `\r`（旧 Mac 换行）不做归一化，避免改动正文里的其它控制字符。
- *
- * 格式边界：三个标记都必须**顶格**出现在行首，只忽略行尾空白。块内容里出现
- * `=======` 作为普通文本（例如 `const divider = '=======';` 或缩进后的 `  =======`）
- * 不会被误判为分隔符；但一整行恰好是 `=======` 时无法与分隔符区分，按格式约定
- * 视为分隔符。
  */
-
-import { ComemError } from './errors.js';
 
 export interface PatchBlock {
   readonly search: string;
@@ -44,93 +30,9 @@ export type PatchResult =
       readonly matches: number;
     };
 
-const SEARCH_MARKER = '<<<<<<< SEARCH';
-const SEPARATOR_MARKER = '=======';
-const REPLACE_MARKER = '>>>>>>> REPLACE';
-
 /** 只归一化 CRLF；单独的 CR 保持原样。 */
 function normalizeLineEndings(text: string): string {
   return text.replaceAll('\r\n', '\n');
-}
-
-function malformed(message: string): ComemError {
-  return new ComemError('INVALID_ARGUMENT', `补丁格式不合法：${message}`, { reason: message });
-}
-
-/**
- * 解析补丁文本，提取所有 SEARCH/REPLACE 块。
- *
- * 块外的普通文本被忽略，方便模型在块前后附带说明。块不完整（缺分隔符、缺结束
- * 标记、块内又出现开始标记）时抛 `INVALID_ARGUMENT`——静默丢掉半截块会让抽取结果
- * 少写一条记忆，比报错更危险。
- */
-export function parsePatchBlocks(text: string): PatchBlock[] {
-  const lines = normalizeLineEndings(text).split('\n');
-  const blocks: PatchBlock[] = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-    if (line === undefined) {
-      break;
-    }
-    if (line.trimEnd() !== SEARCH_MARKER) {
-      index += 1;
-      continue;
-    }
-
-    index += 1;
-    const searchLines: string[] = [];
-    while (index < lines.length) {
-      const current = lines[index];
-      if (current === undefined) {
-        break;
-      }
-      const trimmed = current.trimEnd();
-      if (trimmed === SEPARATOR_MARKER) {
-        break;
-      }
-      if (trimmed === SEARCH_MARKER || trimmed === REPLACE_MARKER) {
-        throw malformed('SEARCH 块缺少 ======= 分隔符');
-      }
-      searchLines.push(current);
-      index += 1;
-    }
-
-    if (index >= lines.length || lines[index]?.trimEnd() !== SEPARATOR_MARKER) {
-      throw malformed('SEARCH 块缺少 ======= 分隔符');
-    }
-    index += 1;
-
-    const replaceLines: string[] = [];
-    while (index < lines.length) {
-      const current = lines[index];
-      if (current === undefined) {
-        break;
-      }
-      const trimmed = current.trimEnd();
-      if (trimmed === REPLACE_MARKER) {
-        break;
-      }
-      if (trimmed === SEARCH_MARKER) {
-        throw malformed('SEARCH 块缺少 >>>>>>> REPLACE 结束标记');
-      }
-      replaceLines.push(current);
-      index += 1;
-    }
-
-    if (index >= lines.length || lines[index]?.trimEnd() !== REPLACE_MARKER) {
-      throw malformed('SEARCH 块缺少 >>>>>>> REPLACE 结束标记');
-    }
-    index += 1;
-
-    blocks.push({
-      search: searchLines.join('\n'),
-      replace: replaceLines.join('\n'),
-    });
-  }
-
-  return blocks;
 }
 
 /** 统计 SEARCH 在正文里的命中次数。重叠命中也要算：`aaa` 里的 `aa` 有两个落点。 */

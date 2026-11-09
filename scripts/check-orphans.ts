@@ -136,200 +136,48 @@ interface TargetInternal {
  */
 const BASELINE: readonly BaselineEntry[] = [
   {
-    id: 'AclFileStore.remove',
-    reason: '该删：目录删除由 ContentStore 递归完成，生产没有单独删 .acl.json 的调用方。',
-  },
-  {
-    id: 'AclFileStore.exists',
-    reason: '该删：根预置与 ACL 读取都不检查文件存在性（read 返回 null 已覆盖）。',
-  },
-  {
-    id: 'MetadataFileStore.removeSummary',
-    reason: '该删：摘要失效只 bump pendingChanges，没有删除摘要文件的调用方。',
-  },
-  {
     id: 'ConsoleLogger.child',
-    reason: '该删：Logger.child 整个方法族在 src/ 零调用，requestId 是直接塞进 fields 的。',
+    reason: '待删：`Logger` 端口上的 `child` 零生产调用（requestId 直接进 fields），但 61 个测试文件用对象字面量实现它，删端口要先改那批字面量。',
   },
   {
     id: 'FileLogger.child',
-    reason: '该删：Logger.child 整个方法族在 src/ 零调用，requestId 是直接塞进 fields 的。',
+    reason: '待删：同上，`Logger` 端口的 `child` 方法族整体无生产调用方。',
   },
   {
     id: 'FileLogger.flush',
-    reason: '该接线：优雅退出（main.ts 的 shutdown / container.close）没有等日志队列落盘。',
+    reason: '该接线：优雅退出没有等日志队列落盘，进程退出时丢日志。',
   },
   {
     id: 'NullLogger.child',
-    reason: '该删：Logger.child 整个方法族在 src/ 零调用，requestId 是直接塞进 fields 的。',
-  },
-  {
-    id: 'ApiKeyRepository.get',
-    reason: '该删：管理面按 prefix 查（findByPrefix），没有按 id 读单行的调用方。',
-  },
-  {
-    id: 'EmbeddingCacheRepository.count',
-    reason: '误报：public 但只被同类 #trim 调用；应改成 private，不是生产未接线。',
-  },
-  {
-    id: 'EmbeddingCacheRepository.clear',
-    reason: '该删：换模型/释放磁盘没有调用方，reindex 走 drop/rebuild。',
-  },
-  {
-    id: 'EmbeddingRepository.deleteByModel',
-    reason: '该删：reindex 直接重建表，没有按模型清理旧向量的调用方。',
-  },
-  {
-    id: 'EmbeddingRepository.count',
-    reason: '该删：健康度统计直接查 node 表，没有用这个计数。',
+    reason: '待删：同上，`Logger` 端口的 `child` 方法族整体无生产调用方。',
   },
   {
     id: 'EmbeddingRepository.iterMissingUris',
-    reason: '该接线：打开 embedding 后的存量增量回填没有调用方，只能手动 reindex。',
-  },
-  {
-    id: 'IngestCursorRepository.list',
-    reason: '该删：ingest 只 upsert 游标，没有列出游标的调用方。',
-  },
-  {
-    id: 'IngestCursorRepository.delete',
-    reason: '该删：没有删除/重置游标的调用方。',
-  },
-  {
-    id: 'IngestCursorRepository.count',
-    reason: '该删：游标计数没有调用方。',
-  },
-  {
-    id: 'NodeRepository.children',
-    reason: '该删：目录遍历由 SearchService/FTS 查询完成，没有调用方。',
+    reason: '该接线：打开 embedding 后存量不回填，只能手动 reindex。',
   },
   {
     id: 'NodeRepository.upsert',
-    reason: '该删：生产写 node 表走 SqliteFtsIndex.upsert，这条重复写路径没人调用。',
-  },
-  {
-    id: 'NodeRepository.deleteTree',
-    reason: '该删：删除经 IndexObserver → RetrievalIndex.deleteByUri(recursive)，这条重复实现没人调用。',
-  },
-  {
-    id: 'NodeRepository.listByScope',
-    reason: '该删：没有按 scope 列节点的调用方。',
-  },
-  {
-    id: 'NodeRepository.count',
-    reason: '该删：计数走 health 的内联 SQL，没有调用方。',
-  },
-  {
-    id: 'PermissionRepository.entriesOf',
-    reason: '该删：ACL 读取走 AclService 的缓存/反查表，没有直接读条目的调用方。',
-  },
-  {
-    id: 'PromptRepository.get',
-    reason: '该删：PromptService 启动时 list() 全量进内存，单条 get 没有调用方。',
-  },
-  {
-    id: 'RequestLogRepository.list',
-    reason: '该删：request_log 是只写表，没有分页读取端点。',
-  },
-  {
-    id: 'RequestLogRepository.count',
-    reason: '该删：没有请求记录计数的调用方。',
-  },
-  {
-    id: 'UserRepository.getMany',
-    reason: '该删：组成员解析没有用它，没有调用方。',
-  },
-  {
-    id: 'src/domain/acl.ts#groupIdOf',
-    reason: '该删：parsePrincipal 覆盖同一解析，生产没有调用方。',
-  },
-  {
-    id: 'src/domain/acl.ts#userIdOf',
-    reason: '该删：parsePrincipal 覆盖同一解析，生产没有调用方。',
-  },
-  {
-    id: 'src/domain/acl.ts#canModifyAcl',
-    reason: '该删：AclService 的授权判定没有调用这个领域函数。',
-  },
-  {
-    id: 'src/domain/acl.ts#createAclCache',
-    reason: '该删：AclService 自己维护请求级缓存，没有调用方。',
-  },
-  {
-    id: 'src/domain/memory-type.ts#fieldByName',
-    reason: '该删：记忆类型字段解析没有调用方。',
-  },
-  {
-    id: 'src/domain/memory-type.ts#validateMemoryType',
-    reason: '该删：自定义记忆类型校验没有在配置加载/服务启动时接线。',
-  },
-  {
-    id: 'src/domain/patch.ts#parsePatchBlocks',
-    reason: '该删：HTTP 路由自己实现了一份 parsePatchBlocks，领域层这份没人调用。',
-  },
-  {
-    id: 'src/domain/ranking.ts#truncateByTokenBudget',
-    reason: '该删：检索结果的截断没有调用这个领域函数。',
-  },
-  {
-    id: 'src/domain/retrieval.ts#validateGrepQuery',
-    reason: '该删：grep 参数校验在别处实现，没有调用方。',
-  },
-  {
-    id: 'src/domain/task.ts#transition',
-    reason: '该删：任务状态迁移由 TaskRepository 的 SQL 实现，领域状态机没人调用。',
-  },
-  {
-    id: 'src/domain/task.ts#claim',
-    reason: '该删：认领逻辑在仓储 SQL 里，领域函数没人调用。',
-  },
-  {
-    id: 'src/domain/task.ts#markStepDone',
-    reason: '该删：管线写 steps_done 走 TaskService/仓储，领域函数没人调用。',
-  },
-  {
-    id: 'src/domain/text.ts#isCjkChar',
-    reason: '该删：CJK 分段由 adapters 的 segmentCjk 实现，没有调用方。',
-  },
-  {
-    id: 'src/domain/text.ts#tokenize',
-    reason: '该删：分词没有调用方。',
+    reason: '待删：与 `SqliteFtsIndex.upsert` 是两条写 `node` 表的实现，生产只走后者。仍有服务测试拿它当夹具，改用生产写路径后再删。',
   },
   {
     id: 'EmbeddingService.stats',
-    reason: '该接线：注释说 /metrics 与 health 用，实际两处都没读，embedding 用量不可观测。',
-  },
-  {
-    id: 'LlmService.resetStats',
-    reason: '该删：只在测试里重置累加器，没有生产调用方。',
+    reason: '该接线：注释说 `/metrics` 与 health 在用，实际两处都没读，embedding 用量不可观测。',
   },
   {
     id: 'MemoryLinkService.addLinks',
-    reason: '该接线：唯一写入口零调用，GET /:uri/links 永远返回空表。',
+    reason: '该接线：唯一写入口零调用，`GET /:uri/links` 永远返回空表。',
   },
   {
     id: 'ObservabilityService.attribute',
-    reason: '误报：生产由同类 recordRequest 调用；按「同类内部不算」的口径落到清单里。',
+    reason: '待收窄：public 但只被同类 `recordRequest` 调用，应改成私有。',
   },
   {
     id: 'ObservabilityService.modelUsage',
-    reason: '该删：/metrics 直接读 llm.stats，这个包装没有调用方。',
-  },
-  {
-    id: 'RecallLedger.load',
-    reason: '误报：由同类 recall() 内部调用；公开面只服务内部，应改成 private。',
-  },
-  {
-    id: 'RecallLedger.save',
-    reason: '误报：由同类 remember() 内部调用；公开面只服务内部，应改成 private。',
+    reason: '待删：`/metrics` 直接读 `llm.stats`，这层包装没有调用方。',
   },
   {
     id: 'ResourceService.sweepStaged',
-    reason: '该接线：_meta/tmp/ 的暂存上传没有清理调用方，会无限增长。',
-  },
-  {
-    id: 'SessionService.writeArchiveMeta',
-    reason: '该删：归档元数据由 createArchivePorts 直接写 MetadataFileStore，这个转发没人调用。',
+    reason: '该接线：`_meta/tmp/` 的暂存上传没有清理调用方，会无限增长。',
   },
 ];
 

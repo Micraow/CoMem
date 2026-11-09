@@ -166,11 +166,6 @@ export class ApiKeyRepository {
     return { record: toRecord(row), keyHash: text(row['key_hash']) };
   }
 
-  get(id: string): ApiKeyRecord | null {
-    const row = this.#db.prepare(`SELECT ${COLUMNS} FROM api_key WHERE id = ?`).get(id);
-    return row === undefined ? null : toRecord(row);
-  }
-
   /**
    * 一个用户的全部 key，按创建时间倒序（最新的在前）。
    *

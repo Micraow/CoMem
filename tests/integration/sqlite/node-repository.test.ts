@@ -3,11 +3,21 @@ import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { NodeRepository, type NodeAccessStats, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 let db: DatabaseSync;
 let repository: NodeRepository;
+let logger: Logger;
+
+/**
+ * 用生产写路径建行：`node` 表由 `SqliteFtsIndex.upsert` 维护，`NodeRepository.upsert`
+ * 只是保留的旧写入口。读方法的夹具走生产路径，避免「写入器和读取器一起错」。
+ */
+async function seed(rows: readonly NodeRow[]): Promise<void> {
+  await new SqliteFtsIndex({ db, logger }).upsert(rows.map((item) => ({ ...item, content: '' })));
+}
 
 function createLogger(): Logger {
   const logger: Logger = {
@@ -47,6 +57,11 @@ function uris(rows: readonly NodeRow[]): string[] {
   return rows.map((item) => item.uri);
 }
 
+/** `node` 表的物理行数（目录的 L0/L1 是两行）。 */
+function total(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM node').get()?.['total'] ?? 0);
+}
+
 function urisOf(stats: readonly NodeAccessStats[]): string[] {
   return stats.map((item) => item.uri);
 }
@@ -54,7 +69,8 @@ function urisOf(stats: readonly NodeAccessStats[]): string[] {
 beforeEach(() => {
   db = openDatabase(':memory:');
   runMigrations(db);
-  repository = new NodeRepository({ db, logger: createLogger() });
+  logger = createLogger();
+  repository = new NodeRepository({ db, logger });
 });
 
 afterEach(() => {
@@ -82,7 +98,7 @@ describe('upsert / get', () => {
     repository.upsert([row('comem://user/alice/a.md', { abstract: '第一版' })]);
     repository.upsert([row('comem://user/alice/a.md', { abstract: '第二版', status: 'archived' })]);
 
-    expect(repository.count()).toBe(1);
+    expect(total()).toBe(1);
     expect(repository.get('comem://user/alice/a.md')).toMatchObject({
       abstract: '第二版',
       status: 'archived',
@@ -92,7 +108,7 @@ describe('upsert / get', () => {
   it('空数组是合法的空操作', () => {
     repository.upsert([]);
 
-    expect(repository.count()).toBe(0);
+    expect(total()).toBe(0);
   });
 
   it('不存在的 URI 返回 null', () => {
@@ -109,35 +125,13 @@ describe('upsert / get', () => {
       repository.upsert([row('comem://user/alice/a.md'), failing]);
     }).toThrow();
 
-    expect(repository.count()).toBe(0);
-  });
-});
-
-describe('children', () => {
-  it('只返回直接子节点，按 name 升序', () => {
-    repository.upsert([
-      row('comem://user/alice/dir/b.md'),
-      row('comem://user/alice/dir/a.md'),
-      row('comem://user/alice/dir/c.md'),
-      row('comem://user/alice/dir/nested/d.md'),
-      row('comem://user/alice/other.md'),
-    ]);
-
-    expect(uris(repository.children('comem://user/alice/dir'))).toEqual([
-      'comem://user/alice/dir/a.md',
-      'comem://user/alice/dir/b.md',
-      'comem://user/alice/dir/c.md',
-    ]);
-  });
-
-  it('没有子节点返回空数组', () => {
-    expect(repository.children('comem://user/alice/empty')).toEqual([]);
+    expect(total()).toBe(0);
   });
 });
 
 describe('descendants', () => {
-  it('返回整棵子树，不含自身，按 uri 升序', () => {
-    repository.upsert([
+  it('返回整棵子树，不含自身，按 uri 升序', async () => {
+    await seed([
       row('comem://user/alice/dir/nested/deep/d.md'),
       row('comem://user/alice/dir/b.md'),
       row('comem://user/alice/dir/a.md'),
@@ -150,8 +144,8 @@ describe('descendants', () => {
     ]);
   });
 
-  it('按段边界匹配：alice 不包含 alice2', () => {
-    repository.upsert([
+  it('按段边界匹配：alice 不包含 alice2', async () => {
+    await seed([
       row('comem://user/alice/dir/a.md'),
       row('comem://user/alice/dir2/b.md'),
       row('comem://user/alice/dir.x/c.md'),
@@ -162,8 +156,8 @@ describe('descendants', () => {
     ]);
   });
 
-  it('下划线是字面量而不是通配', () => {
-    repository.upsert([
+  it('下划线是字面量而不是通配', async () => {
+    await seed([
       row('comem://user/alice/my_dir/a.md'),
       row('comem://user/alice/myXdir/b.md'),
     ]);
@@ -173,8 +167,8 @@ describe('descendants', () => {
     ]);
   });
 
-  it('百分号是字面量而不是通配', () => {
-    repository.upsert([
+  it('百分号是字面量而不是通配', async () => {
+    await seed([
       row('comem://user/alice/50%off/a.md'),
       row('comem://user/alice/50Xoff/b.md'),
     ]);
@@ -184,8 +178,8 @@ describe('descendants', () => {
     ]);
   });
 
-  it('大小写敏感：Alice 不包含 alice', () => {
-    repository.upsert([
+  it('大小写敏感：Alice 不包含 alice', async () => {
+    await seed([
       row('comem://user/alice/a.md'),
       row('comem://user/Alice/b.md'),
     ]);
@@ -199,78 +193,14 @@ describe('descendants', () => {
   });
 });
 
-describe('deleteTree', () => {
-  it('删除自身与子树，返回删除行数', () => {
-    repository.upsert([
-      row('comem://user/alice/dir/a.md'),
-      row('comem://user/alice/dir/nested/b.md'),
-      row('comem://user/alice/other.md'),
-    ]);
-
-    expect(repository.deleteTree('comem://user/alice/dir')).toBe(2);
-    expect(repository.get('comem://user/alice/dir/a.md')).toBeNull();
-    expect(repository.get('comem://user/alice/other.md')).not.toBeNull();
-    expect(repository.count()).toBe(1);
-  });
-
-  it('不存在的子树返回 0', () => {
-    expect(repository.deleteTree('comem://user/alice/missing')).toBe(0);
-  });
-
-  it('段边界：alice 不删 alice2', () => {
-    repository.upsert([
-      row('comem://user/alice/a.md'),
-      row('comem://user/alice2/b.md'),
-    ]);
-
-    expect(repository.deleteTree('comem://user/alice')).toBe(1);
-    expect(repository.get('comem://user/alice2/b.md')).not.toBeNull();
-  });
-});
-
-describe('listByScope', () => {
-  it('命中自身与子树', () => {
-    repository.upsert([
-      row('comem://user/alice/a.md'),
-      row('comem://user/alice/dir/b.md'),
-      row('comem://user/alice2/c.md'),
-    ]);
-
-    expect(uris(repository.listByScope('comem://user/alice'))).toEqual([
-      'comem://user/alice/a.md',
-      'comem://user/alice/dir/b.md',
-    ]);
-  });
-
-  it('limit 生效', () => {
-    repository.upsert([
-      row('comem://user/alice/a.md'),
-      row('comem://user/alice/b.md'),
-      row('comem://user/alice/c.md'),
-    ]);
-
-    expect(repository.listByScope('comem://user/alice', { limit: 2 })).toHaveLength(2);
-  });
-});
-
-describe('count', () => {
-  it('空库返回 0，写入后返回行数', () => {
-    expect(repository.count()).toBe(0);
-
-    repository.upsert([row('comem://user/alice/a.md'), row('comem://user/alice/b.md')]);
-
-    expect(repository.count()).toBe(2);
-  });
-});
-
 describe('recordAccess', () => {
   const A = 'comem://user/alice/a.md';
   const B = 'comem://user/alice/b.md';
   const C = 'comem://user/alice/c.md';
   const AT = new Date('2026-11-08T12:00:00.000Z');
 
-  beforeEach(() => {
-    repository.upsert([row(A), row(B), row(C)]);
+  beforeEach(async () => {
+    await seed([row(A), row(B), row(C)]);
   });
 
   it('批量累加访问计数并写入最近访问时间', () => {
@@ -338,8 +268,8 @@ describe('readAccessStats', () => {
   const B = 'comem://user/alice/b.md';
   const AT = new Date('2026-11-08T12:00:00.000Z');
 
-  beforeEach(() => {
-    repository.upsert([row(A), row(B)]);
+  beforeEach(async () => {
+    await seed([row(A), row(B)]);
   });
 
   it('从没访问过时 accessCount 是 0，lastAccessedAt 是 null', () => {
@@ -383,8 +313,8 @@ describe('目录的 L1 概览行不是独立节点', () => {
     return row(DIR, { kind: 'directory', level, abstract });
   }
 
-  beforeEach(() => {
-    repository.upsert([
+  beforeEach(async () => {
+    await seed([
       directoryRow('L0', '团队约定'),
       directoryRow('L1', '团队约定'),
       row(CHILD),
@@ -404,11 +334,15 @@ describe('目录的 L1 概览行不是独立节点', () => {
     expect(repository.get(DIR)?.abstract).toBe('团队约定');
   });
 
-  it('children / descendants / listByScope / count 都只算一个节点', () => {
-    expect(uris(repository.children(DIR))).toEqual([CHILD]);
+  it('descendants 只把目录算一个节点', () => {
     expect(uris(repository.descendants('comem://user/alice'))).toEqual([CHILD, DIR].sort());
-    expect(uris(repository.listByScope('comem://user/alice'))).toEqual([CHILD, DIR].sort());
-    expect(repository.count()).toBe(2);
+    expect(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS total FROM node WHERE NOT (kind = 'directory' AND level = 'L1')",
+        )
+        .get(),
+    ).toMatchObject({ total: 2 });
   });
 
   it('recordAccess 只累加节点自身那一行', () => {
@@ -443,10 +377,5 @@ describe('目录的 L1 概览行不是独立节点', () => {
     expect(statuses).toEqual(['archived', 'archived']);
   });
 
-  it('deleteTree 连子项一起删，目录的两行都在其中', () => {
-    // 2 行目录 + 1 个子文件
-    expect(repository.deleteTree(DIR)).toBe(3);
-    expect(repository.get(DIR)).toBeNull();
-    expect(repository.get(CHILD)).toBeNull();
-  });
+
 });

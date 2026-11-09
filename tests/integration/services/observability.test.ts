@@ -40,6 +40,11 @@ let requestLog: RequestLogRepository;
 let llm: LlmService;
 let service: ObservabilityService;
 
+/** `request_log` 的行数；`count` 已删，测试直接查表。 */
+function requestRows(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM request_log').get()?.['total'] ?? 0);
+}
+
 function createLogger(): Logger {
   const mock: Logger = {
     trace: vi.fn(),
@@ -318,19 +323,25 @@ describe('recordRequest', () => {
       });
     });
 
-    const rows = requestLog.list({ limit: 10 });
+    const rows = db
+      .prepare(
+        `SELECT request_id, method, path, status_code, duration_ms, error_code, subject,
+                created_at, phases
+           FROM request_log ORDER BY created_at DESC LIMIT 10`,
+      )
+      .all();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      requestId: 'req_1',
+      request_id: 'req_1',
       method: 'POST',
       path: '/api/v1/search/find',
-      statusCode: 200,
-      durationMs: 104,
-      errorCode: null,
+      status_code: 200,
+      duration_ms: 104,
+      error_code: null,
       subject: 'alice',
-      createdAt: NOW.toISOString(),
+      created_at: NOW.toISOString(),
     });
-    expect(rows[0]?.phases).toEqual({ recall: expect.any(Number) });
+    expect(JSON.parse(String(rows[0]?.['phases']))).toEqual({ recall: expect.any(Number) });
     expect(logger.info).toHaveBeenCalledWith(
       'HTTP 请求完成。',
       expect.objectContaining({ requestId: 'req_1', statusCode: 200 }),
@@ -408,10 +419,10 @@ describe('recordRequest', () => {
     };
 
     await sampled.recordRequest(entry);
-    expect(requestLog.count()).toBe(0);
+    expect(requestRows()).toBe(0);
 
     await sampled.recordRequest({ ...entry, requestId: 'req_error', statusCode: 500 });
-    expect(requestLog.count()).toBe(1);
+    expect(requestRows()).toBe(1);
   });
 
   it('enabled 为 false 时什么都不写', async () => {
@@ -427,7 +438,7 @@ describe('recordRequest', () => {
       subject: null,
     });
 
-    expect(requestLog.count()).toBe(0);
+    expect(requestRows()).toBe(0);
   });
 });
 

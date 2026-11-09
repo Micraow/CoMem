@@ -52,6 +52,11 @@ function entry(digest: string, axis: number, model = MODEL): EmbeddingCacheEntry
   return { model, contentDigest: digest, dimension: DIMENSION, vector: basis(axis) };
 }
 
+/** `embedding_cache` 的物理行数；`count` 是仓储私有方法，测试直接查表。 */
+function cacheRows(): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM embedding_cache').get()?.['total'] ?? 0);
+}
+
 beforeEach(() => {
   db = openDatabase(':memory:');
   runMigrations(db);
@@ -111,7 +116,7 @@ describe('EmbeddingCacheRepository', () => {
     cache.put([entry('aaaa', 0)]);
     cache.put([entry('aaaa', 2)]);
 
-    expect(cache.count()).toBe(1);
+    expect(cacheRows()).toBe(1);
     expect(cache.getMany(MODEL, ['aaaa'], DIMENSION).get('aaaa')?.[2]).toBe(1);
   });
 
@@ -126,7 +131,7 @@ describe('EmbeddingCacheRepository', () => {
       vi.setSystemTime(new Date('2026-11-08T00:00:02.000Z'));
       cache.put([entry('newest', 3)]);
 
-      expect(cache.count()).toBe(2);
+      expect(cacheRows()).toBe(2);
       const found = cache.getMany(MODEL, ['oldest', 'older', 'newer', 'newest'], DIMENSION);
       // 留下的是最近插入的两条。
       expect([...found.keys()].sort()).toEqual(['newer', 'newest']);
@@ -140,21 +145,11 @@ describe('EmbeddingCacheRepository', () => {
     // 同一次 put 的 created_at 相同，淘汰顺序只能靠 rowid（插入顺序）。
     cache.put([entry('a', 0), entry('b', 1), entry('c', 2), entry('d', 3)]);
 
-    expect(cache.count()).toBe(2);
+    expect(cacheRows()).toBe(2);
     expect([...cache.getMany(MODEL, ['a', 'b', 'c', 'd'], DIMENSION).keys()].sort()).toEqual([
       'c',
       'd',
     ]);
-  });
-
-  it('clear 清空（可按模型）', () => {
-    const cache = createCache();
-    cache.put([entry('aaaa', 0), entry('bbbb', 1, OTHER_MODEL)]);
-
-    expect(cache.clear(MODEL)).toBe(1);
-    expect(cache.count()).toBe(1);
-    expect(cache.clear()).toBe(1);
-    expect(cache.count()).toBe(0);
   });
 
   it('空输入不打 SQL', () => {

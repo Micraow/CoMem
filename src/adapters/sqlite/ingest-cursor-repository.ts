@@ -93,25 +93,6 @@ export class IngestCursorRepository {
     return row === undefined ? null : toRow(row);
   }
 
-  list(harness?: IngestHarness): readonly IngestCursorRow[] {
-    const rows =
-      harness === undefined
-        ? this.#db
-            .prepare(
-              `SELECT ${CURSOR_COLUMNS} FROM ingest_cursor
-                ORDER BY harness, native_session_id`,
-            )
-            .all()
-        : this.#db
-            .prepare(
-              `SELECT ${CURSOR_COLUMNS} FROM ingest_cursor
-                WHERE harness = ?
-                ORDER BY native_session_id`,
-            )
-            .all(harness);
-    return rows.map(toRow);
-  }
-
   /**
    * 插入或更新。主键冲突时更新全部可变列：续跑时游标、消息数与 `session_uri`
    * 都可能变（首次导入还没建会话时 `session_uri` 为空串的路径不存在——服务层
@@ -147,23 +128,5 @@ export class IngestCursorRepository {
       cursorValue: row.cursorValue,
       messageCount: row.messageCount,
     });
-  }
-
-  /** 删掉一条游标，返回是否真的删到了行（测试与「重导某个会话」用）。 */
-  delete(harness: IngestHarness, nativeSessionId: string): boolean {
-    const result = this.#db
-      .prepare('DELETE FROM ingest_cursor WHERE harness = ? AND native_session_id = ?')
-      .run(harness, nativeSessionId);
-    return Number(result.changes) > 0;
-  }
-
-  count(harness?: IngestHarness): number {
-    const row =
-      harness === undefined
-        ? this.#db.prepare('SELECT COUNT(*) AS total FROM ingest_cursor').get()
-        : this.#db
-            .prepare('SELECT COUNT(*) AS total FROM ingest_cursor WHERE harness = ?')
-            .get(harness);
-    return Number(row?.['total'] ?? 0);
   }
 }

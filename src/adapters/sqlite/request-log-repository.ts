@@ -14,7 +14,7 @@
  *    删、再按行数删；第二条只看剩下的行，所以两条规则不会互相「救回」被删的行。
  */
 
-import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 
 import type { Logger } from '../../domain/log.js';
 
@@ -41,12 +41,6 @@ export interface RequestLogRepositoryDeps {
   readonly logger: Logger;
 }
 
-export interface RequestLogListOptions {
-  readonly limit: number;
-  readonly offset?: number;
-  /** 只要 `status_code >= 400` 或 `error_code IS NOT NULL` 的行 */
-  readonly onlyErrors?: boolean;
-}
 
 export interface RequestLogPruneOptions {
   /** §18 的 `telemetry.requestLog.retainDays`：保留最近这么多天 */
@@ -74,60 +68,6 @@ const REQUEST_LOG_COLUMNS = REQUEST_LOG_COLUMN_NAMES.join(', ');
 
 /** 1 天 = 86 400 000 毫秒；`retainDays` 是配置里的天数。 */
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function number(value: SQLOutputValue | undefined): number {
-  return Number(value);
-}
-
-/**
- * 解析 `phases` 列。
- *
- * 失败（非法 JSON、不是对象）返回 `null`：阶段计时是诊断数据，缺了它请求记录本身
- * 仍然有用（§17.6 要的是「哪个请求、多慢、什么状态」）。值不是数字的条目按 `null`
- * 处理，与 `RequestLogRow.phases` 的「缺的字段为 null」一致。
- */
-function parsePhases(raw: string | null): Record<string, number | null> | null {
-  if (raw === null) {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return null;
-  }
-  const phases: Record<string, number | null> = {};
-  for (const [name, value] of Object.entries(parsed)) {
-    phases[name] = typeof value === 'number' ? value : null;
-  }
-  return phases;
-}
-
-function toRequestLogRow(row: Record<string, SQLOutputValue>): RequestLogRow {
-  return {
-    id: text(row['id']),
-    requestId: text(row['request_id']),
-    method: text(row['method']),
-    path: text(row['path']),
-    statusCode: number(row['status_code']),
-    durationMs: number(row['duration_ms']),
-    phases: parsePhases(nullableText(row['phases'])),
-    errorCode: nullableText(row['error_code']),
-    subject: nullableText(row['subject']),
-    createdAt: text(row['created_at']),
-  };
-}
 
 export class RequestLogRepository {
   readonly #db: DatabaseSync;
@@ -164,25 +104,6 @@ export class RequestLogRepository {
       path: row.path,
       statusCode: row.statusCode,
     });
-  }
-
-  /**
-   * 按时间倒序分页。
-   *
-   * 排序的第二键是 `id`：同一毫秒内到达的并发请求 `created_at` 相同，不补一个稳定
-   * 的次序时，翻页会看到重复或漏行。
-   */
-  list(options: RequestLogListOptions): readonly RequestLogRow[] {
-    const errorFilter =
-      options.onlyErrors === true ? ' WHERE status_code >= 400 OR error_code IS NOT NULL' : '';
-    return this.#db
-      .prepare(
-        `SELECT ${REQUEST_LOG_COLUMNS} FROM request_log${errorFilter}
-          ORDER BY created_at DESC, id DESC
-          LIMIT ? OFFSET ?`,
-      )
-      .all(options.limit, options.offset ?? 0)
-      .map(toRequestLogRow);
   }
 
   /**
@@ -227,10 +148,5 @@ export class RequestLogRepository {
       });
     }
     return deleted;
-  }
-
-  count(): number {
-    const row = this.#db.prepare('SELECT COUNT(*) AS total FROM request_log').get();
-    return Number(row?.['total'] ?? 0);
   }
 }

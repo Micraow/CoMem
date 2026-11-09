@@ -6,7 +6,6 @@ import {
   dedupeByRenderedText,
   perItemTokenCap,
   rankCandidates,
-  truncateByTokenBudget,
 } from '../../../src/domain/ranking.js';
 import type { RankedCandidate } from '../../../src/domain/ranking.js';
 
@@ -192,89 +191,6 @@ describe('dedupeByRenderedText', () => {
     dedupeByRenderedText(candidates);
 
     expect(candidates).toHaveLength(2);
-  });
-});
-
-describe('truncateByTokenBudget', () => {
-  const estimate = (text: string): number => text.length;
-
-  it('预算正好够时全部保留', () => {
-    const kept = truncateByTokenBudget(
-      [candidate('a', 'L0', 2, 'abc'), candidate('b', 'L2', 1, '12345')],
-      8,
-      estimate,
-    );
-
-    expect(kept.map((entry) => entry.uri)).toEqual(['a', 'b']);
-  });
-
-  it('差一个 token 时丢掉放不下的那条', () => {
-    const kept = truncateByTokenBudget(
-      [candidate('a', 'L0', 2, 'abc'), candidate('b', 'L2', 1, '12345')],
-      7,
-      estimate,
-    );
-
-    expect(kept.map((entry) => entry.uri)).toEqual(['a']);
-  });
-
-  it('放不下的候选被跳过，后面的短候选仍可装入', () => {
-    const kept = truncateByTokenBudget(
-      [
-        candidate('a', 'L0', 3, 'abc'),
-        candidate('b', 'L2', 2, '1234567890'),
-        candidate('c', 'L1', 1, '12'),
-      ],
-      8,
-      estimate,
-    );
-
-    expect(kept.map((entry) => entry.uri)).toEqual(['a', 'c']);
-  });
-
-  it('预算为 0 时返回空数组', () => {
-    expect(truncateByTokenBudget([candidate('a', 'L0', 1, 'abc')], 0, estimate)).toEqual([]);
-  });
-
-  it('预算为负数或 NaN 时返回空数组', () => {
-    expect(truncateByTokenBudget([candidate('a', 'L0', 1, 'abc')], -1, estimate)).toEqual([]);
-    expect(truncateByTokenBudget([candidate('a', 'L0', 1, 'abc')], Number.NaN, estimate)).toEqual(
-      [],
-    );
-  });
-
-  it('保持输入顺序', () => {
-    const kept = truncateByTokenBudget(
-      [candidate('a', 'L0', 1, 'a'), candidate('b', 'L0', 1, 'b'), candidate('c', 'L0', 1, 'c')],
-      3,
-      estimate,
-    );
-
-    expect(kept.map((entry) => entry.uri)).toEqual(['a', 'b', 'c']);
-  });
-
-  it('把渲染后的正文交给估算函数', () => {
-    const seen: string[] = [];
-    const estimator = (text: string): number => {
-      seen.push(text);
-      return text.length;
-    };
-
-    truncateByTokenBudget([candidate('a', 'L0', 1, 'rendered-a')], 100, estimator);
-
-    expect(seen).toEqual(['rendered-a']);
-  });
-
-  it('空候选返回空数组', () => {
-    expect(truncateByTokenBudget([], 100, estimate)).toEqual([]);
-  });
-
-  it('不修改输入数组', () => {
-    const candidates = [candidate('a', 'L0', 1, 'abc')];
-
-    truncateByTokenBudget(candidates, 1, estimate);
-
-    expect(candidates).toHaveLength(1);
   });
 });
 

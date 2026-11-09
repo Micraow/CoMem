@@ -63,6 +63,11 @@ interface HarnessOptions {
   };
 }
 
+/** `node_embedding` 的行数；`count` 已删，测试直接查表。 */
+function embeddingRows(db: DatabaseSync): number {
+  return Number(db.prepare('SELECT COUNT(*) AS total FROM node_embedding').get()?.['total'] ?? 0);
+}
+
 function createLogger(): Logger {
   const logger: Logger = {
     trace: vi.fn(),
@@ -585,7 +590,7 @@ describe('IndexObserver 批量嵌入', () => {
         4, 4, 2,
       ]);
       // 每条记录都写回了向量，一条不少。
-      expect(embeddings.count()).toBe(10);
+      expect(embeddingRows(local.db)).toBe(10);
     } finally {
       await local.close();
     }
@@ -642,7 +647,7 @@ describe('IndexObserver 批量嵌入', () => {
       await local.observer.drain();
 
       // 只有坏记录没写进去，其余 5 条都在。
-      expect(embeddings.count()).toBe(5);
+      expect(embeddingRows(local.db)).toBe(5);
       expect(embeddings.get(uris[1]?.toString() ?? '')).toBeNull();
       expect(local.logger.warn).toHaveBeenCalledWith(
         '嵌入降级，跳过写入',
@@ -673,7 +678,7 @@ describe('IndexObserver 批量嵌入', () => {
       expect(provider.embed).toHaveBeenCalledTimes(1);
       expect(provider.embed.mock.calls[0]?.[0]).toEqual(['同一段正文。']);
       // 两个 URI 各写一行，向量相同。
-      expect(embeddings.count()).toBe(2);
+      expect(embeddingRows(local.db)).toBe(2);
       expect(embeddings.get(first.toString())?.contentDigest).toBe(
         embeddings.get(second.toString())?.contentDigest,
       );
@@ -701,7 +706,7 @@ describe('IndexObserver 批量嵌入', () => {
       await local.observer.onNodeWritten(uri, 'file');
       await local.observer.drain();
       expect(provider.embed).toHaveBeenCalledTimes(1);
-      expect(embeddings.count()).toBe(1);
+      expect(embeddingRows(local.db)).toBe(1);
     } finally {
       await local.close();
     }

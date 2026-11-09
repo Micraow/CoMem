@@ -160,14 +160,6 @@ export class PermissionRepository {
       .map(toAclEntryRow);
   }
 
-  /** 某节点的直接授权，按主体升序。 */
-  entriesOf(uri: string): readonly AclEntryRow[] {
-    return this.#db
-      .prepare(`SELECT ${ACL_COLUMNS} FROM acl_entry WHERE uri = ? ORDER BY principal ASC`)
-      .all(uri)
-      .map(toAclEntryRow);
-  }
-
   /**
    * 替换某节点的直接授权（不涉及子树）。
    *

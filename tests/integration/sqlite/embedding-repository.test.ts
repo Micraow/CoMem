@@ -85,7 +85,7 @@ describe('ensureSchema', () => {
       'embedding',
     ]);
     expect(embeddings.storedDimension()).toBe(DIMENSION);
-    expect(embeddings.count()).toBe(0);
+    expect(embeddings.getMany([uriFor('a')])).toEqual([]);
   });
 
   it('幂等：重复调用不改维度，也不清空已有行', () => {
@@ -98,7 +98,7 @@ describe('ensureSchema', () => {
       embeddings.ensureSchema(DIMENSION, MODEL);
     }).not.toThrow();
     expect(embeddings.storedDimension()).toBe(DIMENSION);
-    expect(embeddings.count()).toBe(1);
+    expect(embeddings.getMany([uriFor('a')])).toHaveLength(1);
   });
 
   it('维度不一致抛 CONFLICT 并带 stored / configured', () => {
@@ -162,7 +162,7 @@ describe('读写', () => {
       { uri: uriFor('a'), model: MODEL, contentDigest: 'new', vector: basis(1) },
     ]);
 
-    expect(embeddings.count()).toBe(1);
+    expect(embeddings.getMany([uriFor('a')])).toHaveLength(1);
     const row = embeddings.get(uriFor('a'));
     expect(row?.contentDigest).toBe('new');
     expect(row?.vector[1]).toBeCloseTo(1, 5);
@@ -180,27 +180,6 @@ describe('读写', () => {
     expect(embeddings.getMany([])).toEqual([]);
   });
 
-  it('count 按模型过滤', () => {
-    embeddings.upsert([
-      { uri: uriFor('a'), model: MODEL, contentDigest: 'd', vector: basis(0) },
-      { uri: uriFor('b'), model: OLD_MODEL, contentDigest: 'd', vector: basis(0) },
-    ]);
-
-    expect(embeddings.count()).toBe(2);
-    expect(embeddings.count(MODEL)).toBe(1);
-    expect(embeddings.count(OLD_MODEL)).toBe(1);
-  });
-
-  it('deleteByModel 只删指定模型的行', () => {
-    embeddings.upsert([
-      { uri: uriFor('a'), model: MODEL, contentDigest: 'd', vector: basis(0) },
-      { uri: uriFor('b'), model: OLD_MODEL, contentDigest: 'd', vector: basis(0) },
-    ]);
-
-    expect(embeddings.deleteByModel(OLD_MODEL)).toBe(1);
-    expect(embeddings.count()).toBe(1);
-    expect(embeddings.get(uriFor('b'))).toBeNull();
-  });
 });
 
 describe('iterMissingUris', () => {
