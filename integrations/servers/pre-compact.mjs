@@ -29,18 +29,22 @@ import { pathToFileURL } from 'node:url';
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
+import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 import { captureSession } from './stop.mjs';
+
+/** 降级诊断：一行 JSON 到 stderr，不含消息正文。 */
+const warn = (message, data) => warnToStderr('pre-compact', message, data);
 
 /**
  * 提交待处理消息。返回是否提交了消息，供调用方（测试 / 诊断）观察。
  *
  * 失败不向外抛：hook 抛错会让宿主在压缩上下文时看到一条红色错误。失败时游标
- * 停在原处，下一次 `Stop` 会重投同一批消息。
+ * 停在原处，下一次 `Stop` 会重投同一批消息。stderr 留一行诊断（不含消息正文）。
  *
  * @param {{ sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, deduper?: FileEventDeduper }} deps
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, deduper?: FileEventDeduper, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  * @returns {Promise<{ message?: string } | undefined>}
  */
 export async function handlePreCompact(event, deps) {
@@ -55,11 +59,13 @@ export async function handlePreCompact(event, deps) {
   }
 
   const captureStartedAt = process.hrtime.bigint();
-  const result = await captureSession(event, deps).catch(() => ({
-    captured: 0,
-    committed: false,
-    bypassed: false,
-  }));
+  const result = await captureSession(event, deps).catch((error) => {
+    (deps.warn ?? warn)('提交失败，游标停在原处，等待下一次重投。', {
+      code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+      status: typeof error?.status === 'number' ? error.status : null,
+    });
+    return { captured: 0, committed: false, bypassed: false };
+  });
   const captureMs = elapsedMs(captureStartedAt);
 
   // 这条链路是阻塞的（等提交完成），四个阶段里只有 `captureMs` 有值——检索与
@@ -81,9 +87,18 @@ export async function handlePreCompact(event, deps) {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const config = await loadConfig();
-  // 这条链路等提交完成，用 §17.2 的单步 LLM 预算（30s）而不是 Stop 的 5s。
-  const http = createHttpClient({ ...config, timeoutMs: config.commitTimeoutMs });
-  const host = await resolveHost();
-  await host.runHook(async (event) => handlePreCompact(event, { config, http }));
+  await runMain('hook pre-compact', async () => {
+    const config = await loadConfig();
+    const host = await resolveHost();
+    await host.runHook(
+      async (event, { deadline }) =>
+        handlePreCompact(event, {
+          config,
+          // 这条链路等提交完成，用 §17.2 的单步 LLM 预算（30s）而不是 Stop 的 5s；
+          // 三次提交共享同一个总 deadline（`PreCompact` 30000 / `SessionEnd` 1200）。
+          http: createHttpClient({ ...config, timeoutMs: config.commitTimeoutMs, deadline }),
+        }),
+      { hardExit: true },
+    );
+  });
 }

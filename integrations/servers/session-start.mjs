@@ -54,6 +54,7 @@ import { pathToFileURL } from 'node:url';
 
 import { DEFAULT_PROFILE_BUDGET_TOKENS, isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
+import { runMain } from '../lib/lifecycle.mjs';
 import { elideToBudget, estimateTokens, fitContext, stripFrontmatter } from '../lib/injection.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
@@ -332,10 +333,17 @@ export async function handleSessionStart(event, deps) {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const host = await resolveHost();
-  const config = await loadConfig();
-  const http = createHttpClient(config);
-  await host.runHook(async (event) =>
-    handleSessionStart(event, { config, http, maxContextBytes: host.MAX_CONTEXT_BYTES }),
-  );
+  await runMain('hook session-start', async () => {
+    const host = await resolveHost();
+    const config = await loadConfig();
+    await host.runHook(
+      async (event, { deadline }) =>
+        handleSessionStart(event, {
+          config,
+          http: createHttpClient({ ...config, deadline }),
+          maxContextBytes: host.MAX_CONTEXT_BYTES,
+        }),
+      { hardExit: true },
+    );
+  });
 }

@@ -24,9 +24,13 @@ import { pathToFileURL } from 'node:url';
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
+import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
+
+/** 降级诊断：一行 JSON 到 stderr。工具输出与输入都不进日志。 */
+const warn = (message, data) => warnToStderr('post-tool-use', message, data);
 
 /** `POST /sessions` 的 409 表示会话已存在（§19 的 CONFLICT）。 */
 const CONFLICT_STATUS = 409;
@@ -63,7 +67,7 @@ export function toToolMessage(event) {
 
 /**
  * @param {{ sessionId: string, cwd: string, toolName: string | null, toolUseId: string | null, toolInput: unknown, toolOutput: string | null }} event
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv }} deps
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  */
 export async function handlePostToolUse(event, deps) {
   const env = deps.env ?? process.env;
@@ -85,6 +89,10 @@ export async function handlePostToolUse(event, deps) {
     // 409 = 会话已存在（正常路径）：复用它，消息原样保留，继续追加。
     // 其它状态说明服务端不可用：这次采集放弃，游标不前进，下一次重投。
     if (error.status !== CONFLICT_STATUS) {
+      (deps.warn ?? warn)('创建会话失败，本次工具调用不采集。', {
+        code: typeof error.code === 'string' ? error.code : 'UNKNOWN',
+        status: typeof error.status === 'number' ? error.status : null,
+      });
       return undefined;
     }
   }
@@ -93,8 +101,12 @@ export async function handlePostToolUse(event, deps) {
     await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/messages`, {
       messages: [toToolMessage(event)],
     });
-  } catch {
+  } catch (error) {
     // 采集失败不打断工具循环。游标不涉及消息，重投由下一次 PostToolUse 自己带。
+    (deps.warn ?? warn)('写入工具消息失败，本次工具调用不采集。', {
+      code: typeof error.code === 'string' ? error.code : 'UNKNOWN',
+      status: typeof error.status === 'number' ? error.status : null,
+    });
     return undefined;
   }
   const captureMs = elapsedMs(captureStartedAt);
@@ -113,15 +125,19 @@ export async function handlePostToolUse(event, deps) {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const host = await resolveHost();
-  const config = await loadConfig();
-  const http = createHttpClient(config);
-  // 宿主重投同一个工具事件时按 `tool_use_id` 去重（§15.4 第 1 层）。
-  const deduper = new FileEventDeduper(join(config.tmpDir, 'comem-events.json'));
-  await host.runHook(async (event) => {
-    if (!(await deduper.accept(event.eventId))) {
-      return undefined;
-    }
-    return handlePostToolUse(event, { config, http });
+  await runMain('hook post-tool-use', async () => {
+    const host = await resolveHost();
+    const config = await loadConfig();
+    // 宿主重投同一个工具事件时按 `tool_use_id` 去重（§15.4 第 1 层）。
+    const deduper = new FileEventDeduper(join(config.tmpDir, 'comem-events.json'));
+    await host.runHook(
+      async (event, { deadline }) => {
+        if (!(await deduper.accept(event.eventId))) {
+          return undefined;
+        }
+        return handlePostToolUse(event, { config, http: createHttpClient({ ...config, deadline }) });
+      },
+      { hardExit: true },
+    );
   });
 }

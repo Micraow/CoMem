@@ -20,15 +20,17 @@
  *
  * ## 检索失败不注入
  *
- * 服务端不可达、超时、返回错误时静默放行：这一轮没有记忆，对话照常进行。把错误
- * 文本注入进去只会污染上下文。
+ * 服务端不可达、超时、返回错误时不注入：这一轮没有记忆，对话照常进行。把错误
+ * 文本注入进去只会污染上下文。**但 stderr 要留一行诊断**——静默失败是「功能看
+ * 起来正常、其实从未工作过」的来源（`<comem-preferences>` 就踩过这个坑）。
  */
 
 import { pathToFileURL } from 'node:url';
 
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { applyQueryFilters } from '../lib/filter.mjs';
-import { createHttpClient } from '../lib/http.mjs';
+import { ComemHookError, createHttpClient } from '../lib/http.mjs';
+import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 /** §14 的检索端点。 */
@@ -37,6 +39,9 @@ const FIND_PATH = '/api/v1/search/find';
 /** 注入块的包裹标签。用 XML 风格，模型对它的边界判断比 Markdown 稳。 */
 const RECALL_OPEN = '<comem-recall>';
 const RECALL_CLOSE = '</comem-recall>';
+
+/** 降级诊断：一行 JSON 到 stderr，不带 prompt 正文。 */
+const warn = (message, data) => warnToStderr('user-prompt-submit', message, data);
 
 /** 响应可能是数组，也可能封在 `hits` 里（两版服务端的差异）。 */
 function readHits(result) {
@@ -124,7 +129,7 @@ export function formatRecallBlock(hits, threshold) {
 
 /**
  * @param {{ sessionId: string, cwd: string, prompt: string | null }} event
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv }} deps
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void }} deps
  * @returns {Promise<{ context?: string } | undefined>}
  */
 export async function handleUserPromptSubmit(event, deps) {
@@ -151,8 +156,13 @@ export async function handleUserPromptSubmit(event, deps) {
       limit: deps.config.recallLimit,
     });
     hits = readHits(result);
-  } catch {
+  } catch (error) {
     // 检索失败是正常的降级路径（服务端没起、网络抖动）。这一轮没有记忆。
+    // 诊断只写 code 与消息：prompt 可能含用户隐私，不进日志。
+    (deps.warn ?? warn)('检索失败，本轮不注入 <comem-recall>。', {
+      code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+      error: error instanceof Error ? error.message : String(error),
+    });
     return undefined;
   }
   const recallMs = elapsedMs(recallStartedAt);
@@ -175,8 +185,16 @@ export async function handleUserPromptSubmit(event, deps) {
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const host = await resolveHost();
-  const config = await loadConfig();
-  const http = createHttpClient(config);
-  await host.runHook(async (event) => handleUserPromptSubmit(event, { config, http }));
+  await runMain('hook user-prompt-submit', async () => {
+    const host = await resolveHost();
+    const config = await loadConfig();
+    await host.runHook(
+      async (event, { deadline }) =>
+        handleUserPromptSubmit(event, {
+          config,
+          http: createHttpClient({ ...config, deadline }),
+        }),
+      { hardExit: true },
+    );
+  });
 }

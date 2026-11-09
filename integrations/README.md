@@ -103,7 +103,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的 `Read` / `Write` / `Edit`，指回 MCP 工具 | 阻塞（纯内存判断） |
 | `PostToolUse` | 把工具调用与结果采集为 `tool` 消息 | 阻塞（5–20ms 的采集写入） |
 | `Stop` | 采集本轮 user / assistant 消息并提交 | **主进程立刻返回**，采集与提交在分离的 worker 进程里 |
-| `PreCompact` / `SessionEnd` | 把待处理消息提交完 | 阻塞，等提交完成（最多 `commitTimeoutMs`） |
+| `PreCompact` / `SessionEnd` | 把待处理消息提交完 | 阻塞，等提交完成（总预算 30s / 1.2s，见「每个 hook 的总预算」） |
 
 `SessionEnd` 在内部归一成 `PreCompact`：两者都是「对话要没了，把手上的消息交出去」。
 默认只安装表格里的六个事件；要接 `SessionEnd` 时把 `pre-compact.mjs` 再加一条即可。
@@ -116,6 +116,52 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 
 只有 `PreCompact` / `SessionEnd` 等提交完成：这两个时机之后对话就没了，后台 worker
 会被宿主杀掉。
+
+### 每个 hook 的总预算
+
+**预算是「每个 hook 一个」，不是「每个请求一个」。** `timeoutMs`（默认 5s）只约束
+一次 HTTP 尝试；一个 hook 里顺序发三次请求就会变成三倍，GET 还有两次重试。用户在
+`UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。
+
+预算从**进程启动**算起（`performance.timeOrigin`），读 stdin、检索、采集、上报都
+从同一个 deadline 里扣。子请求共享同一个 `AbortSignal`（`AbortSignal.any` 合并单
+请求超时与总 deadline），预算用尽后不再开新请求、不再重试，错误码是
+`HOOK_BUDGET_EXCEEDED`（与单请求超时的 `HOOK_TIMEOUT` 分开）。
+
+| 事件 | 总预算 | 依据 |
+|---|---|---|
+| `SessionStart` | 4000ms | 会话开局一次；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒还能接受」定；本机空载实测 57ms |
+| `UserPromptSubmit` | 2000ms | **每轮按回车都付**。宿主默认给 30s（Claude Code 官方），30s 与挂住没有区别；§15.9 典型 60–180ms、本机实测 54ms，2s 是典型值的 ~10 倍，超了退化成「本轮没有记忆」 |
+| `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的 ~30 倍 |
+| `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
+| `Stop` | 1000ms | 主进程只写载荷 + spawn；`tests/stop.test.mjs` 实测 44ms |
+| `PreCompact` | 30000ms | 数据可能丢，必须等提交完成；与 `commitTimeoutMs`、§17.2 的 `rewriteTimeoutMs` 同一个数（宿主默认 600s） |
+| `SessionEnd` | 1200ms | Claude Code 给 `SessionEnd` 一组 hook 只有 **1.5 秒**共享预算，留 300ms 给启动与退出。等 30s 等于被宿主先杀掉、留下半截提交 |
+
+值在 `lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`，**没有配置项**：它表达的是「用户最多
+等多久」，不是部署差异。调大时别超过宿主给该事件的 hook 超时（上表最后两行就是反
+例）：宿主会先杀掉进程并丢弃输出，预算就成了空话。
+
+**stdin 读取有 800ms 上限**（`STDIN_READ_CAP_MS`），超时按「没有事件」处理——宿主
+不写也不关 stdin 时，`for await` 永远不会返回。800ms 小于最短的事件预算，保证
+「stdin 卡住」不会把任何 hook 拖过它的总预算。
+
+**错误路径的契约（六个 hook 一致）**：
+
+| 性质 | 实现 |
+|---|---|
+| stdout 一个字节都不写 | 只有 handler 正常返回且 `formatOutput` 产出信封时才写；任何异常都不进写路径 |
+| stderr 一行诊断 | `co-mem hook <事件>: <消息>` 或一行 JSON `warn`；不含 prompt 正文、工具输出、凭据 |
+| 退出码 0 | 宿主把非 0 当失败；Claude Code 配了 `onFailure: "block"` 时还会**阻断**这次调用（官方文档「Block the action when a hook fails」）。`--host` 拼错、配置文件坏、未捕获异常也走同一条路 |
+| 进程会退出 | 逻辑结束后安排一个 **unref 的**兜底定时器：没有残留句柄时它不触发（自然退出）；有未关的 stdin / socket / 定时器时它到点 `process.exit(0)`。安排之前已经 `await` 过 stdout 的写回调，不会截断输出 |
+
+`PreToolUse` 的判定完全在本地（只看 `file_path` 是否以 `comem://` 开头），不发
+HTTP——后端不可达既不会让它变慢，也不会让它改主意。任何内部错误都收敛成「没有输出
++ 退出码 0」，宿主按「没有决定」处理，工具调用继续走正常权限流程。
+
+回归测试在 `tests/hook-resilience.test.mjs`：真起子进程，分别对着**永不响应的服务
+端**、**无人监听的端口**、**不关闭的 stdin** 断言「预算 + 余量内退出、退出码 0、
+stdout 为空、stderr 一行」。
 
 ## MCP 接入
 
@@ -404,7 +450,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `baseUrl` | `COMEM_BASE_URL` | `http://127.0.0.1:1933` | 服务端地址 |
 | `userId` | `COMEM_USER_ID` | 空 | 个人根标识；为空时不召回、不采集，`doctor` 报失败 |
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
-| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时 |
+| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时；实际生效值是 `min(它, 事件总预算的剩余)`，见「每个 hook 的总预算」 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
@@ -509,6 +555,14 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 **每一轮都很慢**：看监控页的四阶段柱子。`processStartMs` 占大头是正常的（30–50ms）；
 `recallMs` 高说明检索慢，先看服务端的日志；`captureMs` 高说明消息写入慢，检查
 SQLite 的写锁。
+
+**hook 报 `HOOK_BUDGET_EXCEEDED`**：不是某个端点慢，是这个 hook 的总预算用完了
+（`lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`）。先看服务端日志确认请求有没有到、卡在
+哪一步；`HOOK_TIMEOUT` 才指向单个请求。**不要靠调大预算解决**——预算是用户最多等
+多久，不是服务端的性能上限。
+
+**hook 报「等宿主写 stdin 超时」**：宿主没有在 800ms 内写完 stdin 并关闭。多数是
+宿主侧的插件运行器出了问题；这条路径按「没有事件」放行，不会阻断对话。
 
 **同一段记忆被注入两次**：召回账本由服务端维护（§8.7），hook 侧只负责发请求。
 检查 `dedupTurns` 配置。

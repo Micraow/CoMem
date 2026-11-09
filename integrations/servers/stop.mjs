@@ -37,6 +37,7 @@ import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
 import { withSessionLock } from '../lib/lock.mjs';
 import { advanceCursor, readCursor } from '../lib/cursor.mjs';
+import { runMain } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -308,20 +309,23 @@ async function main() {
   const host = await resolveHost();
   const deduper = new FileEventDeduper(join(config.tmpDir, 'comem-events.json'));
 
-  await host.runHook(async (event) => {
-    if (!(await deduper.accept(event.eventId))) {
+  await host.runHook(
+    async (event) => {
+      if (!(await deduper.accept(event.eventId))) {
+        return undefined;
+      }
+      if (isBypassed({ cwd: event.cwd })) {
+        return undefined;
+      }
+      const payloadFile = await writeWorkerPayload(config.tmpDir, {
+        event,
+        processStartMs: processStartMs(),
+      });
+      spawnCaptureWorker(payloadFile);
       return undefined;
-    }
-    if (isBypassed({ cwd: event.cwd })) {
-      return undefined;
-    }
-    const payloadFile = await writeWorkerPayload(config.tmpDir, {
-      event,
-      processStartMs: processStartMs(),
-    });
-    spawnCaptureWorker(payloadFile);
-    return undefined;
-  });
+    },
+    { hardExit: true },
+  );
 }
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -333,6 +337,6 @@ if (isMain) {
       await runCaptureWorker(payloadFile, { config, http: createHttpClient(config) });
     }
   } else {
-    await main();
+    await runMain('hook stop', main);
   }
 }

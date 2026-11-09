@@ -12,11 +12,20 @@
  *
  * Bypass 开关（§8.9）关的是记忆的注入与采集，不是路径守卫：`comem://` 不管开没
  * 开 bypass 都不是本地路径。
+ *
+ * ## 错误路径必须是「放行」
+ *
+ * 这个 hook 的判定完全在本地（只看字符串前缀），**不发 HTTP**，所以后端不可达
+ * 不会让它变慢，也不会让它改主意。任何内部错误——载荷解析失败、插件配置坏、
+ * 进程级异常——都收敛成「没有输出 + 退出码 0」，宿主按「没有决定」处理，工具调用
+ * 继续走正常权限流程。`handlePreToolUse` 只会返回 `{deny}` 或 `undefined`，
+ * `runHook` 的 catch 分支不会写 stdout，因此不存在「异常 → deny」的路径。
  */
 
 import { pathToFileURL } from 'node:url';
 
 import { resolveHost } from '../lib/config.mjs';
+import { runMain } from '../lib/lifecycle.mjs';
 
 /** URI 方案（架构文档 §6.1）。 */
 const COMEM_SCHEME = 'comem://';
@@ -50,6 +59,8 @@ export function handlePreToolUse(event) {
 /** 直接可执行时走宿主信封；被测试 import 时不执行。 */
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  const host = await resolveHost();
-  await host.runHook(async (event) => handlePreToolUse(event));
+  await runMain('hook pre-tool-use', async () => {
+    const host = await resolveHost();
+    await host.runHook(async (event) => handlePreToolUse(event), { hardExit: true });
+  });
 }

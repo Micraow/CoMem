@@ -13,6 +13,19 @@
  * `GET` 是只读的，重试没有副作用，所以允许重试瞬时故障（网络错误、超时、5xx、
  * 429）。重试次数是经验值，没有架构来源：hook 的阻塞预算只有几十毫秒到几秒
  * （§15.9），两次重试已经踩到上限。
+ *
+ * ## 单请求超时之上还有总预算
+ *
+ * `timeoutMs` 只约束**一次尝试**。一个 hook 里顺序发三次请求，最坏就是三倍；
+ * 并发发三次，取最慢的那条。用户等的是「这个 hook 一共花了多久」，所以客户端
+ * 接受一个 `deadline`（`lib/lifecycle.mjs` 的 `createDeadline`）：
+ *
+ * - 每次尝试的超时取 `min(timeoutMs, deadline.remainingMs())`；
+ * - 请求的信号是「单请求超时」与「总 deadline」的 `AbortSignal.any`；
+ * - 预算用尽后抛 `HOOK_BUDGET_EXCEEDED`，**不再开新请求、不再重试**。
+ *
+ * 两个错误码分开：`HOOK_TIMEOUT` 是「这一个请求慢」，`HOOK_BUDGET_EXCEEDED` 是
+ * 「整个 hook 的时间用完了」。排障时前者指向服务端某个端点，后者指向预算。
  */
 
 /** 默认超时。5s 来自任务书与 §15.9 的 `expansionTimeoutMs = 5000`（hook 侧最长阻塞预算）。 */
@@ -34,6 +47,8 @@ const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
  * - `HOOK_INVALID_ARGUMENT` / `HOOK_INVALID_CONFIG`：调用方或配置错
  * - `HOOK_HTTP_ERROR`：服务端返回了错误封套或非 2xx
  * - `HOOK_TIMEOUT` / `HOOK_UNREACHABLE`：网络层
+ * - `HOOK_BUDGET_EXCEEDED`：整个 hook 的总预算用尽（见文件头）
+ * - `HOOK_STDIN_TIMEOUT`：等宿主写 stdin 超时（`lib/lifecycle.mjs`）
  * - `HOOK_LOCK_TIMEOUT`：等会话锁超时
  * - `HOOK_CONFLICT`：409
  */
@@ -82,9 +97,20 @@ function isRetryable(error) {
   return error.status !== undefined && RETRYABLE_STATUSES.has(error.status);
 }
 
-function toHookError(error, path, timeoutMs) {
+function budgetExceededError(path, deadline) {
+  return new ComemHookError(
+    `CoMem 请求超出 hook 总预算：${path}（${deadline.budgetMs}ms 已用尽）`,
+    { code: 'HOOK_BUDGET_EXCEEDED', path },
+  );
+}
+
+function toHookError(error, path, timeoutMs, deadline) {
   if (error instanceof ComemHookError) {
     return error;
+  }
+  // 总 deadline 先于单请求超时触发时，错误码要指向预算而不是某一个端点。
+  if (deadline !== undefined && deadline.expired()) {
+    return budgetExceededError(path, deadline);
   }
   if (isTimeoutError(error)) {
     return new ComemHookError(`CoMem 请求超时：${path}（${timeoutMs}ms）`, {
@@ -150,7 +176,13 @@ async function unwrap(response, method, path) {
  *   timeoutMs?: number,
  *   retries?: number,
  *   fetchImpl?: typeof fetch,
- * }} options
+ *   deadline?: {
+ *     budgetMs: number,
+ *     signal: AbortSignal,
+ *     remainingMs(): number,
+ *     expired(): boolean,
+ *   },
+ * }} options `deadline` 来自 `createDeadline`：传给它的所有请求共享同一个总预算
  */
 export function createHttpClient(options) {
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -158,6 +190,7 @@ export function createHttpClient(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const retries = options.retries ?? DEFAULT_RETRIES;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const deadline = options.deadline;
 
   if (typeof fetchImpl !== 'function') {
     throw new ComemHookError('当前 Node 运行时没有 fetch，无法访问 CoMem 服务端。', {
@@ -179,17 +212,29 @@ export function createHttpClient(options) {
     const attempts = method === 'GET' ? retries + 1 : 1;
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      // 预算用尽就不开新请求：重试会把「用户等了多久」放大成 attempts × 预算。
+      if (deadline !== undefined && deadline.expired()) {
+        throw budgetExceededError(path, deadline);
+      }
+      const attemptTimeoutMs =
+        deadline === undefined
+          ? timeoutMs
+          : // `AbortSignal.timeout` 只收整数毫秒，`remainingMs()` 是浮点。
+            Math.max(1, Math.round(Math.min(timeoutMs, deadline.remainingMs())));
+      const timeoutSignal = AbortSignal.timeout(attemptTimeoutMs);
+      const signal =
+        deadline === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, deadline.signal]);
       try {
         const response = await fetchImpl(target, {
           method,
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal,
         });
         return await unwrap(response, method, path);
       } catch (error) {
-        const wrapped = toHookError(error, path, timeoutMs);
-        if (method !== 'GET' || !isRetryable(wrapped)) {
+        const wrapped = toHookError(error, path, attemptTimeoutMs, deadline);
+        if (method !== 'GET' || !isRetryable(wrapped) || wrapped.code === 'HOOK_BUDGET_EXCEEDED') {
           throw wrapped;
         }
         lastError = wrapped;
