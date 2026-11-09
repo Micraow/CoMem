@@ -9,15 +9,19 @@
  * 策略在上层，它还要判断「超时该降级到融合分」这类事；适配器里再重试一次只会
  * 把「重排慢」变成「检索慢 3 倍」。
  *
- * **错误映射是复制的。** `ai-sdk-provider.ts` 的 `mapProviderError` 没有导出，本
- * wave 的文件所有权也不包含它。规则逐条对齐（401/403、400/404/422、429、5xx、
- * 网络错误），复制而不是共享；等两边都需要改的时候再抽公共模块，现在抽只会多
- * 一层间接。
+ * **错误映射与生成、嵌入共用。** 三份各自复制时，同一个故障在两条链路上给出相反
+ * 的重试结论没有任何机制能拦住；规则与理由见 `provider-error-mapping.ts`。重排
+ * 唯一多出来的约定是超时在 `details` 里带 `timeout: true`，见 `ERROR_MAP_OPTIONS`。
  */
 
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { isFiniteScore, type RerankOptions, type RerankProvider } from '../../domain/rerank.js';
+import {
+  mapProviderError,
+  type ProviderErrorContext,
+  type ProviderErrorMapOptions,
+} from './provider-error-mapping.js';
 
 export interface HttpRerankProviderOptions {
   /** 供应商根地址，如 `https://api.jina.ai/v1`。末尾斜杠会被去掉。 */
@@ -50,77 +54,23 @@ const MILLISECONDS_PER_SECOND = 1000;
  */
 const RERANK_PATH = '/rerank';
 
-/** `APICallError` 的 `statusCode`。用结构判断而不是 `instanceof`：测试替身不必构造真类。 */
-function readStatusCode(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('statusCode' in error)) {
-    return undefined;
-  }
-  const statusCode: unknown = error.statusCode;
-  return typeof statusCode === 'number' ? statusCode : undefined;
-}
-
-interface ErrorContext {
-  /** 超时定时器是否已经触发。区分「超时」与「上游取消」只能靠这个标记。 */
-  readonly timedOut: boolean;
-  readonly timeoutMs: number;
-}
-
 /**
- * 错误映射（架构文档 §19），规则与 `ai-sdk-provider.ts` 逐条对齐：
+ * 重排链路的错误映射参数（架构文档 §19）。
  *
- * - 401 / 403 → `UNAUTHENTICATED`（API Key 无效或没有模型权限）；
- * - 400 / 404 / 422 → `INVALID_ARGUMENT`（模型名写错、请求体不合法，重试结果一样）；
- * - 429 → `RESOURCE_EXHAUSTED`（限流 / 配额不足，可重试）；
- * - 5xx 与网络错误 → `PROVIDER_UNAVAILABLE`（可重试）；
- * - 其余 → `INTERNAL`。
- *
- * 超时走 `PROVIDER_UNAVAILABLE` 并带 `details.timeout`：服务层据此决定「降级到
- * 融合分」还是「重试」，两种处置都需要知道这是超时而不是供应商故障。
+ * `markTimeout` 是三条链路里唯一需要保留的差异：`services/search.ts` 靠
+ * `details.timeout === true` 把降级原因记成「超时」而不是「网络」。
  */
-function mapRerankError(error: unknown, context: ErrorContext): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  if (context.timedOut) {
-    return new ComemError(
-      'PROVIDER_UNAVAILABLE',
-      `重排调用超时（${context.timeoutMs} 毫秒），请检查供应商可用性或调大 timeoutSeconds。`,
-      { timeout: true, timeoutMs: context.timeoutMs },
-    );
-  }
+const ERROR_MAP_OPTIONS: ProviderErrorMapOptions = {
+  call: '重排调用',
+  vendor: '重排供应商',
+  invalidArgumentHint: '请检查模型名、baseUrl 与请求体格式',
+  networkHint: '请检查网络与 baseUrl',
+  markTimeout: true,
+};
 
-  const statusCode = readStatusCode(error);
-  if (statusCode === 401 || statusCode === 403) {
-    return new ComemError(
-      'UNAUTHENTICATED',
-      '重排供应商拒绝了这次请求：API Key 无效，或没有访问该模型的权限。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 400 || statusCode === 404 || statusCode === 422) {
-    return new ComemError(
-      'INVALID_ARGUMENT',
-      '重排供应商拒绝了这次请求：请检查模型名、baseUrl 与请求体格式。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 429) {
-    return new ComemError('RESOURCE_EXHAUSTED', '重排供应商限流或配额不足，请稍后重试。', {
-      statusCode,
-    });
-  }
-  if (statusCode !== undefined && statusCode >= 500) {
-    return new ComemError('PROVIDER_UNAVAILABLE', `重排供应商暂时不可用（HTTP ${statusCode}）。`, {
-      statusCode,
-    });
-  }
-  // fetch 在网络不可达、DNS 失败、URL 不合法时抛 TypeError。
-  if (error instanceof TypeError) {
-    return new ComemError('PROVIDER_UNAVAILABLE', '无法连接重排供应商，请检查网络与 baseUrl。', {
-      cause: error.message,
-    });
-  }
-  return ComemError.from(error);
+/** 保留本地名字：`services/search.ts` 的注释按这个名字指路。 */
+function mapRerankError(error: unknown, context: ProviderErrorContext): ComemError {
+  return mapProviderError(error, context, ERROR_MAP_OPTIONS);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

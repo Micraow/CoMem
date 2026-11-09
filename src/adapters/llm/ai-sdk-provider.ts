@@ -38,6 +38,10 @@ import type {
   LlmUsage,
 } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
+import {
+  mapProviderError,
+  type ProviderErrorMapOptions,
+} from './provider-error-mapping.js';
 
 export interface AiSdkProviderOptions {
   /** 对应 `config.providers.llm.default`（§18）。 */
@@ -105,15 +109,6 @@ function readUsage(usage: RawUsage): LlmUsage {
   };
 }
 
-/** `APICallError` 的 `statusCode`。用结构判断而不是 `instanceof`：测试替身不必构造真类。 */
-function readStatusCode(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('statusCode' in error)) {
-    return undefined;
-  }
-  const statusCode: unknown = error.statusCode;
-  return typeof statusCode === 'number' ? statusCode : undefined;
-}
-
 /**
  * 结构化输出解析失败（模型返回了不合 schema 的 JSON）。
  *
@@ -135,85 +130,38 @@ function isJsonGenerationFailure(error: unknown): boolean {
   );
 }
 
-interface ProviderErrorContext {
-  /** 超时定时器是否已经触发。区分「超时」与「上游取消」只能靠这个标记。 */
-  readonly timedOut: boolean;
-  readonly timeoutMs: number;
+/**
+ * 结构化输出失败 → 领域失败；不认识的形态返回 `undefined`，交给共享映射按状态码
+ * 处理。这是三家适配器里唯一的「真正的差异」：只有生成链路有 `generateObject`。
+ */
+function classifyJsonGenerationFailure(error: unknown): ComemError | undefined {
+  if (!isJsonGenerationFailure(error)) {
+    return undefined;
+  }
+  if (NoObjectGeneratedError.isInstance(error) && error.finishReason === 'length') {
+    return new ComemError(
+      'PROVIDER_UNAVAILABLE',
+      '模型输出被截断，结构化结果不完整。请调大 maxTokens 后重试。',
+      { truncated: true, finishReason: error.finishReason },
+    );
+  }
+  return new ComemError('INVALID_ARGUMENT', '模型输出不是合法的结构化数据，无法按 schema 解析。', {
+    cause: error instanceof Error ? error.name : typeof error,
+  });
 }
 
 /**
- * 错误映射（架构文档 §19）。
- *
- * - 401 / 403 → `UNAUTHENTICATED`（API Key 无效或没有模型权限）；
- * - 400 / 404 / 422 → `INVALID_ARGUMENT`（模型名写错、请求体不合法）；
- * - 429 → `RESOURCE_EXHAUSTED`（限流 / 配额不足）；
- * - 5xx 与网络错误 → `PROVIDER_UNAVAILABLE`；
- * - 其余 → `INTERNAL`。
- *
- * **400 类必须映射成不可重试的错误。** 模型名拼错、`maxTokens` 超出供应商上限这类
- * 问题，重试三次的结果完全一样，只是把「立刻失败」拖成「几秒后失败」，还会在监控
- * 里留下三条假故障。`INTERNAL` 是可重试的，所以不能落到那条分支。
- *
- * 不在这一层重试：重试是 `services/llm.ts` 的职责，它还需要根据 `finishReason`
- * 决定「截断不重试」。
+ * 生成链路的错误映射参数（架构文档 §19）。状态码、超时与网络错误的判定在
+ * `provider-error-mapping.ts` 里与嵌入 / 重排共用，这里只声明本链路的文案与
+ * 结构化输出分类。
  */
-function mapProviderError(error: unknown, context: ProviderErrorContext): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  if (context.timedOut) {
-    return new ComemError(
-      'PROVIDER_UNAVAILABLE',
-      `模型调用超时（${context.timeoutMs} 毫秒），请检查供应商可用性或调大 timeoutSeconds。`,
-      { timeoutMs: context.timeoutMs },
-    );
-  }
-  if (isJsonGenerationFailure(error)) {
-    if (NoObjectGeneratedError.isInstance(error) && error.finishReason === 'length') {
-      return new ComemError(
-        'PROVIDER_UNAVAILABLE',
-        '模型输出被截断，结构化结果不完整。请调大 maxTokens 后重试。',
-        { truncated: true, finishReason: error.finishReason },
-      );
-    }
-    return new ComemError('INVALID_ARGUMENT', '模型输出不是合法的结构化数据，无法按 schema 解析。', {
-      cause: error instanceof Error ? error.name : typeof error,
-    });
-  }
-
-  const statusCode = readStatusCode(error);
-  if (statusCode === 401 || statusCode === 403) {
-    return new ComemError(
-      'UNAUTHENTICATED',
-      '模型供应商拒绝了这次请求：API Key 无效，或没有访问该模型的权限。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 400 || statusCode === 404 || statusCode === 422) {
-    return new ComemError(
-      'INVALID_ARGUMENT',
-      '模型供应商拒绝了这次请求：请检查模型名、maxTokens 与请求体格式。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 429) {
-    return new ComemError('RESOURCE_EXHAUSTED', '模型供应商限流或配额不足，请稍后重试。', {
-      statusCode,
-    });
-  }
-  if (statusCode !== undefined && statusCode >= 500) {
-    return new ComemError('PROVIDER_UNAVAILABLE', `模型供应商暂时不可用（HTTP ${statusCode}）。`, {
-      statusCode,
-    });
-  }
-  // fetch 在网络不可达时抛 TypeError；SDK 不会把它包成 APICallError。
-  if (error instanceof TypeError) {
-    return new ComemError('PROVIDER_UNAVAILABLE', '无法连接模型供应商，请检查网络。', {
-      cause: error.message,
-    });
-  }
-  return ComemError.from(error);
-}
+const ERROR_MAP_OPTIONS: ProviderErrorMapOptions = {
+  call: '模型调用',
+  vendor: '模型供应商',
+  invalidArgumentHint: '请检查模型名、maxTokens 与请求体格式',
+  networkHint: '请检查网络',
+  classify: classifyJsonGenerationFailure,
+};
 
 /** `LlmMessage` 的三分法正好对应 AI SDK 的三种消息类型，逐分支构造让类型收窄。 */
 function toModelMessage(message: LlmMessage): ModelMessage {
@@ -334,7 +282,7 @@ export class AiSdkLlmProvider implements LlmProvider {
     try {
       return await operation(abortSignal);
     } catch (error) {
-      throw mapProviderError(error, { timedOut, timeoutMs });
+      throw mapProviderError(error, { timedOut, timeoutMs }, ERROR_MAP_OPTIONS);
     } finally {
       clearTimeout(timer);
     }

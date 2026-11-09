@@ -12,10 +12,8 @@
  * 重试会绕过「认证失败不重试」「维度不匹配不重试」的判断，所以调用时显式
  * `maxRetries: 0`。
  *
- * **错误映射是复制的。** `ai-sdk-provider.ts` 的 `mapProviderError` 没有导出，
- * 本 wave 的文件所有权也不包含它。规则逐条对齐（401/403、400/404/422、429、5xx、
- * 网络错误），复制而不是共享；等两边都需要改的时候再抽公共模块，现在抽只会多一层
- * 间接。
+ * **错误映射与生成、重排共用。** 三份各自复制时，同一个故障在两条链路上给出相反
+ * 的重试结论没有任何机制能拦住；规则与理由见 `provider-error-mapping.ts`。
  */
 
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
@@ -28,6 +26,10 @@ import type {
 } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
+import {
+  mapProviderError,
+  type ProviderErrorMapOptions,
+} from './provider-error-mapping.js';
 
 export interface AiSdkEmbeddingProviderOptions {
   /**
@@ -79,75 +81,16 @@ const MILLISECONDS_PER_SECOND = 1000;
  */
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
-/** `APICallError` 的 `statusCode`。用结构判断而不是 `instanceof`：测试替身不必构造真类。 */
-function readStatusCode(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null || !('statusCode' in error)) {
-    return undefined;
-  }
-  const statusCode: unknown = error.statusCode;
-  return typeof statusCode === 'number' ? statusCode : undefined;
-}
-
-interface ErrorContext {
-  /** 超时定时器是否已经触发。区分「超时」与「上游取消」只能靠这个标记。 */
-  readonly timedOut: boolean;
-  readonly timeoutMs: number;
-}
-
 /**
- * 错误映射（架构文档 §19），规则与 `ai-sdk-provider.ts` 逐条对齐：
- *
- * - 401 / 403 → `UNAUTHENTICATED`（API Key 无效或没有模型权限）；
- * - 400 / 404 / 422 → `INVALID_ARGUMENT`（模型名写错、请求体不合法，重试结果一样）；
- * - 429 → `RESOURCE_EXHAUSTED`（限流 / 配额不足，可重试）；
- * - 5xx 与网络错误 → `PROVIDER_UNAVAILABLE`（可重试）；
- * - 其余 → `INTERNAL`。
+ * 嵌入链路的错误映射参数（架构文档 §19）。状态码、超时与网络错误的判定与生成 /
+ * 重排共用；嵌入没有 `generateObject`，所以不传 `classify`。
  */
-function mapEmbeddingError(error: unknown, context: ErrorContext): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  if (context.timedOut) {
-    return new ComemError(
-      'PROVIDER_UNAVAILABLE',
-      `嵌入调用超时（${context.timeoutMs} 毫秒），请检查供应商可用性或调大 timeoutSeconds。`,
-      { timeoutMs: context.timeoutMs },
-    );
-  }
-
-  const statusCode = readStatusCode(error);
-  if (statusCode === 401 || statusCode === 403) {
-    return new ComemError(
-      'UNAUTHENTICATED',
-      '嵌入供应商拒绝了这次请求：API Key 无效，或没有访问该模型的权限。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 400 || statusCode === 404 || statusCode === 422) {
-    return new ComemError(
-      'INVALID_ARGUMENT',
-      '嵌入供应商拒绝了这次请求：请检查模型名、maxBatchSize 与请求体格式。',
-      { statusCode },
-    );
-  }
-  if (statusCode === 429) {
-    return new ComemError('RESOURCE_EXHAUSTED', '嵌入供应商限流或配额不足，请稍后重试。', {
-      statusCode,
-    });
-  }
-  if (statusCode !== undefined && statusCode >= 500) {
-    return new ComemError('PROVIDER_UNAVAILABLE', `嵌入供应商暂时不可用（HTTP ${statusCode}）。`, {
-      statusCode,
-    });
-  }
-  // fetch 在网络不可达时抛 TypeError；SDK 不会把它包成 APICallError。
-  if (error instanceof TypeError) {
-    return new ComemError('PROVIDER_UNAVAILABLE', '无法连接嵌入供应商，请检查网络。', {
-      cause: error.message,
-    });
-  }
-  return ComemError.from(error);
-}
+const ERROR_MAP_OPTIONS: ProviderErrorMapOptions = {
+  call: '嵌入调用',
+  vendor: '嵌入供应商',
+  invalidArgumentHint: '请检查模型名、maxBatchSize 与请求体格式',
+  networkHint: '请检查网络',
+};
 
 /**
  * 构造嵌入模型实例。
@@ -287,7 +230,7 @@ export class AiSdkEmbeddingProvider implements EmbeddingProvider {
     try {
       return await operation(abortSignal);
     } catch (error) {
-      throw mapEmbeddingError(error, { timedOut, timeoutMs });
+      throw mapProviderError(error, { timedOut, timeoutMs }, ERROR_MAP_OPTIONS);
     } finally {
       clearTimeout(timer);
     }
