@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -576,6 +576,25 @@ describe('错误码映射', () => {
       store.writeText(uri('comem://user/alice/memories/a.md/child.md'), 'child'),
       'INVALID_ARGUMENT',
     );
+  });
+
+  it('EACCES → PERMISSION_DENIED（写内容时目录不可写，不是 INTERNAL）', async () => {
+    const directory = uri('comem://user/alice/memories');
+    await mkdir(diskPath(directory), { recursive: true });
+    await chmod(diskPath(directory), 0o500);
+
+    try {
+      const error = await expectCode(
+        store.writeText(uri('comem://user/alice/memories/a.md'), 'a'),
+        'PERMISSION_DENIED',
+      );
+
+      expect(error.details).toMatchObject({ fsCode: 'EACCES' });
+      expect(error.message).toContain('没有写入权限');
+    } finally {
+      // 恢复写权限，afterEach 的 rm -rf 才能删掉这个目录。
+      await chmod(diskPath(directory), 0o700);
+    }
   });
 
   it('错误对象带 uri 与 fsCode，调用方不用摸 errno', async () => {

@@ -20,15 +20,15 @@ import type { FileHandle } from 'node:fs/promises';
 import { cp, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import type { DocumentFrontmatter, SummaryState } from '../../domain/node.js';
 import { stableDigest } from '../../domain/node.js';
 import type { Uri } from '../../domain/uri.js';
 
-import { TEMP_FILE_PREFIX, isArtifactName, isReservedName, toDiskPath } from './path.js';
+import { createFsErrorMapper, fsErrorCode } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
+import { TEMP_FILE_PREFIX, isArtifactName, isReservedName, toDiskPath } from './path.js';
 
 export interface ContentStoreOptions {
   readonly dataDir: string;
@@ -80,52 +80,31 @@ const FRONTMATTER_KEYS = {
   summaryState: 'summary_state',
 } as const;
 
-/** 文件系统 errno → 领域错误码（架构文档 §19）。表里没有的一律 INTERNAL。 */
-const ERROR_CODE_BY_FS_ERRNO: Readonly<Record<string, ComemErrorCode>> = {
-  ENOENT: 'NOT_FOUND',
-  EEXIST: 'ALREADY_EXISTS',
-  ENOTDIR: 'INVALID_ARGUMENT',
-  EISDIR: 'INVALID_ARGUMENT',
-  ENOSPC: 'RESOURCE_EXHAUSTED',
-};
-
-const ERROR_MESSAGE_BY_CODE: Readonly<Record<ComemErrorCode, string>> = {
-  INVALID_URI: 'URI 不合法',
-  INVALID_ARGUMENT: '路径类型不匹配',
-  NOT_FOUND: '文件不存在',
-  UNAUTHENTICATED: '未认证',
-  PERMISSION_DENIED: '没有写入权限',
-  ALREADY_EXISTS: '路径已存在',
-  CONFLICT: '并发写冲突',
-  RESOURCE_EXHAUSTED: '磁盘空间不足',
-  PROVIDER_UNAVAILABLE: '服务不可用',
-  INTERNAL: '文件系统操作失败',
-};
-
-/** 从 `unknown` 里取 `code`，不用类型断言。 */
-function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
-}
-
 /**
- * 把文件系统错误收敛成 `ComemError`。
+ * 本适配器的 errno → `ComemError` 映射（架构文档 §19）。公共表与机制在
+ * `error-map.ts`，这里只声明覆盖项与本层自己的文案。
  *
- * 已经是 `ComemError` 的原样返回（例如 `writeText` 自己抛的 CONFLICT），否则按
- * errno 查表，查不到的是程序缺陷，标 INTERNAL 而不是假装成业务错误。
+ * **`ENOTDIR` 覆盖成 `INVALID_ARGUMENT`**：这里面对的是「`memories` 这个路径段其实是
+ * 个文件」——路径类型不匹配，不是「文件不存在」。`metadata-file` / `acl-file` 面对的是
+ * 「没有这个元数据文件」，`NOT_FOUND` 才符合它们的调用方语义；那两处是**有意保留的
+ * 差异**，不是漂移。差异集合由 `tests/integration/fs/error-map-consistency.test.ts`
+ * 逐个 errno 钉住。
+ *
+ * `EACCES` / `EPERM` → `PERMISSION_DENIED` 走公共表：写内容时目录不可写或文件不可改是
+ * 权限故障，不是 `INTERNAL`（HTTP 500）。
+ *
+ * 导出是为了让一致性测试调用**适配器实际使用的映射**，不是一份测试专用的表。
  */
-function mapFsError(error: unknown, uri: Uri): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  const fsCode = fsErrorCode(error);
-  const code = (fsCode === null ? undefined : ERROR_CODE_BY_FS_ERRNO[fsCode]) ?? 'INTERNAL';
-  const message = `${ERROR_MESSAGE_BY_CODE[code]}（${fsCode ?? 'UNKNOWN'}）：${uri.toString()}`;
-  return new ComemError(code, message, { uri: uri.toString(), fsCode });
-}
+export const mapFsError = createFsErrorMapper(
+  { ENOTDIR: 'INVALID_ARGUMENT' },
+  {
+    INVALID_ARGUMENT: '路径类型不匹配',
+    NOT_FOUND: '文件不存在',
+    PERMISSION_DENIED: '没有写入权限',
+    ALREADY_EXISTS: '路径已存在',
+    INTERNAL: '文件系统操作失败',
+  },
+);
 
 function randomTempSuffix(): string {
   return `${process.pid.toString(36)}-${Math.random()

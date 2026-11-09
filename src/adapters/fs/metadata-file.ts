@@ -42,12 +42,12 @@ import type {
   CommitStepName,
   SkippedCommitStep,
 } from '../../domain/archive.js';
-import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import type { SessionMeta, SessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
+import { createFsErrorMapper, fsErrorCode } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
 import { TEMP_FILE_PREFIX, toDiskPath } from './path.js';
 
@@ -112,51 +112,30 @@ const FRONTMATTER_KEYS = {
 } as const;
 
 /**
- * 文件系统 errno → 领域错误码（架构文档 §19）。表里没有的一律 INTERNAL。
+ * 本适配器的 errno → `ComemError` 映射（架构文档 §19）。公共表与机制在
+ * `error-map.ts`，这里只声明覆盖项与本层自己的文案。
  *
- * 摘要文件是内部产物，`ENOENT` 在 `readSummary` 里被当成「没有摘要」吞掉；
- * 其余错误（磁盘满、权限、目录被当成文件）都是真故障，必须让调用方看到。
+ * **`ENOTDIR` 覆盖成 `NOT_FOUND`**：这里面对的是「没有这个元数据文件」——上层多处
+ * （`readSummary` / `readSession` / `readArchive`）直接把 `ENOTDIR` 当成「文件不存在」
+ * 吞掉，映射成 `INVALID_ARGUMENT` 会与吞掉行为自相矛盾。`content-store` 对
+ * `ENOTDIR` 用 `INVALID_ARGUMENT`（路径段是文件），那是有意保留的差异，
+ * 见 `tests/integration/fs/error-map-consistency.test.ts`。
+ *
+ * 摘要文件是内部产物，`ENOENT` 在 `readSummary` 里被当成「没有摘要」吞掉；其余错误
+ * （磁盘满、权限、目录被当成文件）都是真故障，必须让调用方看到。
+ *
+ * 导出是为了让一致性测试调用**适配器实际使用的映射**，不是一份测试专用的表。
  */
-const ERROR_CODE_BY_FS_ERRNO: Readonly<Record<string, ComemErrorCode>> = {
-  ENOENT: 'NOT_FOUND',
-  ENOTDIR: 'NOT_FOUND',
-  EEXIST: 'ALREADY_EXISTS',
-  EISDIR: 'INVALID_ARGUMENT',
-  ENOSPC: 'RESOURCE_EXHAUSTED',
-  EACCES: 'PERMISSION_DENIED',
-  EPERM: 'PERMISSION_DENIED',
-};
-
-const ERROR_MESSAGE_BY_CODE: Readonly<Record<ComemErrorCode, string>> = {
-  INVALID_URI: 'URI 不合法',
-  INVALID_ARGUMENT: '摘要文件路径类型不匹配',
-  NOT_FOUND: '摘要文件不存在',
-  UNAUTHENTICATED: '未认证',
-  PERMISSION_DENIED: '没有权限读写摘要文件',
-  ALREADY_EXISTS: '摘要文件已存在',
-  CONFLICT: '并发写冲突',
-  RESOURCE_EXHAUSTED: '磁盘空间不足',
-  PROVIDER_UNAVAILABLE: '服务不可用',
-  INTERNAL: '摘要文件系统操作失败',
-};
-
-function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
-}
-
-function mapFsError(error: unknown, uri: Uri): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  const fsCode = fsErrorCode(error);
-  const code = (fsCode === null ? undefined : ERROR_CODE_BY_FS_ERRNO[fsCode]) ?? 'INTERNAL';
-  const message = `${ERROR_MESSAGE_BY_CODE[code]}（${fsCode ?? 'UNKNOWN'}）：${uri.toString()}`;
-  return new ComemError(code, message, { uri: uri.toString(), fsCode });
-}
+export const mapFsError = createFsErrorMapper(
+  { ENOTDIR: 'NOT_FOUND' },
+  {
+    INVALID_ARGUMENT: '摘要文件路径类型不匹配',
+    NOT_FOUND: '摘要文件不存在',
+    PERMISSION_DENIED: '没有权限读写摘要文件',
+    ALREADY_EXISTS: '摘要文件已存在',
+    INTERNAL: '摘要文件系统操作失败',
+  },
+);
 
 function randomTempSuffix(): string {
   return `${process.pid.toString(36)}-${Math.random()

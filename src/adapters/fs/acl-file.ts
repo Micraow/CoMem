@@ -31,11 +31,11 @@ import { mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promis
 import { dirname, join } from 'node:path';
 
 import { parsePrincipal } from '../../domain/acl.js';
-import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
+import { createFsErrorMapper, fsErrorCode } from './error-map.js';
 import { TEMP_FILE_PREFIX, isArtifactName, toDiskPath } from './path.js';
 
 /** 目录几何文件的名字（架构文档 §6.2 规则 6 的保留名之一）。 */
@@ -98,33 +98,29 @@ const TOP_LEVEL_KEYS = ['mode', 'entries'] as const;
 const ENTRY_KEYS = ['principal', 'level', 'effect'] as const;
 
 /**
- * 文件系统 errno → 领域错误码（架构文档 §19）。
+ * 本适配器的 errno → `ComemError` 映射（架构文档 §19）。公共表与机制在
+ * `error-map.ts`，这里只声明覆盖项与本层自己的文案。
  *
- * `ENOENT` / `ENOTDIR` 在 `read` / `exists` / `remove` 里被当成「没有 ACL 文件」
- * 吞掉；其余错误（磁盘满、权限、把目录当文件）都是真故障，必须让调用方看到。
+ * **`ENOTDIR` 覆盖成 `NOT_FOUND`**：这里面对的是「没有这个 ACL 文件」。`read` /
+ * `exists` / `remove` 在多处直接把 `ENOTDIR` 当成「没有 ACL 文件」吞掉（目录路径段
+ * 其实是个文件），映射成 `INVALID_ARGUMENT` 会把一次「没有 ACL」变成异常，改变
+ * 继承语义。`content-store` 对 `ENOTDIR` 用 `INVALID_ARGUMENT`（路径段是文件），
+ * 那是有意保留的差异，见 `tests/integration/fs/error-map-consistency.test.ts`。
+ *
+ * 其余错误（磁盘满、权限、把目录当文件）都是真故障，必须让调用方看到。
+ *
+ * 导出是为了让一致性测试调用**适配器实际使用的映射**，不是一份测试专用的表。
  */
-const ERROR_CODE_BY_FS_ERRNO: Readonly<Record<string, ComemErrorCode>> = {
-  ENOENT: 'NOT_FOUND',
-  ENOTDIR: 'NOT_FOUND',
-  EEXIST: 'ALREADY_EXISTS',
-  EISDIR: 'INVALID_ARGUMENT',
-  ENOSPC: 'RESOURCE_EXHAUSTED',
-  EACCES: 'PERMISSION_DENIED',
-  EPERM: 'PERMISSION_DENIED',
-};
-
-const ERROR_MESSAGE_BY_CODE: Readonly<Record<ComemErrorCode, string>> = {
-  INVALID_URI: 'URI 不合法',
-  INVALID_ARGUMENT: 'ACL 文件路径类型不匹配',
-  NOT_FOUND: 'ACL 文件不存在',
-  UNAUTHENTICATED: '未认证',
-  PERMISSION_DENIED: '没有权限读写 ACL 文件',
-  ALREADY_EXISTS: 'ACL 文件已存在',
-  CONFLICT: '并发写冲突',
-  RESOURCE_EXHAUSTED: '磁盘空间不足',
-  PROVIDER_UNAVAILABLE: '服务不可用',
-  INTERNAL: 'ACL 文件系统操作失败',
-};
+export const mapFsError = createFsErrorMapper(
+  { ENOTDIR: 'NOT_FOUND' },
+  {
+    INVALID_ARGUMENT: 'ACL 文件路径类型不匹配',
+    NOT_FOUND: 'ACL 文件不存在',
+    PERMISSION_DENIED: '没有权限读写 ACL 文件',
+    ALREADY_EXISTS: 'ACL 文件已存在',
+    INTERNAL: 'ACL 文件系统操作失败',
+  },
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -136,24 +132,6 @@ function isAclFileLevel(value: unknown): value is AclFileEntry['level'] {
 
 function describe(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
-}
-
-function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
-}
-
-function mapFsError(error: unknown, uri: Uri): ComemError {
-  if (error instanceof ComemError) {
-    return error;
-  }
-  const fsCode = fsErrorCode(error);
-  const code = (fsCode === null ? undefined : ERROR_CODE_BY_FS_ERRNO[fsCode]) ?? 'INTERNAL';
-  const message = `${ERROR_MESSAGE_BY_CODE[code]}（${fsCode ?? 'UNKNOWN'}）：${uri.toString()}`;
-  return new ComemError(code, message, { uri: uri.toString(), fsCode });
 }
 
 function invalidField(absolute: string, field: string, reason: string): ComemError {
