@@ -818,6 +818,9 @@ export class SearchService {
    */
   async #retrieve(text: string, options: FindOptions, limit: number): Promise<RetrieveOutcome> {
     const candidateLimit = Math.max(limit, this.#rerank?.topN ?? 0);
+    // 「现在」只取一次：FTS 臂与向量臂的候选集必须用同一个时刻。分两次取，一条
+    // 恰好在两次取时刻之间开始生效的记忆会出现在向量候选里、却不在 FTS 候选里。
+    const asOf = new Date().toISOString();
     if (this.#engine === 'fts5') {
       const hits = await this.#index.search({
         text,
@@ -828,6 +831,7 @@ export class SearchService {
         memoryTypes: options.memoryTypes,
         updatedAfter: options.updatedAfter,
         updatedBefore: options.updatedBefore,
+        asOf,
         limit: candidateLimit,
       });
       const ranked = this.#rank(hits, candidateLimit).map((hit) => ({
@@ -850,8 +854,8 @@ export class SearchService {
       });
     }
     return this.#engine === 'vector'
-      ? this.#retrieveVector(vector, text, options, limit, candidateLimit)
-      : this.#retrieveHybrid(vector, text, options, limit, candidateLimit);
+      ? this.#retrieveVector(vector, text, options, limit, candidateLimit, asOf)
+      : this.#retrieveHybrid(vector, text, options, limit, candidateLimit, asOf);
   }
 
   /**
@@ -859,6 +863,8 @@ export class SearchService {
    *
    * 降级时返回空命中 + 原因，**不退回 FTS5**（见 `find` 的引擎差异）。调用方从
    * 日志与 `search` 的 `plan.reason` 能看到原因。
+   *
+   * `asOf` 由 `#retrieve` 算一次传进来，见那里的注释（两臂必须同一个时刻）。
    */
   async #retrieveVector(
     vector: VectorRetrievalDeps,
@@ -866,6 +872,7 @@ export class SearchService {
     options: FindOptions,
     limit: number,
     candidateLimit: number,
+    asOf: string,
   ): Promise<RetrieveOutcome> {
     const embedded = await this.#embedQuery(vector, text, options);
     const queryVector = embedded.vectors[0];
@@ -886,7 +893,7 @@ export class SearchService {
       };
     }
 
-    const uris = await this.#readableUris(options);
+    const uris = await this.#readableUris(options, asOf);
     const raw = await vector.vectors.search({
       vector: queryVector,
       model,
@@ -919,6 +926,8 @@ export class SearchService {
    * 权重为 1 时退化成标准 RRF，与接线前逐位相同。
    *
    * 向量降级时退化成纯 FTS5，并把原因带回给 `search` 的 `plan`。
+   *
+   * `asOf` 由 `#retrieve` 算一次传进来，见那里的注释（两臂必须同一个时刻）。
    */
   async #retrieveHybrid(
     vector: VectorRetrievalDeps,
@@ -926,6 +935,7 @@ export class SearchService {
     options: FindOptions,
     limit: number,
     candidateLimit: number,
+    asOf: string,
   ): Promise<RetrieveOutcome> {
     // 两路并行：串行会让一次 hybrid 查询把两倍的索引延迟叠在用户身上。
     const [ftsHits, embedded] = await Promise.all([
@@ -938,6 +948,7 @@ export class SearchService {
         memoryTypes: options.memoryTypes,
         updatedAfter: options.updatedAfter,
         updatedBefore: options.updatedBefore,
+        asOf,
         limit: candidateLimit,
       }),
       this.#embedQuery(vector, text, options),
@@ -953,7 +964,7 @@ export class SearchService {
     } else if (model === null) {
       degradation = '没有配置嵌入模型，无法按模型过滤向量。';
     } else {
-      const uris = await this.#readableUris(options);
+      const uris = await this.#readableUris(options, asOf);
       const raw = await vector.vectors.search({
         vector: queryVector,
         model,
@@ -1035,12 +1046,16 @@ export class SearchService {
    * 谓词），所以传进 `SqliteVectorIndex.search` 的已经是可读集合——向量索引不需要
    * 再查一次权限。
    *
-   * **`memoryTypes` / 时间范围也在这里下推。** `vec0` 的 `uris` 就是候选集过滤：
-   * 先取最近邻再在 JS 里按类型丢掉，等于把「距离排第 20、但类型匹配」的候选浪费掉。
-   * 把它们交给 `GlobQuery` 的元数据条件，KNN 只在匹配的候选上算距离；hybrid 的
-   * 融合因此发生在两路都已过滤之后，而不是融合后才筛。
+   * **`memoryTypes` / 时间范围 / 有效期也在这里下推。** `vec0` 的 `uris` 就是候选集
+   * 过滤：先取最近邻再在 JS 里按类型丢掉，等于把「距离排第 20、但类型匹配」的候选
+   * 浪费掉。把它们交给 `GlobQuery` 的元数据条件，KNN 只在匹配的候选上算距离；
+   * hybrid 的融合因此发生在两路都已过滤之后，而不是融合后才筛。
+   *
+   * **`asOf` 必须传。** 候选集是 kNN 的名额：带上一批已失效的历史版本，top-k 里
+   * 一半会是同一段正文的旧版本，用户看到重复内容而且新的那条被挤掉。这个过滤在
+   * SQL 里做（`GlobQuery.asOf`），不是取回候选后再筛。
    */
-  async #readableUris(options: FindOptions): Promise<readonly string[]> {
+  async #readableUris(options: FindOptions, asOf: string): Promise<readonly string[]> {
     return this.#index.glob({
       pattern: VECTOR_CANDIDATE_PATTERN,
       scopes: options.scopes,
@@ -1048,6 +1063,7 @@ export class SearchService {
       memoryTypes: options.memoryTypes,
       updatedAfter: options.updatedAfter,
       updatedBefore: options.updatedBefore,
+      asOf,
       limit: VECTOR_CANDIDATE_LIMIT,
     });
   }

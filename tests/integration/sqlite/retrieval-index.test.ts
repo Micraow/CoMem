@@ -367,6 +367,97 @@ describe('search：记忆类型与更新时间（SQL 下推）', () => {
   });
 });
 
+/**
+ * 有效区间（W98 数据基座）。
+ *
+ * 记忆有「从何时到何时有效」两列，NULL = 无界。检索默认只看「现在有效」的节点：
+ * `find` / `search` / `rule_search` 与抽取预取都不该看到被顶替的历史版本。条件是
+ * `(valid_from IS NULL OR valid_from <= asOf)` 与
+ * `(valid_until IS NULL OR valid_until > asOf)`，**两列都是 NULL 时放行**——旧数据
+ * 与非记忆节点正是这个形态，它们不能被这次改动过滤掉。
+ *
+ * 四条记忆 + 一条非记忆文件全部命中同一个词，唯一差别是有效期。
+ */
+describe('检索的有效期过滤（asOf）', () => {
+  const NOW = '2026-11-10T00:00:00.000Z';
+  const UNBOUNDED = 'comem://user/alice/mem/unbounded.md';
+  const CURRENT = 'comem://user/alice/mem/current.md';
+  const EXPIRED = 'comem://user/alice/mem/expired.md';
+  const FUTURE = 'comem://user/alice/mem/future.md';
+  const RESOURCE = 'comem://user/alice/notes/plain.md';
+  const ALL = [UNBOUNDED, CURRENT, EXPIRED, FUTURE, RESOURCE];
+
+  beforeEach(async () => {
+    // 两列显式写 null：这是「带 valid_until 但为 NULL」的普通节点，必须放行。
+    await seed(UNBOUNDED, '有效区间', {
+      memoryType: 'preferences',
+      validFrom: null,
+      validUntil: null,
+    });
+    await seed(CURRENT, '有效区间', {
+      memoryType: 'preferences',
+      validFrom: '2026-11-09T00:00:00.000Z',
+    });
+    await seed(EXPIRED, '有效区间', {
+      memoryType: 'preferences',
+      validFrom: '2026-11-01T00:00:00.000Z',
+      validUntil: '2026-11-05T00:00:00.000Z',
+    });
+    await seed(FUTURE, '有效区间', {
+      memoryType: 'preferences',
+      validFrom: '2027-01-01T00:00:00.000Z',
+    });
+    // 非记忆节点：`valid_*` 恒为 NULL，不属于任何有效区间。
+    await seed(RESOURCE, '有效区间', { contextType: 'resource', memoryType: null });
+  });
+
+  it('search 只返回无界与当前有效的两条', async () => {
+    expect(uris(await search('有效区间', { asOf: NOW })).sort()).toEqual(
+      [UNBOUNDED, CURRENT, RESOURCE].sort(),
+    );
+  });
+
+  it('glob 用同一套条件：历史版本与未来版本都不出现', async () => {
+    // `glob` 同时是向量检索与 `grep` 的候选集来源；两处 SQL 分家会出现
+    // 「find 看不到历史版本、glob 能看到」。
+    expect((await glob('mem/*.md', { asOf: NOW })).sort()).toEqual(
+      [UNBOUNDED, CURRENT].sort(),
+    );
+    expect((await glob('**/*.md', { asOf: NOW })).sort()).toEqual(
+      [UNBOUNDED, CURRENT, RESOURCE].sort(),
+    );
+  });
+
+  it('省略 asOf 时不过滤，行为与接入有效期之前逐字相同', async () => {
+    expect(uris(await search('有效区间')).sort()).toEqual([...ALL].sort());
+    expect((await glob('**/*.md')).sort()).toEqual([...ALL].sort());
+  });
+
+  it('边界：valid_from 等于 asOf 仍有效，valid_until 等于 asOf 已失效', async () => {
+    const STARTS_NOW = 'comem://user/alice/mem/starts-now.md';
+    const ENDS_NOW = 'comem://user/alice/mem/ends-now.md';
+    await seed(STARTS_NOW, '有效区间', { memoryType: 'preferences', validFrom: NOW });
+    await seed(ENDS_NOW, '有效区间', { memoryType: 'preferences', validUntil: NOW });
+
+    const hits = uris(await search('有效区间', { asOf: NOW }));
+    expect(hits).toContain(STARTS_NOW);
+    expect(hits).not.toContain(ENDS_NOW);
+  });
+
+  it('asOf 归一化后再比较：带时区偏移的边界与 UTC 同一结果', async () => {
+    // `2026-11-10T08:00:00+08:00` 就是 NOW。不归一化会按字符串比较出错。
+    expect(uris(await search('有效区间', { asOf: '2026-11-10T08:00:00+08:00' })).sort()).toEqual(
+      [UNBOUNDED, CURRENT, RESOURCE].sort(),
+    );
+  });
+
+  it('asOf 不是时间串时在进 SQL 之前被拒绝', async () => {
+    await expect(search('有效区间', { asOf: '明天' })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+  });
+});
+
 describe('search：分数', () => {
   const MANY = 'comem://user/alice/many.md';
   const ONCE = 'comem://user/alice/once.md';

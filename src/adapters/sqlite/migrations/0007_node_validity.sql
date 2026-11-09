@@ -1,0 +1,27 @@
+-- ── 记忆的有效区间（W98 数据基座）────────────────────────────────────────────
+--
+-- 一条记忆「从什么时刻到什么时候有效」。两列都存 ISO 8601 绝对时刻
+-- （`Date#toISOString()` 的形态：定长、带 `Z`），所以 TEXT 比较即时间比较。
+--
+-- NULL = 这一侧没有边界，两个方向各自独立：
+--   `valid_from`  NULL → 不设下界（对迁移前的存量行也等于「不知道从何时开始有效」）
+--   `valid_until` NULL → 仍然有效
+--
+-- **旧行不重写**：`ADD COLUMN` 只给新列补 NULL，所以本迁移之前写入的每个节点都
+-- 自动是「无界」，检索行为与迁移前逐字相同。写入语义（版本快照、`supersedes`、
+-- `reject` 回滚）不在这里——这一列只承载「检索按当前时刻过滤」所需的数据，
+-- 写侧这一阶段只写 NULL。
+--
+-- 不给这两列建索引。它们只出现在 `search` / `glob` 的 `WHERE` 里，与 `status` /
+-- `memory_type` 同域：查询的入口永远是 `node_fts MATCH`，或者 `n.uri` 的 GLOB
+-- 范围，然后逐候选行求这几条谓词；没有查询按这两列排序，也没有查询拿它们做范围
+-- 扫描的起点。`EXPLAIN QUERY PLAN` 实测（5000 行、两列 2/3 非 NULL）：
+--
+--   search: SCAN node_fts VIRTUAL TABLE INDEX 0:M4
+--           SEARCH n USING INDEX sqlite_autoindex_node_1 (uri=? AND level=?)
+--   glob:   SEARCH n USING INDEX sqlite_autoindex_node_1 (uri>? AND uri<?)
+--
+-- 在这两列上各建一个索引后，两条 plan 逐行不变（SQLite 不选它们）。也就是说索引
+-- 只会在每次 `upsert` 时多维护两棵 B 树，读路径一次都用不上。
+ALTER TABLE node ADD COLUMN valid_from TEXT;
+ALTER TABLE node ADD COLUMN valid_until TEXT;

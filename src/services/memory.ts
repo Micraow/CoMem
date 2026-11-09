@@ -26,6 +26,33 @@
  * 丢掉，而 `upsertMemory` / `approve` 都是整份重写。旧文件没有这个键 → 读作空数组，
  * 且不写这个键（输出与改动前一致）。
  *
+ * ## 覆盖写与版本快照（W98）
+ *
+ * 一次覆盖写不再永久销毁旧值。`upsertMemory` 在写新文档之前，如果磁盘上的文档
+ * `status = 'active'` 且正文真的变了，就把**旧文档原样**写成一份版本文件，放在
+ * 记忆类型目录下的 `.history/` 里（路径镜像 identity 的相对路径）：
+ *
+ * ```
+ * memories/preferences/code-style.md                       ← 规范文件（当前有效）
+ * memories/preferences/.history/code-style.md--20261110T022746123Z.md
+ *                                                           ← 旧值，valid_until 非空
+ * ```
+ *
+ * 两份文件的差别只有三处：版本文件带 `valid_until = 写入时刻`、带旧值自己的
+ * `valid_from`、文件名带时间戳；正文与其它字段逐字节相同。新文档写
+ * `valid_from = 写入时刻`、`supersedes = 版本文件 URI`，于是「这条记忆从哪一刻开始
+ * 有效、顶替了哪一份」都在文件里说得清。
+ *
+ * 检索默认看不到版本文件：`node.valid_until` 非空，`search` 的 `asOf` 过滤把它挡在
+ * 外面。它只能按 URI 直接 `read`——版本没有独立入口是刻意的（不加工具、不加接口）。
+ *
+ * 每个 identity 只留最新 `MAX_VERSIONS` 份：`memory.ttl.defaultDays` 默认 0 时滑动
+ * TTL 不跑，版本文件不会被自动清理，所以磁盘有界靠截断而不是 TTL。
+ *
+ * `pending` 的旧值不快照（`pending` 不是有效值，没有「正确的旧值」可言），但新文档
+ * **继承**它的 `supersedes`：否则拒绝一次基于 pending 的覆盖写会丢掉上一条有效版本
+ * 的指向，`reject` 就回不到写入前。
+ *
  * ## 端口为什么是「原样文档」
  *
  * `filesystem.read` 的 `text` 必须是**磁盘上的原始内容**（含 frontmatter），
@@ -74,6 +101,7 @@ import {
 } from '../domain/memory-type.js';
 import { getMemoryType, profileMemoryType } from '../domain/memory-types/index.js';
 import { validateProfileBody } from '../domain/profile-format.js';
+import { parseValidityInstant } from '../domain/retrieval.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
@@ -93,6 +121,15 @@ export interface MemoryRecord {
    * 引用的材料 URI，让它给只能得到幻觉。旧文件缺这个键时读作空数组。
    */
   readonly sources: readonly string[];
+  /**
+   * 这条记忆的有效区间（frontmatter 的保留键 `valid_from` / `valid_until`），
+   * ISO 8601 UTC 形态。`null` = 无界：不知道从何时开始有效 / 仍然有效。
+   *
+   * 旧文件缺这两个键时读作 `null`，所以「没有有效期」与「一直有效」是同一个状态。
+   * 检索默认只返回当前有效的节点；历史版本只能按 URI 直接 `read`。
+   */
+  readonly validFrom: string | null;
+  readonly validUntil: string | null;
 }
 
 export interface MemoryWriteResult {
@@ -241,6 +278,27 @@ const SUMMARY_KEY = 'summary';
  * 对的、写回去就没了。它也不是记忆字段：模型不产出它，`edit` 也不该能改它。
  */
 const SOURCES_KEY = 'sources';
+/**
+ * 有效区间（W98）：`valid_from` / `valid_until`，ISO 8601，缺键或为 NULL 都是无界。
+ *
+ * **必须是保留键**，理由同 `sources`：不在 `RESERVED_KEYS` 里的键会被
+ * `parseMemoryDocument` 收进 `fields`，而 `serializeMemoryDocument` 只写
+ * `schema.fields` 与保留键，下一次重写就把它丢掉了。它也不是记忆字段——有效期由
+ * 服务端按写入时刻算，模型不该能通过一次 `replace` 改自己的有效期。
+ */
+const VALID_FROM_KEY = 'valid_from';
+const VALID_UNTIL_KEY = 'valid_until';
+/**
+ * 被这条记忆顶替掉的版本（W98）：版本文件的 URI。
+ *
+ * 同样是保留键，同样不是记忆字段：它由写入点算出来（被快照的那份旧文档的路径），
+ * 模型看不到也不需要看到。`reject` 靠它回到写入前——拒绝一次错误写入时，把
+ * `supersedes` 指向的版本写回规范 URI。
+ *
+ * **继承规则**：这次覆盖写没有产生新快照（`pending` 旧值、正文没变、或旧文档已被
+ * 归档）时沿用磁盘上的值，不丢上一条有效版本的指向。
+ */
+const SUPERSEDES_KEY = 'supersedes';
 
 /**
  * `sources` 的条数上限。
@@ -252,6 +310,34 @@ const SOURCES_KEY = 'sources';
  */
 const MAX_SOURCES = 20;
 
+/**
+ * 每个 identity 保留的版本文件数上限（W98）。
+ *
+ * 来源：经验假设。目的是「回到上一次正确值」——回滚的粒度是上一次覆盖写，5 步
+ * 够覆盖连续几次错误写入；同时把每个 identity 的历史占用固定在 5 份以内（一份约与
+ * 规范文件同量级）。`memory.ttl.defaultDays` 默认 0 时不跑滑动 TTL，版本文件不会
+ * 被自动清理，所以磁盘有界性靠这里的截断兜，不靠 TTL。
+ */
+const MAX_VERSIONS = 5;
+
+/**
+ * 版本文件所在的隐藏目录（记忆类型目录下，如 `memories/preferences/.history/`）。
+ *
+ * 它不是保留名（`adapters/fs/path.ts` 的 `RESERVED_NAMES`）：`glob` / `grep` /
+ * `list` / `tree` 是路径工具，契约是磁盘，应当看得到版本文件。检索面看不到它们
+ * 靠的是 `valid_until` 过滤，不是目录名。
+ */
+const HISTORY_DIRECTORY = '.history';
+
+/**
+ * 版本文件名里时间戳之后的形态：`YYYYMMDDTHHMMSSmmmZ`，同一毫秒内撞名时追加
+ * `-1`、`-2`。
+ *
+ * 时间戳不带冒号与点，Windows 上也能直接当文件名。定长，所以按字符串排序与按时间
+ * 排序等价（截断依赖这一点）。
+ */
+const VERSION_NAME_PATTERN = /^(\d{8}T\d{6}\d{3}Z)(?:-(\d+))?\.md$/;
+
 /** 这些键是文件元数据，不属于 `fields`。 */
 const RESERVED_KEYS: ReadonlySet<string> = new Set([
   MEMORY_TYPE_KEY,
@@ -261,6 +347,9 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
   URI_KEY,
   SUMMARY_KEY,
   SOURCES_KEY,
+  VALID_FROM_KEY,
+  VALID_UNTIL_KEY,
+  SUPERSEDES_KEY,
 ]);
 
 /** 走复核闸门的记忆类型（§11.6）。 */
@@ -364,6 +453,12 @@ interface MemoryDocument {
   readonly sources: readonly string[];
   /** 正文（`## content` 及之后），与 `memory_diff.json` 的 before / after 同一形态 */
   readonly body: string;
+  /** 有效区间的起点（保留键 `valid_from`）；缺键或解析不出来时是 `null` */
+  readonly validFrom: string | null;
+  /** 有效区间的终点（保留键 `valid_until`）；`null` = 仍然有效 */
+  readonly validUntil: string | null;
+  /** 被这条记忆顶替掉的版本文件 URI（保留键 `supersedes`）；缺键时是 `null` */
+  readonly supersedes: string | null;
 }
 
 function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
@@ -535,6 +630,28 @@ function parseStatus(value: unknown): MemoryStatus {
 }
 
 /**
+ * 版本文件名里的时间戳：`Date#toISOString()` 去掉 `-`、`:`、`.`。
+ *
+ * `2026-11-10T02:27:46.123Z` → `20261110T022746123Z`。定长、无冒号（冒号在 Windows
+ * 文件名里非法），所以同一时刻的两次写入只可能因为毫秒相同而撞名，撞名由调用方
+ * 追加 `-1`、`-2` 解决。
+ */
+function versionStamp(now: string): string {
+  return now.replace(/[-:.]/g, '');
+}
+
+/**
+ * frontmatter 的 `supersedes` → 版本文件 URI。
+ *
+ * 不可信输入（手改文件）按「没有指向」处理：非字符串、空串都读作 `null`。解析不
+ * 出合法 URI 的值留到 `reject` 里判断——那时才需要决定「删掉」还是「恢复」，
+ * 在这里抛错会让整条记忆读不出来。
+ */
+function parseSupersedes(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
  * frontmatter 的 `sources` → 字符串数组。
  *
  * 缺键、写成标量、块里混进非字符串项都读作「没有可信的溯源」：一个解析不出来的
@@ -601,6 +718,17 @@ function serializeMemoryDocument(input: {
   readonly fields: Readonly<Record<string, unknown>>;
   /** 空数组不写这个键：没有溯源的文件与 W97 之前的文件逐字节相同。 */
   readonly sources: readonly string[];
+  /**
+   * 有效区间：写进 frontmatter 的 `valid_from` / `valid_until`。
+   *
+   * 来自 `MemoryDocument` 的**元数据**，不从 `fields` 读：进 `fields` 就等于让模型
+   * 用一条 `replace` 改自己的有效期。`valid_until` 为 `null` 时不写这个键（与空
+   * `sources` 不写键同一约定），所以当前有效的记忆输出与改动前只差一行 `valid_from`。
+   */
+  readonly validFrom: string | null;
+  readonly validUntil: string | null;
+  /** 被顶替的版本文件 URI；`null` 时不写这个键。 */
+  readonly supersedes: string | null;
 }): string {
   const header = [
     FRONTMATTER_DELIMITER,
@@ -610,6 +738,19 @@ function serializeMemoryDocument(input: {
     `${UPDATED_AT_KEY}: ${formatScalar(input.updatedAt)}`,
     `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
   ];
+
+  // 有效期与被顶替版本放在同一段元数据里（`status` / `created_at` 那一列），
+  // **不放 `fields`**：模型的一次 `replace` 不该能改自己的有效期，而 `fields` 是
+  // 模型可写的。
+  if (input.validFrom !== null) {
+    header.push(`${VALID_FROM_KEY}: ${formatScalar(input.validFrom)}`);
+  }
+  if (input.validUntil !== null) {
+    header.push(`${VALID_UNTIL_KEY}: ${formatScalar(input.validUntil)}`);
+  }
+  if (input.supersedes !== null) {
+    header.push(`${SUPERSEDES_KEY}: ${formatScalar(input.supersedes)}`);
+  }
 
   if (input.sources.length > 0) {
     header.push(formatField(SOURCES_KEY, input.sources));
@@ -690,6 +831,11 @@ function parseMemoryDocument(text: string): MemoryDocument | null {
     // 字段。不在保留键集合里时它会被上面的循环收进 `fields`，重写时又按 schema
     // 丢掉——这正是「新键必须做成保留键」的失败形态，不要把它读成溯源。
     sources: RESERVED_KEYS.has(SOURCES_KEY) ? parseSources(data[SOURCES_KEY]) : [],
+    // 有效期由写入点给出（W98）：缺键 / 不可解析都是无界，归一化成
+    // `toISOString()` 形态以便与索引列按 TEXT 比较。
+    validFrom: parseValidityInstant(data[VALID_FROM_KEY]),
+    validUntil: parseValidityInstant(data[VALID_UNTIL_KEY]),
+    supersedes: parseSupersedes(data[SUPERSEDES_KEY]),
     body,
   };
 }
@@ -754,6 +900,8 @@ export class MemoryService {
       status: document.status,
       updatedAt: document.updatedAt,
       sources: document.sources,
+      validFrom: document.validFrom,
+      validUntil: document.validUntil,
     };
   }
 
@@ -833,6 +981,28 @@ export class MemoryService {
         }
 
         const now = new Date().toISOString();
+        // 覆盖写之前先把旧值留一份版本文件（W98）。判据用**正文有没有变**而不是
+        // 「是不是覆盖写」：同一份正文再写一遍（重放、补 sources）没有旧值可丢，
+        // 快照只会凭空多出五份一模一样的文件。
+        const contentChanged =
+          existing !== null && existing.fields[CONTENT_FIELD] !== merged[CONTENT_FIELD];
+        // `addOnly` 已在上面抛错，`operationMode === 'upsert'` 这个判据在这里是显式
+        // 的语义声明（只有「可覆盖写」的类型才有「被顶替的旧值」）。
+        const snapshot =
+          existing !== null &&
+          existing.status === 'active' &&
+          schema.operationMode === 'upsert' &&
+          contentChanged
+            ? await this.#writeVersionSnapshot(
+                scopeUri,
+                schema,
+                target.uri,
+                existing,
+                now,
+              )
+            : null;
+        const supersedes = snapshot?.toString() ?? existing?.supersedes ?? null;
+
         const fields: Record<string, unknown> = { ...merged };
         if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
           fields[UPDATED_AT_FIELD] = now;
@@ -854,6 +1024,10 @@ export class MemoryService {
           schema,
           fields,
           sources,
+          // 新文档的有效期从这一刻开始；`valid_until` 留空 = 仍然有效。
+          validFrom: now,
+          validUntil: null,
+          supersedes,
         });
         await this.#filesystem.write(target.uri, text);
 
@@ -884,6 +1058,118 @@ export class MemoryService {
       // 两个并发写者会同时通过（见 `LockAcquireOptions.createParentDirectory`）。
       { createParentDirectory: true },
     );
+  }
+
+  /**
+   * 把磁盘上的旧文档快照成一份版本文件，返回它的 URI。
+   *
+   * 路径：`{scope}/{schema.directory}/.history/{identity 相对路径}--{stamp}.md`。
+   * identity 的相对路径从**规范 URI** 里切出来（`upsertMemory` 刚校验过它等于
+   * `renderMemoryUri` 的结果），所以 `rules` 的 `{scenario}/{rule}.md` 那层目录在
+   * `.history` 里原样镜像，不需要第二份路径渲染。
+   *
+   * 内容与原文档的差别只有三处：frontmatter 的 `uri` 换成版本文件自己的地址、
+   * `valid_until` 是本次写入的时刻、`valid_from` 沿用旧值自己的起点（缺键时退回
+   * `created_at`，否则旧版本会变成「不知道从何时开始有效」，检索无法判断它是否
+   * 在某个过去时刻有效）。
+   */
+  async #writeVersionSnapshot(
+    scopeUri: Uri,
+    schema: MemoryTypeSchema,
+    identityUri: Uri,
+    document: MemoryDocument,
+    now: string,
+  ): Promise<Uri> {
+    const directorySegments = schema.directory.split('/');
+    const mirror = identityUri.segments.slice(scopeUri.depth + directorySegments.length);
+    const directory = scopeUri.child(
+      ...directorySegments,
+      HISTORY_DIRECTORY,
+      ...mirror.slice(0, -1),
+    );
+    const name = mirror.at(-1) ?? '';
+    const stamp = versionStamp(now);
+
+    let versionUri = directory.child(`${name}--${stamp}.md`);
+    // 同一毫秒内的第二次快照会撞名（两次写入落在同一毫秒）。追加 `-1`、`-2`，
+    // 与截断的排序规则一致：同一个 stamp 里序号大的更新。
+    for (let collision = 1; (await this.#filesystem.stat(versionUri)) !== null; collision += 1) {
+      versionUri = directory.child(`${name}--${stamp}-${collision}.md`);
+    }
+
+    await this.#filesystem.write(
+      versionUri,
+      serializeMemoryDocument({
+        uri: versionUri,
+        memoryType: document.memoryType,
+        status: document.status,
+        createdAt: document.createdAt,
+        updatedAt: document.updatedAt,
+        schema,
+        fields: document.fields,
+        sources: document.sources,
+        validFrom:
+          document.validFrom ?? (document.createdAt === '' ? null : document.createdAt),
+        validUntil: now,
+        supersedes: document.supersedes,
+      }),
+    );
+    await this.#truncateVersions(directory, name);
+
+    this.#logger.info('记忆旧值已存为版本', {
+      uri: identityUri.toString(),
+      version: versionUri.toString(),
+      memoryType: schema.type,
+    });
+    return versionUri;
+  }
+
+  /**
+   * 每个 identity 只留最新 `MAX_VERSIONS` 份版本文件，按 stamp 升序删最旧。
+   *
+   * 只处理同一个 `baseName` 的文件：`.history` 目录里可能有多个 identity 的版本
+   * （`rules` 的镜像目录里一个 scenario 下有多条规则），互相不能算进对方的配额。
+   * 删不掉只记 warn 不抛错：写盘已经成功，截断失败不该让这次记忆写入失败——下一轮
+   * 覆盖写会再试一次。
+   */
+  async #truncateVersions(directory: Uri, baseName: string): Promise<void> {
+    const prefix = `${baseName}--`;
+    const versions: { readonly uri: Uri; readonly stamp: string; readonly collision: number }[] = [];
+    for (const entry of await this.#listOrEmpty(directory)) {
+      if (entry.kind !== 'file' || !entry.uri.name.startsWith(prefix)) {
+        continue;
+      }
+      const matched = VERSION_NAME_PATTERN.exec(entry.uri.name.slice(prefix.length));
+      if (matched === null) {
+        continue;
+      }
+      versions.push({
+        uri: entry.uri,
+        stamp: matched[1] ?? '',
+        collision: Number(matched[2] ?? 0),
+      });
+    }
+    if (versions.length <= MAX_VERSIONS) {
+      return;
+    }
+
+    versions.sort((left, right) =>
+      left.stamp === right.stamp
+        ? left.collision - right.collision
+        : left.stamp < right.stamp
+          ? -1
+          : 1,
+    );
+    for (const oldest of versions.slice(0, versions.length - MAX_VERSIONS)) {
+      try {
+        await this.#filesystem.remove(oldest.uri);
+      } catch (error) {
+        this.#logger.warn('旧版本文件删除失败，保留待下次截断', {
+          uri: oldest.uri.toString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   /** 复核通过：`pending` → `active`（§11.6）。已经是 `active` 时是空操作。 */
@@ -917,8 +1203,12 @@ export class MemoryService {
           schema,
           fields: document.fields,
           // 复核也是**一次完整重写**：不把读到的溯源带过来，approve 会在用户
-          // 点下「通过」的那一刻把 `sources` 抹掉。
+          // 点下「通过」的那一刻把 `sources` 抹掉。有效期与 `supersedes` 同理：
+          // 通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
           sources: document.sources,
+          validFrom: document.validFrom,
+          validUntil: document.validUntil,
+          supersedes: document.supersedes,
         }),
       );
       this.#logger.info('记忆复核通过', {
@@ -928,20 +1218,101 @@ export class MemoryService {
     });
   }
 
-  /** 复核拒绝：删除并记录原因（§11.6）。已经不在了是空操作。 */
+  /**
+   * 复核拒绝（§11.6）：回到写入前。
+   *
+   * 拒绝的是一次**覆盖写**时，规范文件里现在是不该留下的新值、旧值在版本文件里。
+   * 所以这里把 `supersedes` 指向的版本写回规范 URI 并清掉 `valid_until`（它现在
+   * 又有效了），调用方不需要知道版本文件的位置。这样拒绝一次错误写入的终态是
+   * 「写入前的数据」，不是「这条记忆消失了」。
+   *
+   * 没有版本可回（首条写入、`supersedes` 指向的文件已被 TTL 清理或截断）时维持
+   * 原来的行为：删掉 pending 文件。已经不在了是空操作。
+   */
   async reject(uri: Uri, reason: string): Promise<void> {
     await this.#locks.withLock(uri, 'exact', async () => {
       const document = await this.#readDocument(uri);
       if (document === null) {
         return;
       }
-      await this.#filesystem.remove(uri);
-      this.#logger.info('记忆复核拒绝，已删除', {
+      const restoredFrom = await this.#restoreSuperseded(uri, document);
+      if (restoredFrom === null) {
+        await this.#filesystem.remove(uri);
+        this.#logger.info('记忆复核拒绝，已删除', {
+          uri: uri.toString(),
+          memoryType: document.memoryType,
+          reason,
+        });
+        return;
+      }
+      this.#logger.info('记忆复核拒绝，已恢复到上一个有效版本', {
         uri: uri.toString(),
         memoryType: document.memoryType,
         reason,
+        restoredFrom: restoredFrom.toString(),
       });
     });
+  }
+
+  /**
+   * 把 `supersedes` 指向的版本写回规范 URI，返回被恢复的版本 URI。
+   *
+   * 恢复出来的文档取版本文件自己的字段与时间戳：目标是「与写入前的那份文件相同」，
+   * 所以不刷新 `updated_at`，也不重新过复核闸门（那个版本本来就是 active 的）。
+   * 版本文件本身留在 `.history`（它的 `valid_until` 仍然非空，检索看不到它）。
+   *
+   * 任何一种「恢复不了」都返回 `null`，由调用方维持删除：`supersedes` 不是合法
+   * URI、指向的文件不存在、或那个文件已经读不出记忆类型。这些都不该让一次拒绝
+   * 失败——拒绝的语义是「别留下这条 pending」。
+   */
+  async #restoreSuperseded(uri: Uri, document: MemoryDocument): Promise<Uri | null> {
+    if (document.supersedes === null) {
+      return null;
+    }
+    const previousUri = Uri.tryParse(document.supersedes);
+    if (previousUri === null) {
+      this.#logger.warn('记忆的 supersedes 不是合法 URI，拒绝时按删除处理', {
+        uri: uri.toString(),
+        supersedes: document.supersedes,
+      });
+      return null;
+    }
+    const previous = await this.#readDocument(previousUri);
+    if (previous === null) {
+      this.#logger.warn('记忆的 supersedes 指向的文件不存在，拒绝时按删除处理', {
+        uri: uri.toString(),
+        supersedes: document.supersedes,
+      });
+      return null;
+    }
+    const schema = getMemoryType(previous.memoryType);
+    if (schema === undefined) {
+      this.#logger.warn('记忆的 supersedes 指向未知的记忆类型，拒绝时按删除处理', {
+        uri: uri.toString(),
+        supersedes: document.supersedes,
+        memoryType: previous.memoryType,
+      });
+      return null;
+    }
+
+    await this.#filesystem.write(
+      uri,
+      serializeMemoryDocument({
+        uri,
+        memoryType: previous.memoryType,
+        status: previous.status,
+        createdAt: previous.createdAt,
+        updatedAt: previous.updatedAt,
+        schema,
+        fields: previous.fields,
+        sources: previous.sources,
+        validFrom: previous.validFrom,
+        // 又有效了：清掉终点，检索重新看得到它。
+        validUntil: null,
+        supersedes: previous.supersedes,
+      }),
+    );
+    return previousUri;
   }
 
   /**
@@ -958,7 +1329,14 @@ export class MemoryService {
     this.#logger.info('记忆已删除', { uri: uri.toString() });
   }
 
-  /** 待复核列表：scope 下 `memories/` 里 `status = 'pending'` 的记录。 */
+  /**
+   * 待复核列表：scope 下 `memories/` 里 `status = 'pending'` 的记录。
+   *
+   * **跳过 `.history`**：那里是已经失效的旧值（W98），不是「当前记录」。待复核队列
+   * 回答的是「有哪些**当前**记忆需要人看一眼」，版本文件既不是当前值、也不该因为
+   * 一次覆盖就把旧版本重新塞进人的工作队列；顺带省掉每个 identity 最多 5 次多余的
+   * 读盘。
+   */
   async listPending(
     scopeUri: Uri,
     options: { readonly limit?: number } = {},
@@ -976,6 +1354,9 @@ export class MemoryService {
           return;
         }
         if (entry.kind === 'directory') {
+          if (entry.uri.name === HISTORY_DIRECTORY) {
+            continue;
+          }
           await visit(entry.uri);
           continue;
         }

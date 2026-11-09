@@ -417,6 +417,70 @@ describe('0005 升级路径（删 node.expires_at）', () => {
  * HTTP 响应的写入成本。升级要在**已有库**上可用：索引没了，表与裁剪用的
  * `request_log_created` 还在，行还在。
  */
+/**
+ * 0007 给 `node` 加两列有效区间（W98 数据基座）。
+ *
+ * 升级要在**已有库**上可用：`ALTER TABLE ... ADD COLUMN` 只补 NULL，不重写旧行。
+ * 旧行的两列读作「无界」（NULL），这是「升级后行为与升级前逐字相同」的关键——
+ * 若旧行被写成某个具体时刻，存量记忆会在一次升级后集体从检索里消失。
+ */
+describe('0007 升级路径（node 的有效区间两列）', () => {
+  const MIGRATIONS = new URL('../../../src/adapters/sqlite/migrations/', import.meta.url);
+  const EXISTING = 'comem://user/alice/memories/preferences/code-style.md';
+
+  function applyPre0007(db: DatabaseSync): void {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const files = [
+      '0001_init.sql',
+      '0002_archived_at.sql',
+      '0003_memory_link.sql',
+      '0004_node_level_rows.sql',
+      '0005_sliding_ttl.sql',
+      '0006_drop_request_log_indexes.sql',
+    ];
+    for (const [index, name] of files.entries()) {
+      db.exec(readFileSync(new URL(name, MIGRATIONS), 'utf8'));
+      db.prepare('INSERT INTO schema_version (version, applied_at) VALUES (?, ?)').run(
+        index + 1,
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  function nodeColumns(db: DatabaseSync): string[] {
+    return db
+      .prepare('PRAGMA table_info(node)')
+      .all()
+      .map((row) => String(row['name']));
+  }
+
+  it('从 0006 升级后两列存在且为 NULL，行数不变', () => {
+    const db = open(':memory:');
+    applyPre0007(db);
+    expect(currentVersion(db)).toBe(6);
+    expect(nodeColumns(db)).not.toContain('valid_from');
+    expect(nodeColumns(db)).not.toContain('valid_until');
+
+    db.prepare(
+      `INSERT INTO node (uri, parent_uri, scope, kind, context_type, memory_type, level,
+                         abstract, body_digest, size, updated_at, status)
+       VALUES (?, ?, 'user', 'document', 'memory', 'preferences', 'L2',
+               NULL, '0000000000000000', 42, '2026-11-01T00:00:00.000Z', 'active')`,
+    ).run(EXISTING, 'comem://user/alice/memories/preferences');
+
+    expect(runMigrations(db)).toBe(LATEST_VERSION);
+
+    expect(nodeColumns(db)).toEqual(expect.arrayContaining(['valid_from', 'valid_until']));
+    expect(db.prepare('SELECT COUNT(*) AS total FROM node').get()).toMatchObject({ total: 1 });
+    // 旧行 = 无界。检索的谓词两侧都有 `IS NULL` 分支，所以这行仍然可见。
+    expect(
+      db.prepare('SELECT valid_from, valid_until FROM node WHERE uri = ?').get(EXISTING),
+    ).toMatchObject({ valid_from: null, valid_until: null });
+  });
+});
+
 describe('0006 升级路径（删 request_log 的查询索引）', () => {
   const MIGRATIONS = new URL('../../../src/adapters/sqlite/migrations/', import.meta.url);
   const DROPPED = ['request_log_status', 'request_log_request_id', 'request_log_subject'];

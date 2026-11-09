@@ -556,6 +556,56 @@ describe('markStale', () => {
   });
 });
 
+/**
+ * 版本快照目录不参与目录摘要（W98）。
+ *
+ * 每次记忆覆盖写都会新增一份 `.history/...` 版本文件，观察者会对它的父目录投递一次
+ * `markStale`。若照常传播，每次覆盖写会多两次摘要生成（`.history` 与它上面的类型
+ * 目录），而版本文件从不参与检索。豁免点在 `#invalidateDirectory`：遇到 `.history`
+ * 返回 `unchanged`，传播就此止步。
+ */
+describe('版本快照目录不参与摘要（W98）', () => {
+  it('`.history` 直接返回 unchanged：不调生成器、不写摘要文件、不往上传播', async () => {
+    await makeDirectory(`${PREFERENCES}/.history`);
+    const { generator, inputs } = spyGenerator(() => '不该被生成的摘要');
+    const service = createService({ generator });
+
+    const result = await service.markStale(Uri.parse(`${PREFERENCES}/.history`));
+
+    expect(inputs).toEqual([]);
+    // 传播走了一步就停：`.history` 自己返回 `unchanged`，类型目录不在结果里。
+    expect(result.recomputed).toEqual([`${PREFERENCES}/.history`]);
+    expect(result.markedStale).toEqual([]);
+    // 类型目录的摘要不会被这次版本写入顺手生成/改写。
+    await expect(service.read(Uri.parse(PREFERENCES))).resolves.toBeNull();
+  });
+
+  it('`rules` 的镜像子目录（`.history/{scenario}`）同样止步', async () => {
+    const rulesHistory = `${SCOPE_ROOT}/memories/rules/.history/backend`;
+    await makeDirectory(rulesHistory);
+    const { generator, inputs } = spyGenerator(() => '不该被生成的摘要');
+    const service = createService({ generator });
+
+    const result = await service.markStale(Uri.parse(rulesHistory));
+
+    expect(inputs).toEqual([]);
+    expect(result.recomputed).toEqual([rulesHistory]);
+    expect(result.markedStale).toEqual([]);
+  });
+
+  it('对照组：同层的普通子目录照常重算', async () => {
+    await makeDirectory(TEAM);
+    await writeText(CONVENTIONS, '# 约定\n\n目录正文。\n');
+    const { generator, inputs } = spyGenerator(() => '普通子目录的摘要');
+    const service = createService({ generator });
+
+    const result = await service.markStale(Uri.parse(TEAM));
+
+    expect(inputs.length).toBeGreaterThan(0);
+    expect(result.recomputed).toContain(TEAM);
+  });
+});
+
 describe('锁内不得跨越慢操作（§10.6）', () => {
   it('摘要生成（慢 LLM）期间，另一个写者能拿到子树锁', async () => {
     await makeDirectory(PREFERENCES);

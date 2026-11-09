@@ -46,6 +46,7 @@ import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
+import { parseFrontmatterFields } from './index-observer.js';
 import { skillIndexRecord } from './skill.js';
 
 /** 资源文件的索引层级（与 `ResourceService` 一致，§9.1）。 */
@@ -296,6 +297,12 @@ export class ReconcileService {
    * `memory_type` / `status` 优先取索引里的旧行——重放是「补写丢掉的派生数据」，
    * 不该顺手改写已有元数据。
    *
+   * **有效区间必须从 frontmatter 重放**（W98）。它不取旧行：索引行丢了就是丢了，
+   * 而 `valid_until` 一旦重放成 NULL 就等于「永远有效」，一份已经失效的历史版本
+   * 会在重放之后重新出现在 `find` 里。解析复用写路径的 `parseFrontmatterFields`
+   * （`services/index-observer.ts`），不在这里写第四份——两份口径一旦不同，
+   * 「哪一版有效」会取决于谁最后写了索引。
+   *
    * 二进制（严格 UTF-8 解码失败）按附件处理：正文为空。附件写路径本来就不索引
    * 字节内容；把解码出来的替换字符写进 FTS 只会污染检索。
    */
@@ -352,6 +359,8 @@ export class ReconcileService {
     }
 
     const document = await this.#store.readText(uri);
+    // 只有记忆文件 frontmatter 里才有 `valid_*`；其它文件读原始字节没有意义。
+    const validity = contextType === 'memory' ? parseFrontmatterFields(text) : null;
     await this.#index.upsert([
       {
         ...base,
@@ -360,6 +369,8 @@ export class ReconcileService {
         bodyDigest: stableDigest(document.text),
         size: Buffer.byteLength(document.text, 'utf8'),
         updatedAt: document.stat.updatedAt,
+        validFrom: validity?.validFrom ?? null,
+        validUntil: validity?.validUntil ?? null,
       },
     ]);
     return { kind: 'indexed' };

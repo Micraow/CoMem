@@ -10,7 +10,7 @@
  * 写路径」，也是原先漏记对账的那条路。
  */
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -458,5 +458,124 @@ describe('IndexObserver 的索引失败进入对账', () => {
     // 内容已经是真相：线索写不进去不能把写操作变成失败。
     expect(await harness.store.stat(Uri.parse(CODE_STYLE))).not.toBeNull();
     expect(harness.logger.errors).toContain('对账日志写入失败，已忽略。');
+  });
+});
+
+/**
+ * 覆盖写与检索面（W98）。
+ *
+ * 这里测的是**从写到查的整条链**：真实 `MemoryService` 写盘 → 观察者落索引 →
+ * `SearchService.find` / `glob` 读索引。`memory.test.ts` 用假检索端口，证明不了
+ * 「旧版本不会出现在命中里」——那一条只有真的索引能回答。
+ */
+describe('覆盖写的版本快照与检索面（W98）', () => {
+  /** `.history` 目录里的版本文件名（升序）；没有就是空数组。 */
+  async function historyNames(): Promise<string[]> {
+    try {
+      return (
+        await readdir(join(harness.dataDir, 'user/alice/memories/preferences/.history'))
+      ).sort();
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  function historyUri(name: string): string {
+    return `${PREFERENCES}/.history/${name}`;
+  }
+
+  /** 命中里的文件（目录摘要行也会命中同一个词，断言只关心文件）。 */
+  function fileHits(hits: readonly { readonly uri: string }[]): string[] {
+    return hits.map((hit) => hit.uri).filter((uri) => uri.endsWith('.md'));
+  }
+
+  it('同 topic 两次覆盖写：find 只有一条命中，旧正文只能从 .history 读出', async () => {
+    const first = `第一版（${PROBE}）。`;
+    const second = `第二版（${PROBE}）。`;
+    await writeMemory(first);
+    await writeMemory(second);
+
+    const names = await historyNames();
+    expect(names).toHaveLength(1);
+    const version = historyUri(names[0] ?? '');
+
+    // 检索面只有规范文件：历史版本的 valid_until 非空，被 asOf 挡在外面。
+    expect(fileHits(await harness.search.find(PROBE, FIND_OPTIONS))).toEqual([CODE_STYLE]);
+    // 旧正文仍然读得回来，而且它明确是「已失效」的那一版。
+    const old = await harness.memory.read(Uri.parse(version));
+    expect(old?.fields['content']).toBe(first);
+    expect(old?.validUntil).not.toBeNull();
+    expect((await harness.memory.read(Uri.parse(CODE_STYLE)))?.fields['content']).toBe(second);
+  });
+
+  it('重放带上 valid_*：索引行丢失后重放，历史版本仍然是失效的', async () => {
+    await writeMemory(`第一版（${PROBE}）。`);
+    await writeMemory(`第二版（${PROBE}）。`);
+    const names = await historyNames();
+    const version = historyUri(names[0] ?? '');
+
+    // 模拟「索引行丢了」：node 与 node_fts 都删掉，磁盘上的文件还在。
+    await harness.index.deleteByUri(version);
+    expect(
+      harness.db.prepare('SELECT COUNT(*) AS total FROM node WHERE uri = ?').get(version)?.['total'],
+    ).toBe(0);
+    await harness.reconcileLog.append({
+      op: 'index',
+      uri: version,
+      error: '索引坏了',
+      at: new Date().toISOString(),
+    });
+
+    await expect(harness.reconcile.replay()).resolves.toMatchObject({
+      scanned: 1,
+      resolved: 1,
+      failed: 0,
+      remaining: 0,
+    });
+
+    // 重放必须从磁盘 frontmatter 恢复有效期。写成 NULL 等于「永远有效」——
+    // 已失效的历史版本会在一次重放之后重新出现在命中里。
+    const row = harness.db
+      .prepare('SELECT valid_from, valid_until FROM node WHERE uri = ?')
+      .get(version);
+    expect(row?.['valid_from']).not.toBeNull();
+    expect(row?.['valid_until']).not.toBeNull();
+    expect(fileHits(await harness.search.find(PROBE, FIND_OPTIONS))).toEqual([CODE_STYLE]);
+  });
+
+  it('forget 之后 find 与 glob 都找不到该 identity 的任何有效版本', async () => {
+    await writeMemory(`第一版（${PROBE}）。`);
+    await writeMemory(`第二版（${PROBE}）。`);
+    const names = await historyNames();
+    const version = historyUri(names[0] ?? '');
+    expect(fileHits(await harness.search.find(PROBE, FIND_OPTIONS))).toEqual([CODE_STYLE]);
+
+    // `forget` 的删除路径：`FileSystemService.remove` 只删规范路径。
+    await harness.filesystem.remove(Uri.parse(CODE_STYLE), PRINCIPALS);
+    await harness.observer.drain();
+
+    // 检索面：规范文件没了，`.history` 里的版本因为 `valid_until` 非空本来就不可见。
+    expect(fileHits(await harness.search.find(PROBE, FIND_OPTIONS))).toEqual([]);
+    // 路径工具按 identity 的地址找：规范路径已经不存在。
+    expect(
+      await harness.search.glob('**/code-style.md', {
+        scopes: [PREFERENCES],
+        subject: SUBJECT,
+        principals: PRINCIPALS,
+      }),
+    ).toEqual([]);
+
+    // 版本文件仍然在磁盘上（`glob`/`list`/`tree` 是路径工具，契约是磁盘；
+    // 检索看不到它靠 `valid_until`，不是靠删除）。这条断言把边界钉在这里：
+    // `forget` 之后「忘不掉」的东西只剩一个不可检索的历史文件。
+    expect((await harness.store.readText(Uri.parse(version))).text).toContain(PROBE);
+    expect(
+      harness.db.prepare('SELECT valid_until FROM node WHERE uri = ?').get(version)?.[
+        'valid_until'
+      ],
+    ).not.toBeNull();
   });
 });

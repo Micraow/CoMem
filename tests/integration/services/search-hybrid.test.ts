@@ -95,6 +95,9 @@ interface RecordOverrides {
   readonly abstract?: string | null;
   readonly memoryType?: string | null;
   readonly updatedAt?: string;
+  /** 记忆的有效区间（W98）；缺省 = `null` = 无界。 */
+  readonly validFrom?: string | null;
+  readonly validUntil?: string | null;
 }
 
 function record(uri: string, content: string, overrides: RecordOverrides = {}): IndexRecord {
@@ -112,6 +115,8 @@ function record(uri: string, content: string, overrides: RecordOverrides = {}): 
     size: Buffer.byteLength(content),
     updatedAt: overrides.updatedAt ?? CREATED_AT,
     status: 'active',
+    validFrom: overrides.validFrom ?? null,
+    validUntil: overrides.validUntil ?? null,
   };
 }
 
@@ -246,6 +251,9 @@ describe('engine: fts5', () => {
       memoryTypes: undefined,
       updatedAfter: undefined,
       updatedBefore: undefined,
+      // 检索默认只看「现在有效」的节点（W98）。这个时刻由服务自己取，不接受调用方
+      // 指定——只断言它存在且是 ISO 串，断言具体值等于把墙钟钉进测试。
+      asOf: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
       // 服务层默认与 MCP / HTTP 共用 `api/search-defaults.ts` 的 10。
       limit: 10,
     });
@@ -325,6 +333,32 @@ describe('engine: vector', () => {
       findOptions({ updatedAfter: '2026-11-09T00:00:00.000Z' }),
     );
     expect(boundary.map((hit) => hit.uri)).toEqual([NEW]);
+  });
+
+  it('有效期预过滤向量候选集：已失效的版本不占 kNN 名额', async () => {
+    // 候选集来自 `#readableUris` → `index.glob`。漏传 `asOf` 时历史版本仍是
+    // kNN 候选：一次 `limit: 10` 的查询会同时返回新旧两份正文，用户看到重复内容，
+    // `limit` 小时新版本还可能被旧版本挤掉。
+    const CURRENT = 'comem://user/alice/mem/current-vector.md';
+    const EXPIRED = 'comem://user/alice/mem/expired-vector.md';
+    await seed(CURRENT, '语义 记忆', { memoryType: 'preferences' });
+    await seed(EXPIRED, '语义 记忆', {
+      memoryType: 'preferences',
+      validFrom: '2026-11-01T00:00:00.000Z',
+      validUntil: '2026-11-05T00:00:00.000Z',
+    });
+    storeVector(CURRENT, [1, 0]);
+    storeVector(EXPIRED, [1, 0]);
+
+    const service = createService({ engine: 'vector', embedding: semanticEmbedding() });
+    const vectorSearch = vi.spyOn(vectors, 'search');
+
+    const hits = await service.find('语义', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([CURRENT]);
+    // 下推的证据：候选 URI 在进 `vec0` 之前就已经只剩当前有效的那条。
+    const [query] = vectorSearch.mock.calls[0] ?? [];
+    expect(query?.uris).toEqual([CURRENT]);
   });
 
   it('降级时返回空命中，并有说明', async () => {

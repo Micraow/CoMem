@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,7 @@ import { eventsMemoryType } from '../../../src/domain/memory-types/events.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
+import { rulesMemoryType } from '../../../src/domain/memory-types/rules.js';
 import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
@@ -557,5 +558,409 @@ describe('sources 溯源（W97）', () => {
 
     const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
     expect(raw.match(/^ {2}- comem:\/\//gm)).toHaveLength(20);
+  });
+});
+
+/**
+ * 有效区间与版本快照（W98）。
+ *
+ * 一条记忆一次覆盖写不再销毁旧值：旧文档变成 `.history` 下的版本文件，规范文件
+ * 写新的 `valid_from`，两者靠 `valid_until` / `supersedes` 串起来。时间用 fake
+ * Date 固定：文件名里的 stamp 是断言的一部分，真实时钟会让「留下来的五份是哪五份」
+ * 变成一次碰运气。
+ */
+describe('有效区间与版本快照（W98）', () => {
+  /** 规范文件与版本文件共用的时间基点。 */
+  const T0 = '2026-11-10T02:00:00.000Z';
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(T0));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function at(seconds: number): void {
+    vi.setSystemTime(new Date(Date.parse(T0) + seconds * 1000));
+  }
+
+  /** 版本目录（相对 scope 根，如 `memories/preferences/.history`）的绝对路径。 */
+  function historyDiskPath(relative: string): string {
+    return join(dataDir, 'user/alice', relative);
+  }
+
+  async function historyNames(relative: string): Promise<string[]> {
+    try {
+      return (await readdir(historyDiskPath(relative))).sort();
+    } catch (error) {
+      if ((error as { code?: string }).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  function versionUri(memoryTypeDirectory: string, name: string): Uri {
+    return Uri.parse(`${SCOPE}/memories/${memoryTypeDirectory}/.history/${name}`);
+  }
+
+  /** 规范文件 frontmatter 里的 `valid_from` / `valid_until` / `supersedes` 行。 */
+  function frontmatterLine(raw: string, key: string): string | null {
+    const line = raw.split('\n').find((candidate) => candidate.startsWith(`${key}:`));
+    return line === undefined ? null : line.slice(key.length + 1).trim();
+  }
+
+  it('同 topic 写两次：旧值成为版本文件，规范文件的有效期只有起点', async () => {
+    const first = await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '第一版正文。',
+    });
+    const created = await memory.read(first.uri);
+    // 首条写入没有旧值可快照，`valid_from` 就是创建时刻。
+    expect(created?.validFrom).toBe(T0);
+    expect(created?.validUntil).toBeNull();
+    expect(await historyNames('memories/preferences/.history')).toEqual([]);
+
+    at(3600);
+    const second = await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '第二版正文。',
+    });
+
+    const canonical = await memory.read(second.uri);
+    expect(canonical?.validFrom).toBe('2026-11-10T03:00:00.000Z');
+    expect(canonical?.validUntil).toBeNull();
+    expect(canonical?.fields['content']).toBe('第二版正文。');
+
+    const names = await historyNames('memories/preferences/.history');
+    // 文件名里的 stamp 是**快照时刻**（第二次写入的时间），不是旧值的起点。
+    expect(names).toEqual(['code-style.md--20261110T030000000Z.md']);
+    const version = await memory.read(versionUri('preferences', names[0] ?? ''));
+    expect(version?.validFrom).toBe(T0);
+    expect(version?.validUntil).toBe('2026-11-10T03:00:00.000Z');
+    expect(version?.fields['content']).toBe('第一版正文。');
+
+    // 版本文件不是「另一个 identity」：它的 memory_type / topic 与规范文件相同。
+    expect(version?.memoryType).toBe('preferences');
+    expect(version?.fields['topic']).toBe('code-style');
+
+    const raw = await readFile(toDiskPath(dataDir, second.uri), 'utf8');
+    expect(raw).toContain('valid_from: "2026-11-10T03:00:00.000Z"');
+    expect(raw).not.toContain('valid_until');
+    // 新文档指回被它顶替的版本：`reject` 靠这条线回到写入前。
+    expect(raw).toContain(`supersedes: ${versionUri('preferences', names[0] ?? '').toString()}`);
+  });
+
+  it('有效期从元数据写、不从 fields 读（模型改不了自己的有效期）', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), tagMemoryType, {
+      name: 'forged',
+      content: '正文。',
+      // 这两个键不是 schema 字段：直接写入时会被序列化器忽略，不会进 frontmatter。
+      valid_from: '2000-01-01T00:00:00.000Z',
+      valid_until: '2000-01-02T00:00:00.000Z',
+    });
+
+    const uri = Uri.parse(`${SCOPE}/memories/tags/forged.md`);
+    const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(raw.match(/^valid_from:/gm)).toHaveLength(1);
+    expect(frontmatterLine(raw, 'valid_from')).toBe(`"${T0}"`);
+    expect(raw).not.toContain('valid_until');
+
+    const record = await memory.read(uri);
+    expect(record?.validFrom).toBe(T0);
+    expect(record?.validUntil).toBeNull();
+    // 保留键：有效期不是记忆字段，`read` 出来的 `fields` 里不该多一列。
+    expect(Object.keys(record?.fields ?? {})).not.toContain('valid_from');
+  });
+
+  it('连写 7 次：版本收敛到 5 份，被删的是最旧的（按 stamp 升序）', async () => {
+    const uri = Uri.parse(CODE_STYLE);
+    for (let index = 1; index <= 7; index += 1) {
+      at(index);
+      await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+        uri,
+        update: (current) => ({
+          ...current,
+          topic: 'code-style',
+          content: `第 ${index} 版正文。`,
+        }),
+      });
+    }
+
+    const names = await historyNames('memories/preferences/.history');
+    // 第 1 次写入没有旧值；第 2–7 次各快照上一版，共 6 份 → 截断到最新 5 份。
+    // 留下的是第 2–6 次写入时产生的版本（stamp 03..07 秒）。
+    expect(names).toEqual([
+      'code-style.md--20261110T020003000Z.md',
+      'code-style.md--20261110T020004000Z.md',
+      'code-style.md--20261110T020005000Z.md',
+      'code-style.md--20261110T020006000Z.md',
+      'code-style.md--20261110T020007000Z.md',
+    ]);
+
+    // 留下来的确实是最新的 5 份正文（第 2–6 版），最旧的那份（第 1 版）没了。
+    const contents: (string | undefined)[] = [];
+    for (const name of names) {
+      contents.push((await memory.read(versionUri('preferences', name)))?.fields['content'] as
+        | string
+        | undefined);
+    }
+    expect(contents).toEqual([
+      '第 2 版正文。',
+      '第 3 版正文。',
+      '第 4 版正文。',
+      '第 5 版正文。',
+      '第 6 版正文。',
+    ]);
+    expect(await memory.read(versionUri('preferences', 'code-style.md--20261110T020002000Z.md'))).toBeNull();
+
+    // 规范文件仍然只有一个、内容是最后一版，检索面的行为不受影响。
+    expect((await memory.read(uri))?.fields['content']).toBe('第 7 版正文。');
+    expect((await memory.read(uri))?.validFrom).toBe('2026-11-10T02:00:07.000Z');
+  });
+
+  it('pending 状态下覆盖：不快照旧值，但继承 supersedes', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第一版。',
+    });
+    await memory.approve(uri);
+
+    at(60);
+    // 已复核的旧值是有效值 → 写新正文时快照它，新文档 pending 且指向版本文件。
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第二版。',
+    });
+    const afterSecond = await historyNames('memories/experiences/.history');
+    expect(afterSecond).toHaveLength(1);
+    const snapshot = versionUri('experiences', afterSecond[0] ?? '');
+    const secondRaw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(frontmatterLine(secondRaw, 'supersedes')).toBe(snapshot.toString());
+
+    at(120);
+    // `existing` 现在是 pending：它不是有效值，不快照；但上一条有效版本的指向必须留着。
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第三版。',
+    });
+
+    expect(await historyNames('memories/experiences/.history')).toEqual(afterSecond);
+    const thirdRaw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(frontmatterLine(thirdRaw, 'supersedes')).toBe(snapshot.toString());
+    expect((await memory.read(uri))?.validFrom).toBe('2026-11-10T02:02:00.000Z');
+    expect((await memory.read(uri))?.status).toBe('pending');
+    // 版本文件里仍然是第一版：pending 的第二版没有资格成为「正确旧值」。
+    expect((await memory.read(snapshot))?.fields['content']).toBe('第一版。');
+  });
+
+  it('identity 自带目录时镜像出同名子目录（rules 的 {scenario}/{rule}.md）', async () => {
+    const uri = `${SCOPE}/memories/rules/backend/naming.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), rulesMemoryType, {
+      scenario: 'backend',
+      rule: 'naming',
+      content: '接口名用动词短语。',
+    });
+    // rules 走复核闸门：先通过，旧值才是「有效值」、才有资格被快照。
+    await memory.approve(Uri.parse(uri));
+    at(60);
+    await memory.upsertMemory(Uri.parse(SCOPE), rulesMemoryType, {
+      uri: Uri.parse(uri),
+      update: (current) => ({ ...current, content: '接口名用动词短语，字段名用名词。' }),
+    });
+
+    // `.history` 里镜像 `scenario/` 那一层，版本文件名只替换最后一段。
+    expect(await historyNames('memories/rules/.history/backend')).toEqual([
+      'naming.md--20261110T020100000Z.md',
+    ]);
+    const version = await memory.read(
+      Uri.parse(`${SCOPE}/memories/rules/.history/backend/naming.md--20261110T020100000Z.md`),
+    );
+    expect(version?.fields['content']).toBe('接口名用动词短语。');
+    expect(version?.validUntil).toBe('2026-11-10T02:01:00.000Z');
+  });
+
+  it('同一毫秒内的两次快照：文件名追加 -1，不覆盖前一份', async () => {
+    const uri = Uri.parse(CODE_STYLE);
+    // 时间不前进：两次覆盖的快照 stamp 相同。
+    for (const content of ['第一版。', '第二版。', '第三版。']) {
+      await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+        uri,
+        update: (current) => ({ ...current, topic: 'code-style', content }),
+      });
+    }
+
+    expect(await historyNames('memories/preferences/.history')).toEqual([
+      'code-style.md--20261110T020000000Z-1.md',
+      'code-style.md--20261110T020000000Z.md',
+    ]);
+    // 两份版本各自保存了不同的旧正文：撞名没有让第二份覆盖第一份。
+    const first = await memory.read(
+      versionUri('preferences', 'code-style.md--20261110T020000000Z.md'),
+    );
+    const second = await memory.read(
+      versionUri('preferences', 'code-style.md--20261110T020000000Z-1.md'),
+    );
+    expect(first?.fields['content']).toBe('第一版。');
+    expect(second?.fields['content']).toBe('第二版。');
+  });
+
+  it('listPending 跳过 .history：待复核队列只包含规范路径', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第一版。',
+    });
+    await memory.approve(uri);
+
+    at(60);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第二版。',
+    });
+    expect(await historyNames('memories/experiences/.history')).toHaveLength(1);
+
+    // 版本文件的 `status` 保留快照时刻的值（active），不会自己进队列；这里再手工
+    // 放一份 `status: pending` 的版本，直接钉住「按目录排除」而不是「碰巧不是 pending」。
+    const manual = versionUri('experiences', 'manual.md--20261110T030000000Z.md');
+    await store.writeBytes(
+      manual,
+      Uint8Array.from(
+        Buffer.from(
+          [
+            '---',
+            'memory_type: experiences',
+            'status: pending',
+            'created_at: 2026-11-10T03:00:00.000Z',
+            'updated_at: 2026-11-10T03:00:00.000Z',
+            `uri: ${manual.toString()}`,
+            'topic: manual',
+            '---',
+            '',
+            '## content',
+            '',
+            '手工放进去的 pending 版本。',
+          ].join('\n'),
+          'utf8',
+        ),
+      ),
+    );
+
+    const listed = await memory.listPending(Uri.parse(SCOPE));
+    expect(listed.map((record) => record.uri.toString())).toEqual([uri.toString()]);
+  });
+
+  it('approve 之后 valid_from 与 supersedes 仍在', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第一版。',
+    });
+    await memory.approve(uri);
+
+    at(60);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第二版。',
+    });
+    const names = await historyNames('memories/experiences/.history');
+    const snapshot = versionUri('experiences', names[0] ?? '');
+
+    at(120);
+    await memory.approve(uri);
+
+    const approved = await memory.read(uri);
+    expect(approved?.status).toBe('active');
+    expect(approved?.validFrom).toBe('2026-11-10T02:01:00.000Z');
+    expect(approved?.validUntil).toBeNull();
+    const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(frontmatterLine(raw, 'valid_from')).toBe('"2026-11-10T02:01:00.000Z"');
+    expect(frontmatterLine(raw, 'supersedes')).toBe(snapshot.toString());
+  });
+
+  it('reject（有 supersedes）：规范文件恢复旧正文、valid_until 清空、pending 内容消失', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '写入前的正确结论。',
+    });
+    await memory.approve(uri);
+
+    at(60);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '被拒绝的错误结论。',
+    });
+    expect((await memory.read(uri))?.status).toBe('pending');
+
+    at(120);
+    await memory.reject(uri, '证据不足');
+
+    const restored = await memory.read(uri);
+    expect(restored?.fields['content']).toBe('写入前的正确结论。');
+    expect(restored?.status).toBe('active');
+    // 「回到写入前」：起点还是第一次写入的时刻，终点被清掉（它又有效了）。
+    expect(restored?.validFrom).toBe(T0);
+    expect(restored?.validUntil).toBeNull();
+    // 被拒绝的正文不再存在，pending 列表里也没有这条了。
+    const raw = await readFile(toDiskPath(dataDir, uri), 'utf8');
+    expect(raw).not.toContain('被拒绝的错误结论。');
+    expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      '记忆复核拒绝，已恢复到上一个有效版本',
+      expect.objectContaining({ reason: '证据不足' }),
+    );
+    // 版本文件留着（`valid_until` 仍非空，检索看不到它）。
+    const names = await historyNames('memories/experiences/.history');
+    expect(names).toHaveLength(1);
+    expect((await memory.read(versionUri('experiences', names[0] ?? '')))?.validUntil).toBe(
+      '2026-11-10T02:01:00.000Z',
+    );
+  });
+
+  it('reject（没有 supersedes）：维持删除', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '首条写入。',
+    });
+
+    await memory.reject(uri, '证据不足');
+
+    expect(await memory.read(uri)).toBeNull();
+    expect(await historyNames('memories/experiences/.history')).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      '记忆复核拒绝，已删除',
+      expect.objectContaining({ reason: '证据不足' }),
+    );
+  });
+
+  it('supersedes 指向的版本文件已被清理时，reject 退回删除而不是抛错', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第一版。',
+    });
+    await memory.approve(uri);
+    at(60);
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '第二版。',
+    });
+
+    // 模拟 TTL / 截断把版本文件物理删掉：指向还在、文件没了。
+    const names = await historyNames('memories/experiences/.history');
+    await store.remove(versionUri('experiences', names[0] ?? ''));
+
+    await memory.reject(uri, '证据不足');
+
+    expect(await memory.read(uri)).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      '记忆的 supersedes 指向的文件不存在，拒绝时按删除处理',
+      expect.objectContaining({ supersedes: versionUri('experiences', names[0] ?? '').toString() }),
+    );
   });
 });

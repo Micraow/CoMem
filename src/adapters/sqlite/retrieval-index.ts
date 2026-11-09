@@ -185,22 +185,30 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 /**
- * 记忆类型 + 更新时间范围 → SQL 条件（架构文档 §8.3 的过滤维度）。
+ * 记忆类型 + 更新时间范围 + 有效期 → SQL 条件（架构文档 §8.3 的过滤维度）。
  *
- * 这三个条件**必须在 `LIMIT` 之前进 `WHERE`**：先取候选再在 JS 里过滤，会把
+ * 这些条件**必须在 `LIMIT` 之前进 `WHERE`**：先取候选再在 JS 里过滤，会把
  * 「类型 / 时间匹配、但 bm25（或向量距离）排在 `limit × candidateMultiplier`
  * 之后」的节点整批丢掉——`rule_search` 曾经就是这样把规则全筛没的。
  *
  * `updated_at` 归一化成 `Date#toISOString()` 形态后与 `node.updated_at` 同形，
  * TEXT 比较即时间比较（`canonicalInstant` 的注释）。两端都是**闭区间**。
  *
+ * 有效期（`asOf`）的边界是半开区间：`valid_from <= asOf < valid_until`，
+ * 与前缀「从此刻开始有效 / 到此刻为止仍有效」一致。两列的 `IS NULL` 都放行，
+ * 所以「旧数据（全 NULL）」与「非记忆节点」不会被过滤掉。
+ *
  * 空 `memoryTypes` 与省略同义；`memory_type` 为 `NULL` 的行不命中任何 `IN` 列表，
  * 因此给了类型就自动排除非记忆节点。
+ *
+ * **`search` 与 `glob` 共用这一份**（唯一的两处调用）。向量检索的候选集来自
+ * `glob`，两处条件若各写一份，就会出现「`find` 看不到历史版本、`glob` 能看到」。
  */
 function metadataConditions(query: {
   readonly memoryTypes?: readonly string[];
   readonly updatedAfter?: string;
   readonly updatedBefore?: string;
+  readonly asOf?: string;
 }): { readonly sql: readonly string[]; readonly params: readonly string[] } {
   const sql: string[] = [];
   const params: string[] = [];
@@ -215,6 +223,15 @@ function metadataConditions(query: {
   if (query.updatedBefore !== undefined) {
     sql.push('n.updated_at <= ?');
     params.push(canonicalInstant(query.updatedBefore, 'updatedBefore'));
+  }
+  if (query.asOf !== undefined) {
+    // 同一个时刻绑两次：两个条件是两个方向的开区间，用两个变量会让「起点」与
+    // 「终点」有机会取到不同毫秒。
+    const asOf = canonicalInstant(query.asOf, 'asOf');
+    sql.push('(n.valid_from IS NULL OR n.valid_from <= ?)');
+    params.push(asOf);
+    sql.push('(n.valid_until IS NULL OR n.valid_until > ?)');
+    params.push(asOf);
   }
   return { sql, params };
 }
@@ -333,6 +350,10 @@ export class SqliteFtsIndex implements RetrievalIndex {
    *
    * `abstract` 与 `content` 都写切分后的文本（§8.1）；`node` 表的 `abstract` 存原文，
    * 检索返回值取的是后者，所以摘要里的空格不会出现在用户可见内容里。
+   *
+   * `valid_from` / `valid_until` 原样写入（省略 = NULL = 无界），**不与旧行合并**：
+   * 一条索引行描述的是「这条记忆现在的有效期」，旧值留着只会在有效期被清空时
+   * 继续生效。记忆文件是这条数据的事实来源，重建（`reindex`）同样从 frontmatter 读。
    */
   async upsert(records: readonly IndexRecord[]): Promise<void> {
     if (records.length === 0) {
@@ -342,8 +363,8 @@ export class SqliteFtsIndex implements RetrievalIndex {
       const upsertNode = this.#db.prepare(
         `INSERT INTO node (
            uri, parent_uri, scope, kind, context_type, memory_type, level,
-           abstract, body_digest, size, updated_at, status
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           abstract, body_digest, size, updated_at, status, valid_from, valid_until
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uri, level) DO UPDATE SET
            parent_uri = excluded.parent_uri,
            scope = excluded.scope,
@@ -355,7 +376,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
            body_digest = excluded.body_digest,
            size = excluded.size,
            updated_at = excluded.updated_at,
-           status = excluded.status`,
+           status = excluded.status,
+           valid_from = excluded.valid_from,
+           valid_until = excluded.valid_until`,
       );
       const deleteFts = this.#db.prepare('DELETE FROM node_fts WHERE uri = ? AND level = ?');
       const insertFts = this.#db.prepare(
@@ -376,6 +399,8 @@ export class SqliteFtsIndex implements RetrievalIndex {
           record.size,
           record.updatedAt,
           record.status,
+          record.validFrom ?? null,
+          record.validUntil ?? null,
         );
         deleteFts.run(record.uri, record.level);
         insertFts.run(

@@ -48,7 +48,7 @@ import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { NodeStatus } from '../domain/node.js';
 import { contextTypeOf, stableDigest } from '../domain/node.js';
-import type { IndexRecord } from '../domain/retrieval.js';
+import { parseValidityInstant, type IndexRecord } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { EmbeddingService } from '../services/embedding.js';
 
@@ -126,6 +126,10 @@ interface DiskNode {
 interface FrontmatterFields {
   readonly memoryType: string | null;
   readonly status: NodeStatus | null;
+  /** 有效区间的起点（`valid_from`），UTC 形态；缺键/不可解析时是 `null` = 无界。 */
+  readonly validFrom: string | null;
+  /** 有效区间的终点（`valid_until`）；`null` = 仍然有效。 */
+  readonly validUntil: string | null;
 }
 
 function isNodeStatus(value: unknown): value is NodeStatus {
@@ -144,13 +148,24 @@ function fsErrorCode(error: unknown): string | null {
   return typeof code === 'string' ? code : null;
 }
 
-/** 记忆文件的 `memory_type` / `status`（`IndexObserver` 的同一份映射）。 */
+/**
+ * 记忆文件的 `memory_type` / `status` / `valid_from` / `valid_until`
+ * （`IndexObserver` 的同一份映射）。
+ *
+ * 前两个是内存里的枚举 / 标识，直接判类型；有效期交给 `parseValidityInstant`：
+ * 它把 YAML 读出来的数字、布尔、解析不了的串一律读作「无界」，并把合法值归一化成
+ * `toISOString()` 形态。`memory.ts` / `index-observer.ts` 用的是同一个函数，
+ * 所以同一份文件在这三条链路上得到同样的两列（对拍见
+ * `tests/integration/services/frontmatter-validity-consistency.test.ts`）。
+ */
 function readFrontmatterFields(data: Readonly<Record<string, unknown>>): FrontmatterFields {
   const memoryType = data['memory_type'];
   const status = data['status'];
   return {
     memoryType: typeof memoryType === 'string' && memoryType !== '' ? memoryType : null,
     status: isNodeStatus(status) ? status : null,
+    validFrom: parseValidityInstant(data['valid_from']),
+    validUntil: parseValidityInstant(data['valid_until']),
   };
 }
 
@@ -309,6 +324,9 @@ async function buildRecords(
       size: stat.size,
       updatedAt: stat.updatedAt,
       status: fields.status ?? existing?.status ?? ACTIVE_STATUS,
+      // 有效期**不保留索引旧值**：磁盘是真相，缺键就是无界（与写路径同一个口径）。
+      validFrom: fields.validFrom,
+      validUntil: fields.validUntil,
     },
   ];
 }

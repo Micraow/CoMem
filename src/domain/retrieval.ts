@@ -28,6 +28,21 @@ export interface IndexRecord {
   readonly size: number;
   readonly updatedAt: string;
   readonly status: NodeStatus;
+  /**
+   * 记忆的有效区间（`node.valid_from` / `node.valid_until`），ISO 8601 UTC 形态。
+   *
+   * `null`（或省略）都表示这一侧没有边界：没写 `valid_from` 即不设下界（对迁移前的
+   * 存量行也等于「不知道从何时开始有效」），没写 `valid_until` 就是「仍然有效」；
+   * 过滤时按「该侧不设条件」放行。**只有记忆文件能给出值**——它来自记忆
+   * frontmatter 的保留键，由三处解析器算出；目录行、资源、技能一律省略。
+   *
+   * 省略与 `null` 同义，因为构造 `IndexRecord` 的另外几处（目录摘要的 L0 / L1 两行、
+   * 资源、技能、重放）在分层上都不该知道有效期，让它们逐个写 `null` 只是噪声。
+   * 记忆行由 `index-observer` 与 `reindex` 显式给出——那两处才是这条数据的事实来源。
+   */
+  readonly validFrom?: string | null;
+  /** 见 `validFrom`。 */
+  readonly validUntil?: string | null;
 }
 
 export interface SearchQuery {
@@ -64,6 +79,21 @@ export interface SearchQuery {
   readonly updatedAfter?: string;
   /** 更新时间上界，**闭区间**：`updated_at <= updatedBefore`。语义同上。 */
   readonly updatedBefore?: string;
+  /**
+   * 「现在」：只返回这一刻有效的节点（W98）。
+   *
+   * 条件是 `(valid_from IS NULL OR valid_from <= asOf)` 且
+   * `(valid_until IS NULL OR valid_until > asOf)`。NULL 在两侧都放行，所以旧数据
+   * （全 NULL）与非记忆节点（无有效期）不受影响。
+   *
+   * **不对外暴露。** MCP 的 16 个工具与 HTTP 查询参数都没有这一项：所有入口都用
+   * 「请求到达的时刻」，由 `SearchService` 自己填。允许调用方指定 `asOf` 等于把
+   * 「回溯某个时刻的记忆状态」变成一个没人测过的入口。
+   *
+   * 省略 = 不做有效期过滤。`glob` / `grep` / `tree` 的对外面就是这样：它们是路径
+   * 工具，契约是磁盘上的全部节点（含已失效的历史版本）。
+   */
+  readonly asOf?: string;
   readonly limit: number;
 }
 
@@ -316,6 +346,14 @@ export interface GlobQuery {
   readonly updatedAfter?: string;
   /** 同 `SearchQuery.updatedBefore` */
   readonly updatedBefore?: string;
+  /**
+   * 同 `SearchQuery.asOf`。
+   *
+   * `glob` 是向量检索的候选集来源（`services/search.ts` 的 `#readableUris`），
+   * 所以它必须能带着同一个 `asOf` 枚举候选：漏传时 kNN 的名额会被已失效的历史
+   * 版本占掉，top-k 里一半是同一段正文的旧版本。
+   */
+  readonly asOf?: string;
   readonly limit: number;
 }
 
@@ -401,16 +439,50 @@ export function canonicalInstant(value: string, field: string): string {
 }
 
 /**
- * 元数据过滤维度（记忆类型、更新时间范围）的校验。
+ * 记忆 frontmatter 的 `valid_from` / `valid_until` → 索引列形态；不可用返回 `null`。
+ *
+ * 与 `canonicalInstant` 的差别只有两点，都来自「输入是磁盘上的手改文件」：
+ *
+ * 1. **不抛错**。值不是字符串（`valid_from: 123` 会被 YAML 读成 number）、是
+ *    布尔、是序列、或根本不是时间串（`valid_from: 下周`），都读作「没有有效期」。
+ *    有效期是辅助信息，解析不出来不该让整条记忆读不出来，更不该让一次 `reindex`
+ *    在中途抛错。
+ * 2. **归一化**。合法值写成 `Date#toISOString()` 的 UTC 形态（`+08:00` 的输入会被
+ *    折算成 `Z`）：`node.valid_*` 与过滤边界都是 TEXT 比较，不归一化会得到错误的
+ *    时间顺序（同 `canonicalInstant` 的理由）。手写的 `2026-11-10` 补成
+ *    `2026-11-10T00:00:00.000Z`。
+ *
+ * 三个 frontmatter 解析点（`services/memory.ts`、`services/index-observer.ts`、
+ * `commands/reindex.ts`）都调这一个函数。三处各写一份判断时，同一份文件会得到三个
+ * 有效期：写入时按 A 算、索引按 B 算、`reindex` 按 C 算，而 `reindex` 会把整列
+ * 覆盖掉——「检索看不到历史版本」这条保证会在一次重建后悄悄失效。
+ */
+export function parseValidityInstant(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return new Date(timestamp).toISOString();
+}
+
+/**
+ * 元数据过滤维度（记忆类型、更新时间范围、有效期）的校验。
  *
  * 空 `memoryTypes` 与省略同义（`contextTypes` / `levels` 也是这个语义）：调用方
  * 从配置里拿到空数组时不该被迫分支。区间为空（`updatedAfter > updatedBefore`）
  * 报错而不是静默返回空集——那是调用方写错了参数，不是「没有匹配」。
+ *
+ * `asOf` 只校验可解析：它是**单点**时刻，没有「空区间」可言。口径与
+ * `updatedAfter` 一致——非法时间串在这里就被拒绝，不会一路走到 SQL 比较。
  */
 function validateMetadataFilter(query: {
   readonly memoryTypes?: readonly string[];
   readonly updatedAfter?: string;
   readonly updatedBefore?: string;
+  readonly asOf?: string;
 }): void {
   if (query.memoryTypes?.some((memoryType) => memoryType === '') === true) {
     throw invalidArgument('memoryTypes 里不能有空字符串。', { memoryTypes: query.memoryTypes });
@@ -429,6 +501,9 @@ function validateMetadataFilter(query: {
       updatedBefore: query.updatedBefore,
     });
   }
+  if (query.asOf !== undefined) {
+    canonicalInstant(query.asOf, 'asOf');
+  }
 }
 
 /**
@@ -444,7 +519,7 @@ export function validateSearchQuery(query: SearchQuery): void {
 }
 
 /**
- * 把模型产出的条目收敛成合法 `TypedQuery`（§8.4 的三条约束）。
+ * 把模型产出的条目收敛成合法 `TypedQuery`。
  *
  * 三件事，顺序不能变：
  *
