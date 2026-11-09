@@ -32,7 +32,11 @@
  */
 
 import type { EmbeddingCacheEntry } from '../adapters/sqlite/embedding-cache.js';
-import type { EmbeddingProvider, EmbeddingResult } from '../domain/embedding.js';
+import type {
+  EmbeddingOptions,
+  EmbeddingProvider,
+  EmbeddingResult,
+} from '../domain/embedding.js';
 import { assertValidVector } from '../domain/embedding.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
@@ -206,8 +210,15 @@ export class EmbeddingService {
    * 计费请求，也不应该因为供应商不可用而失败。
    *
    * 缓存命中先短路：全部命中时不碰熔断状态、不打网络（见文件头）。
+   *
+   * `options` 只给**查询路径**用：MCP 工具的总预算比 `providers.embedding.timeoutSeconds`
+   * 短（见 `services/search.ts` 的 `QUERY_EMBED_TIMEOUT_MS`），不把剩余预算传下去
+   * 的话，接口层到点返回了、供应商请求还在后台跑到 30 秒。写路径不传，行为不变。
    */
-  async embed(texts: readonly string[]): Promise<EmbedOutcome> {
+  async embed(
+    texts: readonly string[],
+    options?: EmbeddingOptions,
+  ): Promise<EmbedOutcome> {
     if (texts.length === 0) {
       return { vectors: [], degraded: false, reason: null };
     }
@@ -247,6 +258,7 @@ export class EmbeddingService {
         const result = await this.#embedBatch(
           provider,
           chunk.map((miss) => miss.text),
+          options,
         );
         if (!result.ok) {
           return result.outcome;
@@ -298,12 +310,19 @@ export class EmbeddingService {
    * 单独抽出来是因为它在 `embed()` 的循环里既要 `return` 降级、又要往里塞向量，
    * 内联时那两种退出路径会缠在一起。
    */
-  async #embedBatch(provider: EmbeddingProvider, batch: readonly string[]): Promise<BatchOutcome> {
+  async #embedBatch(
+    provider: EmbeddingProvider,
+    batch: readonly string[],
+    options: EmbeddingOptions | undefined,
+  ): Promise<BatchOutcome> {
     this.#stats.calls += 1;
 
     let result: EmbeddingResult;
     try {
-      result = await provider.embed(batch, { timeoutMs: this.#config.timeoutMs });
+      result = await provider.embed(batch, {
+        timeoutMs: options?.timeoutMs ?? this.#config.timeoutMs,
+        ...(options?.signal === undefined ? { } : { signal: options.signal }),
+      });
     } catch (error) {
       this.#stats.failures += 1;
       this.#recordFailure();

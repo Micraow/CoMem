@@ -14,6 +14,7 @@ import {
   readScopes,
   requiredString,
   asRecord,
+  formatDegradations,
   formatHits,
   textResult,
   type McpToolDefinition,
@@ -69,7 +70,9 @@ export const findTool: McpToolDefinition = {
     const contextType = optionalContextType(args, 'contextType', 'find');
     const scopes = await readScopes(context, targetUri);
 
-    const hits = await context.search.find(query, {
+    // 本地索引 / ACL 阶段：超时归因要说得出「卡在本地」，不能笼统写「工具超时」。
+    context.deadline?.mark('index');
+    const result = await context.search.findWithDiagnostics(query, {
       scopes,
       subject: context.subject,
       principals: context.principals,
@@ -79,7 +82,14 @@ export const findTool: McpToolDefinition = {
       memoryTypes: optionalStringArray(args, 'memoryTypes', 'find'),
       updatedAfter: optionalString(args, 'updatedAfter', 'find'),
       updatedBefore: optionalString(args, 'updatedBefore', 'find'),
+      deadlineAt: context.deadline?.deadlineAt,
+      onUpstream: (upstream) => context.deadline?.mark(upstream),
     });
-    return textResult(formatHits(hits));
+    // 降级必须写进结果：`Found 0` 不说明原因时，调用方会把它读成「记忆里没有」。
+    return textResult(
+      [formatHits(result.hits), ...formatDegradations(context.config.retrieval.engine, result)].join(
+        '\n',
+      ),
+    );
   },
 };

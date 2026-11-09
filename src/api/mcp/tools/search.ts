@@ -14,6 +14,7 @@ import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
 import {
   asRecord,
+  formatDegradations,
   formatHits,
   optionalContextType,
   optionalLevel,
@@ -85,8 +86,10 @@ function formatQueryPlan(plan: SearchPlan, envelope: PlanEnvelope): string {
     `  sessionId: ${envelope.sessionId ?? 'none'}`,
     `  queries: ${plan.queries.length} (${status}, ${plan.elapsedMs.toFixed(0)}ms)`,
   ];
-  if (!plan.analyzed) {
-    lines.push(`  reason: ${plan.reason ?? '原因未知'}`);
+  if (plan.reason !== null) {
+    // 降级原因与「是否 analyzed」是两件事：向量后端不可用时 `analyzed` 仍然是
+    // `true`，只打印 reason（旧实现把它藏起来了，调用方看不出这次结果来自 FTS）。
+    lines.push(`  degraded: ${plan.reason}`);
   }
   for (const query of plan.queries) {
     lines.push(`  - [${query.intent} ${query.confidence.toFixed(2)}] ${query.text}`);
@@ -150,10 +153,17 @@ export const searchTool: McpToolDefinition = {
     const updatedAfter = optionalString(args, 'updatedAfter', 'search');
     const updatedBefore = optionalString(args, 'updatedBefore', 'search');
     const scopes = await readScopes(context, targetUri);
+    // 本地索引阶段；随后的意图分析 / 嵌入 / 重排由服务层上报（`onUpstream`）。
+    context.deadline?.mark('index');
+    const deadline = {
+      deadlineAt: context.deadline?.deadlineAt,
+      onUpstream: (upstream: 'llm' | 'embedding' | 'rerank') =>
+        context.deadline?.mark(upstream),
+    };
 
     if (mode === 'context') {
       // 跨轮去重：传了 sessionId 才有轮次时钟（见 `ContextOptions.sessionId`）。
-      const assembled = await context.search.context(query, {
+      const diagnostics = await context.search.contextWithDiagnostics(query, {
         scopes,
         subject: context.subject,
         principals: context.principals,
@@ -164,8 +174,10 @@ export const searchTool: McpToolDefinition = {
         memoryTypes,
         updatedAfter,
         updatedBefore,
+        ...deadline,
       });
 
+      const assembled = diagnostics.assembly;
       context.logger.debug('MCP search（context）完成', {
         requestId: context.requestId,
         sessionId: sessionId ?? null,
@@ -175,7 +187,13 @@ export const searchTool: McpToolDefinition = {
         dropped: assembled.dropped,
       });
 
-      return textResult(formatContext(assembled));
+      // `mode=context` 也可能在向量 / 重排上降级：只给条目数的话，
+      // `Context: 0 item(s)` 会被读成「记忆里没有」。
+      return textResult(
+        [formatContext(assembled), ...formatDegradations(context.config.retrieval.engine, diagnostics)].join(
+          '\n',
+        ),
+      );
     }
 
     const result = await context.search.search(query, {
@@ -189,6 +207,7 @@ export const searchTool: McpToolDefinition = {
       memoryTypes,
       updatedAfter,
       updatedBefore,
+      ...deadline,
     });
 
     context.logger.debug('MCP search 完成', {

@@ -22,9 +22,14 @@ import { LEVELS, type Level } from '../../domain/level.js';
 import type { ContextType } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
 import type { AclAction } from '../../services/authorizer.js';
-import type { ScoredHit } from '../../services/search.js';
+import type { RerankFailure, ScoredHit } from '../../services/search.js';
 
 import type { McpToolContext } from './context.js';
+import {
+  MCP_TOOL_DEADLINE_MS,
+  ToolDeadline,
+  runWithDeadline,
+} from './deadline.js';
 
 /** §12.1：read = 1。 */
 const READ: AclAction = 1;
@@ -75,7 +80,18 @@ const CONTEXT_TYPES: readonly ContextType[] = ['memory', 'resource', 'skill', 's
 
 export type McpToolResult =
   | { readonly type: 'text'; readonly text: string }
-  | { readonly type: 'binary'; readonly mimeType: string; readonly base64: string };
+  | { readonly type: 'binary'; readonly mimeType: string; readonly base64: string }
+  /**
+   * 工具级失败（到上限仍未返回）。
+   *
+   * 不是 `McpToolResult` 的常规产物：16 个工具的业务错误都抛 `ComemError`，由
+   * `server.ts` 统一收敛。这个形态只给 `ToolRegistry` 的截止时间闸门用——它拿到
+   * 的是「超时」而不是一个异常，因为异常在工具内部可能已经被吞掉（降级路径），
+   * 这里要返回的是**明确的失败**，不能伪装成空结果。
+   *
+   * `server.ts` 把它映射成 MCP 的 `isError: true`，文本以 `code: message` 开头。
+   */
+  | { readonly type: 'error'; readonly code: string; readonly message: string };
 
 export interface McpToolDefinition {
   readonly name: McpToolName;
@@ -174,15 +190,70 @@ function bindSubjectAliases(tool: McpToolDefinition): McpToolDefinition {
   };
 }
 
+/** 工具级失败的错误码。MCP 没有 `DEADLINE_EXCEEDED`，这是接口层自定的稳定标识。 */
+const DEADLINE_EXCEEDED_CODE = 'TOOL_DEADLINE_EXCEEDED';
+
+/**
+ * 到上限时的返回文本。
+ *
+ * 必须回答「卡在哪」：只说「工具超时」的话，调用方拿不到任何可执行的下一步。
+ * 上游由工具上报（`ToolDeadline.mark`）；没上报过说明卡在本地（索引 / 文件系统 /
+ * 锁），也要明确写出来，不能让它看起来像供应商的问题。
+ */
+function deadlineMessage(tool: McpToolDefinition, deadline: ToolDeadline): string {
+  const upstream = deadline.lastUpstream;
+  if (upstream === null) {
+    return `工具 ${tool.name} 在 ${deadline.budgetMs} 毫秒内没有返回，且没有进入任何外部上游；卡住的位置在本地（索引 / 文件系统 / 锁）。本次调用已中止等待，不代表没有结果。`;
+  }
+  return `工具 ${tool.name} 在 ${deadline.budgetMs} 毫秒内没有返回；最后进入的上游是 ${upstream.label}，已等待 ${upstream.elapsedMs} 毫秒仍未响应。本次调用已中止等待，上游可能仍在执行。`;
+}
+
+/**
+ * 给每个工具套上截止时间。
+ *
+ * 包装在 `execute` 上而不是逐工具的 `try/finally`：16 个工具漏一个就是一条没有
+ * 上限的路径，而「哪个工具忘了」在 review 里看不出来。放在了 `~` 展开之后，
+ * 别名展开本身也被同一个预算覆盖。
+ */
+function bindDeadline(tool: McpToolDefinition, budgetMs: number): McpToolDefinition {
+  return {
+    ...tool,
+    async execute(input, context) {
+      const deadline = context.deadline ?? new ToolDeadline(budgetMs);
+      const scoped: McpToolContext = { ...context, deadline };
+      const operation = tool.execute(input, scoped);
+      return runWithDeadline(operation, deadline, () => ({
+        type: 'error',
+        code: DEADLINE_EXCEEDED_CODE,
+        message: deadlineMessage(tool, deadline),
+      }));
+    },
+  };
+}
+
+/** `ToolRegistry` 的装配参数。 */
+export interface ToolRegistryOptions {
+  /**
+   * 单次工具调用的上限（毫秒）。默认 `MCP_TOOL_DEADLINE_MS`，来源见 `deadline.ts`。
+   *
+   * 仅供装配与测试使用；**不暴露给模型**（不新增工具输入参数）。
+   */
+  readonly deadlineMs?: number;
+}
+
 export class ToolRegistry {
   readonly #tools: readonly McpToolDefinition[];
   readonly #byName: ReadonlyMap<string, McpToolDefinition>;
 
-  constructor(tools: readonly McpToolDefinition[]) {
+  constructor(tools: readonly McpToolDefinition[], options: ToolRegistryOptions = {}) {
     // `~` 展开需要请求身份，而身份只在 `execute` 的 `context` 里（§6.1、§13.2）。
     // 在这里统一包装，16 个工具不必各写一遍——漏一个就是「有的工具能用别名、
     // 有的不能」。
-    this.#tools = tools.map(bindSubjectAliases);
+    //
+    // 截止时间同样是统一包装：它是「MCP 工具调用不能挂住宿主 agent」的唯一执行点
+    // （`deadline.ts`）。测试传更小的值来验证闸门，生产用默认值。
+    const deadlineMs = options.deadlineMs ?? MCP_TOOL_DEADLINE_MS;
+    this.#tools = tools.map((tool) => bindDeadline(bindSubjectAliases(tool), deadlineMs));
     this.#byName = new Map(this.#tools.map((tool) => [tool.name, tool]));
   }
 
@@ -247,6 +318,45 @@ export function formatHits(hits: readonly ScoredHit[]): string {
     }
   }
   return lines.join('\n');
+}
+
+/** 重排失败原因的中文说明。只用于结果标注，日志里仍写英文枚举。 */
+const RERANK_FAILURE_LABELS: Readonly<Record<RerankFailure['reason'], string>> = Object.freeze({
+  timeout: '超时',
+  network: '网络不可达',
+  http_5xx: 'HTTP 5xx',
+  other: '调用失败',
+});
+
+/**
+ * 检索结果的降级标注（§17.9「降级不静默」）。
+ *
+ * 空结果与降级结果必须可分辨：向量后端不可用时 `find` 可能 `Found 0`，如果不说
+ * 「这次是降级」，调用方会把它读成「记忆里没有」。所以降级时在命中列表后追加一行，
+ * 并写清「退回了什么」——`vector` 引擎**不**退回 FTS5（显式选了语义检索），
+ * `hybrid` 才退回，这句话不能写反。
+ */
+export function formatDegradations(
+  engine: 'fts5' | 'vector' | 'hybrid',
+  result: {
+    readonly degradation: string | null;
+    readonly rerankFailure: RerankFailure | null;
+  },
+): string[] {
+  const lines: string[] = [];
+  if (result.degradation !== null) {
+    lines.push(
+      engine === 'vector'
+        ? `Degraded: 向量检索不可用（${result.degradation}）；没有退回关键词检索，本次结果可能不完整。`
+        : `Degraded: 向量检索不可用（${result.degradation}）；已退回关键词检索（FTS5），只覆盖关键词命中的内容。`,
+    );
+  }
+  if (result.rerankFailure !== null) {
+    lines.push(
+      `Degraded: 重排不可用（${RERANK_FAILURE_LABELS[result.rerankFailure.reason]}）；结果使用融合分。`,
+    );
+  }
+  return lines;
 }
 
 /**

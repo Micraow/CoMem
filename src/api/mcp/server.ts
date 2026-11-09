@@ -161,6 +161,14 @@ function toCallToolResult(result: McpToolResult): CallToolResult {
   if (result.type === 'text') {
     return { content: [{ type: 'text', text: result.text }] };
   }
+  if (result.type === 'error') {
+    // 工具级失败走 MCP 的 isError 形态，而不是 200 + 空文本：后者会让 agent 以为
+    // 「记忆里没有」。`code` 放在文本最前面，便于宿主与日志按它检索。
+    return {
+      content: [{ type: 'text', text: `${result.code}: ${result.message}` }],
+      isError: true,
+    };
+  }
   return { content: [toBinaryBlock(result)] };
 }
 
@@ -237,7 +245,18 @@ export class McpHttpServer {
         );
       }
       try {
-        return toCallToolResult(await tool.execute(call.params.arguments ?? {}, context));
+        const result = await tool.execute(call.params.arguments ?? {}, context);
+        if (result.type === 'error') {
+          // 超时不是工具的业务拒绝，是「这次调用没有等到答案」。用 warn 让运维在
+          // 日志里能按 `TOOL_DEADLINE_EXCEEDED` 搜到；工具本身没有 logger。
+          this.#options.logger.warn('MCP 工具超过调用上限。', {
+            requestId,
+            tool: tool.name,
+            code: result.code,
+            error: result.message,
+          });
+        }
+        return toCallToolResult(result);
       } catch (error) {
         const failure = ComemError.from(error);
         const fields = {

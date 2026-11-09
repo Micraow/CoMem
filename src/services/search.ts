@@ -73,7 +73,7 @@ import { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
 import type { ContextAssembler } from './context-assembler.js';
-import type { EmbeddingService } from './embedding.js';
+import type { EmbeddingService, EmbedOutcome } from './embedding.js';
 import type { FileSystemService } from './filesystem.js';
 import type { LlmService } from './llm.js';
 import {
@@ -252,7 +252,26 @@ export interface FindOptions {
   readonly updatedBefore?: string;
   readonly limit?: number;
   readonly scoreThreshold?: number;
+  /**
+   * 本次查询的**墙上时钟**上限（epoch 毫秒），由接口层（MCP 工具）注入。
+   *
+   * 与 `providers.*.timeoutSeconds` 不是一件事：那个是单次外部调用的预算，这里是
+   * 一次工具调用的总预算。省略时不做工具级收窄，行为与接线前逐字一致（HTTP /
+   * Hook 路径）。给了它，查询嵌入与重排的预算按剩余时间截断，并且**先降级再谈
+   * 失败**：向量拿不到就退 FTS，重排拿不到就用融合分。
+   */
+  readonly deadlineAt?: number;
+  /**
+   * 进入一次外部上游前上报，供接口层在到达总上限时归因。
+   *
+   * 只上报三类真正会打网络的地方（意图分析 / 查询嵌入 / 重排）。本地索引与文件
+   * 系统由工具层自己标记，服务层不猜。
+   */
+  readonly onUpstream?: (upstream: SearchUpstream) => void;
 }
+
+/** `onUpstream` 的上报取值（见 `FindOptions.onUpstream`）。 */
+export type SearchUpstream = 'llm' | 'embedding' | 'rerank';
 
 export interface SearchOptions extends FindOptions {
   /** 会话 ID。有它才能解析指代；没有也能分析，只是历史为空 */
@@ -346,11 +365,26 @@ export interface ScoredSearchResult {
   readonly plan: SearchPlan;
 }
 
-/** 一次 `find` 的内部产物：命中 + 向量后端的降级原因。 */
+/** 一次 `find` 的内部产物：命中 + 各上游的降级原因。 */
 interface RetrieveOutcome {
   readonly hits: readonly RankedScoredHit[];
   /** 向量后端降级原因；`null` 表示这次没有降级 */
   readonly degradation: string | null;
+  /** 本次重排是否失败（失败即用融合分）；`null` 表示没配重排、没命中或调用成功 */
+  readonly rerankFailure: RerankFailure | null;
+}
+
+/**
+ * `findWithDiagnostics` 的返回体。
+ *
+ * 降级必须能被出口读到（§17.9）：`find` 的旧返回类型只有命中，向量不可用时
+ * `Found 0` 与「记忆里没有」无法区分。MCP 工具用这个变体输出 `Degraded:` 行；
+ * 只要命中的调用方继续用 `find`，行为不变。
+ */
+export interface FindDiagnostics {
+  readonly hits: readonly RankedScoredHit[];
+  readonly degradation: string | null;
+  readonly rerankFailure: RerankFailure | null;
 }
 
 /** 向量检索需要的三个依赖。构造期保证 `engine !== 'fts5'` 时非空。 */
@@ -438,6 +472,96 @@ const RECENT_MESSAGES = 10;
  * 收窄，而不是继承后台任务的默认值。
  */
 const REWRITE_TIMEOUT_MS = 10_000;
+
+/**
+ * 查询嵌入的预算（毫秒），只在接口层给了 `deadlineAt` 时生效。
+ *
+ * 6000 是**推导值**：一次检索只嵌一条短查询（不是批量回填的 128 条），供应商往返
+ * 通常 < 1 秒（§15.9 的检索阶段「向量变体含查询嵌入的网络往返」与整轮 20–100ms
+ * 的量级）。6 秒给冷启动与跨地域网关留 6 倍余量，同时让「供应商挂住」在用户可
+ * 感知之前退化成 FTS 结果。
+ */
+const QUERY_EMBED_TIMEOUT_MS = 6_000;
+
+/**
+ * 查询重排的预算（毫秒），只在接口层给了 `deadlineAt` 时生效。
+ *
+ * 12000 是**推导值**：本地 0.6B 重排 50 条候选实测 p95 为 9.35 秒
+ * （`eval/README.md` 的 105 条基线）。12 秒是 p95 的 1.28 倍，仍覆盖绝大多数
+ * 查询；超过它的调用退回融合分并标注 `Degraded`。**不沿用
+ * `providers.rerank.timeoutSeconds` 的 30 秒**：那是「不静默降级」的配置预算，
+ * 30 秒的重排等待会直接吃掉 MCP 工具总上限（见 `api/mcp/deadline.ts`）。
+ */
+const QUERY_RERANK_TIMEOUT_MS = 12_000;
+
+/**
+ * 上游预算之外留给工具层的余量（毫秒）。
+ *
+ * 上游预算与工具总上限同时到点的话，谁先返回取决于定时器顺序——降级路径可能
+ * 输给「工具级失败」，把一次本可以返回 FTS 结果的检索变成错误。所以每个上游
+ * 预算都从剩余时间里扣掉这份余量；余量再按剩余预算的 1/5 封顶，避免测试里
+ * 几百毫秒的预算被一个固定值吃光。
+ */
+const DEADLINE_RESERVE_MS = 1_000;
+
+/**
+ * 剩余预算（毫秒）：`cap` 与「离总截止还有多久」取较小者。
+ *
+ * `deadlineAt` 省略时返回 `null`——调用方据此走原来的「只有供应商超时」路径，
+ * HTTP / Hook 的行为不变。
+ */
+function remainingBudget(deadlineAt: number | undefined, cap: number): number | null {
+  const remaining = deadlineRemainingMs(deadlineAt);
+  if (remaining === null) {
+    return null;
+  }
+  const reserve = Math.min(DEADLINE_RESERVE_MS, Math.floor(remaining / 5));
+  // 已经过期时给 1ms 而不是 0：`setTimeout(0)` 与「立刻降级」在语义上都是马上，
+  // 但 1ms 让错误信息里能写一个正整数预算，读日志时不会出现「0 毫秒超时」。
+  return Math.max(1, Math.min(cap, remaining - reserve));
+}
+
+/** 离总截止还有多久（毫秒）；没有总预算时是 `null`。 */
+function deadlineRemainingMs(deadlineAt: number | undefined): number | null {
+  if (deadlineAt === undefined) {
+    return null;
+  }
+  return Math.max(1, deadlineAt - Date.now());
+}
+
+/**
+ * 给一个外部调用套上预算。到点用 `onTimeout()` 的错误结束，不取消在途请求
+ * （供应商返回后会被丢弃）。
+ *
+ * 只用于已经确定有预算的路径；`null` 预算的调用不经过它。
+ */
+async function withBudget<T>(
+  operation: Promise<T>,
+  budgetMs: number,
+  onTimeout: () => Error,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), budgetMs);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([operation, guard]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** 超时错误：`details.timeout` 让 `rerankFailureReason` 能把它记成 `timeout`。 */
+function budgetExceeded(upstream: string, budgetMs: number): ComemError {
+  return new ComemError(
+    'PROVIDER_UNAVAILABLE',
+    `${upstream}超过 ${budgetMs} 毫秒没有返回，已中止等待。`,
+    { timeout: true, timeoutMs: budgetMs },
+  );
+}
 
 /**
  * 重排候选文本的兜底上限：512 个字符（Unicode 码点）。
@@ -645,10 +769,26 @@ export class SearchService {
    * 热度只重排已经通过阈值的命中，不能把一条不相关的记忆「救」进来。
    */
   async find(query: string, options: FindOptions): Promise<readonly RankedScoredHit[]> {
+    const diagnostics = await this.findWithDiagnostics(query, options);
+    return diagnostics.hits;
+  }
+
+  /**
+   * 与 `find` 同一次检索，额外返回向量 / 重排的降级原因。
+   *
+   * 给「降级必须可见」的出口用（MCP `find` / `rule_search`）。`find` 继续只返回
+   * 命中：其它调用方（HTTP、Hook、`memory.search`）的输出契约里没有这一列，加了
+   * 反而要改一圈协议。
+   */
+  async findWithDiagnostics(query: string, options: FindOptions): Promise<FindDiagnostics> {
     const outcome = await this.#findWithOutcome(query, options);
     // 记的是「返回给调用方的命中」，不是候选集：截断与阈值都在 `#retrieve` 里做完。
     this.#recordHits(outcome.hits);
-    return outcome.hits;
+    return {
+      hits: outcome.hits,
+      degradation: outcome.degradation,
+      rerankFailure: outcome.rerankFailure,
+    };
   }
 
   /**
@@ -667,7 +807,7 @@ export class SearchService {
         returned: 0,
         durationMs: elapsedMs(startedAt),
       });
-      return { hits: [], degradation: null };
+      return { hits: [], degradation: null, rerankFailure: null };
     }
 
     const outcome = await this.#retrieve(filtered, options, limit);
@@ -713,9 +853,11 @@ export class SearchService {
         ...hit,
         ranks: null,
       }));
+      const reranked = await this.#applyRerank(text, ranked, options);
       return {
-        hits: this.#applyHotness((await this.#applyRerank(text, ranked, options.principals)).slice(0, limit)),
+        hits: this.#applyHotness(reranked.hits.slice(0, limit)),
         degradation: null,
+        rerankFailure: reranked.failure,
       };
     }
 
@@ -744,18 +886,23 @@ export class SearchService {
     limit: number,
     candidateLimit: number,
   ): Promise<RetrieveOutcome> {
-    const embedded = await vector.embedding.embed([text]);
+    const embedded = await this.#embedQuery(vector, text, options);
     const queryVector = embedded.vectors[0];
     if (embedded.degraded || queryVector === undefined) {
       return {
         hits: [],
         degradation: embedded.reason ?? '向量检索没有拿到查询向量。',
+        rerankFailure: null,
       };
     }
 
     const model = vector.embedding.model;
     if (model === null) {
-      return { hits: [], degradation: '没有配置嵌入模型，无法按模型过滤向量。' };
+      return {
+        hits: [],
+        degradation: '没有配置嵌入模型，无法按模型过滤向量。',
+        rerankFailure: null,
+      };
     }
 
     const uris = await this.#readableUris(options);
@@ -772,9 +919,11 @@ export class SearchService {
         ranks: { fts5: null, vector: index + 1, hybrid: null },
       }),
     );
+    const reranked = await this.#applyRerank(text, ranked, options);
     return {
-      hits: this.#applyHotness((await this.#applyRerank(text, ranked, options.principals)).slice(0, limit)),
+      hits: this.#applyHotness(reranked.hits.slice(0, limit)),
       degradation: null,
+      rerankFailure: reranked.failure,
     };
   }
 
@@ -810,7 +959,7 @@ export class SearchService {
         updatedBefore: options.updatedBefore,
         limit: candidateLimit,
       }),
-      vector.embedding.embed([text]),
+      this.#embedQuery(vector, text, options),
     ]);
 
     const queryVector = embedded.vectors[0];
@@ -858,10 +1007,46 @@ export class SearchService {
         ranks: hit.ranks,
       }));
 
+    const reranked = await this.#applyRerank(text, scored, options);
     return {
-      hits: this.#applyHotness((await this.#applyRerank(text, scored, options.principals)).slice(0, limit)),
+      hits: this.#applyHotness(reranked.hits.slice(0, limit)),
       degradation,
+      rerankFailure: reranked.failure,
     };
+  }
+
+  /**
+   * 查询嵌入：把「供应商慢」收敛成降级结果，而不是让工具等满总上限。
+   *
+   * 只在接口层给了 `deadlineAt` 时收窄：预算取 `QUERY_EMBED_TIMEOUT_MS` 与剩余
+   * 时间中较小的那个，并同时传给适配器（真正中止 HTTP）与本地闸门（防供应商
+   * 不响应 `timeoutMs`）。没有 `deadlineAt` 时保持原样——HTTP / Hook 路径的行为
+   * 不变，供应商超时仍由配置决定。
+   */
+  async #embedQuery(
+    vector: VectorRetrievalDeps,
+    text: string,
+    options: FindOptions,
+  ): Promise<EmbedOutcome> {
+    const budget = remainingBudget(options.deadlineAt, QUERY_EMBED_TIMEOUT_MS);
+    options.onUpstream?.('embedding');
+    try {
+      if (budget === null) {
+        return await vector.embedding.embed([text]);
+      }
+      return await withBudget(
+        vector.embedding.embed([text], { timeoutMs: budget }),
+        budget,
+        () => budgetExceeded('查询嵌入（embedding）', budget),
+      );
+    } catch (error) {
+      const failure = ComemError.from(error);
+      return {
+        vectors: [],
+        degraded: true,
+        reason: `查询嵌入不可用（${failure.code}）：${failure.message}`,
+      };
+    }
   }
 
   /**
@@ -1025,6 +1210,10 @@ export class SearchService {
           updatedBefore: options.updatedBefore,
           limit,
           scoreThreshold: options.scoreThreshold,
+          // 预算与归因必须穿透到每一路 `find`：只在入口收窄的话，5 条 TypedQuery
+          // 各自重排时仍会等满自己的预算。
+          deadlineAt: options.deadlineAt,
+          onUpstream: options.onUpstream,
         }),
       })),
     );
@@ -1040,10 +1229,14 @@ export class SearchService {
       // 向量降级与意图分析失败是两条独立的降级路径，都要能解释。`plan.reason`
       // 是 `SearchPlan` 上唯一能承载「这次为什么不是完整结果」的字段，两条都
       // 非空时拼接，不覆盖任何一条。
-      reason: combineReasons(
-        analysis.reason,
-        ran.map((entry) => entry.outcome.degradation),
-      ),
+      reason: combineReasons(analysis.reason, [
+        ...ran.map((entry) => entry.outcome.degradation),
+        ...ran.map((entry) =>
+          entry.outcome.rerankFailure === null
+            ? null
+            : `重排不可用（${entry.outcome.rerankFailure.reason}），结果使用融合分`,
+        ),
+      ]),
       elapsedMs: elapsedMs(startedAt),
     };
     this.#logger.info('检索完成（含意图分析）', {
@@ -1096,10 +1289,29 @@ export class SearchService {
       ],
     };
 
+    options.onUpstream?.('llm');
+    // 工具级预算存在时，意图分析也收窄到剩余时间：LlmService 的 3 次尝试各自
+    // 10 秒会把一次 `search` 拖到 30 秒以上。`AbortSignal` 让「超时」不再被上层
+    // 当成可重试的瞬态错误——否则第一次 10 秒超时后还会退避再打两次。
+    // 意图分析最多用掉**剩余预算的一半**：它只是查询重写，后面还要跑检索。
+    // 用满剩余时间的话，reach 到总上限时只剩「工具级失败」一条路——而这次检索
+    // 本来可以降级成原查询继续跑（30 秒上限下：10 秒分析 + 最多 18 秒检索）。
+    const remaining = deadlineRemainingMs(options.deadlineAt);
+    const budget =
+      remaining === null ? null : Math.max(1, Math.min(REWRITE_TIMEOUT_MS, Math.floor(remaining / 2)));
+    const controller = new AbortController();
+    const timer = budget === null ? undefined : setTimeout(() => controller.abort(), budget);
+    timer?.unref();
+
     try {
-      const output = await this.#llm.generateJson(prompt, REWRITE_SCHEMA, {
-        timeoutMs: REWRITE_TIMEOUT_MS,
+      const call = this.#llm.generateJson(prompt, REWRITE_SCHEMA, {
+        timeoutMs: budget ?? REWRITE_TIMEOUT_MS,
+        ...(budget === null ? { } : { abortSignal: controller.signal }),
       });
+      const output =
+        budget === null
+          ? await call
+          : await withBudget(call, budget, () => budgetExceeded('意图分析（LLM）', budget));
       return { queries: output.queries.slice(0, maxQueries), analyzed: true, reason: null };
     } catch (error) {
       // 超时、截断（`details.truncated`）、结构化输出不合法都收敛成 `ComemError`
@@ -1116,6 +1328,13 @@ export class SearchService {
         analyzed: false,
         reason: `意图分析失败（${failure.code}）：${failure.message}`,
       };
+    } finally {
+      // 超时后立刻取消在途调用：不取消的话 3 次尝试（各 10 秒）会在后台继续跑，
+      // 而结果已经没人要了。
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      controller.abort();
     }
   }
 
@@ -1323,8 +1542,27 @@ export class SearchService {
    * 条目由 `RecallLedger.record` 自己跳过。
    */
   async context(query: string, options: ContextOptions): Promise<ContextAssembly> {
+    return (await this.contextWithDiagnostics(query, options)).assembly;
+  }
+
+  /**
+   * `context` 的带诊断版本：`search` 的 `mode=context` 用它把「这次降级了」写进
+   * 返回值。
+   *
+   * 只返回组装结果时，向量不可用会表现为 `Context: 0 item(s)`——与「记忆里没有」
+   * 无法区分。诊断列与 `findWithDiagnostics` 同一套来源，不另算一遍。
+   */
+  async contextWithDiagnostics(
+    query: string,
+    options: ContextOptions,
+  ): Promise<{
+    readonly assembly: ContextAssembly;
+    readonly degradation: string | null;
+    readonly rerankFailure: RerankFailure | null;
+  }> {
     const startedAt = process.hrtime.bigint();
-    const hits = await this.find(query, options);
+    const retrieval = await this.findWithDiagnostics(query, options);
+    const hits = retrieval.hits;
     const candidates: AssemblyCandidate[] = hits.map((hit) => ({
       uri: hit.uri,
       contextType: hit.contextType,
@@ -1351,7 +1589,11 @@ export class SearchService {
       tokensUsed: result.tokensUsed,
       durationMs: elapsedMs(startedAt),
     });
-    return result;
+    return {
+      assembly: result,
+      degradation: retrieval.degradation,
+      rerankFailure: retrieval.rerankFailure,
+    };
   }
 
   /**
@@ -1460,17 +1702,17 @@ export class SearchService {
   async #applyRerank(
     query: string,
     hits: readonly PreHotnessHit[],
-    principals: readonly string[],
-  ): Promise<PreHotnessHit[]> {
+    options: FindOptions,
+  ): Promise<{ readonly hits: PreHotnessHit[]; readonly failure: RerankFailure | null }> {
     const rerank = this.#rerank;
     if (rerank === undefined || hits.length === 0) {
-      return [...hits];
+      return { hits: [...hits], failure: null };
     }
 
     const limited = hits.slice(0, rerank.topN);
     // 候选文本有 I/O（摘要为空时要读正文），先并发取齐再一次性送模型：串行读
     // 会把 N 次磁盘延迟叠在用户身上，而 topN 上限是配置里的 50 条。
-    const texts = await Promise.all(limited.map((hit) => this.#rerankText(hit, principals)));
+    const texts = await Promise.all(limited.map((hit) => this.#rerankText(hit, options.principals)));
     const candidates: RerankCandidate[] = limited.map((hit, index) => ({
       uri: hit.uri,
       text: texts[index] ?? '',
@@ -1485,32 +1727,47 @@ export class SearchService {
         model: rerank.provider.model,
         candidates: candidates.length,
       });
-      return [...hits];
+      return { hits: [...hits], failure: null };
     }
 
     let modelScores: readonly (number | null)[] | null = null;
+    let failure: RerankFailure | null = null;
     // 只计模型调用本身：候选正文读取是本地 I/O，不属于「重排有多慢」。
     const startedAt = Date.now();
+    // 与查询嵌入同一套语义：只在接口层给了总预算时收窄，否则沿用配置的
+    // `providers.rerank.timeoutSeconds`。
+    const budget = remainingBudget(options.deadlineAt, QUERY_RERANK_TIMEOUT_MS);
+    options.onUpstream?.('rerank');
     try {
-      modelScores = await rerank.provider.score(
-        query,
-        candidates.map((candidate) => candidate.text),
-      );
+      const scoring =
+        budget === null
+          ? rerank.provider.score(
+              query,
+              candidates.map((candidate) => candidate.text),
+            )
+          : rerank.provider.score(query, candidates.map((candidate) => candidate.text), {
+              timeoutMs: budget,
+            });
+      modelScores =
+        budget === null
+          ? await scoring
+          : await withBudget(scoring, budget, () => budgetExceeded('重排（rerank）', budget));
       // 最近一次成功：`degraded` 回答的是「现在」，历史次数留在 `failures` 里。
       this.#rerankLastFailure = null;
     } catch (error) {
-      const failure = ComemError.from(error);
-      const reason = rerankFailureReason(failure);
+      const caught = ComemError.from(error);
+      const reason = rerankFailureReason(caught);
       const durationMs = Date.now() - startedAt;
       this.#rerankFailures += 1;
-      this.#rerankLastFailure = {
+      failure = {
         at: new Date().toISOString(),
         reason,
         durationMs,
         topN: candidates.length,
-        code: failure.code,
-        message: failure.message,
+        code: caught.code,
+        message: caught.message,
       };
+      this.#rerankLastFailure = failure;
       // `reason` 是给「调大超时」还是「换 API Key」分流用的：只看 code 的话
       // 超时、5xx、网络不可达都是 PROVIDER_UNAVAILABLE，运维无从下手。
       this.#logger.warn('重排失败，使用融合分', {
@@ -1518,8 +1775,8 @@ export class SearchService {
         reason,
         durationMs,
         topN: candidates.length,
-        code: failure.code,
-        message: failure.message,
+        code: caught.code,
+        message: caught.message,
       });
     }
 
@@ -1544,7 +1801,10 @@ export class SearchService {
       }
       return left.uri < right.uri ? -1 : 1;
     });
-    return rerank.keepTopN > 0 ? merged.slice(0, rerank.keepTopN) : merged;
+    return {
+      hits: rerank.keepTopN > 0 ? merged.slice(0, rerank.keepTopN) : merged,
+      failure,
+    };
   }
 
   /**

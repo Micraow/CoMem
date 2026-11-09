@@ -26,6 +26,8 @@ import type { SkillService } from '../../services/skill.js';
 import type { SummaryService } from '../../services/summary.js';
 import type { TaskService } from '../../services/task.js';
 
+import type { ToolDeadline } from './deadline.js';
+
 export interface McpToolContext {
   readonly filesystem: FileSystemService;
   readonly search: SearchService;
@@ -45,4 +47,15 @@ export interface McpToolContext {
   readonly principals: readonly string[];
   /** 请求 ID，贯穿日志（§17.7） */
   readonly requestId: string;
+  /**
+   * 本次工具调用的截止时间（§13、`deadline.ts`）。
+   *
+   * 由 `ToolRegistry` 在 `execute` 前注入，所以工具实现里可能拿不到它（单元测试
+   * 直接调用裸定义时）。**省略表示不做工具级上限**，不是「用默认值」——默认值只在
+   * 注册表这一处，避免两个地方各有一份 30 秒。
+   *
+   * 工具把它传给服务层的 `deadlineAt` / `onUpstream`，检索因此能在总上限之前先
+   * 把「向量不可用」降级成 FTS 结果。
+   */
+  readonly deadline?: ToolDeadline;
 }

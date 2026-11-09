@@ -20,6 +20,7 @@ import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import {
   asRecord,
+  formatDegradations,
   readScopes,
   requiredString,
   textResult,
@@ -68,23 +69,28 @@ export const ruleSearchTool: McpToolDefinition = {
     // `memoryTypes: ['rules']` 是**下推**，不是事后过滤：索引在 SQL 的 WHERE 里
     // 排除其它记忆类型，所以「前 5 条命中都是偏好 / 实体」不会再把规则挤掉
     // （§8.3 的 `SearchQuery.memoryTypes`）。
-    const hits = await context.search.find(taskContext, {
+    context.deadline?.mark('index');
+    const result = await context.search.findWithDiagnostics(taskContext, {
       scopes,
       subject: context.subject,
       principals: context.principals,
       limit: RULE_LIMIT,
       contextTypes: ['memory'],
       memoryTypes: ['rules'],
+      deadlineAt: context.deadline?.deadlineAt,
+      onUpstream: (upstream) => context.deadline?.mark(upstream),
     });
 
     // 相对阈值的基准取**规则**里的最高分：类型过滤已经保证 `hits` 全是规则，
     // 不需要再逐条 `stat` 补记忆类型（那会多一次 SQL，而且旧的「先取 N 条再筛」
     // 正是本工具返回空结果的根因）。
-    const ruleHits = hits.map((hit) => ({ uri: hit.uri, score: hit.score }));
+    const ruleHits = result.hits.map((hit) => ({ uri: hit.uri, score: hit.score }));
     const topScore = Math.max(...ruleHits.map((hit) => hit.score));
     const cutoff = topScore * threshold;
 
     const rules: string[] = [];
+    // 逐条读正文是本地文件系统阶段；放在检索之后上报，超时归因才不会指向索引。
+    context.deadline?.mark('filesystem');
     for (const hit of ruleHits) {
       if (hit.score < cutoff) {
         continue;
@@ -108,8 +114,18 @@ export const ruleSearchTool: McpToolDefinition = {
     }
 
     if (rules.length === 0) {
-      return textResult('Found 0 applicable rule(s):');
+      return textResult(
+        [
+          'Found 0 applicable rule(s):',
+          ...formatDegradations(context.config.retrieval.engine, result),
+        ].join('\n'),
+      );
     }
-    return textResult(`Found ${rules.length} applicable rule(s):\n\n${rules.join('\n\n')}`);
+    return textResult(
+      [
+        `Found ${rules.length} applicable rule(s):\n\n${rules.join('\n\n')}`,
+        ...formatDegradations(context.config.retrieval.engine, result),
+      ].join('\n'),
+    );
   },
 };
