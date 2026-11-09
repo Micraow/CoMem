@@ -134,12 +134,7 @@ interface TargetInternal {
  *
  * 判断口径见条目文字。**不要为了让检查通过而往这里加行。**
  */
-const BASELINE: readonly BaselineEntry[] = [
-  {
-    id: 'EmbeddingRepository.iterMissingUris',
-    reason: '该接线：打开 embedding 后存量不回填，只能手动 reindex。',
-  },
-];
+const BASELINE: readonly BaselineEntry[] = [];
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);

@@ -7,7 +7,7 @@
  * `pnpm reindex`，这里断言的是「启动时能发现，并且只在需要时查一次」。
  *
  * 用真实容器 + 同一份数据根先后起两种引擎：缺向量这件事只有走 SQLite 才能验证，
- * 替身数据库证明不了 `iterMissingUris` 的 `NOT EXISTS` 真的能认出缺失。
+ * 替身数据库证明不了 `hasDocumentsMissingVectors` 的 `NOT EXISTS` 真的能认出缺失。
  */
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';

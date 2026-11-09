@@ -8,9 +8,7 @@ import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 const MODEL = 'text-embedding-3-small';
-const OLD_MODEL = 'text-embedding-ada-002';
 const DIMENSION = 4;
-const CREATED_AT = '2026-11-08T00:00:00.000Z';
 const SCOPE = 'comem://user/alice';
 
 let db: DatabaseSync;
@@ -36,28 +34,6 @@ function basis(axis: number): number[] {
   const vector = new Array<number>(DIMENSION).fill(0);
   vector[axis % DIMENSION] = 1;
   return vector;
-}
-
-function insertNode(uri: string): void {
-  db.prepare(
-    `INSERT INTO node (
-       uri, parent_uri, scope, kind, context_type, memory_type, level,
-       abstract, body_digest, size, updated_at, status
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    uri,
-    uri.slice(0, uri.lastIndexOf('/')),
-    'user',
-    'document',
-    'memory',
-    null,
-    'L2',
-    null,
-    '0000000000000000',
-    0,
-    CREATED_AT,
-    'active',
-  );
 }
 
 beforeEach(() => {
@@ -178,48 +154,4 @@ describe('读写', () => {
     expect(embeddings.getMany([])).toEqual([]);
   });
 
-});
-
-describe('iterMissingUris', () => {
-  beforeEach(() => {
-    embeddings.ensureSchema(DIMENSION, MODEL);
-  });
-
-  it('按 URI 排序，跳过已嵌入的', () => {
-    for (const name of ['c', 'a', 'b']) {
-      insertNode(uriFor(name));
-    }
-    embeddings.upsert([
-      { uri: uriFor('b'), model: MODEL, contentDigest: 'd', vector: basis(0) },
-    ]);
-
-    expect(embeddings.iterMissingUris(MODEL, { limit: 10 })).toEqual([uriFor('a'), uriFor('c')]);
-  });
-
-  it('after 游标分页，不跳行', () => {
-    for (const name of ['a', 'b', 'c', 'd']) {
-      insertNode(uriFor(name));
-    }
-
-    const first = embeddings.iterMissingUris(MODEL, { limit: 2 });
-    expect(first).toEqual([uriFor('a'), uriFor('b')]);
-
-    const second = embeddings.iterMissingUris(MODEL, { limit: 2, after: first[1] });
-    expect(second).toEqual([uriFor('c'), uriFor('d')]);
-  });
-
-  it('只排除当前模型的行', () => {
-    insertNode(uriFor('a'));
-    embeddings.upsert([
-      { uri: uriFor('a'), model: OLD_MODEL, contentDigest: 'd', vector: basis(0) },
-    ]);
-
-    expect(embeddings.iterMissingUris(MODEL, { limit: 10 })).toEqual([uriFor('a')]);
-  });
-
-  it('拒绝非法 limit', () => {
-    expect(() => embeddings.iterMissingUris(MODEL, { limit: 0 })).toThrow(
-      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
-    );
-  });
 });

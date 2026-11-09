@@ -12,12 +12,6 @@
  * 变成「静默跳过所有行」，所以虚拟表由 `ensureSchema` 在启动时按配置建；记录模型
  * 与维度的单行表 `embedding_model` 在 `0001_init.sql` 里。
  *
- * ## 为什么 `iterMissingUris` 查的是 `node`
- *
- * 「还没有嵌入的 URI」这个集合定义在 `node` 上，`node_embedding` 只能回答「已经
- * 嵌了哪些」。反查 `node` 而不是给 `node_embedding` 加一列 `embedded`，让「缺一行」
- * 本身就是缺失的表示——不需要在两个地方维护同一个布尔值。
- *
  * ## 失败模式的分工
  *
  * 仓储失败是磁盘 / 事务，索引失败是数据（模型换了、维度不匹配），提供者失败是
@@ -30,7 +24,7 @@ import type { Logger } from '../../domain/log.js';
 import { normalizeVector } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import { withWriteTransaction } from './database.js';
-import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
+import { globPrefixPattern, placeholders } from './node-repository.js';
 
 /** `node_embedding` 表的一行。 */
 export interface EmbeddingRow {
@@ -236,51 +230,6 @@ export class EmbeddingRepository {
     );
     this.#logger.debug('嵌入删除', { uri, recursive, deleted });
     return deleted;
-  }
-
-  /**
-   * 回填用：返回还没有嵌入的 URI（按 URI 排序保证可重放）。
-   *
-   * 游标是 `after` 而不是 `OFFSET`：回填过程中会不断插入新行，`OFFSET` 在同一份
-   * 结果集上会跳行——插了 100 行之后再取第 101 条，实际跳过了 100 条没处理过的。
-   * 按 URI 排序 + 严格大于游标，重放几次都只会拿到同一批。
-   *
-   * 「还没嵌入」按 `model` 判定：换模型后旧向量还在表里，但它们对这个模型而言是
-   * 缺失的，回填会全部重算。清空靠重建向量表，两件事分开做。
-   *
-   * `NOT EXISTS` 相关子查询在 `vec0` 上成立（走主键点查，不是全表扫），所以不需要
-   * 「把已嵌入 URI 读进内存 Set 再差集」。代价实测：1 万 `node` 行 × 1 万向量行
-   * 约 67ms，属于一次性回填可接受的范围；十万级要换成临时表，那时这条查询会先变慢。
-   */
-  iterMissingUris(
-    model: string,
-    options: { readonly limit: number; readonly after?: string },
-  ): readonly string[] {
-    if (!Number.isInteger(options.limit) || options.limit <= 0) {
-      throw new ComemError('INVALID_ARGUMENT', 'limit 必须是正整数。', { limit: options.limit });
-    }
-    const after = options.after;
-    const cursorClause = after === undefined ? '' : 'AND n.uri > ?';
-    const params: SQLInputValue[] =
-      after === undefined ? [model, options.limit] : [model, after, options.limit];
-    // 向量是**按节点**一条（`vec0` 的主键是 `uri`），所以只看节点自身那一行：
-    // 目录的 L1 概览行与 L0 行同 URI，两行都进候选会让回填对同一个 URI 做两遍。
-    // `DISTINCT` 再兜一层：一个 URI 同时留下 L0 与 L2 行（节点类型变过、旧行没清）
-    // 时，也不会把同一个 URI 报两次——调用方按「前 limit 个未嵌入 URI」翻页。
-    const sql = `SELECT DISTINCT n.uri AS uri
-       FROM node n
-       WHERE ${nodeSelfRowSql('n')}
-         AND NOT EXISTS (
-           SELECT 1 FROM node_embedding e
-           WHERE e.uri = n.uri AND e.model = ?
-         )
-         ${cursorClause}
-       ORDER BY n.uri ASC
-       LIMIT ?`;
-    return this.#db
-      .prepare(sql)
-      .all(...params)
-      .map((row) => text(row['uri']));
   }
 
   /** 当前库里的维度；没有元数据行（还没建过向量表）时返回 `null`。 */
