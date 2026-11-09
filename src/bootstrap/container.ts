@@ -11,7 +11,8 @@
  * 配置 → 日志 → 数据库/迁移 → 适配器 → IdentityService → 模型 → AclService
  *      → SummaryService → ContextAssembler → IndexObserver → FileSystemService
  *      → SearchService → TaskService → SessionService → MemoryService
- *      → ResourceService → SkillService → CommitRunner → ObservabilityService
+ *      → ResourceService → ReconcileService → SkillService → CommitRunner
+ *      → ObservabilityService
  *      → MCP → HTTP 路由
  * ```
  *
@@ -52,7 +53,6 @@ import { randomBytes } from 'node:crypto';
 import { constants as fsConstants, mkdirSync } from 'node:fs';
 import {
   access,
-  appendFile,
   mkdir,
   readFile,
   readdir,
@@ -68,6 +68,7 @@ import { AclFileStore } from '../adapters/fs/acl-file.js';
 import { ContentStore } from '../adapters/fs/content-store.js';
 import { createPathLockManager } from '../adapters/fs/lock.js';
 import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
+import { ReconcileLog } from '../adapters/fs/reconcile-log.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { FileLogger } from '../adapters/log/file.js';
 import { AiSdkLlmProvider } from '../adapters/llm/ai-sdk-provider.js';
@@ -123,6 +124,7 @@ import { ObservabilityService } from '../services/observability.js';
 import { PromptService } from '../services/prompt-service.js';
 import { bindPromptRenderer } from '../services/prompts/registry.js';
 import { RecallLedger, type LedgerStore } from '../services/recall-ledger.js';
+import { ReconcileService } from '../services/reconcile.js';
 import {
   DEFAULT_MAX_FILE_BYTES,
   DEFAULT_MAX_FILES,
@@ -152,9 +154,8 @@ import { DEFAULT_INTERVAL_MS, Scheduler } from './scheduler.js';
 const META_DIRECTORY = '_meta';
 const DATABASE_FILE = 'comem.sqlite';
 
-/** 临时上传与对账日志的位置（`ResourceStorage` 的端口注释）。 */
+/** 临时上传的位置（`ResourceStorage` 的端口注释）。 */
 const TEMP_UPLOAD_DIRECTORY = 'tmp';
-const RECONCILE_LOG_FILE = 'reconcile.log';
 
 /** 临时上传的元数据后缀。与文件同目录，`listStaged` 靠它枚举。 */
 const STAGED_METADATA_SUFFIX = '.meta.json';
@@ -215,6 +216,13 @@ export interface ContainerServices {
   readonly memory: MemoryService;
   readonly resource: ResourceService;
   readonly skill: SkillService;
+  /**
+   * 对账日志重放（§10.6「索引双写补偿」）。
+   *
+   * `main` 在 HTTP 监听之前跑一次，调度器每个轮次也跑一次；测试可以直接调
+   * `container.services.reconcile.replay()`。
+   */
+  readonly reconcile: ReconcileService;
   readonly search: SearchService;
   readonly assembler: ContextAssembler;
   readonly ledger: RecallLedger;
@@ -301,12 +309,17 @@ class FileLedgerStore implements LedgerStore {
  * 临时上传与对账日志的存储（`ResourceStorage` 的 `node:fs` 实现）。
  *
  * 元数据与字节分开存：`listStaged` 不需要把每个上传的文件读进内存就能回答「有哪些」。
+ *
+ * 对账日志的读写交给 `ReconcileLog`：重放器与写路径必须共用同一个实例，才能让
+ * 「追加」与「重写」走同一条串行队列（见 `adapters/fs/reconcile-log.ts` 的文件头）。
  */
-class FileResourceStorage implements ResourceStorage {
+export class FileResourceStorage implements ResourceStorage {
   readonly #dataDir: string;
+  readonly #reconcileLog: ReconcileLog;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, reconcileLog: ReconcileLog) {
     this.#dataDir = dataDir;
+    this.#reconcileLog = reconcileLog;
   }
 
   async stage(input: StageUploadInput): Promise<string> {
@@ -374,9 +387,7 @@ class FileResourceStorage implements ResourceStorage {
   }
 
   async appendReconcile(entry: ReconcileEntry): Promise<void> {
-    const path = metaPath(this.#dataDir, RECONCILE_LOG_FILE);
-    await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, `${JSON.stringify(entry)}\n`, 'utf8');
+    await this.#reconcileLog.append(entry);
   }
 
   #tempDirectory(): string {
@@ -994,17 +1005,29 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     maxIterations: config.memory.consolidation.maxIterations,
   });
 
+  const reconcileLog = new ReconcileLog({ dataDir, logger });
+
   const resource = new ResourceService({
     store,
     locks,
     index,
     summary,
-    storage: new FileResourceStorage(dataDir),
+    storage: new FileResourceStorage(dataDir, reconcileLog),
     logger,
     // 写后物化权限：资源与技能服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
     authorizer,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     maxFiles: DEFAULT_MAX_FILES,
+  });
+
+  // 重放器与写路径共用同一个 `ReconcileLog` 实例：追加与重写因此走同一条队列。
+  const reconcile = new ReconcileService({
+    store,
+    index,
+    acl,
+    nodes,
+    log: reconcileLog,
+    logger,
   });
 
   const skill = new SkillService({ store, locks, index, summary, permissions, logger, authorizer });
@@ -1107,6 +1130,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     dataDir,
     sessions: session,
     ttl,
+    reconcile,
     memories: { read: (uri) => memory.read(uri) },
     expiry: {
       idleTimeoutSeconds: config.session.expiry.idleTimeoutSeconds,
@@ -1207,6 +1231,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     memory,
     resource,
     skill,
+    reconcile,
     search,
     assembler,
     ledger,

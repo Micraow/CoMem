@@ -25,6 +25,7 @@ import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js'
 import {
   Scheduler,
   type PendingMemoryPort,
+  type ReconcilePort,
   type SchedulerExpiry,
   type SessionAutoCommitPort,
   type TtlPort,
@@ -55,6 +56,14 @@ const DEFAULT_POLICY: AutoCommitPolicy = {
 
 /** 关掉过期：只测自动提交的用例不该被「空闲」误触发。 */
 const EXPIRY_OFF: SchedulerExpiry = { idleTimeoutSeconds: 0, action: 'archive' };
+
+/**
+ * 相对此刻的一个 ISO 时刻。TTL 的滑动窗口从「最后一次被使用」起算，用例只需要
+ * 「31 天前写入」这一种基准，不需要注入时钟。
+ */
+function daysAgo(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
 
 let dataDir: string;
 let db: DatabaseSync;
@@ -95,6 +104,7 @@ interface SchedulerHarness {
   readonly sessions: SessionAutoCommitPort;
   readonly ttlPort: TtlPort;
   readonly memories: PendingMemoryPort;
+  readonly reconcile: ReconcilePort;
 }
 
 function createScheduler(options: {
@@ -102,21 +112,26 @@ function createScheduler(options: {
   readonly expiry?: Partial<SchedulerExpiry>;
   readonly memories?: PendingMemoryPort;
   readonly ttl?: TtlPort;
+  readonly reconcile?: ReconcilePort;
   readonly ttlSweepBatchSize?: number;
 } = {}): SchedulerHarness {
   const sessions = options.sessions ?? createSession();
   const ttlPort = options.ttl ?? ttl;
   const memories: PendingMemoryPort = options.memories ?? { read: async () => null };
+  const reconcile: ReconcilePort = options.reconcile ?? {
+    replay: async () => ({ resolved: 0, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 }),
+  };
   const scheduler = new Scheduler({
     logger,
     dataDir,
     sessions,
     ttl: ttlPort,
+    reconcile,
     memories,
     expiry: { ...EXPIRY_OFF, ...options.expiry },
     ttlSweepBatchSize: options.ttlSweepBatchSize ?? 100,
   });
-  return { scheduler, sessions, ttlPort, memories };
+  return { scheduler, sessions, ttlPort, memories, reconcile };
 }
 
 function message(id: string, text = '消息正文'): Omit<SessionMessage, 'turn'> {
@@ -201,8 +216,16 @@ beforeEach(async () => {
     logger,
   });
   // 调度器测试默认 retentionDays=0（物理删除关闭），与生产默认一致；删除路径本身
-  // 在 `tests/integration/services/ttl.test.ts` 里单独测。
-  ttl = new TtlService({ nodes, filesystem, principals: ['user:alice', 'user:*'], retentionDays: 0, logger });
+  // 在 `tests/integration/services/ttl.test.ts` 里单独测。`ttlDays = 30` 让 TTL 用例
+  // 有一条非零的滑动窗口，其它用例没有节点行，第一段自然是空操作。
+  ttl = new TtlService({
+    nodes,
+    filesystem,
+    principals: ['user:alice', 'user:*'],
+    ttlDays: 30,
+    retentionDays: 0,
+    logger,
+  });
   // 数据根的上一层必须存在；调度器从 `user/` 开始扫。
   await store.mkdir(Uri.parse(`${SCOPE}/sessions`), { recursive: true });
 });
@@ -447,11 +470,11 @@ describe('TTL 清扫', () => {
         abstract: null,
         bodyDigest: 'digest',
         size: 10,
-        updatedAt: '2026-01-01T00:00:00.000Z',
+        // 31 天前写入、之后再没被访问：超出 `ttlDays = 30` 的滑动窗口。
+        updatedAt: daysAgo(31),
         status: 'active',
       },
     ]);
-    await ttl.setExpiry([memory], new Date('2026-01-02T00:00:00.000Z'));
 
     const result = await createScheduler().scheduler.tick();
 
@@ -597,5 +620,55 @@ describe('健壮性与关闭', () => {
     await scheduler.stop();
     expect(scheduler.started).toBe(false);
     await expect(scheduler.tick()).resolves.toMatchObject({ skipped: true });
+  });
+});
+
+describe('对账重放', () => {
+  it('每个调度轮次都重放一次，计数进轮次摘要', async () => {
+    const results = [
+      { resolved: 2, failed: 1, remaining: 3, corrupt: 0, unsupported: 0 },
+      { resolved: 0, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 },
+    ];
+    const replay = vi.fn(async () => results.shift() ?? {
+      resolved: 0,
+      failed: 0,
+      remaining: 0,
+      corrupt: 0,
+      unsupported: 0,
+    });
+    const { scheduler } = createScheduler({ reconcile: { replay } });
+
+    await expect(scheduler.tick()).resolves.toMatchObject({
+      reconcileResolved: 2,
+      reconcileFailed: 1,
+      reconcileRemaining: 3,
+    });
+    await expect(scheduler.tick()).resolves.toMatchObject({
+      reconcileResolved: 0,
+      reconcileFailed: 0,
+      reconcileRemaining: 0,
+    });
+
+    expect(replay).toHaveBeenCalledTimes(2);
+  });
+
+  it('重放抛错只记 error，不影响这一轮', async () => {
+    const { scheduler } = createScheduler({
+      reconcile: {
+        replay: async () => {
+          throw new Error('日志磁盘坏了');
+        },
+      },
+    });
+    await store.mkdir(Uri.parse(`${SCOPE}/sessions/sess_1`), { recursive: true });
+
+    const result = await scheduler.tick();
+
+    expect(result.skipped).toBe(false);
+    expect(result.reconcileResolved).toBe(0);
+    expect(logger.error).toHaveBeenCalledWith(
+      '对账重放失败，下一轮重试。',
+      expect.objectContaining({ error: '日志磁盘坏了' }),
+    );
   });
 });

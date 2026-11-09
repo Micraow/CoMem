@@ -83,6 +83,7 @@ describe('createContainer', () => {
         'memory',
         'memoryLink',
         'prompts',
+        'reconcile',
         'resource',
         'search',
         'session',

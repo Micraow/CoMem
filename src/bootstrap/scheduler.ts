@@ -1,5 +1,5 @@
 /**
- * 后台调度器（架构文档 §10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL）。
+ * 后台调度器（架构文档 §10.2.1 的自动提交、§11.7 的会话过期与记忆 TTL、§10.6 的对账重放）。
  *
  * ## 为什么需要它
  *
@@ -12,19 +12,21 @@
  * 单元测试看不出来：它们直接构造服务再同步 `await`，绕过了「谁在什么时候调它」
  * （`local/notes/decisions.md` 的 W10 一条，同一个结构性盲区）。
  *
- * ## 三个职责
+ * ## 四个职责
  *
  * | 职责 | 判定 | 动作 |
  * |---|---|---|
  * | 自动提交 | `SessionService.shouldAutoCommit`（token / 消息数 / 空闲） | 走**现有的**阶段一 `commitPhase1` |
  * | 会话过期 | `now - 最后活动时间 >= session.expiry.idleTimeoutSeconds` | `archive`（默认）或 `delete` |
- * | TTL 清扫 | `node.expires_at < now` | `status = 'archived'`（软过期） |
+ * | TTL 清扫 | `max(updated_at, last_accessed_at) < now - memory.ttl.defaultDays` | `status = 'archived'`（软过期） |
+ * | 对账重放 | `_meta/reconcile.log` 里有未解决记录 | 重做 `index` / `permission`，成功后原子清理日志（§10.6） |
  *
  * ## 幂等
  *
- * 三个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
+ * 四个动作都幂等，所以「上一轮刚做完、这一轮又被扫到」不会产生重复产物：
  * `commitPhase1` 用路径锁 + 归档序号单调（§10.2），`archive` 对已归档的会话是空操作，
- * `sweep` 的 `status <> 'archived'` 让同一条过期记忆只计数一次。间隔与重叠保护是
+ * `sweep` 的 `status <> 'archived'` 让同一条过期记忆只计数一次，`reconcile` 的索引与权限
+ * 物化都是 upsert。间隔与重叠保护是
  * 「省一次扫描」，不是正确性前提。
  *
  * ## 为什么定时器 `unref`
@@ -86,6 +88,9 @@ const SKIPPED_RESULT: SchedulerTickResult = Object.freeze({
   deleted: 0,
   ttlArchived: 0,
   ttlPurged: 0,
+  reconcileResolved: 0,
+  reconcileFailed: 0,
+  reconcileRemaining: 0,
 });
 
 /**
@@ -109,6 +114,25 @@ export interface TtlPort {
   sweep(options?: { readonly limit?: number }): Promise<{ readonly expired: number; readonly purged: number }>;
 }
 
+/**
+ * 对账重放端口（`ReconcileService` 的结构子集）。
+ *
+ * 定期重放的理由：启动扫描只覆盖「上次进程退出前留下的记录」。一个跑几个月的
+ * 服务如果只在启动时对账，运行期间发生的索引写失败会一直沉默到下次重启——
+ * 那正是 §10.6 要消灭的「文件在、检索不到」。
+ */
+export interface ReconcileReplayResult {
+  readonly resolved: number;
+  readonly failed: number;
+  readonly remaining: number;
+  readonly corrupt: number;
+  readonly unsupported: number;
+}
+
+export interface ReconcilePort {
+  replay(): Promise<ReconcileReplayResult>;
+}
+
 /** 删除会话前检查「这个会话产出的记忆是否仍待复核」用的记忆读端口。 */
 export type PendingMemoryPort = Pick<MemoryService, 'read'>;
 
@@ -126,6 +150,7 @@ export interface SchedulerOptions {
   readonly dataDir: string;
   readonly sessions: SessionAutoCommitPort;
   readonly ttl: TtlPort;
+  readonly reconcile: ReconcilePort;
   readonly memories: PendingMemoryPort;
   readonly expiry: SchedulerExpiry;
   /** `memory.ttl.sweepBatchSize`：每轮最多清扫多少条。 */
@@ -148,6 +173,12 @@ export interface SchedulerTickResult {
   readonly ttlArchived: number;
   /** 这一轮被 TTL 物理删除（归档超保留期）的节点数 */
   readonly ttlPurged: number;
+  /** 这一轮对账重放成功（或目标已不存在）的记录数 */
+  readonly reconcileResolved: number;
+  /** 这一轮重放失败的记录数，仍留在 `reconcile.log` */
+  readonly reconcileFailed: number;
+  /** 这一轮结束后日志里剩下的有效记录数 */
+  readonly reconcileRemaining: number;
 }
 
 /** 单个会话这一轮的结局。`scanned` 之外只关心「做了什么」。 */
@@ -215,6 +246,7 @@ export class Scheduler {
   readonly #dataDir: string;
   readonly #sessions: SessionAutoCommitPort;
   readonly #ttl: TtlPort;
+  readonly #reconcile: ReconcilePort;
   readonly #memories: PendingMemoryPort;
   readonly #expiry: SchedulerExpiry;
   readonly #ttlSweepBatchSize: number;
@@ -232,6 +264,7 @@ export class Scheduler {
     this.#dataDir = options.dataDir;
     this.#sessions = options.sessions;
     this.#ttl = options.ttl;
+    this.#reconcile = options.reconcile;
     this.#memories = options.memories;
     this.#expiry = options.expiry;
     this.#ttlSweepBatchSize = options.ttlSweepBatchSize;
@@ -331,6 +364,7 @@ export class Scheduler {
     }
 
     const { archived: ttlArchived, purged: ttlPurged } = await this.#sweepTtl();
+    const reconcile = await this.#replayReconcile();
 
     const result: SchedulerTickResult = {
       skipped: false,
@@ -340,6 +374,9 @@ export class Scheduler {
       deleted,
       ttlArchived,
       ttlPurged,
+      reconcileResolved: reconcile.resolved,
+      reconcileFailed: reconcile.failed,
+      reconcileRemaining: reconcile.remaining,
     };
     this.#logRound(result);
     return result;
@@ -601,10 +638,25 @@ export class Scheduler {
   }
 
   /**
+   * 对账重放。失败只记 error，下一轮再试。
+   *
+   * `ReconcileService.replay` 内部已经逐条兜底；这里再包一层是因为日志读取 / 重写
+   * 也可能抛 IO 错误——调度器不能因为一次磁盘抖动就停在自己的 rejection 上。
+   */
+  async #replayReconcile(): Promise<ReconcileReplayResult> {
+    try {
+      return await this.#reconcile.replay();
+    } catch (error) {
+      this.#logger.error('对账重放失败，下一轮重试。', { error: errorMessage(error) });
+      return { resolved: 0, failed: 0, remaining: 0, corrupt: 0, unsupported: 0 };
+    }
+  }
+
+  /**
    * 每轮的摘要。
    *
    * 空转记 `debug`：30 秒一轮，一天 2880 轮，全打 `info` 会把真正的动作埋掉。有动作
-   * 时（提交了、过期了、清了 TTL）记 `info`——那条才是运维要看的。
+   * 时（提交了、过期了、清了 TTL、重放了对账记录）记 `info`——那条才是运维要看的。
    */
   #logRound(result: SchedulerTickResult): void {
     const summary = {
@@ -614,8 +666,19 @@ export class Scheduler {
       deleted: result.deleted,
       ttlArchived: result.ttlArchived,
       ttlPurged: result.ttlPurged,
+      reconcileResolved: result.reconcileResolved,
+      reconcileFailed: result.reconcileFailed,
+      reconcileRemaining: result.reconcileRemaining,
     };
-    if (result.committed + result.expired + result.ttlArchived + result.ttlPurged === 0) {
+    if (
+      result.committed +
+        result.expired +
+        result.ttlArchived +
+        result.ttlPurged +
+        result.reconcileResolved +
+        result.reconcileFailed ===
+      0
+    ) {
       this.#logger.debug('调度轮次完成（无动作）。', summary);
       return;
     }

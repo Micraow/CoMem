@@ -59,6 +59,13 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
     note: recovered === 0 ? '没有需要回收的任务。' : '租约过期的任务已回到 pending。',
   });
 
+  // 索引双写补偿的启动重放（§10.6）：文件已经落盘但索引 / 权限没写成时，先把派生
+  // 数据追上来再开始服务。放在监听之前——重放会写索引与 `node_permission`，与用户
+  // 请求并发时会在 SQLite 写事务上排队；而且监听之后再修意味着第一批请求可能读到
+  // 「文件在、检索不到」的旧状态。代价是一次日志读取 + 每条记录一次 upsert，
+  // 记录为 0 时只是一次 `readFile` 的 ENOENT。
+  await container.services.reconcile.replay();
+
   // 阶段二执行器（§10.1、§10.4）：`recover()` 之后再启动，回收出来的任务第一轮
   // 就会被认领。没有它，`commit` 建的归档任务永远停在 `pending`。
   container.commitRunner.start();

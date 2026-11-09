@@ -40,6 +40,7 @@ import type { PathLockManager } from '../adapters/fs/lock.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest } from '../domain/node.js';
+import type { ReconcileEntry } from '../domain/reconcile.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
@@ -130,14 +131,13 @@ export interface StagedUpload {
   readonly bytes: Uint8Array;
 }
 
-/** `_meta/reconcile.log` 的一行（架构文档 §10.6「索引双写补偿」）。 */
-export interface ReconcileEntry {
-  readonly op: string;
-  readonly uri: string;
-  readonly error: string;
-  /** ISO 8601 */
-  readonly at: string;
-}
+/**
+ * `_meta/reconcile.log` 的一行（架构文档 §10.6「索引双写补偿」）。
+ *
+ * 形状定义在 `domain/reconcile.ts`（重放器也要用）；这里保留导出，避免调用方
+ * 为了一个日志条目把两个模块都引进来。
+ */
+export type { ReconcileEntry } from '../domain/reconcile.js';
 
 /**
  * 数据根下的原始文件访问端口。
