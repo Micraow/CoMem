@@ -38,7 +38,8 @@ export interface NodeRepositoryDeps {
 }
 
 /**
- * 热度衰减的输入（架构文档 §17.5、`0009_access_tracking.sql`）。
+ * 热度衰减的输入（架构文档 §17.5、`0001_init.sql` 的 `node.access_count` /
+ * `last_accessed_at`）。
  *
  * 与 `NodeRow` 分开：`NodeRow` 是检索的读模型（`uri` / `level` / `abstract` 这些
  * 一次查询就要的列），访问计数只在算热度时用。混进去会让「检索命中」这个热路径
@@ -341,7 +342,8 @@ export class NodeRepository {
   }
 
   /**
-   * 批量设置过期时间（`0010_ttl.sql`、架构文档 §11.7）。返回实际命中的行数。
+   * 批量设置过期时间（`0001_init.sql` 的 `node.expires_at`、架构文档 §11.7）。
+   * 返回实际命中的行数。
    *
    * `expiresAt === null` 是**显式取消过期**，与「从没设过」在列上都是 NULL——这是
    * 有意的：`expires_at` 只有「一个绝对时刻」和「没有」两种取值，不引入第三个哨兵

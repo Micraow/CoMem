@@ -51,7 +51,7 @@ export interface SqliteFtsIndexOptions {
    *
    * **为什么默认值放在这一层**：`node` 行的生产写入点只有这里的 `upsert`（观察者与
    * `reindex` 都走它），而「新写入的记忆默认活多久」必须在写入时算成一个绝对时刻
-   * （`0010_ttl.sql` 的文件头）。放到 `TtlService` 里只能做到「清扫时再算」，那时
+   * （`0001_init.sql` 的 `node.expires_at`）。放到 `TtlService` 里只能做到「清扫时再算」，那时
    * 「从什么时候开始算」已经漂了。
    *
    * **基准是 `record.updatedAt` 而不是 `new Date()`**：索引层的写入时间就是节点的

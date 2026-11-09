@@ -327,7 +327,7 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
 | `rewrite-system.md` / `rewrite-user.md` | 查询重写（§8.4） |
 
 **优先级：仓库默认 < 数据库覆盖。** 控制台的「提示词」页改的是 SQLite 的 `prompt_override`
-表（`0012_prompt.sql`），「恢复默认」就是删掉那一行。不让服务端直接改仓库文件，是因为
+表（`0001_init.sql`），「恢复默认」就是删掉那一行。不让服务端直接改仓库文件，是因为
 容器只读挂载、多副本部署、`git status` 被污染这三个场景下「改仓库文件」都不成立。
 
 **改 `.md` 不需要重启。** 默认模板每次渲染都读一次磁盘（几 KB，而一次模型调用是秒级），
@@ -1508,6 +1508,17 @@ Codex」，导出目录是一次性的。
 
 ## 故障排查
 
+### 模型调用失败时会不会重试
+
+模型调用的重试由 `services/llm.ts` 决定，适配器自己不重试。按 `isRetryable`：429、
+5xx、超时与网络不可达会重试；400 / 401 / 403 / 404 / 413 / 422 不重试——同一份请求
+重发一次结果一样。结构化输出解析失败只重试一次；截断（`finishReason = length`）不重试，
+要调大 `maxTokens`。完整映射见 `docs/architecture.md` §19。
+
+**413 是「请求体 / 上下文超限」，不要靠重试解决。** 它映射成 `INVALID_ARGUMENT`
+（不可重试）；看到它应该缩小单批输入，或换成上下文额度更大的模型。响应 body 里的
+供应商错误码与 `retry-after` 头当前不参与判定。
+
 ### 摘要一直是「待刷新」
 
 **症状**：`/health` 的 `summary.pendingDirs` 不降，控制台文件详情页一直显示「待刷新」，
@@ -1545,6 +1556,35 @@ Codex」，导出目录是一次性的。
 4. **权限过滤**。`find` 只返回调用方有 `read` 的节点（§12.4），无权限节点完全不出现。
 
 **处理**：先用 `grep` 按行确认内容在文件里，再确认 `status`，最后看 `reconcile.log`。
+
+### 工具返回 `TOOL_DEADLINE_EXCEEDED` / 输出里有 `Degraded` 行
+
+**症状**：MCP 工具返回 `isError`，文本以 `TOOL_DEADLINE_EXCEEDED:` 开头；或者 `find` /
+`search` / `rule_search` 的正常返回末尾多出一行 `Degraded: …`。
+
+**这两件事不一样**，判断方向也不同：
+
+| 现象 | 含义 | 去哪看 |
+|---|---|---|
+| `TOOL_DEADLINE_EXCEEDED` +「最后进入的上游是 X」 | 一次工具调用到 30 秒总上限仍未返回（架构文档 §13.3）。有界失败，不是空结果 | `server.log` 里搜 `MCP 工具超过调用上限。`，按 `requestId` 定位这次请求；上游的降级记录是 `意图分析不可用` / `重排失败，使用融合分` |
+| `…；卡住的位置在本地（索引 / 文件系统 / 锁）` | 到上限时没有任何上游上报：卡在 ACL 求权、本地 SQLite 或文件系统调用上 | 同上；这次不是供应商的问题 |
+| `Degraded: 向量检索不可用（…）；已退回关键词检索（FTS5）` | `hybrid` 引擎拿不到查询向量，关键词命中的内容仍然返回 | 括号里带错误码；查嵌入供应商、地址与端口 |
+| `Degraded: 向量检索不可用（…）；没有退回关键词检索，本次结果可能不完整。` | `retrieval.engine: vector` 显式选了语义检索，不退回 FTS5 | 同上。**空结果是「没查到」，不是「记忆里没有」** |
+| `Degraded: 重排不可用（超时 / 网络不可达 / HTTP 5xx）；结果使用融合分。` | 重排失败，排序退回 RRF 融合分 | `GET /health` 的 `rerank.lastFailure`（`reason` / `durationMs` / `topN`） |
+
+**先分清「失败」与「降级」。** `TOOL_DEADLINE_EXCEEDED` 表示这次调用没有等到答案，工具
+不会返回半份结果；`Degraded` 表示结果照常返回、但有一路检索缺席。前者说明总上限或本地
+I/O 出了问题，后者说明单个上游在预算内没答上来。
+
+**调 `providers.*.timeoutSeconds` 不会让 MCP 工具等更久。** 30 秒是工具层的硬上限，
+上游预算（查询嵌入 6 秒、重排 12 秒）各自另有限制；调大只影响 HTTP 与 Hook 路径的单次
+调用。`Degraded` 出现得频繁而工具不超时，说明预算不够或供应商变慢，先确认模型与网络，
+再考虑提高工具上限（`ToolRegistry` 的装配参数，默认 `MCP_TOOL_DEADLINE_MS`，不暴露给
+模型）。
+
+**处理**：到上限的那一路先修上游（`providers.*` 的地址、API Key、端口是否可达）；归因
+写「本地」时查 SQLite 锁与文件系统（`CONFLICT`、磁盘满、NFS 上的 `link` 失败，见已知
+限制 24）。`Degraded` 本身不是故障，只需要让下游知道这次结果不完整。
 
 ### 会话页 403
 
@@ -1814,3 +1854,35 @@ COMEM_SERVER_PORT=8080 pnpm dev
     `exec: "pnpm": executable file not found`。全量测试与 lint 用
     `docker build --target test -t comem:test-suite .` 构建出的镜像跑（它的 `test`
     阶段会自己先跑一遍 `pnpm lint && pnpm test && pnpm test:integrations`）。
+
+26. **模型用量没有 `purpose` 维度，成本累计是下界。** `/metrics` 只有
+    `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`，数据源是
+    `LlmService` 的一份进程级累加器：`LlmService` 没有 `purpose` 概念，调用方不传用途，
+    重启即清零。`comem_llm_calls_total`、`comem_llm_duration_seconds`、
+    `comem_llm_errors_total` 也没有实现（§17.4）。另外 `generateJson` 只累加调用次数，
+    不累加 token 与成本——`LlmProvider.completeJson` 的返回值不含 usage——而记忆抽取、
+    记忆合并与查询改写走的都是这条路径，所以成本累计低于实际。要按用途归因，得先让
+    每次调用带用途标签。
+
+27. **`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/stats.ts` 只有
+    `GET /stats/memories`；单会话的归档次数、消息数、抽取计数、召回 / 提交 P50 与
+    Hook 开销既没有端点，也没有数据来源：`request_log` 没有会话列，`phases` 恒为
+    NULL（没有 HTTP 路由调用 `phase()`）。文档与控制台按「未实现」表述；要落地得先
+    让请求带上会话标识并给阶段计时，再定 P50 的样本窗口（§17.5）。
+
+28. **HTTP 的 `POST /search/*` 没有工具级上限。** 30 秒硬上限只在 MCP 工具层
+    （`src/api/mcp/deadline.ts` 的 `MCP_TOOL_DEADLINE_MS`），`/search/find`、
+    `/search/search`、`/search/grep`、`/search/glob` 只受 `providers.*.timeoutSeconds`
+    约束——那个值只校验正数，写 3600 就真的等 3600 秒。Hook 侧每个事件有墙钟总预算
+    （1–30 秒，见 `docs/architecture.md` §15.9），预算内每次 HTTP 尝试另有 5 秒的
+    `timeoutMs`；**直连 HTTP 的客户端没有这两层**，要自己设超时。服务端不会
+    替调用方放弃：一次慢检索会一直占着那条连接直到供应商回包或触发 `timeoutSeconds`。
+
+29. **`SessionEnd` 用「这次提交可能放弃」换宿主的 1.5 秒共享预算。** 它的总预算是
+    `SESSION_END_BUDGET_MS = 1200`（`integrations/lib/lifecycle.mjs`），而
+    `captureSession` 等会话锁最多 `LOCK_WAIT_MS = 2000`（`integrations/lib/lock.mjs`）。
+    锁被另一个 hook 占着时，等锁会先撞上「预算 + 250ms」的硬上限：进程在约 1.45 秒
+    以退出码 0 结束（赶在宿主 1.5 秒杀掉它之前），这次提交放弃。后果可控——游标没有
+    前进，下一次 `Stop` / `PreCompact` 会把同一批消息重投（§15.4「宁可重复不能丢」）。
+    把等锁降到 1.2 秒以内只会把放弃点从硬上限挪到等锁超时（`HOOK_LOCK_TIMEOUT`），
+    结果同样是这次提交不做；当前保留较长的一侧，是因为正常争用时更愿意等。

@@ -564,7 +564,7 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
     db,
     logger,
     candidateMultiplier: config.retrieval.candidateMultiplier,
-    // `memory.ttl.defaultDays` 在**写入时**算成绝对时刻（`0010_ttl.sql` 的文件头）。
+    // `memory.ttl.defaultDays` 在**写入时**算成绝对时刻（`node.expires_at`，§11.7）。
     // 装配层是唯一能把它接到索引写入点的位置。
     defaultTtlDays: config.memory.ttl.defaultDays,
   });

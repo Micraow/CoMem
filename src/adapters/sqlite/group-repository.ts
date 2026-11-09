@@ -7,9 +7,10 @@
  *
  * ## 成员关系为什么在应用层维护
  *
- * 迁移 0008 最初不建外键：删用户时不能级联删 ACL 里的 `user:{uid}` 条目（删账号
- * 与撤权是两件事），「哪些行跟着删」必须由调用方显式决定。迁移 0017 给
- * `group_member` 补了 `ON DELETE CASCADE`，那是**防御纵深**——仓储是公开入口，
+ * 最初的设计里 `group_member` 不建外键：删用户时不能级联删 ACL 里的 `user:{uid}`
+ * 条目（删账号与撤权是两件事），「哪些行跟着删」必须由调用方显式决定。现在的
+ * schema 给 `group_member` 加了 `ON DELETE CASCADE`（`0001_init.sql`），那是
+ * **防御纵深**——仓储是公开入口，
  * 绕过用例直接删用户行时不能留下孤儿行（孤儿行会让同 ID 重建的用户立刻拿到
  * `group:{gid}` 主体）。这里仍然提供两个批量删除方法
  * （`removeMembershipsOfUser` / `removeMembershipsOfGroup`），
@@ -19,7 +20,7 @@
  * ## `listGroupIdsOfUser` 是热路径
  *
  * 每个请求的 `IdentityService.resolve` 都要展开一次组。走
- * `idx_group_member_user`（迁移 0008），一次索引等值查询，不扫表。
+ * `idx_group_member_user`（`0001_init.sql`），一次索引等值查询，不扫表。
  *
  * ## 幂等
  *
@@ -234,7 +235,7 @@ export class GroupRepository {
    * 话，同 ID 重建的账号会被 `POST /admin/groups/{id}/owner` 当成当前 owner，跳过
    * 组根求权，等于拿到组的管理权。
    *
-   * 迁移 0018 给 `owner_user_id` 补了 `ON DELETE SET NULL` 外键：绕过
+   * `app_group.owner_user_id` 有 `ON DELETE SET NULL` 外键（`0001_init.sql`）：绕过
    * `IdentityService.deleteUser` 直接删用户行时，这条清理也会生效。应用层保留它是
    * 因为删除日志要计数（外键是防御纵深，不是替代）。
    *
@@ -257,7 +258,7 @@ export class GroupRepository {
   /**
    * 硬删组，返回被删的行数（0 = 不存在）。
    *
-   * `group_member` 由迁移 0017 的外键 `ON DELETE CASCADE` 级联清掉；
+   * `group_member` 由外键 `ON DELETE CASCADE` 级联清掉（`0001_init.sql`）；
    * `IdentityService.deleteGroup` 仍然先显式调用批量删除——删除日志要计数。
    */
   delete(id: string): number {

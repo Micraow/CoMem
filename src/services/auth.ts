@@ -12,8 +12,9 @@
  *
  * ## 撤销走身份版本
  *
- * 载荷里带账号的 `session_epoch`（迁移 0016）。校验签名之后还要与目录行的当前值
- * 比对：删账号重建同 ID、改密码都会换一个新值，旧 token 的下一个请求就是 401。
+ * 载荷里带账号的 `session_epoch`（`app_user.session_epoch`）。校验签名之后还要与
+ * 目录行的当前值比对：删账号重建同 ID、改密码都会换一个新值，旧 token 的下一个
+ * 请求就是 401。
  * 这让「删账号」与「改密码」真正撤销访问，而不再是「等到 `exp` 才失效」。
  * 撤销 API Key 仍然走 `api_key` 表（`resolve` 的 `api-key` 分支）。
  *
@@ -69,7 +70,7 @@ export class AuthService {
     const context = await this.#identity.resolve({ kind: 'password', username, password });
     const userId = context.subject.replace(/^user:/u, '');
     // 身份版本必须从目录行读：它回答「这个 token 属于账号的哪一段生命周期」。
-    // 空串是迁移遗留的「版本未知」（迁移 0016 会把存量行回填成随机值），此时签发
+    // 空串是「版本未知」的哨兵值（`session_epoch` 的列默认值），此时签发
     // 一个永远校验不过的 token 只会把问题推到下一个请求，不如在这里明确失败。
     const epoch = this.#identity.sessionEpochOf(userId);
     if (epoch === null || epoch === '') {

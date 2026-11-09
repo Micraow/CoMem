@@ -15,7 +15,7 @@
  *
  * 只有用户 ID 时，token 的全部含义是「这个 ID 曾经存在过」。删账号再重建同 ID，
  * 旧 token 在整个 `exp` 窗口内继续有效——撤销访问的动作本身失效。`epoch` 是
- * `app_user.session_epoch`（迁移 `0016`）：创建账号时生成、改密码时轮换，所以
+ * `app_user.session_epoch`：创建账号时生成、改密码时轮换，所以
  * 重建与改密码都会让已签发的 token 立刻失效。
  *
  * 这里只做格式校验，**不**查库比对：`AuthService` 拿 `IdentityService` 的当前值

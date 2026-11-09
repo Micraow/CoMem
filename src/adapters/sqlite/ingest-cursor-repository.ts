@@ -1,5 +1,5 @@
 /**
- * 导入游标仓储（架构文档 §11.9、`0011_ingest.sql`）。
+ * 导入游标仓储（架构文档 §11.9、`0001_init.sql` 的 `ingest_cursor` 表）。
  *
  * 只做 `ingest_cursor` 表的行与值转换。「什么时候前进游标」「哪些会话该跳过」在
  * `services/ingest.ts`。

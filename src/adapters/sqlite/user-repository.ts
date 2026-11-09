@@ -17,7 +17,7 @@
  *
  * ## `session_epoch` 不出这个仓储
  *
- * `session_epoch` 是 session token 的身份版本（迁移 0016）：创建时生成、改密码时
+ * `session_epoch` 是 session token 的身份版本：创建时生成、改密码时
  * 轮换、校验 token 时比对。它**不进 `User`**——`User` 会进管理面响应，身份版本是
  * 内部状态，和 `password_hash` 一样只在认证路径上读（`getSessionEpoch`）。
  */
@@ -113,7 +113,7 @@ export class UserRepository {
    * 写入用户。主键已存在抛 `CONFLICT`。
    *
    * 身份版本（`session_epoch`）在这里生成：创建账号就是开启一个新的 token 生命周期，
-   * 同 ID 重建必须换一个新的版本，否则旧 token 会在重建后继续有效（迁移 0016）。
+   * 同 ID 重建必须换一个新的版本，否则旧 token 会在重建后继续有效。
    * 随机源用 `crypto.randomUUID()`，不需要调用方参与——它没有业务含义。
    */
   create(user: Omit<User, 'createdAt' | 'updatedAt'>, now: Date): User {
@@ -168,7 +168,8 @@ export class UserRepository {
    * 读身份版本（`session_epoch`）。认证路径用：session token 的载荷必须等于它。
    *
    * 与 `getPasswordHash` 一样不放进 `User`：管理面响应不该带内部状态。用户不存在
-   * 返回 `null`；空串是迁移遗留的「版本未知」，调用方必须当成不匹配（见迁移 0016）。
+   * 返回 `null`；空串是「版本未知」的哨兵值（`session_epoch` 的列默认值），调用方
+   * 必须当成不匹配。
    */
   getSessionEpoch(id: string): string | null {
     const row = this.#db.prepare('SELECT session_epoch FROM app_user WHERE id = ?').get(id);
@@ -294,7 +295,7 @@ export class UserRepository {
   /**
    * 硬删，返回被删的行数（0 = 不存在）。
    *
-   * `group_member` / `api_key` 由迁移 0017 的外键 `ON DELETE CASCADE` 级联清掉；
+   * `group_member` / `api_key` 由外键 `ON DELETE CASCADE` 级联清掉（`0001_init.sql`）；
    * `IdentityService.deleteUser` 仍然先显式调用三个批量删除——删除日志要计数，
    * 而级联删除是看不见的。外键保证「绕过用例直接删行」时不留孤儿行。
    */

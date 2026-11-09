@@ -135,7 +135,7 @@ export const DEPTH_CEILING: Readonly<Record<ContextType, ContextDetail>> = Objec
  * `chat` 预设偏向记忆（对话里最常引用的是偏好与结论），`coding` 偏向资源
  * （代码库里最常引用的是文件与文档）。
  *
- * `session` 不在 §8.6 的表格里。给 2 的理由：会话摘要只用于接上「上一轮聊到哪」，
+ * `session` 在 §8.6 的表格里也给 2。理由：会话摘要只用于接上「上一轮聊到哪」，
  * 当前轮 + 上一轮就够，再多只是在重复同一段对话的不同摘要；2 也是「一对」的最小
  * 有意义取值。
  */

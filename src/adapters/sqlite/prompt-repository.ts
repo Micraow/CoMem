@@ -1,5 +1,5 @@
 /**
- * 提示词覆盖仓储（架构文档 §18、`0012_prompt.sql`）。
+ * 提示词覆盖仓储（架构文档 §18、`0001_init.sql` 的 `prompt_override` 表）。
  *
  * 只做 `prompt_override` 表的行与值转换。「默认值从哪读」「覆盖是否过期」「保存
  * 前怎么校验」在 `services/prompt-service.ts`。

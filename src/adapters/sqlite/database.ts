@@ -126,7 +126,7 @@ function listMigrations(): MigrationFile[] {
  * 重建被引用的表（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，只能新表 +
  * `INSERT ... SELECT` + `DROP` + `RENAME`）时，`DROP TABLE` 在
  * `PRAGMA foreign_keys = ON` 下会先做隐式 `DELETE FROM`，把子表的行按
- * `ON DELETE CASCADE` 一起删掉。迁移 0018 重建 `app_group` 时，`group_member`
+ * `ON DELETE CASCADE` 一起删掉。重建被引用的表（例如 `app_group`）时，`group_member`
  * 的成员关系会被整张清空——一次升级把数据删了。
  *
  * `PRAGMA foreign_keys` 在事务里是 no-op，开关只能在 `BEGIN` 之前。标准做法

@@ -9,8 +9,8 @@
  *
  * `vec0` 的维度在 `CREATE VIRTUAL TABLE` 时固定，而维度来自
  * `providers.embedding.dimension`——换模型就变。写死在静态 SQL 里会让「换模型」
- * 变成「静默跳过所有行」，所以虚拟表由 `ensureSchema` 在启动时按配置建，迁移
- * （`0007_embedding.sql`）只建记录模型与维度的单行表 `embedding_model`。
+ * 变成「静默跳过所有行」，所以虚拟表由 `ensureSchema` 在启动时按配置建；记录模型
+ * 与维度的单行表 `embedding_model` 在 `0001_init.sql` 里。
  *
  * ## 为什么 `iterMissingUris` 查的是 `node`
  *

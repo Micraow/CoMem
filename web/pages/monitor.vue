@@ -214,7 +214,7 @@ const VISIBLE_METRICS: readonly { readonly name: string; readonly label: string 
 
 <script setup lang="ts">
 /**
- * 监控（架构文档 §17.10 的第七页）。
+ * 监控（架构文档 §17.10；控制台十个页面里的第十页）。
  *
  * 四块对应 §17 的四个问题：开销归因（§17.2）、吞吐与用量（§17.3 / §17.4）、
  * 记忆健康度（§17.5）、请求记录（§17.6）。

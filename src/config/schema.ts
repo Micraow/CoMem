@@ -299,7 +299,7 @@ const configObjectSchema = z.object({
         })
         .prefault({}),
       /**
-       * 记忆的 TTL（架构文档 §11.7、`0010_ttl.sql` / `0002_archived_at.sql`）。
+       * 记忆的 TTL（架构文档 §11.7；`0001_init.sql` 的 `node.expires_at` / `2026`）。
        * **两段式**：`defaultDays` 到点先把 `status` 置 `archived`（只标不删）；
        * 归档后超过 `retentionDays` 再物理删除文件与索引行。
        */

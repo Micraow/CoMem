@@ -53,12 +53,12 @@
  * 缓存只会让「退组立即生效」变成「重启后生效」。
  *
  * API Key 的 secret 用与密码相同的 scrypt 编码（`services/password.ts`）。一把
- * key 就是一个 `(user_id)` 的完整凭证：见迁移 0013 的注释，那里写了为什么不做
- * key 级 scope。
+ * key 就是一个 `(user_id)` 的完整凭证：`api_key` 表没有 scope 列，权限范围始终由
+ * 路径级 ACL 表达（§12.5）。
  *
  * ## session token 还要比身份版本
  *
- * `session` 凭据除了用户 ID 还带 `epoch`（`app_user.session_epoch`，迁移 0016）。
+ * `session` 凭据除了用户 ID 还带 `epoch`（`app_user.session_epoch`）。
  * 只确认「用户存在且 active」不够：删账号再重建同 ID 时两件事都成立，旧 token 在
  * 整个 `exp` 窗口内继续有效——撤销访问的动作本身失效。身份版本在重建账号与改密码
  * 时轮换，比对它让这两条路径上的旧 token 立刻 401。比对放在服务层而不是
@@ -324,7 +324,7 @@ export class IdentityService {
   /**
    * 加成员，默认角色 `member`。组或用户不存在抛 `NOT_FOUND`。
    *
-   * 存在性检查放在服务层：迁移 0017 的外键是防御纵深（绕过用例直接写行时由
+   * 存在性检查放在服务层：`group_member` 的外键是防御纵深（绕过用例直接写行时由
    * 数据库兜底），但它的报错是 `FOREIGN KEY constraint failed`，映射不成
    * `NOT_FOUND`。这里先检查，才能给出「组或用户不存在」的稳定错误码。已禁用的
    * 用户可以加入组——成员关系是数据，禁用是登录状态，重新启用后关系自动生效。
@@ -430,8 +430,8 @@ export class IdentityService {
    * 用户当前的 session 身份版本（签发 token 用）。用户不存在返回 `null`。
    *
    * 登录成功后由 `AuthService` 把返回值写进 token 载荷；之后每次请求都要与当前值
-   * 相等（`resolve` 的 `session` 分支）。空串是迁移遗留的「版本未知」，调用方必须
-   * 当成失败——见迁移 0016。
+   * 相等（`resolve` 的 `session` 分支）。空串是「版本未知」的哨兵值（列默认值），
+   * 调用方必须当成失败。
    */
   sessionEpochOf(userId: string): string | null {
     return this.#users.getSessionEpoch(userId);
@@ -483,7 +483,8 @@ export class IdentityService {
   /**
    * 签发一把 API Key。明文只在这里返回一次，库里只有哈希与前缀。
    *
-   * `name` 用来区分用途（控制台「CI 用的 key」），不是权限范围——见迁移 0013。
+   * `name` 用来区分用途（控制台「CI 用的 key」），不是权限范围——`api_key` 表没有
+   * scope 列。
    */
   async createApiKey(
     userId: string,

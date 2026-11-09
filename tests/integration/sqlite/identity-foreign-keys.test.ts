@@ -56,9 +56,9 @@ function seed(): void {
 }
 
 /**
- * 回归：`group_member` / `api_key` 的 `user_id` / `group_id` 没有外键（迁移 0017
- * 之前）。仓储是公开入口，任何调用方都能直接 `DELETE FROM app_user` 绕过
- * `IdentityService.deleteUser` 的清理；孤儿行的后果是同 ID 重建的用户**立刻**
+ * 回归：`group_member` / `api_key` 的 `user_id` / `group_id` 曾经没有外键（旧
+ * schema 只靠应用层清理）。仓储是公开入口，任何调用方都能直接 `DELETE FROM app_user`
+ * 绕过 `IdentityService.deleteUser` 的清理；孤儿行的后果是同 ID 重建的用户**立刻**
  * 获得 `group:{gid}` 主体，继承那个组的全部 ACL（架构文档 §12.2）。
  */
 describe('group_member / api_key 的外键', () => {

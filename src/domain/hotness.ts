@@ -8,7 +8,7 @@
  * 流逝一小时才能断言「越旧分数越低」。
  *
  * 输入来自 `node.access_count` / `node.last_accessed_at` 两列
- * （`0009_access_tracking.sql`）。这两列由 `NodeRepository.recordAccess` 在检索命中
+ * （`0001_init.sql` 的 `node` 表）。这两列由 `NodeRepository.recordAccess` 在检索命中
  * 时累加，**不碰 `updated_at`**——访问不是修改。
  */
 

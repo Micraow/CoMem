@@ -197,6 +197,7 @@ CoMem/
 │   │   │   └── task-repository.ts
 │   │   ├── llm/
 │   │   │   ├── ai-sdk-provider.ts    # 内部用 Vercel AI SDK，外部只见 LlmProvider
+│   │   │   ├── provider-error-mapping.ts # 供应商错误 → ComemError，三个适配器共用
 │   │   │   └── fake-provider.ts      # 测试替身
 │   │   └── log/
 │   │       ├── console.ts
@@ -693,7 +694,7 @@ summary_state: fresh            # fresh | stale
 | 代价 | 对策 |
 |---|---|
 | 每次鉴权要 open `.acl.json` | 每请求一份 `Map<uri, Acl>` 缓存，请求结束丢弃 |
-| 没有跨文件事务 | 先写内容再更新索引；索引失败时标记为待重建，启动对账 |
+| 没有跨文件事务 | 先写内容再更新索引；索引失败时追加 `_meta/reconcile.log`（启动对账未实现，见 §10.6） |
 | 写入需要先 mkdir | `write` 内部自动建父目录，调用方不用关心 |
 
 **反查表也是派生数据，以文件为准。** `acl_entry` 从 `.acl.json` 推出，只服务授权反查（控制台 ACL 页、删账号撤权）。它可能不全：手工改过文件、`mv` 之后丢过行、从备份恢复过文件。`AclService.purgePrincipal` 因此不能只按表找目录——它取「反查表行 ∪ 数据根下所有带 `.acl.json` 的目录」的并集，文件里没有该主体就只删行、不写盘。扫描有目录数上限（`MAX_PURGE_SCAN_DIRECTORIES = 10000`，经验假设：撤权是低频管理操作，10,000 个目录在本地 SSD 上约亚秒级；超出时记 `truncated: true` 并继续，残余风险见 `docs/operations.md` 的已知限制）。
@@ -799,7 +800,7 @@ CREATE INDEX task_claim ON task(status, lease_until);
 CREATE INDEX task_type_status ON task(type, status);
 CREATE INDEX task_created ON task(created_at);
 
--- 嵌入模型的元数据（0007）。虚拟表 `node_embedding` 的维度建表时固化，
+-- 嵌入模型的元数据（`0001_init.sql`）。虚拟表 `node_embedding` 的维度建表时固化，
 -- 而维度来自配置，所以单独一行记「库里存的是哪个模型、多少维」。
 -- 启动时比对：不一致就报错提示跑 reindex——静默跳过会让语义检索永久返回空。
 CREATE TABLE embedding_model (
@@ -809,7 +810,7 @@ CREATE TABLE embedding_model (
   created_at TEXT NOT NULL
 );
 
--- 嵌入缓存（0015）。**不是索引**，是「这份正文嵌过没有」的跨进程记忆。
+-- 嵌入缓存（`0001_init.sql`）。**不是索引**，是「这份正文嵌过没有」的跨进程记忆。
 -- 两张表的分工见下面「node_embedding 与 embedding_cache 的职责边界」。
 -- 派生数据：可以随时清空，清空只让下一次重新打供应商，结果逐位相同。
 CREATE TABLE embedding_cache (
@@ -1036,7 +1037,7 @@ LIMIT ?;
 
 **`acl_entry` 是反查索引，不是求权来源。** 求权只读 `node_permission`；`acl_entry` 回答「哪些目录直接写了这个主体」。两者由同一个 `#writeAcl` 一起替换。节点被移动时 `acl_entry` 必须按新 URI 从 `.acl.json` 重建（否则删账号的反查会漏），这条重建在 `IndexObserver.onNodeMoved` 里逐目录执行；没有 `.acl.json` 的节点直接跳过。
 
-**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），所以物化由它们自己在写完之后对每个新建 URI 调一次 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」。`SessionService` 在每次写 `messages.jsonl`（`create` / `addMessage` / 阶段一步骤 2、4 / 补完中断归档）之后调 `IndexObserver.onNodeWritten`：索引行与逐级物化权限一起补上，归档目录里的「原始对话」本身才可寻址。归档目录（`history/`、`archive_NNN/`）的摘要仍由 `SummaryService` 写索引行与物化权限——阶段一的落盘由 `SessionService` 直接写 `ContentStore`，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
+**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 都直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），物化因此由它们自己在写完之后补，但调用入口分两种：`ResourceService` / `SkillService` / `SessionService` 对写出的 URI（含逐级建出的父目录）调 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」；`SummaryService` 不持有 `Authorizer`，它的依赖是 `acl: Pick<AclService, 'materializeNode'>`，写完摘要后从目标目录逐级向上调 `materializeNode` 直到根（`#materialize`），不做求权。`SessionService` 在每次写 `messages.jsonl`（`create` / `addMessage` / 阶段一步骤 2、4 / 补完中断归档）之后调 `IndexObserver.onNodeWritten`：索引行与逐级物化权限一起补上，归档目录里的「原始对话」本身才可寻址。归档目录（`history/`、`archive_NNN/`）的摘要仍由 `SummaryService` 写索引行与物化权限——阶段一的落盘由 `SessionService` 直接写 `ContentStore`，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 
 ### 8.3 检索接口
 
@@ -1106,6 +1107,8 @@ export interface RetrievalIndex {
 **模型返回空数组不是降级**，是合法结论：`analyzed = true` + `queries: []` + 空命中。检索不到比检索错更节省上下文。
 
 **合并规则**：多条 TypedQuery 各跑一次 `find`，按 URI 去重取最高分，`matchedQuery` 记是哪条命中。这样「同一条记忆被两个改写查询命中」不会在结果里出现两次。
+
+**会等外部供应商的面都有工具级上限。** `find` / `search` 走 MCP 时受 §13.3 的 30 秒总上限约束（`rule_search` 套同一个上限，它不是这里列的四个面），向量与重排在到期之前先降级（FTS5 / 融合分）并把 `Degraded` 写进结果；`grep` / `glob` 是本地枚举，最坏耗时由目录规模决定而不是供应商。HTTP 的 `POST /search/*` 没有这一层，只受 `providers.*.timeoutSeconds` 约束（见 `docs/operations.md` 已知限制 28）。
 
 ### 8.5 层级加权
 
@@ -1185,10 +1188,12 @@ L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` �
 
 **4. 配额。** 预设两套（`chat` / `coding`），按类别分配条目数：
 
-| 预设 | memories | resources | skills |
-|---|---|---|---|
-| `chat` | 5 | 3 | 2 |
-| `coding` | 3 | 5 | 2 |
+| 预设 | memory | resource | skill | session |
+|---|---|---|---|---|
+| `chat` | 5 | 3 | 2 | 2 |
+| `coding` | 3 | 5 | 2 | 2 |
+
+`session` 一列给 2：会话摘要只用于接上「上一轮聊到哪」，当前轮 + 上一轮就够。
 
 **渲染格式**：
 
@@ -1420,6 +1425,8 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 **为什么消费时要减而不是清零。** 重算过程中可能又有新改动进来。写回时 `pending = max(pending - 消费时的快照, 0)`，生成期间到达的改动保留。
 
+**两个入口，语义不同。** `SummaryService.invalidate(nodeUri)` 先比较正文 digest 是否变化再传播（上面第 2 步）；`SummaryService.markStale(directoryUri)` 跳过比较，从这个目录本身开始传播。**已经知道内容确实变了的调用方必须用 `markStale`**：批量写入的顺序是「写文件 → 批量 `index.upsert` → 标脏」，等标脏被调用时索引里已经是新 digest，`invalidate` 的比较必然相等，整条传播链被静默跳过——文件写了、目录摘要停在旧内容，不报错也不失败。用错的另一种形态更彻底：`invalidate` 从 `node.parent()` 开始传播，把目录 URI 传给它时目标目录连一次判定都拿不到，第一次写入后该目录的摘要直接是 `null`（不是「停在旧内容」）。规则收在 `src/services/write-through.ts`：它的依赖类型是 `Pick<SummaryService, 'markStale'>`，实现里连 `invalidate` 都拿不到；`tests/integration/services/write-through.test.ts` 的替身也只实现 `markStale`，`markStale` 被换成 `invalidate` 时该用例的类型对不上。
+
 ## 10. 会话提交管线
 
 ### 10.1 两阶段
@@ -1627,8 +1634,10 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 写文件成功、更新索引失败时，文件在磁盘上但检索不到。处理：
 
 1. 写索引失败 → 往 `_meta/reconcile.log` 追加一条 `{op, uri, error, at}`
-2. 启动时扫这个日志重放；定期任务也扫
-3. 重放成功才删除日志条目
+2. 启动时扫这个日志重放；定期任务也扫——**未实现**
+3. 重放成功才删除日志条目——**未实现**，日志只增不删
+
+**v1 只做了第 1 步。** 写侧的记录是真的（批量导入、附件、权限物化失败都会追加），但没有读侧：启动扫描、定期重放、成功后删除都没有代码。所以「索引双写补偿」目前只是「把失败记下来等人看」，见 `docs/operations.md` 已知限制 8 与排障一节的重放办法。
 
 **为什么不是回滚文件**：文件已经是对的，回滚反而丢数据。补偿的方向是「把索引追上来」，不是「把文件退回去」。
 
@@ -1645,16 +1654,22 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 | 开销 | 单独写 | 批量 |
 |---|---|---|
 | 索引事务 | 100 次 `BEGIN/COMMIT` | 1 次 |
-| 摘要失效标记 | 200 次（10 个目录 × 20 文件各标一次） | 10 次（去重后每个祖先一次） |
+| 摘要失效标记 | 100 次（每个文件各标一次父目录） | 10 次（按直接父目录去重） |
 | 目录摘要重算 | 可能触发多次 | 结束后统一触发一次 |
 
-批量路径：
+批量路径（`ResourceService` 与 `SkillService` 共用 `src/services/write-through.ts`）：
 
-1. 先算出所有目标 URI 的**唯一祖先集合**
-2. 一个大事务里：写全部文件 → 批量 `INSERT` 索引 → 每个祖先标一次脏
-3. 提交后统一投递摘要重算任务
+1. `invalidateParentSummaries` 先按**直接父目录**去重
+2. 持父目录 `TREE` 锁写全部文件 → 一次 `index.upsert`（内部一个事务）→ `materializeAncestorPermissions` 逐级物化权限
+3. 锁释放后，`invalidateParentSummaries` 对每个直接父目录调一次 `markStale`；再往上的祖先链由 `markStale` 自己传播（§9.3），批量路径不展开
 
-**为什么不能只做「循环调 write」再优化**：摘要失效是 Observer 驱动的，每个文件写入都会走到祖先标记。100 个文件就是 200 次标记，其中 190 次是重复的。批量路径必须在**入口处**就去重，不能事后合并。
+**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。唯一的已知差异用 `onFailure` 回调保住——资源侧物化失败时额外往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），技能侧不需要。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
+
+**标记摘要失效只能用 `markStale`，不能用 `invalidate`。** 规则与后果见 §9.3。
+
+**只去重到直接父目录，不预先算全部祖先。** 祖先链的传播条件（正文是否变化、到哪里停）由 `SummaryService` 的失效逻辑判断，批量路径重算一遍会造出第二套规则。同一目录下 10 个文件本来要标 10 次，现在只标 1 次——这正是去重到父目录的目的。
+
+**为什么不能只做「循环调 write」再优化**：摘要失效是 Observer 驱动的，每个文件写入都会走到父目录标记。100 个文件就是 100 次标记，其中 90 次是重复的（10 个目录）。批量路径必须在**入口处**就去重，不能事后合并。
 
 ### 10.7 后台调度器
 
@@ -1823,7 +1838,7 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 ### 11.7 记忆 TTL 与过期清扫
 
-记忆可以有过期时间：`node.expires_at`（`0010_ttl.sql`，见 §8.1）。清扫由后台调度器
+记忆可以有过期时间：`node.expires_at`（`0001_init.sql` 的 `node` 表，见 §8.1）。清扫由后台调度器
 （§10.7）周期性执行，**两段式：先归档、再物理删**。
 
 | 概念 | 语义 |
@@ -1857,8 +1872,13 @@ kind = 'document'`（叶子文档，目录节点不入选——目录里可能�
 
 **为什么第一段仍是软过期。** 第一段只改 `status`，不删文件、不动 `node_permission`。
 TTL 配错（把 7 天写成 7 秒）时归档状态还能改回来，物理删除没有回滚；保留期就是这个
-「还能改回来」的窗口。归档只影响检索（`status = 'active'` 过滤），`read` / `download`
-按路径仍然拿得到内容。**物理删除只在第二段、且 `retentionDays > 0` 时发生**；默认
+「还能改回来」的窗口。**归档只影响检索面**：§8.4 的四个面（`find` / `search` /
+`grep` / `glob`）都只返回 `status = 'active'` 的节点，`grep` 与向量检索的候选集由
+`glob` 枚举，共用同一条 SQL 谓词（`src/adapters/sqlite/retrieval-index.ts` 的
+`ACTIVE_STATUS_PREDICATE`）。`read` / `download` 按路径仍然拿得到内容；`list` /
+`tree` 是目录浏览、`stat` 是状态读取，它们**不按归档状态过滤**——文件还在磁盘上，
+控制台要能看见归档内容并把它改回 `active`。**物理删除只在第二段、且
+`retentionDays > 0` 时发生**；默认
 `retentionDays = 0` 时物理删除仍是运维的显式动作（`forget` / `rm`）。
 
 **幂等。** `sweep` 的 `WHERE status <> 'archived'` 让同一条过期记忆只被计数一次；
@@ -2096,7 +2116,7 @@ ingest_cursor：原生会话 → 我们的 session URI + 读到的位置
 #### 游标：为什么必须有
 
 源日志是**追加式**的。今天导了一半，明天又多了 500 条；没有游标就只能全量重导，
-而重导会产生重复会话。`ingest_cursor`（`0011_ingest.sql`）的主键是
+而重导会产生重复会话。`ingest_cursor`（`0001_init.sql`）的主键是
 `(harness, native_session_id)`，同一个原生 ID 在不同宿主里是不同会话。
 
 两种游标：
@@ -2595,6 +2615,34 @@ interface AddResourceInput {
 
 **原文不被污染。** 附件是原始字节，不做任何改写；规范化文本是独立文件。两者都能单独 `read` / `download`。
 
+### 13.3 工具的时间上限与降级
+
+**每个 `tools/call` 都在注册表处套一个 30 秒的墙上时钟上限**，常数是 `src/api/mcp/deadline.ts` 的 `MCP_TOOL_DEADLINE_MS = 30_000`。包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落；上限只在注册表这一处定义，工具实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
+
+30000 是**推导值**：MCP 检索路径的三段上游预算之和是 10000（意图分析）+ 6000（查询嵌入）+ 12000（重排）= 28000 毫秒，留 2000 给本地索引、ACL 与序列化。三段预算的来源见 `services/search.ts` 的 `REWRITE_TIMEOUT_MS` / `QUERY_EMBED_TIMEOUT_MS` / `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
+
+**这一层兜的是「上游预算本身失效」。** 没有它时 16 个工具没有任何工具级上限：`find` / `search` / `rule_search` 会一直等供应商返回，`search` 的最坏等待约 91 秒——意图分析 3 次重试 × 10 秒，查询嵌入与重排各 30 秒（5 路 `find` 并行，嵌入不叠加）。`providers.*.timeoutSeconds` 只校验正数（`src/config/schema.ts` 里都是 `positive()`），写 3600 也合法，因此那种配置下的最坏等待不封顶。宿主看到的现象是 agent 卡住，用户看不出卡在哪一环。
+
+**到点返回的是失败，不是空结果。** MCP 结果是 `isError: true`，文本以 `TOOL_DEADLINE_EXCEEDED: ` 开头，写明这次调用的上限是多少毫秒、最后进入的上游是哪个、在那个上游上已经等了多少毫秒（`LLM 生成（意图分析）` / `向量嵌入（embedding）` / `重排（rerank）` / `检索索引（SQLite / FTS5）` / `文件系统`）。上游由工具经 `ToolDeadline.mark` 上报：`FindOptions.onUpstream` 只覆盖会打网络的三类，`index` / `filesystem` 由工具自己标，`find` / `search` / `rule_search` 都在进入检索前先标 `index`。一次上报都没有时（例如挂在 `readScopes` 的 ACL 求权上，或 `read` 的文件系统调用上），文本写「卡住的位置在本地（索引 / 文件系统 / 锁）」，不把本地故障说成供应商的问题。服务端同时记一条 `warn`（`MCP 工具超过调用上限。`，带 `requestId` / `tool` / `code`），按 `TOOL_DEADLINE_EXCEEDED` 能在 `server.log` 里搜到。
+
+**只停止等待，不取消在途调用。** `runWithDeadline` 用 `Promise.race` 加一个 `unref()` 的定时器；到点后调用方不再等，上游能不能立刻停下是上游契约的事——工具层不假设每个上游都正确响应 `AbortSignal`。
+
+**到期之前先降级，降级在结果里可见。** 工具把 `deadlineAt` 传给 `SearchService`，只在传了它的路径上收窄上游预算（HTTP 与 Hook 不传，行为不变）：每个上游的预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析另按「最多用剩余的一半」收窄（`services/search.ts` 的 `remainingBudget` 与 `#analyze`）。预留这份余量的目的是让降级先于工具级失败发生：两者同时到点时谁先返回取决于定时器顺序，降级路径可能输给总上限，把一次本可以返回 FTS 结果的检索变成错误。超时同时把 `timeoutMs` 传给 provider（真正中止 HTTP），LLM 另传 `AbortSignal`——后者让 `LlmService` 在第一次超时后不再打剩下两次（`services/llm.ts` 的 `options?.abortSignal?.aborted !== true`）。
+
+`find` / `rule_search` / `search`（`mode=context`）在 `degradation` 或 `rerankFailure` 非空时，于命中列表后追加 `Degraded:` 行：
+
+| 行 | 含义 |
+|---|---|
+| `Degraded: 向量检索不可用（…）；已退回关键词检索（FTS5），只覆盖关键词命中的内容。` | `hybrid` 引擎拿不到查询向量，退回 FTS5 |
+| `Degraded: 向量检索不可用（…）；没有退回关键词检索，本次结果可能不完整。` | `vector` 引擎显式选了语义检索，不退回 |
+| `Degraded: 重排不可用（…）；结果使用融合分。` | 重排超时 / 网络不可达 / 5xx，括号里是原因 |
+
+**这行字的理由**：不写降级的 `Found 0 item(s):` 会被 agent 读成「记忆里没有」，而实际是上游没响应。`vector` 与 `hybrid` 的措辞不能互换：前者不退回关键词检索，写成「已退回」会让调用方以为还有兜底。行只在降级时出现（`src/api/mcp/registry.ts` 的 `formatDegradations`），与是否到达总上限无关——供应商不可达也会产生。
+
+**连接被拒绝与预算到点是两条分支。** 前者由 `adapters/llm/provider-error-mapping.ts` 映射成 `PROVIDER_UNAVAILABLE` 且没有 `statusCode`（`fetch` 抛的 `TypeError`），重排归因 `network`；后者由 `budgetExceeded` 抛出，`details` 里带 `timeout: true` 与 `timeoutMs`，归因 `timeout`。两者都不重试同一次调用：嵌入适配器自己不做重试，意图分析靠 `AbortSignal` 跳过剩余两次尝试。但排查方向不同：前者查网络 / 端口 / 证书，后者查预算是否够用。
+
+**实测**（`tests/integration/mcp/tool-deadline.test.ts`，上游是接受连接但永不回包的本地 HTTP 服务器，不可达端口是先监听再关闭的本地端口）：上游挂起 + 150 毫秒上限 → 212 毫秒返回 `isError`；慢嵌入 + 400 毫秒预算 → 330 毫秒返回 FTS 命中与降级说明；嵌入端口不可达 → 6 毫秒快速失败。
+
 ## 14. HTTP API
 
 统一前缀 `/api/v1`。响应封套：
@@ -2780,6 +2828,37 @@ integrations/
 | 写 worker 载荷（`Stop`） | 是 | 5–20ms |
 | 归档 + 抽取 + 合并 + 摘要 | **否**（后台） | 几秒到几十秒 |
 
+**每个事件一个总预算，不是「每个请求 5 秒」。** `timeoutMs`（默认 5 秒）只约束**一次 HTTP 尝试**；一个 hook 里顺序发三次请求就是三倍，`GET` 还有重试。用户在 `UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。预算按**墙上时钟**从**进程启动**算起（`performance.timeOrigin`）：读 stdin、检索、采集、上报都从同一个 deadline 里扣，子请求共享同一个 `AbortSignal`。值在 `integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`（`SessionEnd` 单列在 `SESSION_END_BUDGET_MS`），**没有配置项**——它表达的是「用户最多等多久」，不是部署差异。
+
+| 事件 | 总预算 | 依据 |
+|---|---|---|
+| `SessionStart` | 4000ms | 会话开局一次；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒还能接受」定；本机空载实测 57ms |
+| `UserPromptSubmit` | 2000ms | **每轮按回车都付**。宿主默认给 30s，30s 与挂住没有区别；本节典型 60–180ms、本机实测 54ms，2s 是典型值的约 10 倍，超了退化成「本轮没有记忆」 |
+| `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的约 30 倍 |
+| `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
+| `Stop` | 1000ms | 主进程只写载荷 + spawn；实测 44ms |
+| `PreCompact` | 30000ms | 数据可能丢，必须等提交完成；与 `commitTimeoutMs`、§17.2 的 `rewriteTimeoutMs` 同一个数 |
+| `SessionEnd` | 1200ms | Claude Code 给 `SessionEnd` 一组 hook 只有 1.5 秒共享预算，留 300ms 给启动与退出 |
+
+**预算不能超过宿主给该事件的 hook 超时。** 超了宿主会先杀掉进程并丢弃输出，预算就成了空话；上表 `SessionEnd` 那一行正是按宿主上限倒推的。`SessionEnd` 的 1.2 秒比等锁的 `LOCK_WAIT_MS = 2000` 短，硬上限会在约 1.45 秒以退出码 0 收尾，代价是这次提交放弃、等下次重投（见 `docs/operations.md` 已知限制 29）。
+
+**一次尝试的超时与总预算取小。** 每次 HTTP 尝试的超时是 `min(timeoutMs, 剩余预算)`，请求信号是「单请求超时」与「总 deadline」的 `AbortSignal.any`；预算用尽抛 `HOOK_BUDGET_EXCEEDED`，之后不再开新请求、不再重试。它与 `HOOK_TIMEOUT` 分开：前者是「这个请求慢」，后者是「整个 hook 的时间用完了」——排障时前者指向某个端点，后者指向预算。
+
+**stdin 有 800ms 上限**（`STDIN_READ_CAP_MS`），超时按「没有事件」处理。宿主不写也不关 stdin 时 `for await` 永远不会返回；800ms 小于最短的事件预算（1000ms），所以「stdin 卡住」不会把任何 hook 拖过它的总预算。
+
+**异常路径的契约**（所有 hook 入口一致）：
+
+| 性质 | 实现 |
+|---|---|
+| stdout 零字节 | 只有 handler 正常返回且 `formatOutput` 产出信封时才写；任何异常都不进写路径 |
+| stderr 一行诊断 | `co-mem hook <事件>: <消息>`，或一行 JSON `warn`；不含 prompt 正文、工具输出与凭据 |
+| 退出码 0 | 0 是成功，2 是阻塞错误，其它非零按 non-blocking error 记；hook 是旁路，内部错误不该参与这个判定 |
+| 进程一定退出 | 两道保险：逻辑结束后安排一个 `unref()` 的兜底定时器（没有残留句柄时不触发，有则 `process.exit(0)`）；`armHardDeadline` 再按「预算 + 250ms」架一道硬上限，handler 永不返回时进程也退出 |
+
+**退出码必须是 0。** 除 0 与 2 之外的退出码在宿主侧只记成 non-blocking error，但 Claude Code 配了 `onFailure: "block"` 时会把它升级成**阻断这次调用**。改前 `--host` 参数非法会在顶层 await 抛出、进程以退出码 1 加堆栈结束；`runMain` 与 `installFatalGuards` 之后，`resolveHost()` / `loadConfig()` 的失败、未捕获异常、未处理的 Promise 拒绝都收敛成「一行 stderr + 退出码 0」。
+
+**`PreToolUse` 的错误路径不会变成 deny。** 它的判定是本地字符串前缀（只认 `comem://`），`runHook` 的 catch 分支不写 stdout，宿主拿到「没有决定」后继续走正常权限流程；`handlePreToolUse` 只返回 `{deny}` 或 `undefined`，不存在「异常 → deny」的路径。「hook 挂了导致工具被拒」比卡住更难查，所以这条要写死。
+
 **服务端采集与提交在 detached worker 里，不阻塞用户。** `Stop` 的主进程只做去重、bypass、写 worker 载荷文件、spawn（`integrations/servers/stop.mjs` 的文件头）：`POST /sessions/{id}/messages` 与 `POST /sessions/{id}/commit` 都在 `detached: true` + `unref()` 的子进程里跑，主进程不等它。只有 `PreCompact` / `SessionEnd` 会等提交完成（§15.3）。
 
 **hook 路径不调 LLM，是刻意的取舍。** 意图分析（§8.4）能补全「那它呢」「继续」这类指代，代价是一次模型调用：估计 300–500ms 起，超时上限 10 秒（`REWRITE_TIMEOUT_MS`）。把这次调用放进每一轮的阻塞路径，等于把用户的输入延迟绑在供应商的尾延迟上。
@@ -2795,6 +2874,8 @@ integrations/
 口语化 prompt 里没有关键词，BM25 无从下手。需要这条召回时走 agent 主动调用的 `search`（带 `sessionId`）：它先做意图分析拿到 0–5 条 TypedQuery，再逐条 `find` 合并——这一次 LLM 调用发生在 agent 自己的工具调用里，不占用户的输入延迟。
 
 **降级而不是等待。** 意图分析超时、输出被截断、结构化输出不合法时，整次分析退化成「原 query 跑一次」，`plan.analyzed = false` 且 `reason` 非空（§8.4）。宁可用粗糙的查询，也不让用户干等。
+
+**MCP 的 `search` 是另一套预算。** 它发生在 agent 自己的工具调用里，不受上面「用户每轮等几十到几百毫秒」的约束，代价由服务端的 30 秒硬上限兜住（§13.3）；Hook 侧是**事件总预算**（上一张表），`timeoutMs` 只是它内部一次 HTTP 尝试的上限。`providers.*.timeoutSeconds` 是**单次外部调用**的预算，既不是 hook 的事件预算，也不是 MCP 的 30 秒；调大它只会让单次调用等更久，不会放宽任何一层的总上限。
 
 **注入的三条前提**（缺一条，召回噪音就会盖过收益）：
 
@@ -2840,7 +2921,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
 | 会话与任务 | 会话列表、归档列表、任务状态、重试、僵尸回收记录 |
-| 监控 | 开销归因、吞吐（TPS / TTFB）、模型用量与成本、记忆健康度（见 §17.10） |
+| 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 六条提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 | 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
 
@@ -2956,7 +3037,7 @@ comem_hook_overhead_total_seconds{event}        # 单轮合计
 comem_hook_async_seconds{event}                 # 后台部分耗时，与阻塞部分分开
 ```
 
-**报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端累加进直方图。
+**报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端**按事件覆盖保存最近一次的值**（gauge），不存直方图：历史分布由 Prometheus 按抓取间隔自己算（§17.10）。
 
 **控制台怎么展示**：
 
@@ -2974,26 +3055,29 @@ comem_hook_async_seconds{event}                 # 后台部分耗时，与阻塞
 | 指标 | 类型 | 标签 | 含义 |
 |---|---|---|---|
 | `comem_http_ttfb_seconds` | Histogram | `route, method, status` | 从收到请求到写出第一个字节 |
-| `comem_http_request_duration_seconds` | Histogram | `route, method, status` | 完整耗时 |
+| `comem_http_request_duration_seconds` | Summary（`_sum` / `_count`） | 无；`telemetry.metrics.includeAccountLabel` 打开时按 `account` | 完整耗时。没有直方图桶，也就没有分位数 |
 | `comem_http_requests_total` | Counter | `route, method, status` | 请求总数，TPS 用 `rate()[10s]` |
 | `comem_http_requests_per_second` | Gauge | `route` | 10 秒滑窗，给不跑 Prometheus 的场景直接看 |
 | `comem_http_inflight_requests` | Gauge | `route` | 当前在途请求数 |
+
+**上表里只有 `comem_http_request_duration_seconds` 是当前实现**：v1 的 `renderMetrics()` 只输出它的 `_sum` / `_count`。`comem_http_ttfb_seconds`、`comem_http_requests_total`、`comem_http_requests_per_second`、`comem_http_inflight_requests` 都没有实现，不要照名字写 Prometheus 查询。实际指标清单见 `docs/operations.md`「`/metrics`」。
 
 **TTFB 和总耗时什么时候不同**：JSON 响应两者相等；MCP 的 SSE 流式响应才真正体现「首事件时间」。分开测是因为流式接口的 TTFB 才是用户感知的延迟。
 
 ### 17.4 模型用量与成本
 
+**当前 `/metrics` 只有两条模型指标，都是进程级总量，不带 `purpose` / `provider` / `model` 标签**：
+
 ```
-comem_llm_calls_total{purpose, provider, model}
-comem_llm_tokens_total{purpose, provider, model, kind}   # kind = prompt | completion
-comem_llm_duration_seconds{purpose, provider, model, quantile}
-comem_llm_cost_usd_total{purpose, provider, model}       # 按配置单价换算
-comem_llm_errors_total{purpose, code}
+comem_llm_tokens_total{kind="prompt"|"completion"}   # 进程启动以来的累计
+comem_llm_cost_usd_total                              # 无标签，按配置单价换算
 ```
 
-**为什么要有 cost**：部署方要知道「跑一个月多少钱」，这条指标直接答。单价配置在 `providers.llm.default.pricing`，不写死。
+数据源是 `LlmService` 的进程级累加器（`LlmCallStats`：`calls` / `promptTokens` / `completionTokens` / `costUsd` / `truncated` / `failed`），`ObservabilityService.modelUsage()` 原样返回这份快照。**`LlmService` 没有 `purpose` 概念**：调用方不传用途，累加器只有一份，进程重启清零。
 
-**`purpose` 的取值**：`summary`（目录摘要）、`extract`（记忆抽取）、`intent`（意图分析）、`working_memory`。分开才能看出「钱花在哪」。
+**`purpose` 维度未实现。** 设计目标是按 `summary`（目录摘要）/ `extract`（记忆抽取）/ `intent`（意图分析）/ `working_memory` 分开，回答「钱花在哪」；这需要每次调用带用途、累加器按用途分桶、`/metrics` 按标签输出。`comem_llm_calls_total`、`comem_llm_duration_seconds`、`comem_llm_errors_total` 同样没有实现。**不要照上面这段名字写 Prometheus 查询**——实际输出见 `docs/operations.md`「`/metrics`」。
+
+**token 与成本有缺口。** 结构化输出（`completeJson`）只累加 `calls`，不累加 token 与成本：`LlmProvider.completeJson` 的返回值不含 usage，写 0 会被读成「这次调用没花钱」，所以留空。记忆抽取、记忆合并与查询改写走的都是这条路径，因此成本累计是下界。没配 `providers.llm.default.pricing` 时 `costUsd` 为 `null`，指标输出 `0`——「没配单价」和「确实花了 0」在 `/metrics` 上不可区分。
 
 ### 17.5 记忆健康度（分析型）
 
@@ -3016,7 +3100,7 @@ comem_llm_errors_total{purpose, code}
 'memory'` 节点，§12.3 的物化表）。全库视角看 `GET /health` 的 `index.totalNodes`——
 那是运维的「库有多大」，与「我能看到多少、冷热如何」是两个问题。
 
-`GET /api/v1/stats/sessions/{id}`：
+**`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/stats.ts` 目前只有 `GET /stats/memories`，没有单会话视图的路由。下面的 JSON 保留的是需求形状（归档次数、消息数、抽取增删改、召回与提交耗时、Hook 开销），不是可调用的接口：
 
 ```json
 {
@@ -3028,6 +3112,8 @@ comem_llm_errors_total{purpose, code}
   "overhead":  { "blockingMs": 142, "asyncMs": 12400 }
 }
 ```
+
+它依赖按会话聚合请求记录与请求阶段耗时，而 `request_log` 没有会话列，`phases` 也恒为 NULL（§17.6：没有 HTTP 路由调用 `phase()`）。所以 `latency.recallP50` / `latency.commitP50` / `overhead` 这三组字段没有数据来源；要落地，先让请求带上会话标识并给阶段计时，再定聚合口径（P50 还得先决定取哪个时间窗口的样本）。已知限制同步写在 `docs/operations.md`。
 
 **热度的算法**：`sigmoid(log1p(activeCount)) × exp(-ln2 × ageHours / halfLifeHours)`。`activeCount` 是记忆被检索命中并注入的次数，`halfLifeHours` 默认 168（一周）。分桶：≥0.7 热、≥0.3 温、其余冷。实现是 `domain/hotness.ts` 的 `hotnessScore` / `hotnessTier`，检索热路径与本端点共用同一份——不另造第二套阈值。
 
@@ -3054,10 +3140,13 @@ comem_llm_errors_total{purpose, code}
   "route": "/api/v1/search/find",
   "status": 200,
   "durationMs": 104,
-  "ttfbMs": 104,
-  "responseBytes": 2048
+  "errorCode": null
 }
 ```
+
+**只有完整耗时，没有 TTFB 与响应体大小。** `request_log` 没有 `ttfb_ms` / `response_bytes` 列（`0001_init.sql`）：TTFB 只在流式响应上与总耗时不同，v1 不采这个点；响应体大小也不落库。
+
+**JSON 里的键是展示用的短名，落库映射见建表注释**：`at` → `created_at`、`route` → `path`、`status` → `status_code`、`userId` → `subject`。`phases` 列只在请求作用域里调过 `phase()` 时非空，当前没有 HTTP 路由调用它，因此实际写 NULL。
 
 **保留策略**：默认 7 天或 10 万条，先到先删。可配置。
 
@@ -3109,22 +3198,34 @@ comem_llm_errors_total{purpose, code}
 | `memory.profileFormat` | 仅 `GET /health`：画像格式自查（§11.1），`checked` / `invalid` / `violations` / `truncated`；`truncated` 为真时前三个计数是下界 |
 | `version` | 服务版本 |
 
-**`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。**索引条数是唯一的例外**：`GET /health` 的 `index.totalNodes` 是 `node` 表全量（运维要知道库有多大），MCP `health` 的 `index.visibleNodes` 是权限过滤后当前身份可见的条数（工具不能绕过权限数别人的节点）。两者**不同名**，因为它们是两个不同的问题；同名会让「库有 19 条、我能看到 12 条」被误读成同一个数在漂移。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
+**`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。**索引条数是唯一的例外**：`GET /health` 的 `index.totalNodes` 是 `node` 表全量（运维要知道库有多大），MCP `health` 的 `index.visibleNodes` 是权限与状态过滤后当前身份**可检索**的条数（`glob` 与四个检索面共用 `status = 'active'` 谓词，归档 / 待复核节点不计入；工具不能绕过权限数别人的节点）。两者**不同名**，因为它们是两个不同的问题；同名会让「库有 19 条、我能看到 12 条」被误读成同一个数在漂移。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
 
 **`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。v1 没有认证，不带请求头的调用本来就被当成绑定主体，这个值不是秘密；多租户要换成真正的认证时，这个字段也要跟着重新设计。
 
 **`degraded` 的判定**：模型不可用且开了规则降级，或最近一次重排调用失败（已退回融合分）。降级必须可见——静默降级等于骗人。重排的降级状态与摘要走同一个模式，不另造一套：`rerank.degraded` 为真时 `status` 也是 `degraded`；`rerank.failures` 是累计值，`lastFailure` 在成功一次后清空，两者分别回答「历史上失败过几次」与「现在还在不在跑」。
 
+**MCP 工具侧的降级另有一条出口。** 向量与重排在单次工具调用里降级时，`find` / `search` / `rule_search` 直接把 `Degraded:` 行写进本次结果（§13.3），调用方当场就知道这批结果缺了哪一路，不必等上线采样 `/health`。两条出口不矛盾：`Degraded` 行回答「这次结果缺了什么」，`rerank.degraded` 回答「服务现在是否健康」。重排失败会同时出现在两边，恢复后行消失、`rerank.degraded` 也跟着变回 `false`（`services/search.ts` 在成功一次后清空 `#rerankLastFailure`）；向量不可用只在结果行里出现，`/health` 没有对应的嵌入字段。
+
 ### 17.10 控制台「监控」页
 
-第 7 个页面，四块：
+控制台「监控」页（§16），四块，数据源是 `GET /health`、`GET /memories/pending` 与 `GET /metrics`：
 
 | 区块 | 内容 |
 |---|---|
-| 开销归因 | 单轮阻塞开销的 P50/P95 + 四阶段饼图；异步耗时单列 |
-| 吞吐 | TPS 曲线、TTFB P95、错误率 |
-| 模型 | 调用次数、token 曲线、成本累计（按 purpose 分） |
-| 记忆健康 | 类型分布、pending 数、热度分布、陈旧目录 |
+| 记忆健康度 | `GET /health` 的四张卡（索引节点数、待处理任务、待复核及其最老一条的年龄、摘要降级目录数） |
+| 开销归因 | 每个 Hook 事件**最近一轮**的四阶段阻塞耗时与后台异步耗时 |
+| 吞吐与用量 | 进程启动以来的请求数、平均耗时、prompt / completion token、成本累计 |
+| 最近的请求 | 没有查询端点，只列出 `/metrics` 里实际存在的聚合项，原始文本放在折叠区 |
+
+**只有「最近一次」，没有历史分布。** `recordHookOverhead` 把每次上报按事件覆盖进 `Map`（`comem_hook_overhead_seconds` 是 gauge，不是直方图），所以这一页给不出 P50/P95，也不给阶段饼图历史。历史分布要靠 Prometheus 按抓取间隔自己算，见 `src/services/observability.ts` 的同名注释。
+
+**吞吐只有平均值。** `comem_http_request_duration_seconds` 是 summary 形态（`_sum` / `_count`），平均耗时 = `_sum / _count`；P95 需要直方图桶，v1 没有桶边界也就不报分位数。**没有 TPS 曲线与错误率**：`comem_http_requests_total` / `comem_http_requests_per_second` / `comem_http_inflight_requests` / `comem_http_ttfb_seconds` 都没有实现（清单见 `docs/operations.md`「`/metrics`」）。
+
+**没有按 purpose 分的模型用量。** `/metrics` 只有 `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`（§17.4），所以「吞吐与用量」一栏只能给进程级总量。
+
+**请求明细没有查询端点。** `request_log` 只落 SQLite，`src/api/http/routes/` 里没有 `GET /stats/requests`；这一块只说明「看不到」并列出真实存在的指标名，不拿聚合值冒充逐条记录。要按路由、状态码、用户筛选，得先加一个查询端点。
+
+**不画不存在的指标。** 每张卡片由数据是否存在决定：一张 TTFB 恒为 0 的图会让人以为「首字节很快」，而实际是「没测」。
 
 ### 17.11 不做
 
@@ -3348,7 +3449,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | 层 | 位置 | 谁改 | 优先级 |
 |---|---|---|---|
 | 默认 | `prompts/{id}.md` | 改代码（进 review、可 diff） | 低 |
-| 覆盖 | `prompt_override` 表（`0012_prompt.sql`） | 控制台 | 高 |
+| 覆盖 | `prompt_override` 表（`0001_init.sql`） | 控制台 | 高 |
 
 **为什么默认值不放数据库。** 默认值是产品行为的一部分，要跟代码一起 review、一起 diff、
 一起回滚。
@@ -3393,9 +3494,44 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | `PROVIDER_UNAVAILABLE` | 503 | 模型不可用 |
 | `INTERNAL` | 500 | 未预期错误 |
 
+**文件系统 errno → code**（`src/adapters/fs/error-map.ts`）。三个 fs 适配器共用一张表，各自只声明覆盖项，表外的一律 `INTERNAL`：
+
+| errno | code | 备注 |
+|---|---|---|
+| `ENOENT` | `NOT_FOUND` | 三者一致 |
+| `EEXIST` | `ALREADY_EXISTS` | 三者一致 |
+| `EISDIR` | `INVALID_ARGUMENT` | 三者一致 |
+| `ENOSPC` | `RESOURCE_EXHAUSTED` | 三者一致 |
+| `EACCES` / `EPERM` | `PERMISSION_DENIED` | `content-store` 曾经缺这两行，写盘权限不足会落成 `INTERNAL`（500） |
+| `ENOTDIR` | `INVALID_ARGUMENT` / `NOT_FOUND` | **有意的差异**，见下 |
+
+**`ENOTDIR` 的差异是语义，不是漂移。** `content-store` 面对的是「`memories` 这个路径段其实是个文件」，此时路径类型不匹配，`INVALID_ARGUMENT` 比 `NOT_FOUND` 准确；`metadata-file` 与 `acl-file` 面对的是「没有这个元数据文件 / ACL 文件」，而且多处直接把 `ENOTDIR` 当成「文件不存在」吞掉，`NOT_FOUND` 才符合调用方语义。差异集合由 `tests/integration/fs/error-map-consistency.test.ts` 逐个 errno 钉住——只有 `content-store` 的 `ENOTDIR` 与另外两个不同，抹平或扩大差异都会让测试变红。
+
+中文消息同样共享结构：`INVALID_ARGUMENT` / `NOT_FOUND` / `PERMISSION_DENIED` / `ALREADY_EXISTS` / `INTERNAL` 的文案由各适配器自己给，「文件不存在」「摘要文件不存在」「ACL 文件不存在」是有诊断价值的定位信息，不强行统一。新增错误码时 `AdapterMessageCode` 自动落到适配器一侧，三个适配器的消息表会各自报缺键（编译期发现）。
+
 **重放语义分两套集合，互补而不是重复。** `domain/errors.ts` 的 `RETRYABLE_CODES`（`CONFLICT` / `RESOURCE_EXHAUSTED` / `PROVIDER_UNAVAILABLE`）回答「一次模型调用再发一次会不会成功」，由 `services/llm.ts` 消费；`domain/archive.ts` 的 `isTerminalStepError`（`INVALID_URI` / `INVALID_ARGUMENT` / `PERMISSION_DENIED` / `UNAUTHENTICATED`）回答「一步提交重放一次会不会成功」，由 `services/commit/pipeline.ts` 与 `services/task.ts` 消费。**两边都不在的 code 会被当成可重试**——`UNAUTHENTICATED` 曾经因此白重试 `(stepAttempts + 1) × taskAttempts` 次（默认 2 × 3 = 6 次）：一把错的 API Key 在模型调用层正确地不重试，到了步骤层却被当成瞬态失败。
 
 `INTERNAL` 是未知异常的兜底，步骤级重试；`NOT_FOUND` 是确定性失败，当前仍按可重试处理——已知缺口：它只在步骤循环之外抛出，没有超时成本，所以不进终态集合。`ALREADY_EXISTS` 已经降级：`memory_merge` 捕获它并把冲突操作记进 `skippedOperations`（§11.5），归档照常完成。把它加进终态集合只是把「一步一步重试到失败」变成「第一次就失败」，并不能让那条记录生效，还会把这批操作里其余十九条一起赔进去。新增错误码时两套集合都要判断，检查方法见 `domain/errors.ts` 的 `RETRYABLE_CODES` 注释。
+
+**供应商错误 → 领域失败由一份共享映射决定。** `adapters/llm/provider-error-mapping.ts` 被生成（`ai-sdk-provider.ts`）、嵌入（`embedding-provider.ts`）与重排（`rerank-provider.ts`）三条链路共用。三份各自复制时，同一个供应商故障（例如 429）可能在对话补全里被判成可重试、在嵌入里被判成不可重试，且没有任何机制能拦住这种漂移。
+
+判定顺序：超时 → 生成链路的结构化输出分类 → HTTP 状态码 → 网络 `TypeError` → 兜底 `INTERNAL`。
+
+| 供应商错误 | 领域码 | `isRetryable` | 依据 |
+|---|---|---|---|
+| 401 / 403 | `UNAUTHENTICATED` | 否 | API Key 或模型权限错误，同一请求重发结果一样 |
+| 400 / 404 / 413 / 422 | `INVALID_ARGUMENT` | 否 | 请求本身不合法；413 表示请求体 / 上下文超出供应商上限 |
+| 429 | `RESOURCE_EXHAUSTED` | 是 | 限流或配额不足，等待后可能成功 |
+| 5xx | `PROVIDER_UNAVAILABLE` | 是 | 供应商暂时不可用 |
+| 超时 | `PROVIDER_UNAVAILABLE` | 是 | 重排额外带 `details.timeout: true`，供 `rerank.degraded` 归因 |
+| 网络不可达（`TypeError`） | `PROVIDER_UNAVAILABLE` | 是 | DNS 失败、连接被拒等瞬态故障 |
+| 结构化输出解析失败 | `INVALID_ARGUMENT` | 否（由 `services/llm.ts` 单独重试一次） | 模型输出不符合 schema |
+| 结构化输出截断 | `PROVIDER_UNAVAILABLE` + `details.truncated` | 是（服务层见 `truncated` 跳过） | 同样的 `maxTokens` 只会再截断一次 |
+| 其它未知异常 | `INTERNAL` | 否（步骤层兜底重试） | 不把未知异常泄漏成业务错误码 |
+
+**不解析响应 body 里的错误码，也不读 `retry-after`。** 供应商的 JSON 错误形状没有稳定契约，按某一家写规则会在兼容实现上误判；`retry-after` 只影响退避时长，而退避在 `services/llm.ts`。这两类形态当前未覆盖，不是已支持。
+
+**413 在合并前落进 `INTERNAL`。** `isRetryable` 对 `INTERNAL` 本来就是 false，所以合并前后的**一次模型调用重试结论相同**；差别在步骤层：`INTERNAL` 不在 `isTerminalStepError` 的终态集合里，会被重放，而 413 表示请求体 / 上下文超出供应商上限，重发同一份输入仍然超限。按保守原则把它并入 400 类，让领域码与「重发无意义」这个事实一致。这是本次合并唯一的映射变更，`isRetryable` 的逐条结论没有改变。
 
 **错误必须可解释**：写进 `error.log`，带请求 ID、URI、操作。不抛只有开发者能读的堆栈，也不静默吞掉。
 
@@ -3419,7 +3555,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | 并发 | 路径锁 EXACT / TREE 互斥；`rm -r` 与后台写摘要不产生孤儿；`commit` 与 `add_message` 不丢消息；元数据 frontmatter 写不坏 |
 | 可观测性 | 开销归因的四阶段相加等于总耗时；`requestId` 从 HTTP 贯穿到后台任务与日志；`/metrics` 输出能被 Prometheus 解析 |
 
-测试在本地跑。`MemoryContentStore` 和 `MemoryIndex` 让核心测试不碰磁盘。
+测试在本地跑。核心链路测试用 `fs.mkdtemp()` 造临时数据根、用 SQLite `:memory:` 造索引，不需要内存替身（AGENTS.md §9）。
 
 ## 21. 里程碑
 
@@ -3431,10 +3567,10 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | P4 | 摘要：生成、失效、降级 | 失效链路测试通过 | ✅ |
 | P5 | 会话与管线：归档、抽取、**预取**、合并、**规则合并**、复核、**并发锁**、**ToolPart** | 提交链路端到端通过 | ✅ |
 | P6 | ACL 与用户组 | 权限链路测试通过 | ✅ |
-| P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 | ✅ |
+| P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 | 部分完成：批量写入与 `add_skill` 已做；双写补偿只做了写入侧（追加 `_meta/reconcile.log`），没有重放器，见 `docs/operations.md` 已知限制 8 |
 | P8 | MCP 16 工具 | MCP 客户端可连 | ✅ |
 | P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 能看到「CoMem 让每个请求多花多少毫秒」 | ✅ |
-| P10 | 控制台八个页面 | 完整演示路径 | ✅ |
+| P10 | 控制台十个页面 | 完整演示路径 | ✅ |
 | P11 | Hook 插件（Claude Code + DSH） | 真实会话自动入库 | ✅ |
 | P12 | 文档定稿 | 全部文档与实现一致 | 未完成 |
 

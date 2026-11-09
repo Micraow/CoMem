@@ -218,7 +218,7 @@ function scopeUriOf(subject: string): Uri {
 }
 
 /**
- * 只读地打开游标表。数据库不存在、或还是 0011 之前的版本时返回 `null`
+ * 只读地打开游标表。数据库不存在、或还没有 `ingest_cursor` 表时返回 `null`
  * （当作「没有任何游标」），dry-run 不写、也不跑迁移。
  */
 function openReadOnlyCursors(
