@@ -22,6 +22,7 @@ const ALL_STEPS: readonly CommitStepName[] = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
+  'experience_distill',
 ];
 
 class FakeStep extends CommitStep {
@@ -120,7 +121,7 @@ function createHarness(options: HarnessOptions): Harness {
 }
 
 describe('CommitPipeline 骨架（§10.3）', () => {
-  it('四步按顺序执行', async () => {
+  it('五步按顺序执行', async () => {
     const steps = ALL_STEPS.map((name) => new FakeStep(name));
     const harness = createHarness({ steps });
 
@@ -147,7 +148,7 @@ describe('CommitPipeline 骨架（§10.3）', () => {
     expect(steps[3]?.run).toHaveBeenCalledTimes(1);
     // 跳过的步骤不会被重复记录。
     expect(harness.currentMeta().stepsDone).toEqual([...ALL_STEPS]);
-    expect(harness.metaWrites.map((meta) => meta.stepsDone.length)).toEqual([3, 4]);
+    expect(harness.metaWrites.map((meta) => meta.stepsDone.length)).toEqual([3, 4, 5]);
   });
 
   it('跳过已完成步骤时先 rehydrate，产物回到 state 供下游消费', async () => {
@@ -191,9 +192,10 @@ describe('CommitPipeline 骨架（§10.3）', () => {
     // 被跳过的两步从未执行过：没有产物可恢复。
     expect(steps[1]?.rehydrate).not.toHaveBeenCalled();
     expect(steps[2]?.rehydrate).not.toHaveBeenCalled();
-    // 执行过的两步（产物在盘上）照常 rehydrate，它们自己不做任何事。
+    // 执行过的三步（产物在盘上）照常 rehydrate，它们自己不做任何事。
     expect(steps[0]?.rehydrate).toHaveBeenCalledTimes(1);
     expect(steps[3]?.rehydrate).toHaveBeenCalledTimes(1);
+    expect(steps[4]?.rehydrate).toHaveBeenCalledTimes(1);
     for (const step of steps) {
       expect(step.run, step.name).not.toHaveBeenCalled();
     }

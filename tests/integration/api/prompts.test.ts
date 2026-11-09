@@ -89,16 +89,18 @@ function errorBody(payload: unknown): ErrorBody['error'] {
 }
 
 describe('GET /prompts', () => {
-  it('列出六条提示词，初始都没有覆盖', async () => {
+  it('列出八条提示词，初始都没有覆盖', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/prompts' });
     expect(response.statusCode).toBe(200);
 
     const result = okBody<{ prompts: readonly Record<string, unknown>[] }>(response.json());
 
-    expect(result.prompts).toHaveLength(6);
+    expect(result.prompts).toHaveLength(8);
     expect(result.prompts.map((prompt) => prompt['id'])).toEqual([
       'extract-system',
       'extract-user',
+      'experience-system',
+      'experience-user',
       'summarize-system',
       'summarize-user',
       'rewrite-system',
@@ -106,7 +108,7 @@ describe('GET /prompts', () => {
     ]);
     expect(result.prompts.every((prompt) => prompt['overridden'] === false)).toBe(true);
     expect(result.prompts.every((prompt) => prompt['stale'] === false)).toBe(true);
-    // 列表不带正文：六条模板加起来十几 KB，列表用不到。
+    // 列表不带正文：八条模板加起来十几 KB，列表用不到。
     expect(result.prompts.every((prompt) => !('body' in prompt))).toBe(true);
   });
 });
@@ -154,6 +156,31 @@ describe('PUT /prompts/:id', () => {
     expect(overridden.map((prompt) => prompt.id)).toEqual(['extract-user']);
 
     const detail = await app.inject({ method: 'GET', url: '/api/v1/prompts/extract-user' });
+    expect(okBody<Record<string, unknown>>(detail.json())['body']).toContain('只输出 JSON。');
+  });
+
+  it('经验归纳的两个标识可读、可覆写', async () => {
+    // 新增提示词最容易漏掉的接线：`PROMPT_IDS` 里有、路由却拿不到正文；或者能读、
+    // 保存后渲染路径取不到覆盖。
+    for (const id of ['experience-system', 'experience-user']) {
+      const detail = await app.inject({ method: 'GET', url: `/api/v1/prompts/${id}` });
+      expect(detail.statusCode).toBe(200);
+      expect(okBody<Record<string, unknown>>(detail.json())['overridden']).toBe(false);
+    }
+    const system = await app.inject({ method: 'GET', url: '/api/v1/prompts/experience-system' });
+    expect(String(okBody<Record<string, unknown>>(system.json())['body'])).toContain('{{today}}');
+
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/prompts/experience-user',
+      payload: {
+        body: '## 已有经验\n\n{{existingExperiences}}\n\n## 本次会话\n\n{{messages}}\n\n## 任务\n\n只输出 JSON。',
+      },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(okBody<Record<string, unknown>>(saved.json())['overridden']).toBe(true);
+
+    const detail = await app.inject({ method: 'GET', url: '/api/v1/prompts/experience-user' });
     expect(okBody<Record<string, unknown>>(detail.json())['body']).toContain('只输出 JSON。');
   });
 

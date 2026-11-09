@@ -39,7 +39,12 @@ export type CommitStepName =
   | 'archive_summary'
   | 'memory_extract'
   | 'memory_merge'
-  | 'summary_invalidate';
+  | 'summary_invalidate'
+  /**
+   * 经验归纳（§10.1 阶段二的第 5 步）。排在最后：它只消费归档目录与记忆文件，不依赖前四步的
+   * `state`，而新增一步不能改变既有步骤的重放判据。
+   */
+  | 'experience_distill';
 
 /**
  * 步骤被跳过的原因。

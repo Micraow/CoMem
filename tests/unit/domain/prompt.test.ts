@@ -4,7 +4,7 @@
  * 三组断言：
  *
  * 1. **模板引擎**：占位符解析、行号、未知变量、缺变量、单遍替换。
- * 2. **仓库里的 `prompts/*.md`**：六条模板都能通过校验——把「编辑模板发错」挡在
+ * 2. **仓库里的 `prompts/*.md`**：八条模板都能通过校验——把「编辑模板发错」挡在
  *    启动之前，而不是等模型收到一条字面量提示词。
  * 3. **渲染快照**：改造前（提示词写死在 TS 里）的逐字节输出。改模板必须显式更新
  *    快照（`pnpm vitest -u`），否则「改一行提示词」会静默改变模型行为。
@@ -26,6 +26,7 @@ import {
 } from '../../../src/domain/prompt.js';
 import { BUILTIN_MEMORY_TYPES } from '../../../src/domain/memory-types/index.js';
 import { Uri } from '../../../src/domain/uri.js';
+import { buildExperiencePrompt } from '../../../src/services/prompts/experience.js';
 import { buildExtractPrompt } from '../../../src/services/prompts/extract.js';
 import { buildRewriteUserPrompt, REWRITE_SYSTEM_PROMPT } from '../../../src/services/prompts/rewrite.js';
 import { buildSummaryPrompt } from '../../../src/services/prompts/summarize.js';
@@ -74,6 +75,15 @@ describe('仓库里的 prompts/*.md', () => {
     for (const id of PROMPT_IDS) {
       expect(listPromptPlaceholders(id, readPromptDefault(id)).length).toBeGreaterThan(0);
     }
+  });
+
+  it('抽取提示词明确把 experiences 留给归纳步骤', () => {
+    // 不加这句时同一批消息会被抽取与归纳各写一次：抽取写补丁、归纳写整段，同一个
+    // topic 被覆盖两次。快照也能拦住删除，但快照可以被 `-u` 无条件刷新；这条断言
+    // 说的是「编辑提示词时不能把隔离删掉」。
+    const body = readPromptDefault('extract-system');
+    expect(body).toContain('留给归纳步骤');
+    expect(body).toContain('不要输出 `experiences`');
   });
 
   it('模板文件以换行结尾，读取后没有尾部空行', () => {
@@ -180,7 +190,7 @@ describe('renderPromptBody', () => {
   });
 });
 
-describe('六条提示词的渲染快照', () => {
+describe('内置提示词的渲染快照', () => {
   const memoryTypes = Object.values(BUILTIN_MEMORY_TYPES);
 
   function extractWithPages() {
@@ -337,5 +347,52 @@ describe('画像收敛指令（profileDirective）', () => {
     expect(system).toContain('`patch` 增量维护');
     expect(system).toContain('整份重写');
     expect(system).not.toContain('已超上限');
+  });
+});
+
+/**
+ * 经验归纳提示词的渲染（`experience-system` / `experience-user`）。
+ *
+ * 两件事必须钉住：空列表要变成一句明确的话（否则模型把空段落当成「随便写」），
+ * 已有经验要带 topic 与有效期（同 topic 整段重写的判断依赖它）。
+ */
+describe('经验归纳提示词（experience-*）', () => {
+  it('没有已有经验与会话时给出明确说明，今天日期进系统提示词', () => {
+    const prompt = buildExperiencePrompt({ messages: [], existing: [], today: '2026-11-10' });
+
+    expect(prompt.system).toContain('归纳');
+    expect(prompt.system).toContain('2026-11-10');
+    expect(prompt.system).toContain('整段覆盖');
+    expect(prompt.messages[0]?.content).toContain('（这次没有预取到已有经验。）');
+    expect(prompt.messages[0]?.content).toContain('（这次没有会话消息。）');
+  });
+
+  it('已有经验带 topic、正文与有效期', () => {
+    const prompt = buildExperiencePrompt({
+      messages: [{ role: 'user', content: '这次迁移踩了依赖版本的坑。' }],
+      existing: [
+        {
+          topic: 'monorepo-migration',
+          content: '先升级依赖。',
+          validFrom: '2026-10-01T00:00:00.000Z',
+          validUntil: null,
+        },
+        {
+          topic: 'legacy-topic',
+          content: '旧结论。',
+          validFrom: null,
+          validUntil: '2026-11-01T00:00:00.000Z',
+        },
+      ],
+      today: '2026-11-10',
+    });
+
+    const user = prompt.messages[0]?.content ?? '';
+    expect(user).toContain('### monorepo-migration');
+    expect(user).toContain('先升级依赖。');
+    expect(user).toContain('2026-10-01T00:00:00.000Z 起，仍然有效');
+    expect(user).toContain('### legacy-topic');
+    expect(user).toContain('至 2026-11-01T00:00:00.000Z');
+    expect(user).toContain('这次迁移踩了依赖版本的坑。');
   });
 });

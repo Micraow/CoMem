@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`六条提示词的渲染快照 > 'extract-system' 1`] = `
+exports[`内置提示词的渲染快照 > 'extract-system' 1`] = `
 "你是 CoMem 的记忆抽取器。阅读一段会话记录，把值得长期保留的信息抽取成结构化操作。
 
 ## 记忆类型
@@ -111,6 +111,8 @@ exports[`六条提示词的渲染快照 > 'extract-system' 1`] = `
   - content (string，合并策略 patch)：规则正文：在什么场景下必须做什么，以及判断依据
   - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
 
+经验类的结论留给归纳步骤：\`experiences\` 由它读整段会话与已有经验后一次整段重写，抽取不要输出 \`experiences\`。同一份消息被两条路径各写一次会让同一个 topic 被覆盖两次，而两条路径的合并语义不同（抽取是补丁，归纳是整段重写）。
+
 ## 用户画像（profile）
 
 画像正文整段注入每次会话的开头，长度是每次请求的固定成本。上面 \`profile\` 的说明里写死了收录范围、路由表与格式契约；这一节只判断**这次要不要整份重写**。
@@ -149,7 +151,7 @@ exports[`六条提示词的渲染快照 > 'extract-system' 1`] = `
 - 没有值得保留的信息时输出 \`{"operations": []}\`。"
 `;
 
-exports[`六条提示词的渲染快照 > 'extract-user' 1`] = `
+exports[`内置提示词的渲染快照 > 'extract-user' 1`] = `
 "## 已读记忆
 
 <page_id: 1>
@@ -185,7 +187,7 @@ alice
 按上面的格式输出 JSON。"
 `;
 
-exports[`六条提示词的渲染快照 > 'extract-user-no-overview' 1`] = `
+exports[`内置提示词的渲染快照 > 'extract-user-no-overview' 1`] = `
 "## 已读记忆
 
 （这次没有预取到已读记忆。）
@@ -199,7 +201,7 @@ exports[`六条提示词的渲染快照 > 'extract-user-no-overview' 1`] = `
 按上面的格式输出 JSON。"
 `;
 
-exports[`六条提示词的渲染快照 > 'rewrite-system' 1`] = `
+exports[`内置提示词的渲染快照 > 'rewrite-system' 1`] = `
 "你是 CoMem 的查询重写器。CoMem 是一个记忆数据库：它保存用户与 agent 过去的偏好、事实、决定、事件与操作步骤。你的任务是把用户当前这句话改写成 0–5 条适合做全文检索的查询。
 
 ## 什么时候返回空数组
@@ -243,7 +245,7 @@ exports[`六条提示词的渲染快照 > 'rewrite-system' 1`] = `
 \`intent\` 只能是：preference（偏好、习惯、风格）/ fact（事实性知识）/ decision（做过的决定与理由）/ event（发生过的事）/ procedure（步骤、流程）/ other（其它）。"
 `;
 
-exports[`六条提示词的渲染快照 > 'rewrite-user' 1`] = `
+exports[`内置提示词的渲染快照 > 'rewrite-user' 1`] = `
 "## 当前查询
 
 我们组的代码风格约定还在吗
@@ -266,7 +268,7 @@ exports[`六条提示词的渲染快照 > 'rewrite-user' 1`] = `
 按上面的规则输出 JSON。"
 `;
 
-exports[`六条提示词的渲染快照 > 'rewrite-user-empty' 1`] = `
+exports[`内置提示词的渲染快照 > 'rewrite-user-empty' 1`] = `
 "## 当前查询
 
 你好
@@ -284,7 +286,7 @@ exports[`六条提示词的渲染快照 > 'rewrite-user-empty' 1`] = `
 按上面的规则输出 JSON。"
 `;
 
-exports[`六条提示词的渲染快照 > 'summarize-system' 1`] = `
+exports[`内置提示词的渲染快照 > 'summarize-system' 1`] = `
 "你是 CoMem 的目录摘要生成器。根据一个目录的直接子节点，写出这个目录的完整概览（L1），让读者不用打开子文件就能判断该读哪一个。
 
 ## 输出结构
@@ -312,7 +314,7 @@ exports[`六条提示词的渲染快照 > 'summarize-system' 1`] = `
 - 不要编造输入里没有的事实；信息不足时只描述子节点写了什么。"
 `;
 
-exports[`六条提示词的渲染快照 > 'summarize-user' 1`] = `
+exports[`内置提示词的渲染快照 > 'summarize-user' 1`] = `
 "## 目录
 
 uri: comem://user/alice/memories
@@ -330,7 +332,7 @@ uri: comem://user/alice/memories/preferences
 偏好清单。"
 `;
 
-exports[`六条提示词的渲染快照 > 'summarize-user-empty' 1`] = `
+exports[`内置提示词的渲染快照 > 'summarize-user-empty' 1`] = `
 "## 目录
 
 uri: comem://user/alice/memories

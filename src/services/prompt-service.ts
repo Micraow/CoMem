@@ -39,7 +39,7 @@ import type { PromptOverrideRow, PromptRepository } from '../adapters/sqlite/pro
 
 import { notifyPromptRenderers } from './prompts/registry.js';
 
-/** 列表行：不含正文。控制台列表不需要为六条提示词各读一遍模板。 */
+/** 列表行：不含正文。控制台列表不需要为每条提示词各读一遍模板。 */
 export interface PromptSummary {
   readonly id: PromptId;
   readonly description: string;

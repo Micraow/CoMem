@@ -106,8 +106,8 @@ export const NODE_SELF_ROW = "NOT (kind = 'directory' AND level = 'L1')";
 /** §17.2 的四个阻塞阶段。名字与 `phase()` 的调用参数一致。 */
 const BLOCKING_PHASES: readonly string[] = ['processStart', 'recall', 'serialize', 'capture'];
 
-/** §17.2 表格里的后台阶段：归档、抽取、合并、摘要。不计入阻塞开销。 */
-const ASYNC_PHASES: readonly string[] = ['archive', 'extract', 'merge', 'summary'];
+/** §17.2 表格里的后台阶段：归档、抽取、合并、摘要、经验归纳。不计入阻塞开销。 */
+const ASYNC_PHASES: readonly string[] = ['archive', 'extract', 'merge', 'summary', 'distill'];
 
 /**
  * `#attribute()` 的容差：0.5ms。

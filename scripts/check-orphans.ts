@@ -139,10 +139,6 @@ const BASELINE: readonly BaselineEntry[] = [
     id: 'EmbeddingRepository.iterMissingUris',
     reason: '该接线：打开 embedding 后存量不回填，只能手动 reindex。',
   },
-  {
-    id: 'MemoryLinkService.addLinks',
-    reason: '该接线：唯一写入口零调用，`GET /:uri/links` 永远返回空表。',
-  },
 ];
 
 function fail(message: string): never {

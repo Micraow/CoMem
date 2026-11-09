@@ -582,11 +582,13 @@ describe('IngestService', () => {
 });
 
 /**
- * 假模型服务：只回答「一条 preferences 记忆」，每次调用换一个 topic。
+ * 假模型服务：抽取请求回答「一条 preferences 记忆」（每次调用换一个 topic），
+ * 经验归纳请求回答空结论。
  *
  * 走真实的 openai-compatible 适配器，而不是在服务层塞 `FakeLlmProvider`——要验证
  * 的正是「导入命令 → 执行器 → 抽取 → 写盘 → 索引 → find」这条生产接线，替换掉
- * 任何一段都会让测试绕过它。
+ * 任何一段都会让测试绕过它。归纳是管线里第二个 `generateJson` 调用：不按提示词
+ * 区分的话，抽取形状会被归纳的 schema 拒绝，任务停在 pending、`tasksCompleted` 为 0。
  */
 interface FakeLlmServer {
   readonly baseUrl: string;
@@ -596,38 +598,46 @@ interface FakeLlmServer {
 async function startFakeLlmServer(): Promise<FakeLlmServer> {
   let calls = 0;
   const server: Server = createServer((request, response) => {
-    request.resume();
-    calls += 1;
-    const content = JSON.stringify({
-      operations: [
-        {
-          kind: 'upsert',
-          pageId: 100,
-          type: 'preferences',
-          identity: { topic: `ingest-topic-${String(calls)}` },
-          operations: [
-            { kind: 'replace', field: 'content', value: `导入抽取的记忆 ${String(calls)}` },
-          ],
-        },
-      ],
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
     });
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        id: `chatcmpl-${String(calls)}`,
-        object: 'chat.completion',
-        created: 0,
-        model: 'fake',
-        choices: [
-          {
-            index: 0,
-            message: { role: 'assistant', content },
-            finish_reason: 'stop',
-          },
-        ],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      }),
-    );
+    request.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      calls += 1;
+      const content = body.includes('经验归纳器')
+        ? JSON.stringify({ experiences: [] })
+        : JSON.stringify({
+            operations: [
+              {
+                kind: 'upsert',
+                pageId: 100,
+                type: 'preferences',
+                identity: { topic: `ingest-topic-${String(calls)}` },
+                operations: [
+                  { kind: 'replace', field: 'content', value: `导入抽取的记忆 ${String(calls)}` },
+                ],
+              },
+            ],
+          });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          id: `chatcmpl-${String(calls)}`,
+          object: 'chat.completion',
+          created: 0,
+          model: 'fake',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+      );
+    });
   });
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', resolve);

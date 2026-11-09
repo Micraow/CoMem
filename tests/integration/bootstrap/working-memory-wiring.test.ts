@@ -61,13 +61,17 @@ let container: Container | undefined;
 let llm: FakeLlmHttp;
 
 /**
- * 同一台假模型服务要同时服务两个步骤：
+ * 同一台假模型服务要同时服务三个阶段：
  * - 工作记忆走 `generate`（纯文本），提示词里有「会话归档器」；
- * - 记忆抽取走 `generateJson`，返回空的 `operations` 就够（本用例只关心工作记忆）。
+ * - 记忆抽取走 `generateJson`，返回空的 `operations` 就够（本用例只关心工作记忆）；
+ * - 经验归纳走 `generateJson`，返回空的 `experiences`（同样是空结论）。
  */
 function respond(body: string): string {
   if (body.includes('会话归档器')) {
     return WORKING_MEMORY;
+  }
+  if (body.includes('经验归纳器')) {
+    return JSON.stringify({ experiences: [] });
   }
   return JSON.stringify({ operations: [] });
 }

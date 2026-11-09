@@ -182,6 +182,7 @@ const COMMIT_STEP_NAMES: ReadonlySet<string> = new Set<CommitStepName>([
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
+  'experience_distill',
 ]);
 
 /** 会话状态集合（`domain/session.ts` 的 `SessionStatus`）。 */

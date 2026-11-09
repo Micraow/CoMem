@@ -3,8 +3,9 @@
  *
  * ## 为什么是模块级绑定，而不是构造参数
  *
- * 三条提示词的调用点不在本 wave 的文件所有权里（`services/search.ts`、
- * `services/summary.ts`、`services/commit/steps/memory-extract.ts`），而
+ * 四条提示词的调用点不在本 wave 的文件所有权里（`services/search.ts`、
+ * `services/summary.ts`、`services/commit/steps/memory-extract.ts`、
+ * `services/commit/steps/experience-distill.ts`），而
  * `REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
  * 不是函数调用——它没法通过参数注入。
  *
@@ -15,7 +16,7 @@
  *   `rewrite.ts` 重新渲染 `REWRITE_SYSTEM_PROMPT`。
  *
  * **这是模块级可变状态，与容器注入的约定冲突**（`api/http/routes/index.ts` 里写过
- * 为什么不用模块级单例）。代价换来的是「不改三个不属于本 wave 的文件」。下一个
+ * 为什么不用模块级单例）。代价换来的是「不改四个不属于本 wave 的文件」。下一个
  * wave 把 `PromptService` 注入 `SearchServiceDeps` / `MemoryExtractStepDeps` 之后，
  * 这个文件应当删掉，`REWRITE_SYSTEM_PROMPT` 变成一个普通函数调用。
  *

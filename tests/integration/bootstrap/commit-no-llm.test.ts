@@ -13,7 +13,7 @@
  * 钉住四件事：
  *
  * 1. 任务以 `done` 结束（不是 `failed`），`error` 为空；
- * 2. `.meta.json` 的 `stepsDone` 含全部四步，`skippedSteps` 写明跳过原因；
+ * 2. `.meta.json` 的 `stepsDone` 含全部五步，`skippedSteps` 写明跳过原因；
  * 3. `warn` 日志说明 `memory_extract` 被跳过；
  * 4. 一次模型调用都没有（`fetch` 未被调用），归档产物里没有 `memory_diff.json`。
  */
@@ -38,6 +38,7 @@ const ALL_STEPS = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
+  'experience_distill',
 ] as const;
 
 let dataDir: string;
@@ -103,13 +104,14 @@ describe('没有可用 LLM 时归档能完成', () => {
     expect(task?.status).toBe('done');
     expect(task?.error).toBeNull();
 
-    // 2. 四步都「完成」；跳过的那两步另记原因。
+    // 2. 五步都「完成」；跳过的那三步另记原因。
     expect(task?.stepsDone).toEqual([...ALL_STEPS]);
     const meta = await container.services.session.readArchiveMeta(committed.archiveUri);
     expect(meta?.stepsDone).toEqual([...ALL_STEPS]);
     expect(meta?.skippedSteps).toEqual([
       { step: 'memory_extract', reason: 'llm_disabled' },
       { step: 'memory_merge', reason: 'llm_disabled' },
+      { step: 'experience_distill', reason: 'llm_disabled' },
     ]);
 
     // 3. 跳过必须可见：归档会走到 `.done`，用户不会收到任何错误。

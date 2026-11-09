@@ -8,8 +8,9 @@
  *
  * ## 为什么放在 `config/`
  *
- * `services/` 被 lint 禁止 `node:fs`（架构文档 §4.2），而三条提示词的调用点
- * （`services/search.ts`、`services/summary.ts`、`services/commit/steps/memory-extract.ts`）
+ * `services/` 被 lint 禁止 `node:fs`（架构文档 §4.2），而四条提示词的调用点
+ * （`services/search.ts`、`services/summary.ts`、`services/commit/steps/memory-extract.ts`、
+ * `services/commit/steps/experience-distill.ts`）
  * 不在本 wave 的文件所有权里。默认模板与 §18 的其它默认值一样，是**随仓库发布的
  * 配置资产**，读取入口放 `config/` 不需要放宽任何一层依赖规则。
  */

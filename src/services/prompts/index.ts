@@ -1,7 +1,7 @@
 /**
  * 提示词模板（架构文档 §9.2、§11.3、§11.4、§18）。
  *
- * 三条提示词（六条模板）的静态骨架在仓库的 `prompts/*.md` 里，由
+ * 提示词（八条模板）的静态骨架在仓库的 `prompts/*.md` 里，由
  * `services/prompt-service.ts` 按「仓库默认 < 数据库覆盖」的优先级取用，可以在
  * 控制台查看和修改。
  *
@@ -10,6 +10,11 @@
  */
 
 export { buildExtractPrompt, NEW_PAGE_ID_START, type ExtractPage, type ExtractPromptInput } from './extract.js';
+export {
+  buildExperiencePrompt,
+  type ExistingExperience,
+  type ExperiencePromptInput,
+} from './experience.js';
 export { buildSummaryPrompt, type SummaryPromptInput } from './summarize.js';
 export {
   buildRewriteUserPrompt,

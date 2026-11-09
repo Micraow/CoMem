@@ -53,6 +53,7 @@ import type {
 import { summarizeMemoryDiff } from '../../../domain/archive.js';
 import { ComemError } from '../../../domain/errors.js';
 import type { Logger } from '../../../domain/log.js';
+import type { MemoryLinkType } from '../../../domain/memory-link.js';
 import { getMemoryType } from '../../../domain/memory-types/index.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
 import type {
@@ -64,12 +65,21 @@ import { applyOperations, suppressConflicts } from '../../../domain/merge-op.js'
 import { Uri } from '../../../domain/uri.js';
 
 import type { MemoryWrite, MemoryWriteResult } from '../../memory.js';
+import type { MemoryLinkService } from '../../memory-link.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
 import { EXTRACT_RESULT_KEY, isMemoryExtractResult } from './memory-extract.js';
 
 /** 跨步骤传递产物的键（`summary_invalidate` 消费）。 */
 export const MERGE_RESULT_KEY = 'memory_merge.result';
+
+/**
+ * 记忆来源的边类型。取自 `MemoryLinkType` 联合，不另写一份字符串字面量。
+ *
+ * 领域层没有为每种边导出常量（`link_type` 是开放字符串，收紧成枚举会让新产生端
+ * 每次加关系都改领域层），所以这里用一个标注了域类型的常量承接。
+ */
+const DERIVED_FROM: MemoryLinkType = 'derived_from';
 
 /** 合并步骤的产物：真正写过的文件与被删掉的文件。 */
 export interface MemoryMergeResult {
@@ -92,6 +102,13 @@ export interface MemoryMergeStepDeps {
     /** 不存在返回 `null`（正常状态：这一步还没跑过）。 */
     readMemoryDiff(archiveUri: Uri): Promise<MemoryDiff | null>;
   };
+  /**
+   * `memory_link` 的写入口（§11.10）。只写 `derived_from`，所以只要 `addLinks`。
+   *
+   * `sources`（frontmatter）是**真相**，`memory_link` 是它的**派生读模型**：文件是
+   * 真相、索引是派生（`AGENTS.md` §3）。两者的分工见写入点的注释。
+   */
+  readonly links: Pick<MemoryLinkService, 'addLinks'>;
   readonly logger: Logger;
 }
 
@@ -174,12 +191,14 @@ export class MemoryMergeStep extends CommitStep {
 
   readonly #memory: MemoryMergeStepDeps['memory'];
   readonly #archive: MemoryMergeStepDeps['archive'];
+  readonly #links: MemoryMergeStepDeps['links'];
   readonly #logger: Logger;
 
   constructor(deps: MemoryMergeStepDeps) {
     super();
     this.#memory = deps.memory;
     this.#archive = deps.archive;
+    this.#links = deps.links;
     this.#logger = deps.logger;
   }
 
@@ -196,6 +215,10 @@ export class MemoryMergeStep extends CommitStep {
     }
 
     const groups = groupByUri(suppressConflicts(extracted.operations));
+
+    // 这次写入的原始材料就是本次归档本身。抽取模型看不到归档 URI，让它输出只会
+    // 得到幻觉。
+    const sources: readonly Uri[] = [context.archiveUri];
 
     const adds: MemoryDiffEntry[] = [];
     const updates: MemoryDiffEntry[] = [];
@@ -233,9 +256,8 @@ export class MemoryMergeStep extends CommitStep {
       try {
         write = await this.#memory.upsertMemory(context.scopeUri, schema, {
           uri,
-          // 溯源由服务端确定（W97）：这次写入的原始材料就是本次归档本身。抽取模型
-          // 看不到归档 URI，让它输出只会得到幻觉。
-          provenance: { sources: [context.archiveUri] },
+          // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
+          provenance: { sources },
           update: (current) => {
             const result = applyOperations({ ...current }, group.operations);
             for (const failure of result.skipped) {
@@ -293,6 +315,30 @@ export class MemoryMergeStep extends CommitStep {
         updates.push(entry);
       }
       written.push(write.uri);
+
+      // `sources` 与 `memory_link` 是同一件事的两种视图：前者写在 frontmatter 里，
+      // 是**真相**；后者在 SQLite 里，是它的**派生读模型**（`AGENTS.md` §3「文件是
+      // 真相、索引是派生」）。`sources` 回答「这条记忆从哪些材料来」，`links` 只补
+      // 它回答不了的反查——「哪些记忆来自这次归档」（`direction=backlinks`）。
+      //
+      // 顺序：**先文件、后派生**。反过来会让派生物比真相更早存在：文件写失败时，
+      // `links` 里已经有一条指向不存在来源的边。
+      //
+      // 两者允许短暂不一致（文件写成功、links 写失败）：links 能从 `sources` 重建，
+      // 而记忆本身已经正确落盘——不能因为派生读模型失败就回滚真相或让归档失败。
+      // 所以这里只记 error，不抛。
+      try {
+        this.#links.addLinks(
+          write.uri,
+          sources.map((toUri) => ({ toUri, linkType: DERIVED_FROM })),
+        );
+      } catch (error) {
+        this.#logger.error('记忆关联边写入失败，已忽略：记忆已落盘，可从 sources 重建。', {
+          archive: context.archiveUri.toString(),
+          uri: write.uri.toString(),
+          error: ComemError.from(error).message,
+        });
+      }
     }
 
     const operations = { adds, updates, deletes };

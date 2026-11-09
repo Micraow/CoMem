@@ -24,7 +24,7 @@
  * 3. **`AclService` 最先**：`FileSystemService` / `SearchService` / `ContextAssembler`
  *    的构造参数都是 `Authorizer`。
  *
- * `CommitRunner` 在 `MemoryService` 之后：四个步骤要用 `MemoryService`（预取、读写、
+ * `CommitRunner` 在 `MemoryService` 之后：五个步骤要用 `MemoryService`（预取、读写、
  * 删除）与 `SummaryService`（归档摘要、失效传播），构造位置比它们早只会拿到
  * `undefined`。
  *
@@ -106,6 +106,7 @@ import { AclService } from '../services/acl.js';
 import { permissionDenied, type AclAction, type Authorizer } from '../services/authorizer.js';
 import { CommitPipeline } from '../services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../services/commit/steps/archive-summary.js';
+import { ExperienceDistillStep } from '../services/commit/steps/experience-distill.js';
 import { MemoryExtractStep } from '../services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../services/commit/steps/summary-invalidate.js';
@@ -238,7 +239,7 @@ export interface ContainerServices {
    * 提示词（§9.2、§11.3、§11.4）。
    *
    * 它同时是 `prompts/registry.ts` 的**进程级渲染器**：容器构造时把默认实现
-   * （只读 `prompts/*.md`）换成「覆盖优先」的实现，三条提示词的调用点才能看到
+   * （只读 `prompts/*.md`）换成「覆盖优先」的实现，四条提示词的调用点才能看到
    * 控制台里的修改。推导写在 `services/prompts/registry.ts`。
    */
   readonly prompts: PromptService;
@@ -611,9 +612,9 @@ export async function createContainer(options: CreateContainerOptions = {}): Pro
   // 提示词覆盖（§18）。构造期就把全部覆盖读进内存并校验——一条引用了不存在
   // 变量的覆盖会让每一次模型调用失败，而失败只出现在后台任务里。
   const prompts = new PromptService({ overrides: new PromptRepository({ db }) });
-  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：三条提示词的调用点
-  // （`search` / `summary` / `memory-extract`）不属于本 wave 的所有权，推导见
-  // `services/prompts/registry.ts`。
+  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：四条提示词的调用点
+  // （`search` / `summary` / `memory-extract` / `experience-distill`）不属于本 wave
+  // 的所有权，推导见 `services/prompts/registry.ts`。
   bindPromptRenderer(prompts);
   // `request_log` 的裁剪跟着调度器走（§17.6）：表在进程活着的时候长，只在启动时
   // 裁一次就等于「常驻越久、表越大」。调度器那一轮每轮都调 `prune`，所以这里不裁；
@@ -999,6 +1000,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
    */
   const consolidation = new ConsolidationService({
     memory,
+    stat: store,
     search,
     llm,
     logger,
@@ -1044,13 +1046,15 @@ async function ensureUserNamespace(userId: string): Promise<void> {
    * 阶段二执行器（§10.1、§10.3、§10.4）。
    *
    * 端口绑定归档目录，所以管线按任务现造（`archive-ports.ts` 的文件头）。装配位置
-   * 必须在 `MemoryService` 之后——四个步骤要用它（预取、读写、删除）与
+   * 必须在 `MemoryService` 之后——五个步骤要用它（预取、读写、删除）与
    * `SummaryService`（归档摘要、失效传播）。
    *
    * **步骤顺序是 §10.3 定死的**：`archive_summary` → `memory_extract` →
-   * `memory_merge` → `summary_invalidate`。合并必须在摘要失效之前——失效步骤读的是
-   * 合并步骤写进 `state` 的「真正写过的文件」集合，顺序调换后它什么都读不到，
-   * 目录摘要从此永远不重算，而日志里只会有一行「没有记忆写入，跳过摘要失效」。
+   * `memory_merge` → `summary_invalidate` → `experience_distill`。合并必须在摘要
+   * 失效之前——失效步骤读的是合并步骤写进 `state` 的「真正写过的文件」集合，顺序
+   * 调换后它什么都读不到，目录摘要从此永远不重算，而日志里只会有一行「没有记忆
+   * 写入，跳过摘要失效」。经验归纳排在最后：它只消费归档目录与记忆文件，不读
+   * 前四步的 `state`，放在最后不会改变任何既有步骤的重放判据。
    */
   /**
    * 没有可用模型时不能执行的步骤。
@@ -1062,14 +1066,17 @@ async function ensureUserNamespace(userId: string): Promise<void> {
    * `{ skipped: true, reason: 'llm_disabled' }` 完全相同：装配层从
    * `providers.llm.default.type` 推出，`services/` 不 import `config/`。
    *
-   * `memory_merge` 跟着跳过：它的输入是抽取结果，没有抽取就没有可合并的操作。另外
-   * 两步不调模型——`archive_summary` 走规则摘要，`summary_invalidate` 只标脏。
+   * `memory_merge` 跟着跳过：它的输入是抽取结果，没有抽取就没有可合并的操作。
+   * `experience_distill` 也调模型，同样跳过——缺模型只让「这次没有归纳出经验」，
+   * 不能让归档变成「没有模型就无法归档」。另外两步不调模型——`archive_summary`
+   * 走规则摘要，`summary_invalidate` 只标脏。
    */
   const commitSkippedSteps =
     config.providers.llm.default.type === 'disabled'
       ? new Map<CommitStepName, CommitStepSkipReason>([
           ['memory_extract', 'llm_disabled'],
           ['memory_merge', 'llm_disabled'],
+          ['experience_distill', 'llm_disabled'],
         ])
       : new Map<CommitStepName, CommitStepSkipReason>();
 
@@ -1105,8 +1112,9 @@ async function ensureUserNamespace(userId: string): Promise<void> {
             logger,
             profile: { maxChars: config.memory.profile.maxChars },
           }),
-          new MemoryMergeStep({ memory, archive: archiveArtifacts, logger }),
+          new MemoryMergeStep({ memory, archive: archiveArtifacts, links: memoryLink, logger }),
           new SummaryInvalidateStep({ summary, logger }),
+          new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
         ],
         ports,
         skippedSteps: commitSkippedSteps,

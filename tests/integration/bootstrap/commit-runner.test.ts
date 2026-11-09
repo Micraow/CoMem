@@ -25,6 +25,7 @@ import { createPathLockManager, type PathLockManager } from '../../../src/adapte
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fake-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
@@ -46,12 +47,14 @@ import {
   type StepContextPorts,
 } from '../../../src/services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-summary.js';
+import { ExperienceDistillStep } from '../../../src/services/commit/steps/experience-distill.js';
 import { MemoryExtractStep } from '../../../src/services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../../../src/services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summary-invalidate.js';
 import { AclService } from '../../../src/services/acl.js';
 import { LlmService } from '../../../src/services/llm.js';
 import { MemoryService, type MemoryServicePorts } from '../../../src/services/memory.js';
+import { MemoryLinkService } from '../../../src/services/memory-link.js';
 import { ObservabilityService } from '../../../src/services/observability.js';
 import { SessionService } from '../../../src/services/session.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
@@ -72,6 +75,7 @@ const ALL_STEPS = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
+  'experience_distill',
 ] as const;
 
 /** §18 的 `task.maxAttempts` 默认值：3 次。坏载荷用完它之后进死信。 */
@@ -129,6 +133,14 @@ const EVENTS_RESPONSE: unknown = {
   ],
 };
 
+/**
+ * 经验归纳步骤的模型输出：这次会话没有可复用的经验。
+ *
+ * 空数组是合法结论（不写盘），所以完整流水线的用例不会因为多一步而多出记忆文件；
+ * 归纳本身的行为在 `commit-steps.test.ts` 里逐条断言。
+ */
+const DISTILL_RESPONSE: FakeResponse = { json: { experiences: [] } };
+
 let dataDir: string;
 let db: DatabaseSync;
 let logger: Logger;
@@ -139,6 +151,7 @@ let taskStore: TaskRepository;
 let tasks: TaskService;
 let session: SessionService;
 let memory: MemoryService;
+let memoryLink: MemoryLinkService;
 let summary: SummaryService;
 
 function createLogger(): Logger {
@@ -193,6 +206,10 @@ beforeEach(async () => {
     list: (uri) => store.list(uri),
   };
   memory = new MemoryService({ filesystem, locks, search: { find: async () => [] }, logger });
+  memoryLink = new MemoryLinkService({
+    repository: new MemoryLinkRepository({ db, logger }),
+    logger,
+  });
 
   // 真实 `AclService`：归档步骤写摘要后要物化权限，桩会让这条链路在测试里断掉。
   const acl = new AclService({
@@ -230,7 +247,7 @@ interface RunnerHarness {
   readonly provider: FakeLlmProvider;
 }
 
-/** 与 `container.ts` 同构的装配：端口按归档现造，四个步骤顺序固定。 */
+/** 与 `container.ts` 同构的装配：端口按归档现造，五个步骤顺序固定。 */
 function createRunner(
   responses: readonly FakeResponse[],
   options: {
@@ -265,8 +282,9 @@ function createRunner(
             logger,
             profile: { maxChars: 800 },
           }),
-          new MemoryMergeStep({ memory, archive: archiveArtifacts, logger }),
+          new MemoryMergeStep({ memory, archive: archiveArtifacts, links: memoryLink, logger }),
           new SummaryInvalidateStep({ summary, logger }),
+          new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
         ],
         ports: createArchivePorts(archiveUri, deps),
         ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),
@@ -377,7 +395,7 @@ function createBlockingPipeline(hooks: {
 
 describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('建会话 → 写消息 → 提交 → tick 跑完 → .done + pending 记忆', async () => {
-    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
+    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
@@ -406,14 +424,14 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     expect(pending[0]?.status).toBe('pending');
     expect(pending[0]?.fields['content']).toBe('项目里不用 any，需要收窄时用 unknown。');
 
-    // 抽取只调了一次模型：重试会消耗掉唯一的响应，测试因此变红。
-    expect(provider.calls).toHaveLength(1);
+    // 抽取与经验归纳各调一次模型：任何一步重试都会把响应提前用掉，测试因此变红。
+    expect(provider.calls).toHaveLength(2);
 
     await runner.stop();
   });
 
   it('重放幂等：重新入队后四步全部跳过，不重复写', async () => {
-    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
+    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
@@ -429,8 +447,8 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     await runner.tick();
 
     expect(taskStore.get(committed.taskId)?.status).toBe('done');
-    // 没有第二次抽取（FakeLlmProvider 的响应已经用尽，重跑会抛错）。
-    expect(provider.calls).toHaveLength(1);
+    // 没有第二次抽取与第二次归纳（FakeLlmProvider 的响应已经用尽，重跑会抛错）。
+    expect(provider.calls).toHaveLength(2);
     // 记忆文件一个字节都没变：`created_at` 与正文都没被覆盖写。
     expect(await readFile(experiencePath, 'utf8')).toBe(before);
     // 跳过的步骤不重写 `.meta.json`。
@@ -444,7 +462,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     // 回归：`memory_extract` 的结果原先只存在 `StepContext.state` 里。`stepsDone`
     // 声称它跑完了，重放会跳过它——`memory_merge` 拿到空 `state`，抛
     // `INVALID_ARGUMENT`（终态），归档永久损坏，错误信息还说「步骤顺序被改过」。
-    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }], {
+    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE], {
       stepAttempts: 0,
     });
 
@@ -476,8 +494,8 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     await runner.tick();
 
     expect(taskStore.get(committed.taskId)).toMatchObject({ status: 'done', error: null });
-    // 抽取没有重新调模型（FakeLlmProvider 只有一个响应，重跑会抛）。
-    expect(provider.calls).toHaveLength(1);
+    // 第 1 轮是抽取，第 2 轮是经验归纳；抽取走 `rehydrate`，没有重调模型。
+    expect(provider.calls).toHaveLength(2);
 
     const diff = JSON.parse(
       await readFile(join(archiveDirectory(ARCHIVE), 'memory_diff.json'), 'utf8'),
@@ -501,7 +519,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     // 上一个用例只验证「同进程重试」。进程崩了再起时，管线实例、`state`、模型
     // 供应商的响应全部消失——只剩磁盘。`recover()` 只重置租约过期的 `running`，
     // 这里用「任务回队列 + 新建执行器」走同一条恢复路径。
-    const first = createRunner([{ json: EXTRACT_RESPONSE }], { stepAttempts: 0 });
+    const first = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE], { stepAttempts: 0 });
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
       sessionId: 'sess_1',
     });
@@ -516,12 +534,15 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     expect(taskStore.get(committed.taskId)?.status).toBe('pending');
     vi.restoreAllMocks();
 
-    // 全新的执行器：没有内存里的 `state`，也没有可用的模型响应。
-    const restarted = createRunner([], { stepAttempts: 0 });
+    // 全新的执行器：没有内存里的 `state`，只剩一次「这次没有经验可归纳」的响应。
+    // 抽取若被重跑会消耗掉它，下面的断言因此变红。
+    const restarted = createRunner([DISTILL_RESPONSE], { stepAttempts: 0 });
     await restarted.runner.tick();
 
     expect(taskStore.get(committed.taskId)).toMatchObject({ status: 'done', error: null });
-    expect(restarted.provider.calls).toHaveLength(0);
+    // 唯一的模型调用属于经验归纳：抽取走的是 `rehydrate`，没有重调模型。
+    expect(restarted.provider.calls).toHaveLength(1);
+    expect(restarted.provider.calls[0]?.prompt.system).toContain('经验归纳器');
     expect(
       JSON.parse(
         await readFile(join(archiveDirectory(ARCHIVE), 'memory_diff.json'), 'utf8'),
@@ -537,7 +558,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     const invalidate = vi
       .spyOn(summary, 'invalidate')
       .mockRejectedValueOnce(new ComemError('INTERNAL', '摘要服务暂时不可用。'));
-    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }], { stepAttempts: 0 });
+    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE], { stepAttempts: 0 });
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
       sessionId: 'sess_1',
@@ -568,7 +589,12 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('events 类型重复写入降级成跳过，归档仍完成', async () => {
     // 两次提交抽到同一个事件：第二次的 `memory_merge` 撞上 `ALREADY_EXISTS`。
     // 期望「这一条没写入、其它照常、归档完成」，而不是整批归档失败。
-    const { runner } = createRunner([{ json: EVENTS_RESPONSE }, { json: EVENTS_RESPONSE }]);
+    const { runner } = createRunner([
+      { json: EVENTS_RESPONSE },
+      DISTILL_RESPONSE,
+      { json: EVENTS_RESPONSE },
+      DISTILL_RESPONSE,
+    ]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '决定：提交管线固定四步。'));
@@ -630,7 +656,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
   it('任务行的 stepsDone 与 .meta.json 同步', async () => {
     // 两处各记一份：`.meta.json` 是重放的依据，`task.steps_done` 让「卡在第几步」
     // 能直接 SQL 查出来。不接回调的话任务行永远是空的，而演示/运维看到的正是它。
-    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }]);
+    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
@@ -640,14 +666,20 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     const taskRow = taskStore.get(committed.taskId);
     const meta = await metadata.readArchive(committed.archiveUri);
 
-    expect(taskRow?.stepsDone).toEqual(['archive_summary', 'memory_extract', 'memory_merge', 'summary_invalidate']);
+    expect(taskRow?.stepsDone).toEqual([
+      'archive_summary',
+      'memory_extract',
+      'memory_merge',
+      'summary_invalidate',
+      'experience_distill',
+    ]);
     expect(taskRow?.stepsDone).toEqual(meta?.stepsDone);
 
     await runner.stop();
   });
 
   it('任务已完成时不再认领：清空 stepsDone 也不会重放', async () => {
-    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }]);
+    const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
     await session.addMessage(sessionUri, message('msg_1', '项目里不用 any。'));
@@ -662,7 +694,8 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     await metadata.writeArchive(committed.archiveUri, { ...meta, stepsDone: [] });
     await runner.tick();
 
-    expect(provider.calls).toHaveLength(1);
+    // 抽取与经验归纳各一次：没有任何一步被重放。
+    expect(provider.calls).toHaveLength(2);
     expect((await metadata.readArchive(committed.archiveUri))?.stepsDone).toEqual([]);
 
     await runner.stop();
@@ -677,7 +710,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
    */
   it('后台阶段耗时进 comem_hook_async_seconds（非 0）', async () => {
     const observability = createObservability();
-    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }], {
+    const { runner } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE], {
       phase: (name, fn) => observability.phase(name, fn),
     });
 

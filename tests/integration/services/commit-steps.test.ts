@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +12,8 @@ import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
+import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';
 import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmOptions, LlmPrompt, LlmResult } from '../../../src/domain/llm.js';
@@ -23,8 +26,16 @@ import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import type { BatchOperation } from '../../../src/domain/merge-op.js';
 import type { ContentPart, SessionMessage } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
-import type { StepContext } from '../../../src/services/commit/pipeline.js';
+import {
+  CommitPipeline,
+  type StepContext,
+  type StepContextPorts,
+} from '../../../src/services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-summary.js';
+import {
+  ExperienceDistillStep,
+  type ExperienceDistillStepDeps,
+} from '../../../src/services/commit/steps/experience-distill.js';
 import {
   EXTRACT_RESULT_KEY,
   isMemoryExtractResult,
@@ -39,7 +50,12 @@ import {
 } from '../../../src/services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summary-invalidate.js';
 import { LlmService } from '../../../src/services/llm.js';
-import { MemoryService, type MemoryRecord } from '../../../src/services/memory.js';
+import {
+  MemoryService,
+  type MemoryRecord,
+  type MemoryServicePorts,
+} from '../../../src/services/memory.js';
+import { MemoryLinkService } from '../../../src/services/memory-link.js';
 
 const SCOPE = 'comem://user/alice';
 const ARCHIVE = `${SCOPE}/sessions/sess_1/history/archive_001`;
@@ -51,6 +67,8 @@ let store: ContentStore;
 let logger: Logger;
 let memory: MemoryService;
 let locks: ReturnType<typeof createPathLockManager>;
+let linkDb: DatabaseSync;
+let linkService: MemoryLinkService;
 let writeSpy: Mock<(uri: Uri, text: string) => Promise<unknown>>;
 
 beforeEach(async () => {
@@ -58,10 +76,28 @@ beforeEach(async () => {
   logger = createLogger();
   store = new ContentStore({ dataDir, logger });
   locks = createPathLockManager({ dataDir, logger });
+  linkDb = openDatabase(':memory:');
+  runMigrations(linkDb);
+  linkService = new MemoryLinkService({
+    repository: new MemoryLinkRepository({ db: linkDb, logger }),
+    logger,
+  });
   writeSpy = vi.fn(async (uri: Uri, text: string) =>
     store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8'))),
   );
-  memory = new MemoryService({
+  memory = createMemoryService();
+});
+
+/**
+ * 真实 `MemoryService`（真实 `ContentStore` + 真实路径锁）。
+ *
+ * `search` 可换：经验归纳的预取依赖它返回「已有经验」的命中，默认空数组等于
+ * 「这条 scope 下没有已有经验」。
+ */
+function createMemoryService(
+  find: MemoryServicePorts['search']['find'] = async () => [],
+): MemoryService {
+  return new MemoryService({
     filesystem: {
       read: async (uri) => ({ text: Buffer.from(await store.readBytes(uri)).toString('utf8') }),
       write: writeSpy,
@@ -70,12 +106,13 @@ beforeEach(async () => {
       list: (uri) => store.list(uri),
     },
     locks,
-    search: { find: async () => [] },
+    search: { find },
     logger,
   });
-});
+}
 
 afterEach(async () => {
+  linkDb.close();
   await rm(dataDir, { recursive: true, force: true });
 });
 
@@ -122,7 +159,16 @@ function message(id: string, role: SessionMessage['role'], parts: readonly Conte
 }
 
 function record(uri: string, memoryType: string, fields: Record<string, unknown>): MemoryRecord {
-  return { uri: Uri.parse(uri), memoryType, fields, status: 'active', updatedAt: UPDATED_AT, sources: [] };
+  return {
+    uri: Uri.parse(uri),
+    memoryType,
+    fields,
+    status: 'active',
+    updatedAt: UPDATED_AT,
+    sources: [],
+    validFrom: null,
+    validUntil: null,
+  };
 }
 
 /** 抽取步骤的端口替身：按记忆类型返回预置的「已读记忆」。 */
@@ -612,6 +658,7 @@ describe('MemoryExtractStep', () => {
 
 function createMergeStep(
   memoryOverride: Partial<MemoryMergeStepDeps['memory']> = {},
+  linksOverride: MemoryMergeStepDeps['links'] = linkService,
 ): {
   readonly step: MemoryMergeStep;
   readonly writeMemoryDiff: Mock<(archiveUri: Uri, diff: MemoryDiff) => Promise<void>>;
@@ -631,6 +678,7 @@ function createMergeStep(
       writeMemoryDiff,
       readMemoryDiff: async () => diffs.at(-1) ?? null,
     },
+    links: linksOverride,
     logger,
   });
   return { step, writeMemoryDiff, diffs };
@@ -643,6 +691,24 @@ function mergeContext(
 ): StepContext {
   const result: MemoryExtractResult = { operations, skipped, memoryTypes: new Map(memoryTypes) };
   return createContext({ state: new Map([[EXTRACT_RESULT_KEY, result]]) });
+}
+
+
+/** 经验归纳步骤的装配：默认用真实 `MemoryService` / `MemoryLinkService`。 */
+function createDistillStep(
+  provider: FakeLlmProvider,
+  options: {
+    readonly memory?: ExperienceDistillStepDeps['memory'];
+    readonly links?: ExperienceDistillStepDeps['links'];
+  } = {},
+): ExperienceDistillStep {
+  const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
+  return new ExperienceDistillStep({
+    memory: options.memory ?? memory,
+    llm,
+    links: options.links ?? linkService,
+    logger,
+  });
 }
 
 describe('MemoryMergeStep', () => {
@@ -662,7 +728,12 @@ describe('MemoryMergeStep', () => {
     const { step, diffs } = createMergeStep();
     await step.run(mergeContext(operations, [[CODE_STYLE, 'preferences']]));
 
-    expect(writeSpy).toHaveBeenCalledTimes(1);
+    // 5 条 patch 合并成一次**规范文件**写入。覆盖写还会顺带写一份版本快照
+    // （`.history/...`，另一个 URI），所以按 URI 过滤而不是数总次数。
+    const canonicalWrites = writeSpy.mock.calls.filter(
+      ([uri]) => uri.toString() === CODE_STYLE,
+    );
+    expect(canonicalWrites).toHaveLength(1);
     expect((await memory.read(Uri.parse(CODE_STYLE)))?.fields['content']).toBe(
       'l1-x\nl2-x\nl3-x\nl4-x\nl5-x',
     );
@@ -1024,6 +1095,325 @@ describe('MemoryMergeStep', () => {
       ),
     );
     expect((await memory.read(Uri.parse(CODE_STYLE)))?.sources).toEqual([ARCHIVE]);
+  });
+
+  it('写盘成功后写入 derived_from 链接，指向本次归档（memory_link 是 sources 的派生读模型）', async () => {
+    const { step } = createMergeStep();
+
+    await step.run(
+      mergeContext(
+        [
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+          },
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'content', value: '偏好严格模式。' },
+          },
+        ],
+        [[CODE_STYLE, 'preferences']],
+      ),
+    );
+
+    const links = linkService.linksOf(Uri.parse(CODE_STYLE));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.toUri.toString()).toBe(ARCHIVE);
+    expect(links[0]?.linkType).toBe('derived_from');
+    expect(links[0]?.weight).toBe(1);
+    expect(links[0]?.matchText).toBe('');
+    // 反查：从归档 URI 能列出这次归档产出的记忆。
+    expect(linkService.backlinksOf(Uri.parse(ARCHIVE)).map((link) => link.fromUri.toString())).toEqual([
+      CODE_STYLE,
+    ]);
+  });
+
+  it('同一归档重放两次：memory_link 命中 (from, to, match_text) 不新增行', async () => {
+    const operations: BatchOperation[] = [
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+      },
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'content', value: '偏好严格模式。' },
+      },
+    ];
+    const addLinks = vi.fn<MemoryMergeStepDeps['links']['addLinks']>((fromUri, list) =>
+      linkService.addLinks(fromUri, list),
+    );
+    const { step } = createMergeStep({}, { addLinks });
+
+    await step.run(mergeContext(operations, [[CODE_STYLE, 'preferences']]));
+    expect(linkService.linksOf(Uri.parse(CODE_STYLE))).toHaveLength(1);
+
+    // 重放会再写一次盘（内容相同也刷新 updated_at），links 由仓储的去重键收敛。
+    await step.run(mergeContext(operations, [[CODE_STYLE, 'preferences']]));
+
+    // 两次都真的写到了 links 上，不是第二次没写盘才「没新增」。
+    expect(addLinks).toHaveBeenCalledTimes(2);
+    const links = linkService.linksOf(Uri.parse(CODE_STYLE));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.weight).toBe(1);
+  });
+
+  it('links 写失败不让归档失败：记忆已落盘，memory_diff.json 照写', async () => {
+    const links: MemoryMergeStepDeps['links'] = {
+      addLinks: () => {
+        throw new Error('memory_link 写失败');
+      },
+    };
+    const errorSpy = vi.spyOn(logger, 'error');
+    const { step, diffs } = createMergeStep({}, links);
+
+    await expect(
+      step.run(
+        mergeContext(
+          [
+            {
+              kind: 'upsert',
+              uri: CODE_STYLE,
+              operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+            },
+            {
+              kind: 'upsert',
+              uri: CODE_STYLE,
+              operation: { kind: 'replace', field: 'content', value: '派生读模型失败也不能回滚真相。' },
+            },
+          ],
+          [[CODE_STYLE, 'preferences']],
+        ),
+      ),
+    ).resolves.toBeUndefined();
+
+    // 真相没有回滚：文件写成功，归档产物照写。
+    expect((await memory.read(Uri.parse(CODE_STYLE)))?.fields['content']).toBe(
+      '派生读模型失败也不能回滚真相。',
+    );
+    expect(diffs).toHaveLength(1);
+    expect(linkService.linksOf(Uri.parse(CODE_STYLE))).toHaveLength(0);
+    // 失败必须可见：派生数据丢失不能静默。
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('记忆关联边写入失败');
+  });
+});
+
+
+describe('ExperienceDistillStep', () => {
+  const EXPERIENCE = `${SCOPE}/memories/experiences/monorepo-migration.md`;
+
+  it('归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接', async () => {
+    const provider = new FakeLlmProvider([
+      {
+        json: {
+          experiences: [
+            { topic: 'monorepo-migration', content: '迁移前先固定依赖版本，再改构建脚本。' },
+          ],
+        },
+      },
+    ]);
+    const step = createDistillStep(provider);
+
+    await step.run(
+      createContext({
+        messages: [message('m1', 'user', [{ kind: 'text', text: '这次迁移踩了依赖版本的坑。' }])],
+      }),
+    );
+
+    // 文件路径由 identity 推出（`{topic}.md`），正文就是模型给的那一段。
+    const raw = await readFile(toDiskPath(dataDir, Uri.parse(EXPERIENCE)), 'utf8');
+    expect(raw).toContain('memory_type: experiences');
+    expect(raw).toContain('status: pending');
+    expect(raw).toContain(`sources:\n  - ${ARCHIVE}\n`);
+    expect(raw).toContain('迁移前先固定依赖版本，再改构建脚本。');
+
+    const record = await memory.read(Uri.parse(EXPERIENCE));
+    expect(record?.status).toBe('pending');
+    expect(record?.fields['content']).toBe('迁移前先固定依赖版本，再改构建脚本。');
+    expect(record?.sources).toEqual([ARCHIVE]);
+
+    // `memory_link` 是 `sources` 的派生读模型：一次写入一条 `derived_from`。
+    const links = linkService.linksOf(Uri.parse(EXPERIENCE));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.toUri.toString()).toBe(ARCHIVE);
+    expect(links[0]?.linkType).toBe('derived_from');
+    expect(linkService.backlinksOf(Uri.parse(ARCHIVE)).map((link) => link.fromUri.toString())).toEqual([
+      EXPERIENCE,
+    ]);
+
+    // 提示词里有会话过程与任务说明，没有 `page_id`（归纳不引用已读编号）。
+    const prompt = provider.calls[0]?.prompt;
+    expect(prompt?.system).toContain('归纳');
+    expect(prompt?.messages[0]?.content).toContain('这次迁移踩了依赖版本的坑。');
+    expect(prompt?.messages[0]?.content).not.toContain('page_id');
+  });
+
+  it('预取到已有经验时喂给模型，同一个 topic 是整段重写而不是追加', async () => {
+    // 预取只返回 `active`：先走一次复核通过，让旧经验成为「已有经验」。
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'monorepo-migration',
+      content: '旧结论：先升级依赖。',
+    });
+    await memory.approve(Uri.parse(EXPERIENCE));
+
+    const searched = createMemoryService(async () => [
+      { uri: EXPERIENCE, abstract: '旧结论', score: 1 },
+    ]);
+    const provider = new FakeLlmProvider([
+      {
+        json: {
+          experiences: [
+            { topic: 'monorepo-migration', content: '合并后的结论：先固定依赖版本，再升级。' },
+          ],
+        },
+      },
+    ]);
+    const step = createDistillStep(provider, { memory: searched });
+
+    await step.run(createContext());
+
+    // 旧正文进了提示词：不预取的话「合并」只剩覆盖丢失。
+    const rendered = provider.calls[0]?.prompt.messages[0]?.content ?? '';
+    expect(rendered).toContain('monorepo-migration');
+    expect(rendered).toContain('旧结论：先升级依赖。');
+    expect(rendered).toContain('有效期：');
+
+    // 写回的是整段新正文，旧结论没有残留（upsert 是字段级合并，`content` 被覆盖）。
+    const record = await memory.read(Uri.parse(EXPERIENCE));
+    expect(record?.fields['content']).toBe('合并后的结论：先固定依赖版本，再升级。');
+    // 同一个 topic 还是一个文件、一份来源、一条链接。
+    expect(await memory.listPending(Uri.parse(SCOPE))).toHaveLength(1);
+    expect(record?.sources).toEqual([ARCHIVE]);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toHaveLength(1);
+  });
+
+  it('同一批重放两次不产生第二条经验：URI 由 topic 决定', async () => {
+    const output = {
+      json: { experiences: [{ topic: 'monorepo-migration', content: '迁移前先固定依赖版本。' }] },
+    };
+
+    await createDistillStep(new FakeLlmProvider([output])).run(createContext());
+    const first = await memory.read(Uri.parse(EXPERIENCE));
+    await createDistillStep(new FakeLlmProvider([output])).run(createContext());
+
+    const pending = await memory.listPending(Uri.parse(SCOPE));
+    expect(pending.map((record) => record.uri.toString())).toEqual([EXPERIENCE]);
+    const second = await memory.read(Uri.parse(EXPERIENCE));
+    expect(second?.sources).toEqual([ARCHIVE]);
+    // 正文相同、来源相同：磁盘上的字段没有因为重放而多出一份。
+    expect(second?.fields['content']).toBe(first?.fields['content']);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toHaveLength(1);
+  });
+
+  it('空数组是合法结论：不写盘、记 info、步骤成功', async () => {
+    const provider = new FakeLlmProvider([{ json: { experiences: [] } }]);
+    const step = createDistillStep(provider);
+
+    await expect(step.run(createContext())).resolves.toBeUndefined();
+
+    expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      '这次没有可归纳的经验，未写入记忆',
+      expect.objectContaining({ archive: ARCHIVE }),
+    );
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual([]);
+  });
+
+  it('非法 topic 与空正文记 warn 跳过，其余条目照常写', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn');
+    const provider = new FakeLlmProvider([
+      {
+        json: {
+          experiences: [
+            { topic: '../escape', content: '会写到目录外，必须拒绝。' },
+            { topic: 'empty-content', content: '   ' },
+            { topic: 'good-topic', content: '这一条照常写。' },
+          ],
+        },
+      },
+    ]);
+    const step = createDistillStep(provider);
+
+    // 一条坏经验不该让整个归档失败。
+    await expect(step.run(createContext())).resolves.toBeUndefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      '经验 topic 拼不出合法路径，跳过这一条',
+      expect.objectContaining({ topic: '../escape' }),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      '经验正文为空，跳过这一条',
+      expect.objectContaining({ topic: 'empty-content' }),
+    );
+
+    const pending = await memory.listPending(Uri.parse(SCOPE));
+    expect(pending.map((record) => record.uri.toString())).toEqual([
+      `${SCOPE}/memories/experiences/good-topic.md`,
+    ]);
+    expect(pending[0]?.fields['content']).toBe('这一条照常写。');
+  });
+
+  it('links 写失败不让归档失败：记忆已落盘', async () => {
+    const errorSpy = vi.spyOn(logger, 'error');
+    const links: ExperienceDistillStepDeps['links'] = {
+      addLinks: () => {
+        throw new Error('memory_link 写失败');
+      },
+    };
+    const provider = new FakeLlmProvider([
+      { json: { experiences: [{ topic: 'monorepo-migration', content: '照常落盘。' }] } },
+    ]);
+
+    await expect(
+      createDistillStep(provider, { links }).run(createContext()),
+    ).resolves.toBeUndefined();
+
+    expect((await memory.read(Uri.parse(EXPERIENCE)))?.fields['content']).toBe('照常落盘。');
+    expect(errorSpy).toHaveBeenCalledWith(
+      '记忆关联边写入失败，已忽略：记忆已落盘，可从 sources 重建。',
+      expect.objectContaining({ uri: EXPERIENCE }),
+    );
+  });
+
+  it('llm_disabled 时步骤被跳过，归档照常完成', async () => {
+    const provider = new FakeLlmProvider([]);
+    const step = createDistillStep(provider);
+    let meta = createMeta();
+    const writeDone = vi.fn(async () => undefined);
+    const ports: StepContextPorts = {
+      readMessages: async () => [],
+      readArchiveMeta: async () => meta,
+      writeArchiveMeta: async (next) => {
+        meta = next;
+      },
+      latestArchiveOverview: async () => null,
+      writeDone,
+      logger,
+    };
+    const pipeline = new CommitPipeline({
+      steps: [step],
+      ports,
+      logger,
+      skippedSteps: new Map([['experience_distill', 'llm_disabled']]),
+    });
+
+    await pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE));
+
+    // 步骤既不在 `skippedSteps` 里重复判，也不调模型。
+    expect(provider.calls).toHaveLength(0);
+    expect(meta.stepsDone).toEqual(['experience_distill']);
+    expect(meta.skippedSteps).toEqual([{ step: 'experience_distill', reason: 'llm_disabled' }]);
+    // 归档照常走到 `.done`：缺模型不是「无法归档」。
+    expect(writeDone).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'experience_distill 被跳过：providers.llm.default.type 是 disabled',
+      expect.objectContaining({ step: 'experience_distill', reason: 'llm_disabled' }),
+    );
+    expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
   });
 });
 

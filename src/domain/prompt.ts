@@ -26,7 +26,7 @@
 import { ComemError } from './errors.js';
 
 /**
- * 六条提示词的稳定标识。
+ * 八条提示词的稳定标识。
  *
  * 标识同时是 `prompts/{id}.md` 的文件名与数据库覆盖行的主键，**不要改**：改了等于
  * 让已有的覆盖静默失效（界面会显示成「没有覆盖」，用户以为自己的修改丢了）。
@@ -35,6 +35,8 @@ import { ComemError } from './errors.js';
 export const PROMPT_IDS = [
   'extract-system',
   'extract-user',
+  'experience-system',
+  'experience-user',
   'summarize-system',
   'summarize-user',
   'rewrite-system',
@@ -74,9 +76,10 @@ export interface PromptDefinition {
 }
 
 /**
- * 六条提示词的目录。
+ * 八条提示词的目录。
  *
- * 顺序就是控制台的展示顺序：按「抽取 → 摘要 → 重写」的业务链路排，不按字母。
+ * 顺序就是控制台的展示顺序：按「抽取 → 经验归纳 → 摘要 → 重写」的业务链路排，
+ * 不按字母。
  */
 export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
   {
@@ -99,6 +102,19 @@ export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
       { name: 'pages', description: '预取到的已读记忆（编号、地址与正文）' },
       { name: 'previousOverviewSection', description: '上一次归档的概览整段；没有时为空' },
       { name: 'messages', description: '这次要抽取的会话消息' },
+    ],
+  },
+  {
+    id: 'experience-system',
+    description: '经验归纳 · 系统提示词',
+    variables: [{ name: 'today', description: '今天的日期（YYYY-MM-DD）' }],
+  },
+  {
+    id: 'experience-user',
+    description: '经验归纳 · 用户消息',
+    variables: [
+      { name: 'existingExperiences', description: '预取到的已有经验（话题、正文与有效期）' },
+      { name: 'messages', description: '这次要归纳的会话消息' },
     ],
   },
   {

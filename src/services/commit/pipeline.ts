@@ -1,8 +1,8 @@
 /**
  * 提交管线骨架（架构文档 §10.1、§10.3、§10.4）。
  *
- * 阶段二（后台任务）是一条固定的四步流水线。Template Method 把「跳过已完成 → 执行
- * → 记录」这段骨架钉死，变化点只有四个 `CommitStep` 实现；新增步骤不改骨架。
+ * 阶段二（后台任务）是一条固定的五步流水线。Template Method 把「跳过已完成 → 执行
+ * → 记录」这段骨架钉死，变化点只有五个 `CommitStep` 实现；新增步骤不改骨架。
  *
  * ## 三条不变量
  *
@@ -113,7 +113,7 @@ export interface CommitPipelineOptions {
   readonly ports: StepContextPorts;
   readonly logger: Logger;
   /**
-   * 给四个后台步骤计时。生产装配传 `observability.phase`；省略时不记。
+   * 给五个后台步骤计时。生产装配传 `observability.phase`；省略时不记。
    *
    * 后台阶段不在 HTTP 请求里，`ObservabilityService.phase` 会把它们记进进程级
    * `#asyncPhases`（见该方法注释），因此这里不需要请求作用域。
@@ -126,7 +126,7 @@ export interface CommitPipelineOptions {
    *
    * 由装配方从配置推出（`services/` 不 import `config/`）。跳过的步骤仍写进
    * `stepsDone`——否则每次任务重放都会再判一次「没有模型」，而且任务行无法看出
-   * 「四步都走过了」；原因另记在 `skippedSteps` 里。
+   * 「五步都走过了」；原因另记在 `skippedSteps` 里。
    */
   readonly skippedSteps?: ReadonlyMap<CommitStepName, CommitStepSkipReason>;
 }
@@ -145,7 +145,7 @@ const SKIP_REASON_LABELS: Readonly<Record<CommitStepSkipReason, string>> = {
 };
 
 /**
- * 四个管线步骤 → §17.2 的后台阶段名。
+ * 五个管线步骤 → §17.2 的后台阶段名。
  *
  * 一一对应：`archive_summary` 是归档阶段（生成 `archive_NNN/` 的摘要），
  * `summary_invalidate` 是摘要阶段（标记目录摘要失效）。阶段一（写归档目录）是请求
@@ -159,6 +159,7 @@ const STEP_PHASE: Readonly<Record<CommitStepName, string>> = {
   memory_extract: 'extract',
   memory_merge: 'merge',
   summary_invalidate: 'summary',
+  experience_distill: 'distill',
 };
 
 /** 没有装配计时器时原样执行。 */

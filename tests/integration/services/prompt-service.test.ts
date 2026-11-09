@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe('默认值与覆盖', () => {
-  it('初始状态：六条提示词都使用默认值', () => {
+  it('初始状态：每条提示词都使用默认值', () => {
     const list = service.list();
 
     expect(list.map((summary) => summary.id)).toEqual([...PROMPT_IDS]);

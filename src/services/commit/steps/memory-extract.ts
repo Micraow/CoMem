@@ -108,7 +108,13 @@ export interface MemoryExtractStepDeps {
   readonly prefetchTopN?: number;
 }
 
-const DEFAULT_PREFETCH_TOP_N = 5;
+/**
+ * 每个多文件记忆类型预取的条数（默认 5）。
+ *
+ * 导出给 `experience_distill`：归纳也要预取已有经验，条数用同一个下界，避免两处
+ * 各自写一个数字后慢慢漂移。
+ */
+export const DEFAULT_PREFETCH_TOP_N = 5;
 
 const patchBlockSchema = z.object({
   search: z.string(),
@@ -161,7 +167,7 @@ function skip(
  * 按 part 类型丢弃：`tool_result.output` 是多行文本，按行丢弃只会留下它的一部分，
  * 而「一部分工具输出」照样泄漏，还看不出被截断过。整个 part 消失才是「隐藏」。
  */
-function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['messages'] {
+export function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['messages'] {
   const result: { readonly role: 'system' | 'user' | 'assistant'; readonly content: string }[] =
     [];
   for (const message of messages) {
@@ -178,8 +184,13 @@ function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['message
   return result;
 }
 
-/** 预取的检索 query：最后一条用户消息。没有用户消息时是空串（`find` 会直接返回空）。 */
-function retrievalQuery(messages: readonly SessionMessage[]): string {
+/**
+ * 预取的检索 query：最后一条用户消息。没有用户消息时是空串（`find` 会直接返回空）。
+ *
+ * 导出给 `experience_distill`：两条步骤都要「按这次会话找相关记忆」，查询构造只应
+ * 有一份（改了一处、另一处不跟着改，预取就会悄悄取到不相干的记忆）。
+ */
+export function retrievalQuery(messages: readonly SessionMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message !== undefined && message.role === 'user') {
@@ -195,7 +206,7 @@ function retrievalQuery(messages: readonly SessionMessage[]): string {
  * 必须与 `applyPatch` 的输入一致：合并步骤在 `fields.content` 上应用 SEARCH/REPLACE，
  * 模型看到的若是带 `## content` 标题的整段正文，SEARCH 永远匹配不上。
  */
-function pageContent(record: MemoryRecord): string {
+export function pageContent(record: MemoryRecord): string {
   const content = record.fields['content'];
   return typeof content === 'string' ? content : '';
 }
