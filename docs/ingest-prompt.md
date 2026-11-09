@@ -165,7 +165,7 @@ remember {
   ChatGPT 的 chat.html 与 conversations-*.json 是同一批 150 个会话，只传一次
 ```
 
-数字要来自实际计数，不要估算；对不上的地方宁可写「未统计」。报告里不出现 `page_id`、`digest`、`pendingChanges` 这类内部术语，也不贴对话正文。
+数字要来自实际计数，不要估算；对不上的地方宁可写「未统计」。报告里不出现 `page_id`、`digest`、`summary_pending` 这类内部术语，也不贴对话正文。
 
 ## 最后
 

@@ -9,7 +9,7 @@
 |---|---|---|
 | Node | ≥ 22.5 | `package.json` 的 `engines`。低版本没有 `node:sqlite`，服务起不来 |
 | 包管理器 | pnpm | 仓库根与 `web/` 各有一份 `pnpm-lock.yaml`；本文在 pnpm 12.17.0 上验证 |
-| 磁盘 | 内容文件 + SQLite 索引 | 没有实测上限。`request_log` 表在启动时按 `retainDays` / `retainRows` 清理一次 |
+| 磁盘 | 内容文件 + SQLite 索引 | 没有实测上限。`request_log` 由调度器每轮按 `retainDays` / `retainRows` 裁剪；四个维护开关全关时只在启动时裁一次 |
 | 内存 | 未测量 | 没有常驻缓存，每次请求现读。FTS5 的索引在 SQLite 里，不占 Node 堆 |
 | 网络 | 只有摘要生成与记忆抽取需要出网 | `summary.generator: rule` 与 `find` / `grep` 全程离线 |
 
@@ -30,6 +30,8 @@ Nuxt 类型。**这一步不是可选的**：`web/tsconfig.json` 的 `extends` �
 `nuxt prepare` 只做类型生成，不产出 `.output/`，耗时约 1 秒。
 
 `integrations/` 不需要安装：它是纯 `.mjs`，只依赖 Node 内置模块，`dependencies` 为空。
+
+**`web/` 是独立包，不参与根 pnpm workspace。** 根 `pnpm-workspace.yaml` 只有 `allowBuilds`、没有 `packages`，所以 `pnpm --filter web <script>` 会打印 `No projects matched the filters` 并以**退出码 0** 结束——空操作，看起来成功但什么都没做。操作控制台必须用 `pnpm --dir web <script>`；控制台的类型检查与构建由根 `pnpm build:web` 承担（`nuxt build` 自身不做类型检查），该步骤已在 `pnpm verify` 里。不要往 CI 里写 `pnpm --filter web build`，那会得到一条永远绿色的步骤。
 
 ## 配置
 
@@ -92,18 +94,19 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
 | `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码会轮换身份版本，旧 token 立即失效 |
+| `auth.adminUserIds` | `[]` | 系统管理员名单（`app_user.id`）。列全部用户 / 组、建用户、建组、`/tasks` 三个端点只认这份名单（§12.4）。**默认空 = 没有系统管理员**，那些端点对所有人 403，没有「第一个用户自动成为管理员」这类隐式规则。**存量部署升级必须显式配一个 ID**，单用户部署也要写自己的 ID |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
 | `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
 | `logging.level` | `info` | `debug` / `info` / `warn` / `error` / `fatal`（没有 `trace`：`Logger` 上不存在 `trace()`，留着会是一个不产生行为的配置值） |
 | `logging.file` | `""` | 填路径则在 stdout 之外**额外**写一份 `error` 及以上级别的日志。10MB 轮转到 `<path>.1`（§17.8） |
 | `telemetry.metrics.enabled` | `true` | 关掉时 `GET /metrics` 返回 404 并说明「指标已关闭」（空文本会被抓成「指标全为 0」） |
 | `telemetry.metrics.includeAccountLabel` | `false` | 单账号部署没必要，开了会放大标签基数 |
-| `telemetry.requestLog.enabled` | `true` | 是否写 `request_log` 表（控制台的请求记录） |
-| `telemetry.requestLog.retainDays` | `7` | 请求记录保留天数。启动时执行一次清理（不做定时任务） |
+| `telemetry.requestLog.enabled` | `true` | 是否写 `request_log` 表。这张表**只写不读**，没有查询端点，只能用 `sqlite3` 查（架构文档 §17.6） |
+| `telemetry.requestLog.retainDays` | `7` | 请求记录保留天数。调度器每轮裁剪；调度器不启动时只在构造期执行一次 |
 | `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。同上 |
 | `telemetry.requestLog.sampleRate` | `1.0` | 采样率。**错误请求永远全量记录** |
 | `telemetry.hookOverhead.enabled` | `true` | 关掉时 Hook 阻塞开销直接丢弃，不累加指标 |
-| `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 只做冷热标记，不参与排序。**记访问与是否参与排序是两件事**：无论 `weight` 是几，检索命中与按 URI 读取都会写 `node.access_count` / `last_accessed_at`（TTL 的滑动窗口读后者）；`weight` 非 0 只是让 `find` 多查一次访问统计并把它算进排序 |
+| `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 不算热度、不参与排序。**记访问与是否参与排序是两件事**：无论 `weight` 是几，检索命中与按 URI 读取都会写 `node.access_count` / `last_accessed_at`（TTL 的滑动窗口读后者）；`weight` 非 0 只是让 `find` 多查一次访问统计并把它算进排序 |
 | `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。调小让热度掉得更快 |
 | `task.leaseSeconds` | `60` | 任务租约。到期未续租会被启动扫描回收（§10.4） |
 | `task.maxAttempts` | `3` | 单个任务最多执行 3 次，超限置 `failed` |
@@ -217,14 +220,33 @@ pnpm check:orphans
 `commands/`、`ingest/`、`eval/` 调用算有调用方；端口实现（显式 `implements`，或结构上
 满足只声明方法的消费方契约）按接口另一端的调用判定，另一端没人调仍算孤儿。
 
-**遗留债务**：`scripts/check-orphans.ts` 的 `BASELINE` 记录 11 条存量（首跑 49 条，已清 38 条），
-每条带一句判断（待删 / 该接线 / 待收窄）。清单只允许缩小：修掉一条删一行，留着会报「清单过期」。
+**遗留债务**：`scripts/check-orphans.ts` 的 `BASELINE` 记录尚未消化完的存量条目，每条带一句
+判断（待删 / 该接线 / 待收窄）。条数以该文件的 `BASELINE` 为准，不在这里写死——这个数字每轮
+都在变，抄进文档就成了一份会漂移的副本。清单只允许缩小：修掉一条删一行，留着会报「清单过期」。
 新增孤儿直接失败——不要为了让检查通过而加白名单。
 
 **残余**：它只证明「有人写了这个方法名」，不证明「调用真的发生并产生效果」。字符串
 派发（`phase('archive', ...)` 的 `'archive'` 不在 `ASYNC_PHASES` 里）、默认关闭的配置
 分支、传空参数导致早退、只被另一个孤儿调用，以及「有调用方但返回值恒空」都抓不到。
 这些需要行为契约测试或调用图可达性分析。
+
+## 质量门禁
+
+`pnpm verify` 依次跑下面大部分命令。每一层保护什么、不保护什么：
+
+| 命令 | 覆盖 | 不覆盖 |
+|---|---|---|
+| `pnpm typecheck` | `src/`、`tests/`、`scripts/`（根 `tsconfig.json` 的 `include`） | `web/`、`integrations/` |
+| `pnpm lint` | `src/`、`tests/`、`scripts/`、根配置文件 | `web/`、`integrations/`、`docs/`（eslint ignores） |
+| `pnpm build:web` | `web/` 的类型检查（`nuxt typecheck`）+ 构建 | 没有 lint |
+| `pnpm check:config` | 配置项是否真的有消费方（L1–L3，加上 `pnpm test` 里的 L4） | 配置到达行为 |
+| `pnpm check:orphans` | `src/` 的生产引用图 | 字符串派发、默认关闭的分支、返回值恒空 |
+| `pnpm test` | `tests/**/*.test.ts`（unit + integration） | `integrations/` |
+| `pnpm test:integrations` | `integrations/tests/*.test.mjs` | `src/` |
+| `pnpm test:e2e`（不在 `verify` 里） | `scripts/demo.sh` 用临时数据根走一遍六条核心链路（演示脚本，失败即非零退出） | 不是单元测试，没有断言库 |
+
+**`web/` 与 `integrations/` 没有 lint**，这是已知空洞。控制台的类型错误由 `build:web`
+抓，Hook 插件的正确性由 `test:integrations` 的 173 条断言抓。
 
 ## 多用户部署
 
@@ -238,6 +260,8 @@ auth:
   # 足够长的随机串（`openssl rand -base64 48`），并保证它不泄露。
   sessionSecret: ""
   sessionTtlSeconds: 86400
+  # 系统管理员（app_user.id）。跨主体端点只认这份名单，默认空 = 没有系统管理员。
+  adminUserIds: [alice]
 ```
 
 打开之后：
@@ -247,6 +271,25 @@ auth:
 - 凭据有两种：登录拿到的 session token，或 `POST /api/v1/admin/users/{id}/api-keys`
   签发的 API Key（`comem_...`）。
 - `x-comem-subject` 被忽略。仍然拒绝 `group:` 主体——组永远不能当认证主体。
+
+### 谁能管用户与组
+
+两类判定（架构文档 §12.4）：
+
+- **对目标资源求 `manage`**：改密码、改资料、启用禁用、删除用户、签发 / 列出 / 吊销
+  API Key、改组资料、删除组、加退成员。吊销 API Key 的请求里只有 key ID，服务端先反查
+  持有者再对持有者的根求权。
+- **只认系统管理员名单**：`GET` / `POST /admin/users`、`GET` / `POST /admin/groups`、
+  `GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`。这些端点没有目标资源可求权
+  （`task` 表没有 scope 或 uri 列），按 `auth.adminUserIds` 判定。
+
+**`auth.adminUserIds` 默认是空数组 = 没有系统管理员。** 名单为空时上面那些端点对所有人
+403，包括单用户部署里的绑定主体。没有「第一个用户自动成为管理员」或「绑定主体即管理员」
+这类隐式规则：默认值站在安全的一侧，要开放就显式写一个 ID。
+
+**升级时必须补这份名单（破坏性变更）。** 早期版本的用户与组管理对任何已认证身份开放；
+现在名单默认为空，也就是全 403。从旧配置升上来时补 `adminUserIds: [<uid>]`，否则控制台的
+「用户与组」页、概览页的待处理任务卡与会话页的任务表都会一直报 403。
 
 ### 建第一个账号
 
@@ -329,7 +372,7 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   不在 HTTP 管理面）。
 - **召回账本是缓存，删账号 / 组时一起删。** `_meta/recall/*.recall_log.json` 记的是
   「这个作用域投过哪些 URI」。`DELETE /admin/users/{id}` 与 `/admin/groups/{id}` 在撤权
-  之前先删对应账本（`src/api/http/routes/admin.ts:303`、`:501`），同 ID 重建的账号不会继承
+  之前先删对应账本（`src/api/http/routes/admin.ts:350`、`:559`），同 ID 重建的账号不会继承
   去重状态。账本是缓存，删除的代价只是「多投一次」；先删它，失败时什么都没动。
 - **`node_embedding` 按 URI 留旧向量。** 向量行带 `content_digest`：正文变了就重算，
   正文没变就复用。它只回答「这段正文的向量是什么」，不携带授权信息，所以删账号不清
@@ -363,6 +406,11 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
 
 **改 `.md` 不需要重启。** 默认模板每次渲染都读一次磁盘（几 KB，而一次模型调用是秒级），
 没有缓存要失效——改完发下一条请求就生效。
+
+**读与写分权限。** `GET /prompts` 与 `GET /prompts/{id}` 任何已认证身份都能读；
+`PUT` / `DELETE` / `POST /prompts/{id}/preview` 要系统管理员（`auth.adminUserIds`，
+架构文档 §12.4）。提示词是全局的，改它等于改所有身份的注入行为，没有「目标资源」可以
+表达这件事。名单为空时控制台的「提示词」页只能看不能改。
 
 ### 校验会拦住什么
 
@@ -875,17 +923,21 @@ XDG 路径」的失败因此不再出现。
 
 ## 后台调度器
 
-`src/bootstrap/scheduler.ts` 每 30 秒跑一轮，做三件事（架构文档 §10.7、§11.7）：
+`src/bootstrap/scheduler.ts` 每 30 秒跑一轮，做六件事（架构文档 §10.7、§11.7、§17.6；TTL 清扫在一次 `sweep()` 里同时做软归档与物理删除，下表拆成两行）：
 
 | 职责 | 打开它的配置 | 动作 |
 |---|---|---|
 | 自动提交 | `session.autoCommit.enabled`（默认开） | 走阶段一，产出 `sessions/<id>/history/archive_NNN/` |
 | 会话过期 | `session.expiry.idleTimeoutSeconds > 0` | `archive`（默认，只改 `status`）或 `delete`（物理删除） |
 | 记忆 TTL 清扫 | `memory.ttl.defaultDays > 0` | 最后使用时刻超出滑动窗口的记忆 `status` 置 `archived`（`profile` / `identity` / `soul` / `rules` 除外） |
+| 归档物理删除 | `memory.ttl.retentionDays > 0` | 归档满保留期的记忆删文件 + 索引行 |
+| 临时上传清理 | 跟随调度器（无独立开关） | 删 `_meta/tmp/` 里超过 24 小时的暂存文件与元数据 |
+| 对账重放 | 跟随调度器（无独立开关） | 重做 `_meta/reconcile.log` 里的索引 / 权限记录，成功后原子清理日志（§10.6） |
+| `request_log` 裁剪 | 跟随调度器（无独立开关） | 按 `retainDays` 与 `retainRows` 删行（§17.6） |
 
 启动条件是下面四个开关任一打开（`session.autoCommit.enabled`、`session.expiry.idleTimeoutSeconds > 0`、
 `memory.ttl.defaultDays > 0`、`memory.ttl.retentionDays > 0`）。**四个全关时不起定时器**，启动日志是
-`调度器未启动：自动提交、会话过期、记忆 TTL 全部关闭。`；
+`调度器未启动：自动提交、会话过期、记忆 TTL 自动归档、归档物理删除全部关闭。`；
 否则有一行 `调度器已启动。` 带间隔与四个开关的状态。**改了配置要重启**：开关在
 `createContainer` 里读一次。
 
@@ -909,6 +961,12 @@ XDG 路径」的失败因此不再出现。
   `find` / `glob` 却找不到，`_meta/reconcile.log` 行数只增不减，重启服务后恢复。
   规避方式：保持调度器运行（任一开关打开，包括只配 `retentionDays`），监控
   `_meta/reconcile.log` 与调度轮次日志里的 `reconcileResolved` / `reconcileRemaining`。
+
+- **临时上传清理与 `request_log` 裁剪没有独立开关，跟调度器同生共死。** `_meta/tmp/`
+  里超过 24 小时的暂存文件只在调度轮次里删；`request_log` 平时也由每轮裁剪，四个开关
+  全关时只剩启动那一次。可观察到的现象是 `_meta/tmp/` 只增不减、`request_log` 行数在
+  长驻进程里缓慢上涨。规避方式：打开任一维护开关让调度器起来，或手工删 `_meta/tmp/`。
+  这两项没有单独的定时器是有意的——为一个低频清理再起一个生命周期与并发问题不划算。
 
 ### 怎么开自动提交
 
@@ -1170,6 +1228,11 @@ $COMEM_DATA_DIR/
 `.done` / `memory_diff.json` / `memory_operations.json`——它们是元数据，不是目录内容。想看内容用 `GET /content/*`，
 想看元数据用 `GET /fs/ls` 之外的接口（§6.7）。
 
+**删除行不会让 SQLite 文件自己缩小。** `request_log` 裁剪、TTL 物理删除只把页还回 freelist，
+库文件保持历史峰值：稳态占用会收敛到上限附近并复用空闲页，但峰值不会自动下降。需要回收
+磁盘时手工 `VACUUM`——它是全库重写，比裁剪贵几个数量级，应在停机或低峰执行；值得做的时机
+是一次性删掉大量历史行之后（例如表曾被不裁剪的旧版本撑大）。
+
 ## 备份与恢复
 
 **内容文件是真相，SQLite 是派生。** 判据是「这东西属于哪一类」（§7）。检索索引可以
@@ -1249,6 +1312,28 @@ ADD CONSTRAINT`，只能新表 + `INSERT INTO ... SELECT` + `DROP` + `RENAME`）
 迁移框架（`runMigrations`）在每个迁移外面关掉外键强制、提交前用 `PRAGMA foreign_key_check`
 确认没有悬空引用、再恢复原值。有冲突时整份迁移回滚并报 `INTERNAL`。
 
+**从旧快照升级时要手改的地方。** 下面几条不兼容旧配置 / 旧调用，症状都是「没报错但行为
+变了」，升级后逐条核对：
+
+- **配 `auth.adminUserIds`。** 用户与组目录、`/tasks` 现在只认这份名单，默认空 = 对所有人
+  403（见「多用户部署」）。不配的话控制台的「用户与组」页、概览页任务卡、会话页任务表
+  全部 403。
+- **MCP 的 `write` / `add_resource` 没有 `wait` 参数了。** 旧调用多传一个 `wait` 不会报错，
+  也不会等待——写入本来就是同步完成的，参数已从 schema 删除。
+- **调用上限的常量与路径都换了。** `MCP_TOOL_DEADLINE_MS` 与 `src/api/mcp/deadline.ts`
+  不存在，改成 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS`；HTTP 的 `/search/find`、
+  `/search/search`（含 `mode=context`）也在同一上限下返回 503 `PROVIDER_UNAVAILABLE`
+  （已知限制 28）。
+- **`timeoutMs` 从覆盖值改成上限。** 适配器取 `min(配置秒数 × 1000, timeoutMs)`，把配置的
+  超时放宽不再生效（架构文档 §19）。
+- **Hook 装了 7 个事件。** `SessionEnd` 与 `PreCompact` 共用 `pre-compact.mjs`，内部事件名
+  不同；`PreToolUse` 不做开销上报，所以 `/metrics` 里 `event` 的取值仍是 6 个。重装插件
+  才会写入新的 `session_end` 条目。
+- **控制台删掉了一批界面元素**（任务重试按钮、记忆置信度徽章、`/memories/pending`
+  预取、文档的 L1 概览档等），另有一处改成显式说明（未配单价时成本卡显示「未配置单价，
+  成本不可计算」）。这些都是取舍，不要当回归补回来，逐条原因见 `docs/architecture.md`
+  §16 末尾。
+
 ## 监控
 
 两个端点都不认证：探活系统没有 CoMem 身份，要求 `x-comem-subject` 只会让 `curl /health`
@@ -1286,7 +1371,8 @@ $ curl -s http://127.0.0.1:1933/health | jq
     "memory": {
       "pendingReview": 0,
       "orphanTasks": 0,
-      "oldestPendingAgeSeconds": null
+      "oldestPendingAgeSeconds": null,
+      "profileFormat": { "checked": 1, "invalid": 0, "violations": 0, "truncated": false }
     },
     "version": "0.1.0"
   }
@@ -1310,6 +1396,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | `memory.pendingReview` | 待复核的记忆条数（`node.status = 'pending'`） | 控制台「记忆复核」页该清了 |
 | `memory.orphanTasks` | 租约过期的 `running` 任务 | 有人认领却没续租 = 进程崩了。启动扫描会把它重置回 `pending` |
 | `memory.oldestPendingAgeSeconds` | 最老的待复核记忆距今多少秒 | 没有待复核时是 `null`（「没有」不是 0 秒） |
+| `memory.profileFormat` | 画像格式契约的自查结果（§11.1）：`checked` / `invalid` / `violations` / `truncated` | `invalid` > 0 = 有画像没按约定写，抽取提示词可能被改坏；`truncated` 为真时三个计数都是下界 |
 | `version` | 服务版本 | 与 `package.json` 一致 |
 
 外层还有一个 `status: "ok"`：那是**响应封套**的状态（§14），不是服务的健康状态。
@@ -1331,19 +1418,30 @@ comem_index_nodes 4
 # HELP comem_pending_review 待复核的记忆条数
 # TYPE comem_pending_review gauge
 comem_pending_review 0
+# HELP comem_hook_async_seconds 后台阶段最近一次耗时（秒）
+# TYPE comem_hook_async_seconds gauge
+comem_hook_async_seconds{phase="extract"} 0
+# HELP comem_llm_pricing_configured 是否配了模型单价（1 = 配了，成本可计算）
+# TYPE comem_llm_pricing_configured gauge
+comem_llm_pricing_configured 1
+# 下面这条只在 pricing_configured = 1 时输出
 # HELP comem_llm_cost_usd_total 模型成本累计，美元（§18 的 pricing 换算）
 # TYPE comem_llm_cost_usd_total counter
 comem_llm_cost_usd_total 0
 ```
+
+**没配单价时 `comem_llm_cost_usd_total` 整条不存在**，不是输出 0：序列缺失表示「算不出来」，`0` 表示「确实花了 0 美元」。抓取端用 `comem_llm_pricing_configured` 区分这两种情况。
 
 v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetrics`）：
 
 | 组 | 指标 | 用途 |
 |---|---|---|
 | HTTP | `comem_http_request_duration_seconds_sum` / `_count` | 请求完整耗时的累加与次数。v1 是 summary 形态，没有分位数 |
-| Hook 开销 | `comem_hook_overhead_seconds{event,phase}`、`comem_hook_overhead_total_seconds{event}`、`comem_hook_async_seconds{event}` | 回答「用 CoMem 让每一轮多花了多少毫秒」。`phase` 是 `process_start` / `recall` / `serialize` / `capture`；`total` 是单轮阻塞合计；`async` 是后台部分，与阻塞分开 |
-| 模型 | `comem_llm_tokens_total{kind="prompt"\|"completion"}`、`comem_llm_cost_usd_total` | 钱花在哪。成本按 `providers.llm.default.pricing` 换算 |
+| Hook 开销 | `comem_hook_overhead_seconds{event,phase}`、`comem_hook_overhead_total_seconds{event}`、`comem_hook_async_seconds{phase}` | 回答「用 CoMem 让每一轮多花了多少毫秒」。`phase` 是 `process_start` / `recall` / `serialize` / `capture`；`total` 是单轮阻塞合计；`async` 是后台部分，`phase` 是 `archive` / `extract` / `merge` / `summary`，**不挂 `event`**（同一份进程级快照不属于任何事件） |
+| 模型 | `comem_llm_tokens_total{kind="prompt"\|"completion"}`、`comem_llm_cost_usd_total`（配了单价才有）、`comem_llm_pricing_configured` | 钱花在哪。成本按 `providers.llm.default.pricing` 换算 |
 | 业务 | `comem_index_nodes`、`comem_pending_review` | 索引规模与待复核积压 |
+
+**进 `comem_hook_*` 的事件是 6 个，不是 7 个。** `pre_tool_use` 的判定全在本地、不发 HTTP，也不上报开销，所以它的 `event` 标签永远不会出现；宿主侧仍然会调它（7 个事件）。`event` 的合法值见 `integrations/lib/events.json` 的 `reportsOverhead`。
 
 **§17.3 / §17.4 里的其余指标还没实现**：`comem_http_requests_total`、`comem_http_requests_per_second`、
 `comem_http_inflight_requests`、`comem_http_ttfb_seconds`、`comem_llm_calls_total`、
@@ -1355,46 +1453,13 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 
 `/health` 与 `/metrics` 同时挂在根路径与 `/api/v1` 下，两处都能抓（§17.1）。
 
-### `/stats/memories`
+### 统计端点
 
-`GET /api/v1/stats/memories` 回答「哪些记忆冷了、哪些很久没碰、最老的多久」。这是
-治理指标：用来决定清理谁，不参与检索排序（§17.5）。
-
-**只统计当前身份可见的记忆**（`node_permission` 上 allow 且无 deny 的 `context_type =
-'memory'` 节点）。换一个 `x-comem-subject` 就只看得到那个主体有权限的那些——跨用户
-统计是信息泄露。全库总量看 `GET /health` 的 `index.totalNodes`，两者回答不同问题。
-
-```console
-$ curl -s http://127.0.0.1:1933/api/v1/stats/memories | jq
-{
-  "status": "ok",
-  "result": {
-    "total": 4,
-    "byCategory": { "preferences": 1, "entities": 1, "rules": 1, "events": 1 },
-    "hotness": { "cold": 2, "warm": 1, "hot": 1 },
-    "staleness": { "notAccessed7d": 3, "notAccessed30d": 2, "oldestMemoryAgeDays": 90 },
-    "avgSizeBytes": 100
-  }
-}
-```
-
-| 字段 | 含义 |
-|---|---|
-| `total` | 当前身份可见的记忆文件数 |
-| `byCategory` | 按 `memory_type` 分布（profile / preferences / entities / events / identity / soul / experiences / rules）。`memory_type` 为 `null` 的行不计入 |
-| `hotness.cold` / `warm` / `hot` | 热度分档人数。分档用 `domain/hotness.ts` 的 `hotnessScore` + `hotnessTier`（`≥0.7` 热、`≥0.3` 温、其余冷） |
-| `staleness.notAccessed7d` | `last_accessed_at` 距今 ≥ 7 天，或从没访问过的条数 |
-| `staleness.notAccessed30d` | 同上，阈值 30 天。「从没访问过」同时计入 7d 与 30d（它比任何「N 天没碰」都更该清） |
-| `staleness.oldestMemoryAgeDays` | 最老记忆（`MIN(updated_at)`）距今天数。空库为 `null`（「没有」不是 0 天） |
-| `avgSizeBytes` | 可见记忆的平均正文字节数，估算清理能省多少磁盘 |
-
-**热度的算法**：`sigmoid(log1p(access_count)) × exp(-ln2 × ageDays / halfLifeDays)`，
-半衰期取 `telemetry.hotness.halfLifeHours`（默认 168 小时 = 一周）。与 §17.5 的排序
-加权是同一个函数，只是这个端点不排序、只分桶。
-
-**索引**：该聚合对 `context_type = 'memory'` 的过滤已由现有的 `node_scope(scope,
-context_type)` 索引服务（`EXPLAIN QUERY PLAN` 显示 `SEARCH n USING INDEX node_scope`）；
-加覆盖索引反而更慢（整表聚合下顺序扫描优于索引随机回表），所以**不新增索引**。
+只有 `GET /health` 与 `GET /metrics`。`/stats/memories` 与 `/stats/sessions/{id}` 都没有实现，
+`src/api/http/routes/` 里也没有 `stats.ts`：分类分布、冷热分桶、最老记忆年龄、单会话耗时
+都需要全表或跨表聚合，没有调用方。全库规模看 `/health` 的 `index.totalNodes`，记忆健康度
+看它的 `memory` 段（§17.5、架构文档 §17.9）；要按类型 / 冷热自己查库，用 `sqlite3` 直接查
+`_meta/comem.sqlite` 的 `node` 表。
 
 ## 检索质量评估
 
@@ -1594,7 +1659,7 @@ Codex」，导出目录是一次性的。
    的顺序是「写文件 → 批量 `index.upsert` → 标脏」，等标脏被调用时索引里已经是新 digest，
    `invalidate` 的比较必然相等，整条传播链会被静默跳过。这条规则写在
    `src/services/summary.ts` 的 `markStale` 文档注释里。
-3. 目录条目数 ≤ 32 或 `pendingChanges / totalEntries ≥ 0.10` 才立刻重算，否则只记脏
+3. 目录条目数 ≤ 32 或 `summary_pending / summary_entries ≥ 0.10` 才立刻重算，否则只记脏
    （§9.3 第 4 步）。条目多的目录要攒够比例。
 
 **处理**：先看 `server.log` 里有没有 `PROVIDER_UNAVAILABLE`；把 `summary.generator` 临时改成
@@ -1641,11 +1706,11 @@ Codex」，导出目录是一次性的。
 不会返回半份结果；`Degraded` 表示结果照常返回、但有一路检索缺席。前者说明总上限或本地
 I/O 出了问题，后者说明单个上游在预算内没答上来。
 
-**调 `providers.*.timeoutSeconds` 不会让 MCP 工具等更久。** 30 秒是工具层的硬上限，
-上游预算（查询嵌入 6 秒、重排 12 秒）各自另有限制；调大只影响 HTTP 与 Hook 路径的单次
-调用。`Degraded` 出现得频繁而工具不超时，说明预算不够或供应商变慢，先确认模型与网络，
-再考虑提高工具上限（`ToolRegistry` 的装配参数，默认 `MCP_TOOL_DEADLINE_MS`，不暴露给
-模型）。
+**调 `providers.*.timeoutSeconds` 不会让 MCP 工具等更久。** 30 秒是工具层与 HTTP 检索两条
+路由的硬上限，上游预算（查询嵌入 6 秒、重排 12 秒）各自另有限制；调大只影响单次
+上游调用（hook HTTP 尝试也会取剩余预算与 `min(5 秒, 剩余)`）。`Degraded` 出现得频繁而
+工具不超时，说明预算不够或供应商变慢，先确认模型与网络，再考虑提高上限
+（`ToolRegistry` 的装配参数，默认 `API_CALL_DEADLINE_MS`，不暴露给模型）。
 
 **处理**：到上限的那一路先修上游（`providers.*` 的地址、API Key、端口是否可达）；归因
 写「本地」时查 SQLite 锁与文件系统（`CONFLICT`、磁盘满、NFS 上的 `link` 失败，见已知
@@ -1670,6 +1735,18 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 **处理**：`curl /health` 看服务是否正常；`GET /api/v1/acl?uri=...` 看物化结果（需要 `manage`）；
 `.acl.json` 改坏了就恢复备份，或者删掉整个 `_meta/comem.sqlite` 再启动（会重新物化根，但
 已索引节点会消失，见「备份与恢复」的警告）。
+
+### 用户与组页 / 任务卡 403
+
+**症状**：控制台的「用户与组」页、概览页的待处理任务卡、会话页的任务表都报
+`PERMISSION_DENIED`，消息是 `需要系统管理员：<主体> 不在 auth.adminUserIds 里。`。
+
+**原因**：这些端点跨主体，没有目标资源可求权，只认 `auth.adminUserIds`（架构文档 §12.4）。
+名单默认是空数组 = 没有系统管理员，所以对所有人 403——包括单用户部署里的绑定主体。没有
+「第一个用户自动成为管理员」这类隐式规则。
+
+**处理**：在 `config.yaml` 里写 `auth.adminUserIds: ["<你的 uid>"]` 并重启。单用户部署
+（`auth.enabled: false`）同样要配，绑定主体不会自动进名单。
 
 ### 控制台每个请求 401
 
@@ -1817,18 +1894,31 @@ COMEM_SERVER_PORT=8080 pnpm dev
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
    日志，不落盘也不进数据库（`src/services/memory.ts`）。事后要复盘「为什么拒了」只能翻日志。
 6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
-   description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模摘要三字段，
+   description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模 `summary` 一个字段，
    `ContentStore.readText` 不暴露任意键。Hook 注入的 `<available-skills>` 因此只有名字，
    这是 §15.2 允许的最低一档，不是静默丢失。
-7. **`add_resource` 不设置 `executable` 位。** `SkillFileInput.executable` 字段在，
-   `services/` 不能 `import node:fs`、`ContentStore` 也没有 chmod 入口，所以脚本装进去之后
-   不可执行。要补需要给 `ContentStore` 加一个 chmod 方法，现在没有。
+7. **技能文件不设置执行位。** 技能文件按数据存放，`ContentStore` 只写字节，没有 chmod
+   入口；`services/` 不能 `import node:fs`，所以脚本装进去之后不可执行。请求里传
+   `executable` 会被忽略：`SkillFileInput` 只有 `path` 与 `content`，MCP 与 HTTP 两侧都只
+   按这两个键取值，HTTP 路由没有严格 schema，未知键直接丢弃。要补需要给 `ContentStore`
+   加一个 chmod 方法，现在没有。
 8. **`reconcile.log` 里的部分失败无法自动恢复。** 重放已实现：启动时（HTTP 监听之前）与
     调度器每一轮都会重放 `op = index` / `permission`，成功后原子重写日志只保留未解决条目；
-    目标 URI 已删除视为已解决，坏行记 warn 后丢弃。仍然修不了的是 `write` / `attachment`
-    的失败记录（日志里没有正文或原始字节，只能重新提交导入），以及 `add_skill` 的索引失败
-    （`SkillService` 目前不写对账记录）。跨进程共享同一数据根时追加与重写没有互斥，v1 不支持
-    这种部署。清理与并发语义见架构文档 §10.6。
+    目标 URI 已删除视为已解决，坏行记 warn 后丢弃。会写记录的写入点是 `add_resource` /
+    `add_skill` 的批量索引、`IndexObserver` 的单文件索引行与移动后的目标子树（都只记文件），
+    以及这三条写路径的权限物化失败（观察者同时覆盖节点自己、祖先目录与删除后的父目录）。
+    仍然修不了的是：
+
+    - `write` / `attachment` 的失败记录：日志里没有正文或原始字节，只能重新提交导入；
+    - 索引**删除**失败（删除节点、移动时清理源前缀）：重放器按磁盘现状补齐，没有「删掉一条
+      过期索引行」这个动作，因此只记日志，过期行要靠 `pnpm reindex` 全量重建；
+    - 观察者读盘失败（连索引记录都构造不出来）与目录型节点的索引行（重放器只按文件重建）；
+    - 摘要生成的 L0 / L1 索引行：失败抛给提交步骤重试或由观察者记日志，不进对账——两行都从
+      磁盘的 `.abstract.md` / `.overview.md` 重建，最终失败用 `pnpm reindex` 补齐，不需要为它
+      新增一种记录。
+
+    跨进程共享同一数据根时追加与重写没有互斥，v1 不支持这种部署。每类失败记什么、不记
+    什么以及原因，见架构文档 §10.6「索引双写补偿」。
 9. **跨设备 `move` 的 EXDEV 分支没有自动化测试。** 两端都在同一个 `mkdtemp` 里，不 mock
     `node:fs` 构造不出来。为一条几乎走不到的分支给生产类加可注入接缝，成本大于收益。
 10. **`download` 的签名密钥是进程级随机值。** 10 分钟过期，**重启即失效**。单机部署可接受；
@@ -1861,7 +1951,8 @@ COMEM_SERVER_PORT=8080 pnpm dev
     数量级。上游修复后可以简化。
 
 16. **导入的会话把来源记在游标表，不是 `.meta.json`。** `SessionMeta` 没有 `source`
-    字段，`metadata-file.ts` 读回时也会丢弃未知字段。`ingest_cursor` 的
+    字段，`metadata-file.ts` 读回的类型化视图不含未知字段（文件里仍原样保留）。
+    `ingest_cursor` 的
     `(harness, native_session_id, session_uri)` 是唯一可追溯来源的地方。要在
     `.meta.json` 里直接看到来源，需要先扩 `SessionMeta`。
 
@@ -1931,7 +2022,9 @@ COMEM_SERVER_PORT=8080 pnpm dev
     阶段会自己先跑一遍 `pnpm lint && pnpm test && pnpm test:integrations`）。
 
 26. **模型用量没有 `purpose` 维度，成本累计是下界。** `/metrics` 只有
-    `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`，数据源是
+    `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`（没配
+    `providers.llm.default.pricing` 时这条序列根本不存在，另输出
+    `comem_llm_pricing_configured 0` 说明原因），数据源是
     `LlmService` 的一份进程级累加器：`LlmService` 没有 `purpose` 概念，调用方不传用途，
     重启即清零。`comem_llm_calls_total`、`comem_llm_duration_seconds`、
     `comem_llm_errors_total` 也没有实现（§17.4）。另外 `generateJson` 只累加调用次数，
@@ -1939,19 +2032,33 @@ COMEM_SERVER_PORT=8080 pnpm dev
     记忆合并与查询改写走的都是这条路径，所以成本累计低于实际。要按用途归因，得先让
     每次调用带用途标签。
 
-27. **`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/stats.ts` 只有
-    `GET /stats/memories`；单会话的归档次数、消息数、抽取计数、召回 / 提交 P50 与
-    Hook 开销既没有端点，也没有数据来源：`request_log` 没有会话列，`phases` 恒为
-    NULL（没有 HTTP 路由调用 `phase()`）。文档与控制台按「未实现」表述；要落地得先
-    让请求带上会话标识并给阶段计时，再定 P50 的样本窗口（§17.5）。
+27. **`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/` 里没有 `stats.ts`，
+    也没有 `/stats/memories`；单会话的归档次数、消息数、抽取计数、召回 / 提交 P50 与
+    Hook 开销既没有端点，也没有数据来源：`request_log` 没有会话列，`phases` 只由
+    `phase()` 写入 `recall`（`/search/find`、`/search/search`）与 `capture`
+    （`POST /sessions/{id}/messages`）两段，其余请求是空的，也串不到某个会话上。
+    文档与控制台按「未实现」表述；要落地得先让请求带上会话标识、补齐阶段计时，再定
+    P50 的样本窗口（架构文档 §17.5）。
 
-28. **HTTP 的 `POST /search/*` 没有工具级上限。** 30 秒硬上限只在 MCP 工具层
-    （`src/api/mcp/deadline.ts` 的 `MCP_TOOL_DEADLINE_MS`），`/search/find`、
-    `/search/search`、`/search/grep`、`/search/glob` 只受 `providers.*.timeoutSeconds`
-    约束——那个值只校验正数，写 3600 就真的等 3600 秒。Hook 侧每个事件有墙钟总预算
-    （1–30 秒，见 `docs/architecture.md` §15.9），预算内每次 HTTP 尝试另有 5 秒的
-    `timeoutMs`；**直连 HTTP 的客户端没有这两层**，要自己设超时。服务端不会
-    替调用方放弃：一次慢检索会一直占着那条连接直到供应商回包或触发 `timeoutSeconds`。
+28. **30 秒总上限只覆盖 MCP 的 16 个工具与 HTTP 检索的两条路由（三条调用路径）。** 常量是
+    `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`，两侧共用；到点后 MCP
+    返回 `isError` 文本 `TOOL_DEADLINE_EXCEEDED: …`，HTTP 返回 503
+    `PROVIDER_UNAVAILABLE`（`details.reason = 'deadline_exceeded'`，架构文档 §13.3）。
+    30 秒是推导值：28 秒上游预算（意图分析 10 + 嵌入 6 + 重排 12）+ 2 秒本地余量。
+    三条路径是 `/search/find`、`/search/search` 的 `mode=list` 与 `mode=context`。
+
+    **`POST /search/grep`、`/search/glob` 与 fs / read / list / tree 等纯本地端点有意
+    不设时间上限。** 三条理由：30 秒是上面的推导值，套给纯本地操作就是「一个数字两套
+    来源」；grep 的代价只有结构性上界（`GREP_CANDIDATE_LIMIT = 200` 个候选文件），不是
+    时间上界，同一个常数对它们没有意义；风险方向是「HTTP 更宽松」而不是相反——MCP
+    同步阻塞宿主 agent，所以先收紧，HTTP 的 grep / glob 只被控制台与脚本调用，而 Hook
+    的召回走 `/search/find`，已经在闸门下。
+
+    **用户可观察的后果**：大库加慢盘时，同一个能力会在 MCP 侧 30 秒返回错误、在 HTTP
+    侧继续等待。`providers.*.timeoutSeconds` 仍然只校验正数（写 3600 就真的等 3600
+    秒），而 `LlmOptions` / `EmbeddingOptions` / `RerankOptions` 的 `timeoutMs` 只是
+    上限，不能把配置放宽（§19）。Hook 侧另有每个事件的墙钟总预算（1–30 秒，见
+    `docs/architecture.md` §15.9），预算内每次 HTTP 尝试再取 `min(5 秒, 剩余预算)`。
 
 29. **`SessionEnd` 用「这次提交可能放弃」换宿主的 1.5 秒共享预算。** 它的总预算是
     `SESSION_END_BUDGET_MS = 1200`（`integrations/lib/lifecycle.mjs`），而
@@ -1961,3 +2068,39 @@ COMEM_SERVER_PORT=8080 pnpm dev
     前进，下一次 `Stop` / `PreCompact` 会把同一批消息重投（§15.4「宁可重复不能丢」）。
     把等锁降到 1.2 秒以内只会把放弃点从硬上限挪到等锁超时（`HOOK_LOCK_TIMEOUT`），
     结果同样是这次提交不做；当前保留较长的一侧，是因为正常争用时更愿意等。
+
+30. **HTTP 与 MCP 的默认检索范围不一样。** MCP 的 `find` / `search` 不带 `targetUri` 时读
+    `readScopes`：个人根 + 所有可读的组根（`src/api/mcp/registry.ts`）。HTTP 的
+    `/search/find` 与 `/search/search` 不带 `scopeUri` 时只查当前身份自己的根
+    （`scopeOfSubject(context.subject)`）。同一句查询在两个入口能看到的范围不同；要从
+    HTTP 覆盖组根，调用方必须显式传 `scopeUri`。`grep` / `glob` 不受影响——它们必须
+    传一个具体 `uri`。
+
+31. **`POST /resources/temp-upload` 与 `POST /telemetry/hook` 只校验身份，没有目标授权。**
+    前者把原始字节写进 `_meta/tmp/`（请求体是 `application/octet-stream` 原始字节，不是
+    multipart；`x-file-name` 头给文件名；单文件上限 50MB，超了 `RESOURCE_EXHAUSTED`），
+    任何已认证身份都能写；后者记录 Hook 开销指标，同样任何已认证身份都能调。两者的落点
+    都不在 `comem://` 节点上，没有可求权的目标。滥用面是「占满 24 小时暂存」与「污染
+    指标」；暂存由调度器按 24 小时清理（见「后台调度器」的已知限制）。
+
+32. **`GET /health` 不需要认证，会回绑定主体与它的可读根。** 响应里的 `subject` 与
+    `scopes` 是给控制台做身份引导用的（架构文档 §16）；单用户部署里未认证就能读到部署者
+    身份与命名空间列表。多用户部署下它仍然只回 `server.subject` 那一个主体的信息，不回
+    任何用户数据。
+
+33. **同一个 `dataDir` 只支持一个服务端进程。** 会话的累计消息数（轮次时钟）与消息幂等
+    索引都是进程内缓存，两个进程写同一个数据根会漏计已归档消息，跨轮去重窗口随之算错
+    （`src/services/session.ts` 的 `totalMessageCount` 注释）；`_meta/reconcile.log` 的追加
+    队列也只在进程内串行（架构文档 §10.6）。多实例部署要给每个实例独立的数据根，或在前
+    置层保证同一时刻只有一个写者。
+
+34. **启动时的向量缺失扫描是线性的。** `retrieval.engine` 含向量且配了 embedding 时，
+    `main.ts` 的 `warnIfVectorsMissing` 调 `hasDocumentsMissingVectors`
+    （`src/commands/reindex.ts`）：对每个 document 行做一次 `NOT EXISTS` 子查询，命中第一
+    条缺失就返回，全部都有向量时要扫完全表。它在开始监听之前跑，库越大启动越慢；扫描只
+    提醒、不修复，补齐靠 `pnpm reindex`。
+
+35. **`telemetry.metrics.includeAccountLabel` 打开后序列数按账号数放大。**
+    `comem_http_request_duration_seconds` 从一条全局序列变成每账号一条（`account` 标签，
+    未认证请求归 `anonymous`），条数随账号数线性增长，Prometheus 侧的存储与查询成本随之
+    上升。单账号部署默认关闭是对的；多账号环境打开前先确认抓取端能承受。

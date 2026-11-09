@@ -46,7 +46,7 @@
             <div class="seg">
               <button class="is-active">全部</button>
               <button>open</button>
-              <button>committed</button>
+              <button>archived</button>
             </div>
           </div>
           <table class="tbl">
@@ -66,7 +66,7 @@
                 <td class="mono strong">session_7c1a</td>
                 <td>重构检索管线的缓存层</td>
                 <td class="num">42</td>
-                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td><span class="status done"><span class="dot"></span>archived</span></td>
                 <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_002</td>
                 <td class="hint mono" style="font-size:10.5px">22:31</td>
                 <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
@@ -75,7 +75,7 @@
                 <td class="mono strong">session_5b09</td>
                 <td>清理 workspace 依赖</td>
                 <td class="num">18</td>
-                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td><span class="status done"><span class="dot"></span>archived</span></td>
                 <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_001</td>
                 <td class="hint mono" style="font-size:10.5px">19:12</td>
                 <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
@@ -84,7 +84,7 @@
                 <td class="mono strong">session_3a77</td>
                 <td>修复 flaky 测试</td>
                 <td class="num">64</td>
-                <td><span class="status done"><span class="dot"></span>committed</span></td>
+                <td><span class="status done"><span class="dot"></span>archived</span></td>
                 <td class="mono" style="font-size:11px;color:var(--ink-3)">archive_001</td>
                 <td class="hint mono" style="font-size:10.5px">昨天</td>
                 <td><button class="btn btn-sm btn-ghost" data-view>查看</button></td>
@@ -205,7 +205,7 @@ const TASKS = [
 
 const ARCHIVES = [
   {
-    id: 'archive_002', at: '2026-11-07 22:31:04', messages: 128, status: 'done',
+    id: 'archive_002', at: '2026-11-07 22:31:04', messages: 128, status: 'ready',
     changes: [
       { type: '经验', n: 1, tone: 'accent' },
       { type: '规则', n: 1, tone: 'info' },
@@ -214,7 +214,7 @@ const ARCHIVES = [
     tasks: '3 / 3 完成'
   },
   {
-    id: 'archive_001', at: '2026-11-07 19:12:38', messages: 86, status: 'failed',
+    id: 'archive_001', at: '2026-11-07 19:12:38', messages: 86, status: 'ready',
     changes: [
       { type: '经验', n: 2, tone: 'accent' },
       { type: '规则', n: 1, tone: 'info' }
@@ -287,7 +287,7 @@ function renderArchives() {
     <div style="padding:13px 14px;border-bottom:1px solid var(--line)">
       <div style="display:flex;align-items:center;gap:9px">
         <span class="mono" style="font-size:12.5px;color:var(--ink);font-weight:500">${a.id}</span>
-        <span class="badge ${a.status === 'done' ? 'badge-ok' : 'badge-err'}">${a.status}</span>
+        <span class="badge ${a.status === 'ready' ? 'badge-ok' : 'badge-info'}">${a.status}</span>
         <span class="spacer" style="flex:1"></span>
         <span class="hint mono" style="font-size:10px">${a.at}</span>
       </div>
