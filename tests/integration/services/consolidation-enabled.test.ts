@@ -148,7 +148,13 @@ describe('memory.consolidation.enabled = true（container → HTTP 端点）', (
       subject: 'user:local',
       principals: PRINCIPALS,
     });
-    expect(remaining.map((uri) => uri.toString()).sort()).toEqual([CODE_STYLE, EDITOR].sort());
+    // `.history` 里是覆盖写的版本快照（W98）：`glob` 能看到它，但它不是「一条记忆」。
+    expect(
+      remaining
+        .map((uri) => uri.toString())
+        .filter((uri) => !uri.includes('/.history/'))
+        .sort(),
+    ).toEqual([CODE_STYLE, EDITOR].sort());
 
     // 真的调过模型：没有这条，「端点 200」也可能来自一次空操作。
     expect(llm.requests.length).toBeGreaterThan(0);

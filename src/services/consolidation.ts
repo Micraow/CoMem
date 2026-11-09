@@ -67,6 +67,7 @@
 import { z } from 'zod';
 import type { ZodType } from 'zod';
 
+import type { ContentStore } from '../adapters/fs/content-store.js';
 import {
   resolveMemoryTarget,
   validateOperations,
@@ -88,6 +89,18 @@ import type { SearchService } from './search.js';
 
 export interface ConsolidationServiceDeps {
   readonly memory: Pick<MemoryService, 'read' | 'upsertMemory' | 'remove'>;
+  /**
+   * 文件系统层面的存在性判断（`ContentStore.stat` 的 `Pick`）：按**路径**看磁盘上
+   * 有没有东西、是文件还是目录，不解析 frontmatter，也不求权。
+   *
+   * 为什么不是 `FileSystemService.stat`：它的签名要 `principals`，且先 `assert` 再
+   * 看磁盘；物化权限行只对真实存在的节点生成，所以对**不存在的路径**它会抛
+   * `PERMISSION_DENIED`。拿它判断「路径空着」就必须吞掉一个真实的权限错误，而
+   * 「权限被拒」与「不存在」是两种不同的结论。`MemoryService` 的文件系统端口
+   * （`MemoryServicePorts['filesystem'].stat`，装配见 container 的 `rawFilesystem`）
+   * 用的就是同一个方法，这里收窄到只取 `stat`。
+   */
+  readonly stat: Pick<ContentStore, 'stat'>;
   /**
    * 枚举 scope 下记忆文件的检索端口。
    *
@@ -177,6 +190,16 @@ const SUMMARY_CHARS = 200;
 
 /** scope 下放记忆的目录（§6.5）。 */
 const MEMORIES_DIRECTORY = 'memories';
+
+/**
+ * 版本快照所在的隐藏目录（`memories/{type}/.history/`，W98）。
+ *
+ * 与 `MemoryService` 的 `HISTORY_DIRECTORY` 是同一个目录名，但**不复用它**：那个
+ * 常量是记忆服务的内部实现（写入方的约定），导出来会把「合并服务不许把版本当记忆」
+ * 这条判断绑到写入方的私有结构上。名字在这里各写一份，漂移时的表现是清单里又出现
+ * 版本文件（本文件的测试会红），不是静默地删掉一份版本。
+ */
+const HISTORY_DIRECTORY = '.history';
 
 /** 记忆文件的扩展名。与 `MemoryService` 写入的形状一致。 */
 const GLOB_PATTERN = '**/*.md';
@@ -383,12 +406,24 @@ function compareByUri(left: WritePlan, right: WritePlan): number {
 }
 
 /**
+ * 版本快照不是记忆：路径段里出现 `.history` 就是一份旧值（W98）。
+ *
+ * 判定按**段**而不是子串：`memories/preferences/.history/` 是 W98 写入的位置，
+ * 而 `.history.md` 这样的文件名是普通记忆（`identity` 可以是 `.history`），按
+ * `includes('/.history/')` 判会把它一起漏掉。
+ */
+function isVersionFile(uri: Uri): boolean {
+  return uri.segments.includes(HISTORY_DIRECTORY);
+}
+
+/**
  * 记忆合并服务。
  *
  * **这是破坏性操作**（会 `delete`）。调用方必须先确认。
  */
 export class ConsolidationService {
   readonly #memory: ConsolidationServiceDeps['memory'];
+  readonly #stat: ConsolidationServiceDeps['stat'];
   readonly #search: ConsolidationServiceDeps['search'];
   readonly #llm: ConsolidationServiceDeps['llm'];
   readonly #logger: Logger;
@@ -396,6 +431,7 @@ export class ConsolidationService {
 
   constructor(deps: ConsolidationServiceDeps) {
     this.#memory = deps.memory;
+    this.#stat = deps.stat;
     this.#search = deps.search;
     this.#llm = deps.llm;
     this.#logger = deps.logger;
@@ -644,7 +680,20 @@ export class ConsolidationService {
     const all = new Set<string>();
     for (const value of [...uris].sort()) {
       const uri = Uri.tryParse(value);
-      if (uri === null) {
+      if (uri === null || isVersionFile(uri)) {
+        // 版本文件是**已经失效的旧值**（W98）：`status` 仍是 `active`，靠 `valid_until`
+        // 才和当前值区分开。合并清单问的是「当前有哪些记忆」，所以它不进候选清单
+        // （`candidates`），也就不会被模型当成一条可以 `delete` 的记忆（删掉一份版本
+        // 就掐断了 `supersedes` 链）。
+        //
+        // 但版本文件**占用 `glob` 的返回名额**：`limit: INVENTORY_LIMIT` 是
+        // `SearchService.glob` 查询本身的参数，按路径段过滤发生在它返回之后（下面的
+        // `continue`），所以 `uris` 里确实混着版本文件。占用有上界——写入时每个
+        // identity 只保留最新 `MAX_VERSIONS = 5` 份（`MemoryService` 的截断）。
+        //
+        // 检索面看不到版本文件是因为 `find` / `search` 带 `asOf`（`node.valid_until`
+        // 过滤）；`glob` 是路径工具，契约是磁盘，没有 `asOf`。不给 `SearchService.glob`
+        // 加这个参数（那会改检索层的公开签名，影响面比这条缺陷大），在路径段上排除。
         continue;
       }
       const record = await this.#memory.read(uri);
@@ -695,6 +744,24 @@ export class ConsolidationService {
 
     for (const operation of operations) {
       const uri = Uri.parse(operation.uri);
+      // 版本是 `supersedes` 链上的旧值（W98），删掉一份就断链。但这条守卫不改变
+      // 任何成功/失败结果，只改变 `add` 的拒绝理由：
+      //
+      // - `delete` / `update` 的版本 URI 到不了这里：`validateOperations` 先用
+      //   `inventory.uris`（`all`，已排除版本文件）判「指向的记忆不存在」，整批在
+      //   `#plan` 之前就拒绝了；
+      // - `add` 的版本 URI 能到这里（`add` 不要求路径出现在清单里）。不过即使删掉
+      //   这条守卫，`resolveMemoryTarget` 也会返回 null——版本相对路径比记忆类型的
+      //   文件名模板多一段 `.history`——同样整批失败；
+      // - 所以保留它的唯一理由是 `add` 的拒绝文案：说「是记忆的版本文件」比说
+      //   「不在任何记忆类型的目录下」更能让人看清错在哪。
+      if (isVersionFile(uri)) {
+        throw new ComemError(
+          'INVALID_ARGUMENT',
+          `${operation.uri} 是记忆的版本文件（.history 下的旧值快照），版本文件不参与合并；请改为对规范路径操作。`,
+          { uri: operation.uri, kind: operation.kind },
+        );
+      }
       if (operation.kind === 'delete') {
         // 记录在这里读到，来源也跟着取走：删除之后磁盘上只剩它的归档历史。
         const record = this.#assertActive(await this.#requireRecord(operation.uri, uri));
@@ -751,6 +818,25 @@ export class ConsolidationService {
             'INVALID_ARGUMENT',
             `记忆 ${operation.uri} 已存在（status=${existing.status}），add 会覆盖它：pending 还在复核（§11.6），archived 已被 TTL 归档（§11.7）。`,
             { uri: operation.uri, status: existing.status },
+          );
+        }
+        // 记忆语义的 `read` 返回 `null` 不等于「路径空着」：`#readDocument` 把「路径
+        // 存在但不是可解析的记忆」也算成 `null`（没有 frontmatter、或 frontmatter 缺
+        // `memory_type`）。`memories/` 下的文件是**人可以直接编辑**的，用户完全可能
+        // 在那里放手写笔记；`write` / `edit` 也能建普通文件。写盘阶段的
+        // `upsertMemory` 用同一套记忆语义判「新建」，所以这里不按文件系统复查一次的
+        // 话，那份文件会被静默换成一条记忆，同批的 delete 还已经生效。
+        //
+        // 只看 `kind === 'file'`：目录占位走原来的 `EISDIR`（`memory.read` 在解析
+        // 之前就会因读目录失败而抛 `INVALID_ARGUMENT`），不是这条要拦的「文件」。
+        // `ContentStore.stat` 跟随符号链接，所以指向普通文件的链接在这里也被当成文件
+        // 拦下——替换链接本身同样是丢数据。
+        const path = await this.#stat.stat(uri);
+        if (path !== null && path.kind === 'file') {
+          throw new ComemError(
+            'INVALID_ARGUMENT',
+            `${operation.uri} 已被一份非记忆文件占用（缺少 frontmatter 或 memory_type），add 会覆盖它；先移走那个文件，或换一个路径。`,
+            { uri: operation.uri, kind: path.kind },
           );
         }
         const values = { ...target.identity, [CONTENT_FIELD]: operation.content };
