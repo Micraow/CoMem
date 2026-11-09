@@ -242,7 +242,7 @@ export class RecallLedger {
   }
 
   /** 读账本；文件不存在返回空账本。损坏的账本按空处理（只记 warn）。 */
-  async load(scopeKey: string): Promise<RecallLedgerData> {
+  async #load(scopeKey: string): Promise<RecallLedgerData> {
     const key = assertScopeKey(scopeKey);
     const text = await this.#store.read(this.#pathOf(key));
     if (text === null) {
@@ -263,7 +263,7 @@ export class RecallLedger {
   }
 
   /** 写账本。原子性由 `LedgerStore` 实现保证。 */
-  async save(scopeKey: string, data: RecallLedgerData): Promise<void> {
+  async #save(scopeKey: string, data: RecallLedgerData): Promise<void> {
     const key = assertScopeKey(scopeKey);
     await this.#store.write(this.#pathOf(key), `${JSON.stringify(data, null, 2)}\n`);
   }
@@ -305,7 +305,7 @@ export class RecallLedger {
     assertTurn(turn);
     const { dedupTurns, maxEntries } = resolveOptions(options);
 
-    const current = await this.load(key);
+    const current = await this.#load(key);
     const cutoff = turn - PRUNE_TURN_FACTOR * dedupTurns;
     const kept = current.entries.filter((entry) => entry.turn > cutoff);
 
@@ -322,7 +322,7 @@ export class RecallLedger {
     const merged = [...kept, ...delivered].sort((a, b) => a.turn - b.turn);
     const capped = merged.length > maxEntries ? merged.slice(merged.length - maxEntries) : merged;
 
-    await this.save(key, { version: 1, entries: capped });
+    await this.#save(key, { version: 1, entries: capped });
   }
 
   /**
@@ -358,7 +358,7 @@ export class RecallLedger {
     assertTurn(turn);
     const { dedupTurns } = resolveOptions(options);
 
-    const data = await this.load(key);
+    const data = await this.#load(key);
     const windowStart = turn - dedupTurns;
     return new Set(
       data.entries

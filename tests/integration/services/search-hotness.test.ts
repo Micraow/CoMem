@@ -93,6 +93,8 @@ interface FakeHit {
   readonly score: number;
   readonly level?: Level;
   readonly contextType?: ContextType;
+  /** L0 摘要。组装按它算 token 成本，`context` 用例用它制造预算截断。 */
+  readonly abstract?: string | null;
 }
 
 /** 假索引：分数由用例写死，`#rank` 只做层级加权（L2 权重 1.0，分数原样保留）。 */
@@ -100,7 +102,7 @@ function fakeIndex(entries: readonly FakeHit[]): RetrievalIndex {
   const hits: SearchHit[] = entries.map((entry) => ({
     uri: entry.uri,
     level: entry.level ?? 'L2',
-    abstract: null,
+    abstract: entry.abstract ?? null,
     score: entry.score,
     contextType: entry.contextType ?? 'memory',
     memoryType: null,
@@ -142,6 +144,8 @@ interface HotnessOptions {
   readonly halfLifeHours?: number;
   readonly accessStats?: SearchServiceDeps['accessStats'];
   readonly recordAccess?: SearchServiceDeps['recordAccess'];
+  /** `retrieval.assembly.maxTokens` 覆盖。`context` 用例用小预算制造截断。 */
+  readonly maxTokens?: number;
 }
 
 function createService(index: RetrievalIndex, hotness: HotnessOptions = {}): SearchService {
@@ -165,7 +169,10 @@ function createService(index: RetrievalIndex, hotness: HotnessOptions = {}): Sea
     authorizer,
     assembler,
     logger,
-    config: CONFIG,
+    config:
+      hotness.maxTokens === undefined
+        ? CONFIG
+        : { ...CONFIG, assembly: { ...CONFIG.assembly, maxTokens: hotness.maxTokens } },
     engine: 'fts5',
     // 必填依赖：测试显式传默认值（`telemetry.hotness.*` 的 schema 默认值）。
     hotnessWeight: hotness.weight ?? 0,
@@ -174,7 +181,6 @@ function createService(index: RetrievalIndex, hotness: HotnessOptions = {}): Sea
     recordAccess: hotness.recordAccess,
   });
 }
-
 function findOptions(overrides: Partial<FindOptions> = {}): FindOptions {
   return { scopes: [SCOPE], subject: 'user:alice', principals: PRINCIPALS, ...overrides };
 }
@@ -182,7 +188,7 @@ function findOptions(overrides: Partial<FindOptions> = {}): FindOptions {
 describe('weight = 0（默认）', () => {
   const DOC = 'comem://user/alice/mem/design.md';
 
-  it('hotness 恒为 null，accessStats / recordAccess 一次都不调', async () => {
+  it('hotness 恒为 null，accessStats 不调，但访问仍然照记', async () => {
     seedAccess([DOC], new Date());
     const accessStats = vi.fn(() => []);
     const recordAccess = vi.fn();
@@ -196,12 +202,13 @@ describe('weight = 0（默认）', () => {
     expect(hits.map((hit) => hit.hotness)).toEqual([null]);
     // 分数与接线前逐字一致：没有乘任何系数。
     expect(hits.map((hit) => hit.score)).toEqual([0.5]);
+    // 权重只决定热度要不要进排序，不决定「命中算不算一次使用」：
+    // `last_accessed_at` 还是 TTL 滑动窗口的判据（§11.7）。
     expect(accessStats).not.toHaveBeenCalled();
-    // 默认路径不承担写放大。
-    expect(recordAccess).not.toHaveBeenCalled();
+    expect(recordAccess).toHaveBeenCalledWith([DOC]);
   });
 
-  it('weight = 0 时同样不查库（默认值就是 0）', async () => {
+  it('weight = 0 时同样不查访问统计（默认值就是 0）', async () => {
     seedAccess([DOC], new Date());
     const accessStats = vi.fn(() => []);
 
@@ -209,6 +216,15 @@ describe('weight = 0（默认）', () => {
     await service.find('记忆', findOptions());
 
     expect(accessStats).not.toHaveBeenCalled();
+  });
+
+  it('没有命中时一次访问都不记', async () => {
+    const recordAccess = vi.fn();
+
+    const service = createService(fakeIndex([]), { recordAccess });
+    await expect(service.find('记忆', findOptions())).resolves.toEqual([]);
+
+    expect(recordAccess).not.toHaveBeenCalled();
   });
 });
 
@@ -406,6 +422,100 @@ describe('构造期校验', () => {
     expect(() => createService(fakeIndex([]), { weight: -1 })).toThrowError(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
     );
+  });
+});
+
+/**
+ * 「使用」= 进入了调用方的上下文（架构文档 §11.7）。
+ *
+ * 同一份 6 条命中，三条路径的交付物不同，记账集合也必须不同：
+ *
+ * | 路径 | 交付物 | 该记的集合 |
+ * |---|---|---|
+ * | `find` | 命中列表（列表本身就是交付物） | 全部返回的命中 |
+ * | `search` `mode=list` | 合并去重后的命中列表 | 合并去重后的全部命中 |
+ * | `search` `mode=context` | 组装后的注入块 | `AssemblyResult.items`（被预算截断的不在） |
+ *
+ * `mode=context` 曾经经过 `findWithDiagnostics`，在组装之前就把候选集全记了一遍：
+ * 一条宽泛查询能把一大批从未注入的记忆窗口推后。这一组用同一个 fixture 把三条路径
+ * 并排钉住——只有 `context` 的那条会红。
+ */
+describe('「使用」= 进入调用方上下文（§11.7）', () => {
+  const URIS = Array.from(
+    { length: 6 },
+    (_, index) => `comem://user/alice/mem/m${index + 1}.md`,
+  );
+  /** 30 天前的一次访问：被截断的条目必须停在这个值上。 */
+  const OLD_ACCESS = new Date(Date.now() - 30 * 24 * HOUR_MS);
+
+  /**
+   * 6 条命中，摘要各不相同（摘要逐字相同会被 §8.6 第 3 步按渲染正文去重，
+   * 那样「被截断」和「被去重」就分不开了）。摘要足够长，`maxTokens` 才有东西可截。
+   */
+  function sixHits(): FakeHit[] {
+    return URIS.map((uri, index) => ({
+      uri,
+      score: URIS.length - index,
+      abstract: `第 ${index + 1} 条摘要：${'长'.repeat(200)}`,
+    }));
+  }
+
+  it('mode=context 只记注入的条目：被组装丢弃的 last_accessed_at 不变', async () => {
+    seedAccess(URIS, OLD_ACCESS);
+    const recordAccess = vi.fn((uris: readonly string[]) => nodes.recordAccess(uris, new Date()));
+    // 6 条候选活下来 3 条：`coding` 预设给 memory 3 条配额（§8.6 第 4 步），
+    // 600 token 只够 1 条摘要、另外 2 条降到「只剩 URI」。配额与预算丢弃都算没进上下文。
+    const service = createService(fakeIndex(sixHits()), { recordAccess, maxTokens: 600 });
+
+    const result = await service.context('记忆', { ...findOptions(), limit: 10 });
+
+    // 6 条候选进组装，注入与丢弃都要有——只测到「全注入」或「全丢弃」都没意义。
+    expect(result.items.length + result.dropped).toBe(URIS.length);
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.dropped).toBeGreaterThan(0);
+
+    const injected = result.items.map((item) => item.uri);
+    const truncated = URIS.filter((uri) => !injected.includes(uri));
+
+    // 记的集合就是组装保留下来的集合：被截断的 URI 一个都不出现。
+    const recorded = [...new Set(recordAccess.mock.calls.flatMap((call) => call[0] ?? []))];
+    expect(recorded).toEqual(injected);
+    expect(recordAccess).toHaveBeenCalledTimes(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stats = new Map(
+      nodes.readAccessStats(URIS).map((row) => [row.uri, row.lastAccessedAt]),
+    );
+    for (const uri of injected) {
+      expect(stats.get(uri)).not.toBe(OLD_ACCESS.toISOString());
+    }
+    for (const uri of truncated) {
+      expect(stats.get(uri)).toBe(OLD_ACCESS.toISOString());
+    }
+    // 两组的真实值不同，而不只是「一个非空」。
+    expect(stats.get(injected[0] ?? '')).not.toBe(stats.get(truncated[0] ?? ''));
+  });
+
+  it('find 仍然记录全部返回的命中（列表本身就是交付物）', async () => {
+    const recordAccess = vi.fn();
+    const service = createService(fakeIndex(sixHits()), { recordAccess });
+
+    const hits = await service.find('记忆', findOptions({ limit: 10 }));
+
+    expect(hits).toHaveLength(URIS.length);
+    expect(recordAccess).toHaveBeenCalledTimes(1);
+    expect(recordAccess.mock.calls[0]?.[0]).toEqual(hits.map((hit) => hit.uri));
+  });
+
+  it('search mode=list 仍然记录合并去重后的全部命中', async () => {
+    const recordAccess = vi.fn();
+    const service = createService(fakeIndex(sixHits()), { recordAccess });
+
+    const result = await service.search('记忆', findOptions({ limit: 10 }));
+
+    expect(result.hits).toHaveLength(URIS.length);
+    expect(recordAccess).toHaveBeenCalledTimes(1);
+    expect(recordAccess.mock.calls[0]?.[0]).toEqual(result.hits.map((hit) => hit.uri));
   });
 });
 

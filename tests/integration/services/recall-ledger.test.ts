@@ -12,6 +12,7 @@ import {
 } from '../../../src/services/recall-ledger.js';
 import type {
   LedgerStore,
+  RecallLedgerData,
   RecallLedgerOptions,
 } from '../../../src/services/recall-ledger.js';
 
@@ -78,6 +79,15 @@ function ledgerPath(scopeKey: string): string {
   return join(DATA_DIR, '_meta', 'recall', `${scopeKey}.recall_log.json`);
 }
 
+/** 直接读仓储写下的 JSON。`load` 是私有实现，断言内部状态只能看文件。 */
+function readLedger(store: MemoryLedgerStore, scopeKey = SCOPE): RecallLedgerData {
+  const raw = store.files.get(ledgerPath(scopeKey));
+  if (raw === undefined) {
+    throw new Error(`账本不存在：${ledgerPath(scopeKey)}`);
+  }
+  return JSON.parse(raw) as RecallLedgerData;
+}
+
 function options(overrides: Partial<RecallLedgerOptions> = {}): RecallLedgerOptions {
   return { ...DEFAULT_RECALL_LEDGER_OPTIONS, ...overrides };
 }
@@ -89,11 +99,11 @@ describe('scopeKeyOf', () => {
   });
 });
 
-describe('RecallLedger.load', () => {
-  it('文件不存在时返回空账本', async () => {
+describe('RecallLedger 读取（经 recentlyDelivered）', () => {
+  it('文件不存在时按空账本处理', async () => {
     const { ledger, store } = createLedger();
 
-    await expect(ledger.load(SCOPE)).resolves.toEqual({ version: 1, entries: [] });
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
     expect(store.reads).toEqual([ledgerPath(SCOPE)]);
   });
 
@@ -101,7 +111,7 @@ describe('RecallLedger.load', () => {
     const { ledger, store, logger } = createLedger();
     store.files.set(ledgerPath(SCOPE), '{not json');
 
-    await expect(ledger.load(SCOPE)).resolves.toEqual({ version: 1, entries: [] });
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
     expect(logger.warnings).toHaveLength(1);
   });
 
@@ -109,7 +119,7 @@ describe('RecallLedger.load', () => {
     const { ledger, store, logger } = createLedger();
     store.files.set(ledgerPath(SCOPE), JSON.stringify({ version: 2, entries: [] }));
 
-    await expect(ledger.load(SCOPE)).resolves.toEqual({ version: 1, entries: [] });
+    expect(await ledger.recentlyDelivered(SCOPE, SESSION, 10, options())).toEqual(new Set());
     expect(logger.warnings).toHaveLength(1);
   });
 
@@ -117,45 +127,42 @@ describe('RecallLedger.load', () => {
     const { ledger, store } = createLedger();
 
     for (const unsafe of ['../evil', 'a/b', '..', '.hidden', 'user\u0000alice', '']) {
-      await expect(ledger.load(unsafe)).rejects.toBeInstanceOf(ComemError);
+      await expect(ledger.recentlyDelivered(unsafe, SESSION, 10, options())).rejects.toBeInstanceOf(
+        ComemError,
+      );
     }
     expect(store.reads).toEqual([]);
   });
 });
 
-describe('RecallLedger.save', () => {
-  it('写盘再读回是同一份账本', async () => {
+describe('RecallLedger 写盘（经 record）', () => {
+  it('写盘后文件内容是一份可读回的账本', async () => {
     const { ledger, store } = createLedger();
-    const data = {
-      version: 1 as const,
-      entries: [
-        {
-          uri: 'comem://user/alice/memories/m1',
-          sessionId: SESSION,
-          turn: 4,
-          detail: 'abstract' as const,
-        },
-      ],
+    const entry = {
+      uri: 'comem://user/alice/memories/m1',
+      sessionId: SESSION,
+      turn: 4,
+      detail: 'abstract' as const,
     };
 
-    await ledger.save(SCOPE, data);
+    await ledger.record(SCOPE, SESSION, 4, [{ uri: entry.uri, detail: entry.detail }], options());
 
     expect(store.writes).toEqual([ledgerPath(SCOPE)]);
-    await expect(ledger.load(SCOPE)).resolves.toEqual(data);
+    expect(readLedger(store)).toEqual({ version: 1, entries: [entry] });
   });
 
   it('拒绝不安全的 scopeKey', async () => {
     const { ledger } = createLedger();
 
     await expect(
-      ledger.save('../evil', { version: 1, entries: [] }),
+      ledger.record('../evil', SESSION, 1, [], options()),
     ).rejects.toBeInstanceOf(ComemError);
   });
 });
 
 describe('RecallLedger.record', () => {
   it('只记账真的给了正文的条目', async () => {
-    const { ledger } = createLedger();
+    const { ledger, store } = createLedger();
 
     await ledger.record(
       SCOPE,
@@ -169,7 +176,7 @@ describe('RecallLedger.record', () => {
       options(),
     );
 
-    const data = await ledger.load(SCOPE);
+    const data = readLedger(store);
     expect(data.entries).toEqual([
       { uri: 'comem://user/alice/memories/m1', sessionId: SESSION, turn: 3, detail: 'abstract' },
       { uri: 'comem://user/alice/memories/m3', sessionId: SESSION, turn: 3, detail: 'full' },
@@ -177,7 +184,7 @@ describe('RecallLedger.record', () => {
   });
 
   it('按 turn - 4 × dedupTurns 裁剪，更早的记录被丢弃', async () => {
-    const { ledger } = createLedger();
+    const { ledger, store } = createLedger();
 
     await ledger.record(
       SCOPE,
@@ -194,12 +201,12 @@ describe('RecallLedger.record', () => {
       options(),
     );
 
-    const data = await ledger.load(SCOPE);
+    const data = readLedger(store);
     expect(data.entries.map((entry) => entry.uri)).toEqual(['comem://user/alice/memories/new']);
   });
 
   it('按条数裁剪时保留最新的记录', async () => {
-    const { ledger } = createLedger();
+    const { ledger, store } = createLedger();
 
     for (const turn of [1, 2, 3, 4, 5, 6]) {
       await ledger.record(
@@ -211,7 +218,7 @@ describe('RecallLedger.record', () => {
       );
     }
 
-    const data = await ledger.load(SCOPE);
+    const data = readLedger(store);
     expect(data.entries.map((entry) => entry.turn)).toEqual([4, 5, 6]);
   });
 
@@ -353,7 +360,7 @@ describe('RecallLedger.remove', () => {
     await ledger.remove(SCOPE);
 
     expect(store.removals).toEqual([ledgerPath(SCOPE)]);
-    expect(await ledger.load(SCOPE)).toEqual({ version: 1, entries: [] });
+    expect(store.files.has(ledgerPath(SCOPE))).toBe(false);
     expect(await ledger.recentlyDelivered(SCOPE, SESSION, 4, options())).toEqual(new Set());
   });
 

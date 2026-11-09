@@ -224,8 +224,12 @@ export interface SearchServiceDeps {
   /**
    * 累加访问计数（`NodeRepository.recordAccess`）。
    *
-   * 只在 `hotnessWeight !== 0` 且真的返回了命中时调用，**不 await**（见
-   * `#recordHits`）。缺省时不记：只读部署没有热度数据源，写不进去也不该报错。
+   * **只要真的进入了调用方的上下文就调用，与 `hotnessWeight` 无关**：
+   * `last_accessed_at` 有两个读者——热度排序（`hotnessWeight` 控制）与 TTL 清扫的
+   * 滑动窗口（§11.7，没有开关）。按权重决定写不写，会让默认部署（`weight = 0`）的
+   * 检索命中对 TTL 不可见。`find` / `search` 记返回的命中，`mode=context` 记组装后
+   * 注入的条目；调用**不 await**（见 `#recordHits`）。缺省时不记：只读部署没有这个
+   * 写端口。
    */
   readonly recordAccess?: (uris: readonly string[]) => unknown;
 }
@@ -779,6 +783,10 @@ export class SearchService {
    * 给「降级必须可见」的出口用（MCP `find` / `rule_search`）。`find` 继续只返回
    * 命中：其它调用方（HTTP、Hook、`memory.search`）的输出契约里没有这一列，加了
    * 反而要改一圈协议。
+   *
+   * **这里记访问，`context` 不走这里。** 命中列表本身就是交付物，返回即算一次使用
+   * （§11.7）；`mode=context` 交付的是组装后的注入块，只该记活到最后的条目，
+   * 所以 `contextWithDiagnostics` 直接用 `#findWithOutcome`，在组装之后自己记。
    */
   async findWithDiagnostics(query: string, options: FindOptions): Promise<FindDiagnostics> {
     const outcome = await this.#findWithOutcome(query, options);
@@ -1533,12 +1541,17 @@ export class SearchService {
   /**
    * §8.6 的 `context` 变体：返回可直接注入模型的文本。
    *
-   * `find` → `AssemblyCandidate[]` →（可选）账本去重 → 组装 → 账本写回。
+   * `find` → `AssemblyCandidate[]` →（可选）账本去重 → 组装 → 账本写回 → 访问记账。
    *
    * `memoryType` 从索引透传：§8.6 的起始层级按记忆类型区分（`events` 从 L1 概览起，
    * 其余从 L0 摘要起）。少了这一列，事件类记忆会一律退化成一句话摘要。
    *
-   * 账本写回放在组装之后：只记**真的给了正文**的条目（§8.7 规则 1），只给 URI 的
+   * **访问记账放在组装之后，记的是 `AssemblyResult.items`。** 「使用」= 进入了调用方
+   * 的上下文（§11.7）。命中被预算截断、被配额挤掉、被同一渲染正文去重掉的条目不
+   * 在 `items` 里，它们没进调用方的上下文，所以不该记。这里不重新算一遍预算：预算
+   * 的唯一实现是 `assembleContext`，照着候选集再推一遍会立刻漂移。
+   *
+   * 账本写回也放在组装之后：只记**真的给了正文**的条目（§8.7 规则 1），只给 URI 的
    * 条目由 `RecallLedger.record` 自己跳过。
    */
   async context(query: string, options: ContextOptions): Promise<ContextAssembly> {
@@ -1551,6 +1564,9 @@ export class SearchService {
    *
    * 只返回组装结果时，向量不可用会表现为 `Context: 0 item(s)`——与「记忆里没有」
    * 无法区分。诊断列与 `findWithDiagnostics` 同一套来源，不另算一遍。
+   *
+   * **不走 `findWithDiagnostics`**：那个入口在返回命中时就记访问，而这里交给调用方
+   * 的是组装后的注入块。走它会让被截断的条目也记一次（§11.7）。
    */
   async contextWithDiagnostics(
     query: string,
@@ -1561,7 +1577,7 @@ export class SearchService {
     readonly rerankFailure: RerankFailure | null;
   }> {
     const startedAt = process.hrtime.bigint();
-    const retrieval = await this.findWithDiagnostics(query, options);
+    const retrieval = await this.#findWithOutcome(query, options);
     const hits = retrieval.hits;
     const candidates: AssemblyCandidate[] = hits.map((hit) => ({
       uri: hit.uri,
@@ -1579,6 +1595,10 @@ export class SearchService {
       excludedUris: await this.#excludedUris(clock),
     };
     const result = await this.#assembler.assemble(candidates, assembly, options.principals);
+    // 「使用」= 进入了调用方的上下文：只记组装保留下来的条目，被截断 / 被配额挤掉 /
+    // 被跨轮去重排除的都不在 `result.items` 里（§11.7）。集合由组装层给出，这里不
+    // 用候选再推一遍预算。
+    this.#recordHits(result.items);
     await this.#recordDelivered(clock, result.items);
 
     this.#logger.info('上下文组装完成', {
@@ -1586,6 +1606,7 @@ export class SearchService {
       queryLength: query.length,
       candidates: candidates.length,
       items: result.items.length,
+      dropped: result.dropped,
       tokensUsed: result.tokensUsed,
       durationMs: elapsedMs(startedAt),
     });
@@ -1949,20 +1970,28 @@ export class SearchService {
   }
 
   /**
-   * 把「这次真正返回给调用方的命中」记一次访问（§17.5 的热度输入）。
+   * 把「这次真正进入调用方上下文的条目」记一次访问（§11.7 的滑动窗口输入、§17.5
+   * 的热度输入）。**与 `hotnessWeight` 无关**：权重只决定热度要不要进排序，
+   * `last_accessed_at` 还决定 TTL 从什么时候起算。
    *
-   * **不 await**：一次查询 50 条就是 50 次 UPDATE（`recordAccess` 一个写事务）。
-   * 检索是只读路径，让调用方等写入会把它变成写路径；写失败只记 warn，不该让检索
-   * 失败——热度是治理指标，不是检索正确性的一部分。
+   * **入参是交付物，不是检索过程。** 两条形态各自的交付物不同：`find` /
+   * `mode=list` 交付命中列表（列表本身就是交付物），`mode=context` 交付组装后的
+   * 注入块（`AssemblyResult.items`）。后者不传候选集——被预算截断、被配额挤掉、
+   * 被跨轮去重排除的条目没有进入调用方的上下文，记了就是把从未被注入的记忆窗口
+   * 推后（滑动窗口退化成「被搜到过就永不过期」）。
    *
-   * **`weight === 0` 不写**：默认部署不承担写放大。`weight` 一旦为 0，热度本来
-   * 也不参与排序，记了没有任何读者。
+   * **不 await**：检索是只读路径，让调用方等写入会把它变成写路径；写失败只记 warn，
+   * 不该让检索失败——访问统计不是检索正确性的一部分。
    *
-   * 入参是最终返回的命中（已去重、已截断），不是候选集全集。
+   * **代价是「一个写事务」而不是「每条一个事务」**：`recordAccess` 对整批 URI 只
+   * `BEGIN IMMEDIATE` 一次、只预编译一条 `UPDATE`，50 条命中是 50 次 `run`。实测
+   * （Node 26.13 + `node:sqlite`，WAL 文件库，两次测量）50 条约 0.8–0.9 ms、200 条
+   * 约 1.2–1.3 ms（中位数，含提交）。同一 URI 在入参里先按 `Set` 去重，所以「5 条
+   * TypedQuery 命中同一条」只算一次访问。
    */
   #recordHits(hits: readonly { readonly uri: string }[]): void {
     const record = this.#recordAccess;
-    if (this.#hotnessWeight === 0 || record === undefined || hits.length === 0) {
+    if (record === undefined || hits.length === 0) {
       return;
     }
     const uris = [...new Set(hits.map((hit) => hit.uri))];

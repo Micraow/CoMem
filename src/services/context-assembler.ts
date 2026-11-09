@@ -56,8 +56,8 @@ const DEFAULT_READ_CONCURRENCY = 8;
  * 字符数 → token 数的默认估算：`Math.ceil(length / 4)`。
  *
  * 4：经验值，来源未知（英文约 4 字符/token 的常见估计）。中文按 1–2 字符/token，
- * 这个估算会**低估**中文预算，所以生产装配应该注入真实的 tokenizer（`domain/ranking.ts`
- * 的 `TokenEstimator` 就是为此留的注入点：不同模型的分词器不一样，领域层不硬编码）。
+ * 这个估算会**低估**中文预算，所以生产装配应该注入真实的 tokenizer（不同模型的分词器
+ * 不一样，领域层不硬编码）。
  */
 const CHARS_PER_TOKEN = 4;
 

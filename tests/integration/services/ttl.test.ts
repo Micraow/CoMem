@@ -24,10 +24,14 @@ import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
+import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import type { Logger } from '../../../src/domain/log.js';
+import type { IndexRecord } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { AllowAllAuthorizer } from '../../../src/services/authorizer.js';
+import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService, type NodeWriteObserver } from '../../../src/services/filesystem.js';
+import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
 import { TtlService } from '../../../src/services/ttl.js';
 
 const NOW = new Date('2026-11-08T00:00:00.000Z');
@@ -60,9 +64,44 @@ let db: DatabaseSync;
 let logger: Logger;
 let nodes: NodeRepository;
 let store: ContentStore;
+let metadata: MetadataFileStore;
 let fts: SqliteFtsIndex;
+let authorizer: AllowAllAuthorizer;
 let filesystem: FileSystemService;
 let ttl: TtlService;
+
+/** 检索所需的默认配置（与 `config/schema.ts` 的默认值一致）。 */
+const RETRIEVAL: RetrievalSettings = {
+  candidateMultiplier: 4,
+  levelWeights: { l0: 1.15, l1: 1.05, l2: 1 },
+  queryFilters: [],
+  assembly: { maxTokens: 1600, dedupTurns: 3, quotaPreset: 'coding' },
+};
+
+/** 生产默认配置下的检索服务：`telemetry.hotness.weight = 0`。 */
+function createSearch(hotnessWeight: number): SearchService {
+  const assembler = new ContextAssembler({
+    store,
+    metadata,
+    authorizer,
+    logger,
+    estimateTokens: (text) => text.length,
+  });
+  return new SearchService({
+    index: fts,
+    filesystem,
+    authorizer,
+    assembler,
+    logger,
+    config: RETRIEVAL,
+    engine: 'fts5',
+    hotnessWeight,
+    hotnessHalfLifeHours: 168,
+    accessStats: (uris) => nodes.readAccessStats(uris),
+    // 与生产装配同一条闭包（`container.ts`）：检索命中与按 URI 读取共用它。
+    recordAccess: (uris) => nodes.recordAccess(uris, NOW),
+  });
+}
 
 function createLogger(): Logger {
   const mock: Logger = {
@@ -145,6 +184,8 @@ beforeEach(async () => {
   nodes = new NodeRepository({ db, logger });
   fts = new SqliteFtsIndex({ db, logger });
   store = new ContentStore({ dataDir, logger });
+  metadata = new MetadataFileStore({ dataDir, logger });
+  authorizer = new AllowAllAuthorizer();
   // 最小的派生数据观察者：删除时把 `node` 行一并删掉，模拟生产里 `IndexObserver`
   // 通过 `deleteByUri` 做的事（`forget` 与 TTL 第二段共用同一条删除路径，
   // 索引行由观察者清）。只测第二段关心的「文件 + 索引行一起消失」，不引入整个
@@ -159,7 +200,7 @@ beforeEach(async () => {
   filesystem = new FileSystemService({
     store,
     locks: createPathLockManager({ dataDir, logger }),
-    authorizer: new AllowAllAuthorizer(),
+    authorizer,
     logger,
     observers: [indexCleanup],
     recordAccess: (uris) => {
@@ -199,6 +240,62 @@ describe('sweep 第一段：滑动窗口归档', () => {
     expect(nodes.readAccessStats([OLD])).toEqual([
       { uri: OLD, accessCount: 1, lastAccessedAt: atDaysAgo(2).toISOString() },
     ]);
+  });
+
+  it('检索命中过的记忆不归档；同条件没被命中过的归档（默认 hotnessWeight = 0）', async () => {
+    // 两条都是 100 天前写入，都在窗口外；只有 HIT 能被 `find` 命中。
+    const HIT = 'comem://user/alice/memories/events/hit.md';
+    const MISS = 'comem://user/alice/memories/events/miss.md';
+    const documents: readonly [string, string][] = [
+      [HIT, 'orbitalteapot'],
+      [MISS, 'moonlantern'],
+    ];
+    for (const [uri, token] of documents) {
+      await store.writeBytes(
+        Uri.parse(uri),
+        Uint8Array.from(Buffer.from(`# ${token}\n`, 'utf8')),
+      );
+      const record: IndexRecord = {
+        uri,
+        parentUri: 'comem://user/alice/memories/events',
+        scope: 'user',
+        kind: 'document',
+        contextType: 'memory',
+        memoryType: 'events',
+        level: 'L2',
+        abstract: null,
+        content: `# ${token}`,
+        bodyDigest: 'digest',
+        size: 10,
+        updatedAt: daysAgo(100),
+        status: 'active',
+      };
+      await fts.upsert([record]);
+      // FTS 查询的权限谓词读 `node_permission`（不是 `Authorizer`）：没有这一行时
+      // `find` 一条都不返回，测的就不是 TTL 了。
+      db.prepare(
+        'INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)',
+      ).run(uri, 'user:alice', 1);
+    }
+
+    // 默认配置：`telemetry.hotness.weight = 0`。热度不参与排序，但「命中算一次使用」
+    // 与权重无关——否则默认部署的滑动窗口看不到检索命中（缺陷就藏在这里）。
+    const search = createSearch(0);
+    const hits = await search.find('orbitalteapot', {
+      scopes: ['comem://user/alice/memories'],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+    expect(hits.map((hit) => hit.uri)).toEqual([HIT]);
+    // `recordAccess` 是 fire-and-forget；等一个宏任务再清扫，不依赖实现细节。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
+
+    expect(statusOf(HIT)).toBe('active');
+    expect(statusOf(MISS)).toBe('archived');
+    // 清扫没有改动访问列：活下来是因为 `last_accessed_at` 真的被写进去了。
+    expect(nodes.readAccessStats([HIT])[0]?.lastAccessedAt).toBe(NOW.toISOString());
   });
 
   it('按 URI read 过的记忆不归档；同条件没读过的归档', async () => {
