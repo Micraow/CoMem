@@ -1213,12 +1213,15 @@ TypedQuery 各自跑一次 `find` 后再按 URI 合并，所以**合并后的命
 失效的版本。`asOf` 不对外暴露：MCP 的 16 个工具与 HTTP 查询参数都没有这一项，所有入口
 都用「请求到达的时刻」。
 
-**`glob` / `grep` / `list` / `tree` / `download` 是路径工具，契约是磁盘。** 它们能看到
-`memories/{type}/.history/` 下的版本文件；`glob` 虽然查的是索引，但不传 `asOf`，同样不
-按有效期过滤（§13.2 的 `glob` 契约是「文件 URI 列表」，不是「检索命中」）。同一份数据
-在检索面与路径面得到不同结果，这是两个出口的契约差异，不是索引缺数据：版本文件有非空
-的 `valid_until`，检索面按它过滤，路径面按磁盘枚举。要看历史值就按版本文件的 URI 直接
-`read` / `download`，或走路径工具；没有为版本文件单独开的工具或接口。
+**`list` / `tree` / `read` / `download` 是路径面，契约是磁盘；`glob` / `grep` 属于检索面。**
+路径面能看到 `memories/{type}/.history/` 下的版本文件，按 URI 直接 `read` / `download` 是
+查看历史值的唯一入口——没有为版本文件单独开的工具或接口。检索面排除整个 `.history` 子树：
+`find` / `search` 按 `valid_until` 过滤（系统写的快照恒非空），而 `glob` / `grep` 不带
+`asOf`，改由 `notVersionFileSql` 在索引 SQL 里按路径段排除（与 TTL 共用
+`adapters/sqlite/node-repository.ts` 的同一份 GLOB 模式，`grep` 的候选集因此也不被版本文件
+占名额）。判定按路径段、不看子串：`memories/preferences/.history.md` 是普通记忆，照常
+出现在检索结果里。同一份数据在检索面与路径面得到不同结果，这是两个出口的契约差异，不是
+索引缺数据。
 
 ### 8.5 层级加权
 

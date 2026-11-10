@@ -14,9 +14,10 @@ import { ComemError } from '../../domain/errors.js';
 import type { Level } from '../../domain/level.js';
 import type { Logger } from '../../domain/log.js';
 import { TTL_EXEMPT_MEMORY_TYPES } from '../../domain/memory-types/index.js';
-import { VERSION_DIRECTORY, type ContextType, type NodeKind, type NodeStatus } from '../../domain/node.js';
+import type { ContextType, NodeKind, NodeStatus } from '../../domain/node.js';
 import type { UriScope } from '../../domain/uri.js';
 import { withWriteTransaction } from './database.js';
+import { escapeGlobLiteral, notVersionFileSql } from './version-path.js';
 
 /** `node` 表的一行（架构文档 §8.1）。 */
 export interface NodeRow {
@@ -91,41 +92,6 @@ const NODE_COLUMNS = NODE_COLUMN_NAMES.join(', ');
 const LAST_USED_AT_SQL = 'MAX(updated_at, COALESCE(last_accessed_at, updated_at))';
 
 /**
- * 「这个 URI 不在记忆版本快照目录下」的 SQL 判据（架构文档 §11.11）。
- *
- * 覆盖写把旧值快照到 `memories/{type}/.history/`，那份文件的 frontmatter 里 `status`
- * 仍是 `active`（设计如此：它是一条**旧值**，不是归档项），索引里只靠非空的
- * `valid_until` 被检索面滤掉。TTL 不看有效区间，只看最后使用时刻，所以不排除的话：
- *
- * - 第一段会把版本文件标成 `archived`。`glob` / `grep` / 向量候选集的 SQL 都带
- *   「只看 active」，于是路径工具再也列不出 `.history` 下的版本文件——而它们的契约
- *   是磁盘（§8.4）。
- * - 第二段会把它物理删除。`reject` 读 `supersedes` 指向的版本文件时只看到「文件不
- *   存在」，于是静默退化成删除：用户以为驳回回到了上一次正确值，实际这条记忆消失。
- *
- * **必须两条 GLOB，不能只写带 `/*` 的那一条。** 目录节点自身（
- * `memories/preferences/.history`）的 URI 在 `.history` 后面没有字符，`/*` 要求至少
- * 一个 `/` 加内容，匹配不到它。漏掉它会怎样：`pnpm reindex` 的 `walkDataDir` 会给
- * 磁盘上每个目录 upsert 一行（`kind = 'directory'`、`memory_type = NULL`、
- * `status = 'active'`），第一段把它当过期记忆归档；而路径工具按 `status = 'active'`
- * 取节点，从此 `.history` 目录在 `list` / `tree` 里消失，磁盘上却还在。
- *
- * **判定按路径段，不看子串。** `memories/preferences/.history.md` 是一条普通记忆
- * （`identity` 可以是 `.history`），必须照常过期。SQL 没有「切段」函数，用 GLOB 表达
- * 段边界：模式要求 `.history` 两侧都是 `/`。锚在 `memories/` 之后是因为记忆类型目录
- * 全部是 `memories/{type}`（含 `projects/{pid}/memories`）；GLOB 的 `*` 跨 `/`，所以
- * `rules` 镜像出来的 `.history/{scenario}/...` 同样命中。
- *
- * 第二段的查询也要带它，不只是第一段：存量库（修复前跑过 TTL）里已经有被归档的版本
- * 行，它们归档得最早，会一直排在 `ORDER BY archived_at ASC` 的队首——不排除的话，
- * 每轮批次的名额被它们占满，真正的记忆一条也轮不到。
- *
- * 目录名从领域层常量派生，不在这里再写一份字面量：判据散开之后，改一处就会漏一处。
- */
-const VERSION_PATH_GLOB = `*/memories/*/${escapeGlobLiteral(VERSION_DIRECTORY)}`;
-const NOT_VERSION_FILE_SQL = `uri NOT GLOB '${VERSION_PATH_GLOB}' AND uri NOT GLOB '${VERSION_PATH_GLOB}/*'`;
-
-/**
  * 「节点自身那一行」的谓词（架构文档 §8.1、§8.5）。
  *
  * 一个目录在 `node` 里最多两行：L0 摘要行（节点自身）与 L1 概览行
@@ -143,11 +109,6 @@ const NOT_VERSION_FILE_SQL = `uri NOT GLOB '${VERSION_PATH_GLOB}' AND uri NOT GL
 export function nodeSelfRowSql(alias?: string): string {
   const prefix = alias === undefined ? '' : `${alias}.`;
   return `NOT (${prefix}kind = 'directory' AND ${prefix}level = 'L1')`;
-}
-
-/** GLOB 里把字面量段内的元字符（`*` `?` `[` `]`）转义成字符类。 */
-function escapeGlobLiteral(value: string): string {
-  return value.replace(/[[\]*?]/g, (char) => `[${char}]`);
 }
 
 /**
@@ -347,7 +308,7 @@ export class NodeRepository {
               AND ${LAST_USED_AT_SQL} < ?
               AND status <> 'archived'
               AND ${nodeSelfRowSql()}
-              AND ${NOT_VERSION_FILE_SQL}
+              AND ${notVersionFileSql()}
             ORDER BY ${LAST_USED_AT_SQL} ASC
             LIMIT ?`,
         )
@@ -395,7 +356,7 @@ export class NodeRepository {
           WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?
             AND kind = 'document'
             AND memory_type IS NOT NULL
-            AND ${NOT_VERSION_FILE_SQL}
+            AND ${notVersionFileSql()}
           ORDER BY archived_at ASC
           LIMIT ?`,
       )

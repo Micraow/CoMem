@@ -6,13 +6,11 @@
  * FTS5 短语、词间用 `AND` 连接，一次 SQL 完成「匹配 + 范围 + 元数据 + 状态 + 权限」。
  *
  * **分数约定**：FTS5 的 `bm25()` 返回负数，越负越相关。这一层把分数取负后返回，
- * 于是「越大越相关」与 `domain/ranking.ts` 的排序方向一致，调用方不需要记住符号。
- * 取负之后**不做层级加权**——加权是 `domain/ranking.ts` 的职责（§8.5），索引层只
- * 提供原始分，否则同一份分数会被乘两次。
+ * 于是「越大越相关」与 `domain/ranking.ts` 的排序方向一致。取负之后**不做层级加权**
+ * ——加权是 `domain/ranking.ts` 的职责（§8.5），索引层只提供原始分。
  *
- * **`grep` 不在这里**：FTS5 索引的是词，`grep` 匹配的是任意正则，两者是不同的访问
- * 路径。`grep` 由 `services/search.ts` 实现——先用本索引拿到权限过滤后的候选 URI，
- * 再逐个读文件做行匹配。
+ * **`grep` 不在这里**：FTS5 索引的是词，`grep` 匹配的是任意正则。`grep` 由
+ * `services/search.ts` 实现——先用本索引拿到权限过滤后的候选 URI，再逐个读文件。
  *
  * **权限判断是 deny 优先**（架构文档 §12.2 不变量 2）：可读 = 主体集合里有人拿到
  * 带读位的 allow，且没有人在同一节点上有 deny 行。谓词本体只有一份，在
@@ -40,6 +38,7 @@ import {
 import { segmentCjk } from '../../domain/text.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
+import { notVersionFileSql } from './version-path.js';
 import { readablePredicateSql } from './permission-repository.js';
 
 export interface SqliteFtsIndexOptions {
@@ -443,7 +442,8 @@ export class SqliteFtsIndex implements RetrievalIndex {
       return [];
     }
 
-    const conditions: string[] = ['node_fts MATCH ?', ACTIVE_STATUS_PREDICATE];
+    // 版本快照目录（`.history` 子树）不在检索面上，判据见 `version-path.ts`。
+    const conditions: string[] = ['node_fts MATCH ?', ACTIVE_STATUS_PREDICATE, notVersionFileSql('n')];
     const params: SQLInputValue[] = [expression];
 
     const scopes = scopeClause('n.uri', query.scopes);
@@ -508,10 +508,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
    * 路径通配。
    *
    * SQL 侧用 GLOB 过近似（见 `globToSqlGlob`），精确匹配在 JS 侧做；两者之间用
-   * `iterate()` 惰性读取，凑满 `limit` 就停，不会把整库结果全部读进内存。
-   * 权限、路径范围、元数据与归档状态仍然由 SQL 过滤——不能把没有权限或已归档的
-   * URI 读到内存再丢。归档状态与 `search` 用同一条谓词（`ACTIVE_STATUS_PREDICATE`），
-   * 因为 `glob` 也是 `grep` 与向量检索的候选集来源。
+   * `iterate()` 惰性读取，凑满 `limit` 就停，不会把整库结果全部读进内存。权限、路径
+   * 范围、元数据、归档状态与版本快照目录（`.history`，判据见 `version-path.ts`）都
+   * 由 SQL 过滤——不能把没有权限、已归档或是版本文件的 URI 读到内存再丢。
    *
    * 排序按 uri 升序（`*` 的精确过滤不改变顺序），`LIMIT` 语义是「前 limit 条精确
    * 命中」，不是「前 limit 条过近似命中」。
@@ -526,6 +525,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
       `(${alternatives.map(() => 'n.uri GLOB ?').join(' OR ')})`,
       nodeSelfRowSql('n'),
       ACTIVE_STATUS_PREDICATE,
+      notVersionFileSql('n'),
     ];
     const params: SQLInputValue[] = alternatives.map((alternative) => alternative.sqlPattern);
 
