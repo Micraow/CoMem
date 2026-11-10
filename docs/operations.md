@@ -2012,8 +2012,8 @@ COMEM_SERVER_PORT=8080 pnpm dev
     `session_uri` 与 `cursor_value` 列，行类型 `IngestCursorRow`（`src/adapters/sqlite/ingest-cursor-repository.ts:25`），
     而 `IdentityService.deleteUser` 只清身份行、成员关系、API Key、组 owner 与召回账本
     （`src/services/identity.ts:210`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
-    原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest.ts:602`），
-    读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest.ts:647`），新账号的会话
+    原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest/session-ingest.ts:52`），
+    读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest/session-ingest.ts:109`），新账号的会话
     目录里没有消息。恢复：删掉对应行再重跑导入
     （`DELETE FROM ingest_cursor WHERE harness = '...' AND native_session_id = '...'`，
     见「导入本机 Agent 对话」的幂等一段）。
