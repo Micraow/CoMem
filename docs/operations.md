@@ -1033,6 +1033,11 @@ memory:
 TTL 是统一策略，没有逐条设置过期时间的接口（`TtlService.setExpiry` 已删除）：想让某条
 记忆不过期，改它的类型，或把 `defaultDays` 设回 0。
 
+**版本文件不参与 TTL。** `memories/{type}/.history/` 下的旧值快照不在清扫范围：两段 SQL 都
+带 `NOT_VERSION_FILE_SQL`（`uri NOT GLOB '*/memories/*/[.]history/*'`），`defaultDays` 与
+`retentionDays` 配成什么都动不到它们。它们的数量由每次覆盖写的「每个 identity 只留 5 份」
+截断兜住（架构文档 §11.11）。
+
 ### 怎么开记忆合并
 
 ```yaml
@@ -1246,8 +1251,9 @@ $COMEM_DATA_DIR/
 | `_meta/recall/*.recall_log.json`（丢了只多投一次） | `.abstract.md` / `.overview.md`（重算要调模型，花钱） |
 | `request_log` 表（只是观测数据） | `_meta/comem.sqlite`（**见下面的警告**） |
 
-> **警告：`reindex` 只重建检索索引与向量，不重建物化权限。** 它从磁盘重新遍历全部
-> 节点，重写 `node` / `node_fts` / `node_embedding`；物化权限（`node_permission`）
+> **警告：`reindex` 只重建检索索引、向量与关联边，不重建物化权限。** 它从磁盘重新遍历
+> 全部节点，重写 `node` / `node_fts` / `node_embedding` 与 `memory_link` 的 `derived_from`
+> （`--only=links` 或 `all`）；物化权限（`node_permission`）
 > 由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径，不在这个命令的职责里
 > （`src/commands/reindex.ts` 的文件头）。所以**删掉 `comem.sqlite` 之后**：
 > `pnpm reindex` 能把 `find` / `search` 的索引修回来，但物化权限行随库一起没了——
@@ -1259,10 +1265,11 @@ $COMEM_DATA_DIR/
 pnpm reindex --dry-run                                   # 只遍历磁盘报数，不打开数据库
 pnpm reindex --only=index                                # 只重建 node / node_fts
 pnpm reindex --only=embeddings                           # 只回填 node_embedding
+pnpm reindex --only=links                                # 只按 sources 重建 memory_link 的 derived_from
 pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
 ```
 
-- 参数：`--only=embeddings|index|all`（默认 `all`）、`--dry-run`、`--config <path>`、
+- 参数：`--only=embeddings|index|links|all`（默认 `all`，`all` 含 links）、`--dry-run`、`--config <path>`、
   `--data-dir <path>`。两个路径参数和环境变量 `COMEM_DATA_DIR` 走同一套
   `loadCommandConfig`（`src/commands/config.ts`），不会静默回落到当前目录的
   `config.yaml`。
@@ -1271,6 +1278,12 @@ pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
   之后概览正文照样能被 `find` 命中，不需要先等一次摘要重算。`reindex` 不清理孤儿
   行（删掉的 `.overview.md` 留下的 L1 行会一直到下次摘要重算或删除该节点为止）——
   与它本来就不清理「文件已删除」的孤儿节点是同一条边界，删除走 `deleteByUri`。
+- **`--only=links` 只重建 `derived_from`。** 从每份记忆文件的 `sources` 整批重算：先清空
+  这一类边再依次写入，一个事务，重跑得到同一份边（读盘不在事务内）。`references` /
+  `related` 在 frontmatter 里没有真相，重建不动它们。归档目录已被 TTL 清理时照写边、不查
+  存在性——`sources` 是真相，查存在性会让同一份输入因磁盘现状不同得到不同的边。`sources`
+  上限 20：一条记忆的 `sources` 被截断过时，重建会删掉写路径累积下来的更早的边（架构文档
+  §11.10）。
 - **只从磁盘读，不信任 SQLite。** 索引坏了才是要重建的理由，拿 `node` 表当输入
   等于假设「坏掉的东西还能用」。
 - **断点续跑。** 按 URI 升序幂等 upsert；嵌入按 `content_digest` 判定「没变」直接
@@ -1740,7 +1753,9 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 ### 用户与组页 / 任务卡 403
 
 **症状**：控制台的「用户与组」页、概览页的待处理任务卡、会话页的任务表都报
-`PERMISSION_DENIED`，消息是 `需要系统管理员：<主体> 不在 auth.adminUserIds 里。`。
+`PERMISSION_DENIED`。接口原文是 `需要系统管理员：<主体> 不在 auth.adminUserIds 里。`
+（`src/api/http/middleware.ts`），控制台不显示这句：403 已经收敛成固定文案，那几处显示
+「需要管理员权限」的空态。
 
 **原因**：这些端点跨主体，没有目标资源可求权，只认 `auth.adminUserIds`（架构文档 §12.4）。
 名单默认是空数组 = 没有系统管理员，所以对所有人 403——包括单用户部署里的绑定主体。没有
@@ -1889,7 +1904,8 @@ COMEM_SERVER_PORT=8080 pnpm dev
    一个时顶栏出现作用域选择器，选择存 `sessionStorage`，刷新后恢复；组根不可读时不会
    列出来。
 4. **`reindex` 不重建物化权限。** `pnpm reindex` 从磁盘重建检索索引（`node` /
-   `node_fts`）与向量（`node_embedding`），物化权限（`node_permission`）不在它的
+   `node_fts`）、向量（`node_embedding`）与关联边（`memory_link` 的 `derived_from`，
+   `--only=links` 或 `all`），物化权限（`node_permission`）不在它的
    职责里——它由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径。索引坏了
    可以修；整库丢失时权限要另走 ACL 重建（目前没有命令）。参数见「备份与恢复」。
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
@@ -2095,14 +2111,18 @@ COMEM_SERVER_PORT=8080 pnpm dev
 33. **同一个 `dataDir` 只支持一个服务端进程。** 会话的累计消息数（轮次时钟）与消息幂等
     索引都是进程内缓存，两个进程写同一个数据根会漏计已归档消息，跨轮去重窗口随之算错
     （`src/services/session.ts` 的 `totalMessageCount` 注释）；`_meta/reconcile.log` 的追加
-    队列也只在进程内串行（架构文档 §10.6）。多实例部署要给每个实例独立的数据根，或在前
-    置层保证同一时刻只有一个写者。
+    队列也只在进程内串行（架构文档 §10.6）。**启动时的存量向量回填落在这条限制上**：两个
+    进程都会回填，`vec0` 没有 compare-and-set，最后写入者赢；不会写坏行（行里的
+    `content_digest` 与向量来自同一次读盘），但两次读盘之间文件被改时，可能短暂出现「向量
+    对应 A、`content_digest` 对应 B」的状态，下一次回填或 `pnpm reindex` 按磁盘重算会修正。
+    多实例部署要给每个实例独立的数据根，或在前置层保证同一时刻只有一个写者。
 
 34. **启动时的向量缺失扫描是线性的。** `retrieval.engine` 含向量且配了 embedding 时，
     `main.ts` 的 `warnIfVectorsMissing` 调 `hasDocumentsMissingVectors`
     （`src/commands/reindex.ts`）：对每个 document 行做一次 `NOT EXISTS` 子查询，命中第一
     条缺失就返回，全部都有向量时要扫完全表。它在开始监听之前跑，库越大启动越慢；扫描只
-    提醒、不修复，补齐靠 `pnpm reindex`。
+    提醒、不修复——补齐由监听之后的后台回填自动做（`startVectorBackfill`，每批一行 info
+    带 embedded / skipped / failed / remaining），`pnpm reindex` 仍是手工全量重建的入口。
 
 35. **`telemetry.metrics.includeAccountLabel` 打开后序列数按账号数放大。**
     `comem_http_request_duration_seconds` 从一条全局序列变成每账号一条（`account` 标签，
@@ -2118,12 +2138,12 @@ COMEM_SERVER_PORT=8080 pnpm dev
     这条路径。要堵住需要不跟随符号链接的 `lstat`（先判定「这是个链接」再决定拒绝还是写
     穿），`src/` 里没有这个方法。
 
-37. **`memory_link` 没有重建入口。** 记忆文件写成功、links 写失败时只记 `error`，归档
-    照常完成（`MemoryMergeStep` / `ExperienceDistillStep`），口径是「`sources` 是真相、
-    `memory_link` 是派生读模型，丢了能重建」。但重建只是原则，不是命令：`pnpm reindex`
-    只重建 `node` / `node_fts` / `node_embedding`，不碰 `memory_link`。写失败的边、删错的
-    行、手工改过 `sources` 之后的边，只能按 `sources` 手工补 SQL 或重新触发归档；
-    `GET /memories/{uri}/links?direction=backlinks` 读到的是表里的现状，不是文件的现状。
+37. **`memory_link` 只有 `derived_from` 能重建，且会丢掉被截断的更早的边。**
+    `pnpm reindex --only=links`（`--only=all` 也含）按每份记忆的 `sources` 整批重算这一类
+    边，能把写失败的边、删错的行、手工改过 `sources` 之后的不一致修回来。两条边界：`references`
+    / `related` 在 frontmatter 里没有真相，重建不动它们，写错的只能改 SQL；`sources` 上限
+    20，一条记忆的 `sources` 被截断过时，重建会把写路径累积下来的更早的边删掉（架构文档
+    §11.10）。HTTP 层仍然只有读端点（`GET /memories/{uri}/links`），没有写端点。
 
 38. **`GET /health` 返回全库聚合计数。** `index.totalNodes`、`queue.pending`、
     `queue.processing`、`memory.pendingReview`、`memory.orphanTasks`、
@@ -2131,18 +2151,16 @@ COMEM_SERVER_PORT=8080 pnpm dev
     在公开路径上（与 `/metrics` 一样，见上面第 32 条），任何能访问服务的人都能读到这些
     数字。它们是计数，不含 URI、正文或别的记录枚举。控制台的概览页依赖它（§16）。
 
-39. **`supersedes` 只跟一跳，版本文件被删后 `reject` 退化成删除。** `reject` 只读当前
-    pending 文件的 `supersedes`，把那一份版本写回规范 URI；它不沿链回溯
-    （`src/services/memory.ts` 的 `#restoreSuperseded`）。版本文件被 TTL 物理删除
-    （`memory.ttl.retentionDays > 0`）或被「每个 identity 只留 5 份」截断之后，恢复失败
-    只记一条 `warn`（「指向的文件不存在，拒绝时按删除处理」），终态是这条记忆被删除，
-    不是回到更早的版本。`retentionDays > 0` 的部署更容易遇到：非豁免类型的版本文件与
-    普通记忆走同一条 TTL 路径，归档满保留期后一起物理删除（`rules` 的版本文件因类型
-    豁免不受 TTL 影响，但仍会被 5 份截断删掉，见架构文档 §11.11）。
+39. **`supersedes` 只跟一跳，被截断的版本回不去。** `reject` 只读当前 pending 文件的
+    `supersedes`，把那一份版本写回规范 URI；它不沿链回溯（`src/services/memory.ts` 的
+    `#restoreSuperseded`）。版本文件不参与 TTL（两段清扫 SQL 都排除 `.history`），所以让
+    回退目标消失的只有「每个 identity 只留 5 份」的截断：同一个 identity 覆盖写超过 5 次
+    之后，恢复失败只记一条 `warn`（「指向的文件不存在，拒绝时按删除处理」），终态是这条
+    记忆被删除，不是回到更早的版本（架构文档 §11.11）。
 
 40. **`prefetch` 只返回 `active`，未复核的经验对下一轮归纳不可见。** 经验归纳步骤
     （`experience_distill`）用 `MemoryService.prefetch` 取同一 topic 的旧正文，而
-    `prefetch` 按 `status = 'active'` 过滤（`src/services/memory.ts:1383`）。上一轮写入的
+    `prefetch` 按 `status = 'active'` 过滤（`src/services/memory.ts:1423`）。上一轮写入的
     经验还在 `pending`、没被复核时，下一轮归纳看不到它，模型按「没有旧经验」整段重写，
     旧结论被无合并覆盖（`pending` 旧值也不做版本快照，见架构文档 §11.11）。这是复核闸门
     的既有语义——未生效的结论不参与检索与预取——不是新缺陷；要让下一轮看到未复核的经验，

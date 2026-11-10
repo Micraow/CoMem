@@ -507,9 +507,9 @@ updated_at: 2026-11-05T16:40:00Z
   版本时不写这个键。
 
 模型改不了它们：`parseMemoryDocument` 把保留键从 `fields` 里剔掉
-（`src/services/memory.ts:808`），`serializeMemoryDocument` 只写 `schema.fields` 与保留键
-（`:766`），三个键的值取自元数据（`:746`–`:752`）。`fields` 里出现同名键也不会落盘——
-整份重写时被丢弃。保留键集合在 `src/services/memory.ts:342`。版本文件的完整语义见
+（`src/services/memory.ts:815`），`serializeMemoryDocument` 只写 `schema.fields` 与保留键
+（`:740`），三个键的值取自元数据（`MemoryDocument` 的 `:485`–`:490`），不从 `fields` 读。`fields` 里出现同名键也不会落盘——
+整份重写时被丢弃。保留键集合在 `src/services/memory.ts:371`。版本文件的完整语义见
 §11.11。
 
 **`user/alice/memories/.abstract.md`** —— 这个目录的 L0
@@ -942,6 +942,10 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 `n.uri` 的 GLOB 范围，这两列只作为逐候选行的谓词；迁移注释里记了 5000 行的
 `EXPLAIN QUERY PLAN` 实测，建索引后两条 plan 不变，只多出每次 `upsert` 的两棵 B 树维护。
 
+这两列（连同 `supersedes`）在 HTTP 上的唯一出口是待复核列表：`GET /memories/pending` 总是
+输出 `validFrom` / `validUntil` / `supersedes` 三个键，无值时是 `null` 而不是省略键（§12.4）；
+没有单条记忆 GET，所以已生效的记忆在控制台看不到这三个值。
+
 **迁移清单**（`src/adapters/sqlite/migrations/`）：
 
 | 序号 | 文件 | 内容 |
@@ -1039,7 +1043,7 @@ WHERE f MATCH ?
     SELECT 1 FROM node_permission p
     WHERE p.node_uri = n.uri
       AND p.principal IN ('user:alice', 'user:*', 'group:eng')
-      AND p.level >= 1                          -- read
+      AND (p.level & 1) = 1                     -- read（读位测试，与 levelSatisfies 同义）
       AND p.effect = 'allow'
   )
   AND NOT EXISTS (
@@ -1051,6 +1055,15 @@ WHERE f MATCH ?
 ORDER BY rank
 LIMIT ?;
 ```
+
+**`level` 用读位测试，不用 `>=`。** 两份 SQL（`retrieval-index.ts` 的 `permissionPredicate`、
+`permission-repository.ts` 的 `readableUris`）与单节点读路径（`MAX(level)` 交给
+`domain/acl.ts` 的 `levelSatisfies`）必须是同一个判定，所以谓词写成 `(p.level & 1) = 1`。
+规范级别 1 / 3 / 7 下它与 `p.level >= 1` 等价；库里出现 `level = 2` / `6` 这类读位为 0 的
+非规范行时两者分叉——`>=` 说可读、位测试说不可读，症状是「列表里有、点进去读不了」。这种
+行 API 写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手工 SQL 或旧数据；两侧一致由
+`tests/integration/sqlite/permission-visibility-consistency.test.ts` 对拍（含 `level = 2` /
+`5` / `6`）。
 
 **`effect` 列不能省，否则 deny 在检索路径上完全失效。** 链式求值（§12.2）是正确的，但检索走的是物化表。只有 `level` 的话，`restricted` 节点上「`user:* = allow read` + `user:alice = deny`」会物化成一行 `(N, 'user:*', 1)`，alice 命中通配行就读到了本该被拒绝的节点——跨用户越权，而且不报错。
 
@@ -1748,7 +1761,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 |---|---|---|
 | 索引行（`node` / `node_fts`） | `find` / `search` / `glob` 少命中；`read` 按路径仍能读到 | 对账重放（`op: 'index'`，从磁盘重建该行）；重放覆盖不到的形态用 `pnpm reindex` |
 | 权限行（`node_permission`） | 该看到的看不到（默认 deny：`list` / `tree` / `glob` 里整个节点消失）；该拦的没拦（`deny` 行缺失时越权节点出现在结果里） | 对账重放（`op: 'permission'` → `AclService.materializeNode`）。`.acl.json` 是真相，重放只重算派生表；文件本身被改坏要手工修文件，重放不生成授权 |
-| 向量（`node_embedding`） | `vector` / `hybrid` 少命中（FTS5 仍能按关键词命中），不报错 | 写路径失败只记日志、不写对账记录；补齐靠 `pnpm reindex`，启动时 `warnIfVectorsMissing` 对存量缺失记一条 `warn` |
+| 向量（`node_embedding`） | `vector` / `hybrid` 少命中（FTS5 仍能按关键词命中），不报错 | 写路径失败只记日志、不写对账记录；补齐有两条——服务监听之后的后台回填（`startVectorBackfill`，按 `model` / `content_digest` 判缺、正文从磁盘读、分批嵌入）与手工 `pnpm reindex`。启动时 `warnIfVectorsMissing` 仍对存量缺失记一条 `warn` |
 
 **为什么不是回滚文件**：文件已经是对的，回滚反而丢数据。补偿的方向是「把索引追上来」，不是「把文件退回去」。
 
@@ -2046,7 +2059,7 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 | `memory.ttl.defaultDays` | 滑动窗口长度（天），从最后一次被使用（写入、检索结果被交付、正文被读取）起算。`0`（默认）= 永不过期 |
 | `memory.ttl.sweepBatchSize` | 每轮最多清扫多少条（默认 100），给一次 UPDATE 一个上界 |
 | `memory.ttl.retentionDays` | 归档后保留多少天才物理删除。`0`（默认）= 永不物理删，只软归档 |
-| `TtlService.sweep()` | 第一段：最后使用时刻早于 `now - defaultDays` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行 |
+| `TtlService.sweep()` | 第一段：最后使用时刻早于 `now - defaultDays` 的节点 `status` 置 `archived` 并写 `archived_at`；第二段：归档满 `retentionDays` 天的节点删文件 + 索引行。两段 SQL 都带 `NOT_VERSION_FILE_SQL`：`.history` 下的版本文件不参与 TTL 的两段，数量由每 identity 5 份的截断兜住（§11.11） |
 
 **TTL 是一个统一策略，不是逐条属性。** 早期有一个 `TtlService.setExpiry(uris, at)`，
 给指定 URI 设一个绝对过期时刻。它没有任何生产调用方（HTTP 没有路由、MCP 没有工具、
@@ -2101,7 +2114,9 @@ SQL 里不出现字面量列表）。不做配置项：哪些类型承载身份�
 不把未知当成「很久以前」。
 
 **第二段的安全性。** 只删 `status = 'archived' AND archived_at < cutoff AND
-kind = 'document'`（叶子文档，目录节点不入选——目录里可能有没归档的兄弟记忆）。删除
+kind = 'document'`（叶子文档，目录节点不入选——目录里可能有没归档的兄弟记忆），并且带
+`NOT_VERSION_FILE_SQL`：`.history` 下的版本文件不参与 TTL 的两段——第一段不归档、第二段
+不物理删除（§11.11）。删除
 复用 `forget` 的路径 `FileSystemService.remove`（求 MANAGE → 拿 TREE 锁 → 删文件 →
 通知 `IndexObserver` 删 `node` / `node_fts` / `node_permission`），不另写一套删除逻辑。
 单条删除失败只记 warn 跳过，不打断整轮。`retentionDays` 配得小时（< 7 天）记 warn，
@@ -2548,11 +2563,25 @@ frontmatter 字段。理由：
 缺失可以由 `sources` 重建；为了派生读模型回滚真相、或者把一次归档标成失败，方向都是
 反的。先写文件、后写派生也是同一个理由：反过来会让派生物比真相更早存在。
 
-**目前没有重建命令。** `pnpm reindex` 只重建 `node` / `node_fts` / `node_embedding`
-（`src/commands/reindex.ts`），不碰 `memory_link`。「从 `sources` 重建」是一条原则，
-不是一条现成命令：写失败的边、删错的行、手工改过 `sources` 之后的边，现在只能重新
-触发归档或手工补 SQL。反查（`direction=backlinks`）读到的永远是 `memory_link` 的现状，
-不是 `sources` 的现状。
+**重建入口是 `pnpm reindex --only=links`**（`--only=all` 含这一段；`src/commands/reindex.ts`
+的 `needsLinks` 与 `MemoryLinkService.rebuildDerived`）。语义有四条：
+
+- **范围只限 `derived_from`。** `references` / `related` 在 frontmatter 里没有真相，推不出
+  来，也不能被这次重建误删——`MemoryLinkRepository.replaceByLinkType` 只 `DELETE` 调用方
+  指定的那个 `link_type`。
+- **先清空再整批写入**，在一个短事务里。读盘与嵌入都不在事务内，被杀后重跑得到同一份边，
+  所以是幂等的；增量补齐做不到这一点——它删不掉「`sources` 里已经没有了、表里还留着」的
+  边，而那正是手工改过 `sources` 之后的形态。
+- **归档 URI 已被清理时照写边，不查存在性。** `sources` 是真相，那条溯源在归档目录被 TTL
+  物理删除之后仍然成立（与上面「悬空边写时不拦」同一条口径）。查存在性会让同一份输入因为
+  磁盘现状不同而得到不同的边，重建不再幂等。
+- **版本文件不贡献边。** 版本文件是旧值快照，它的 `sources` 说的是那份旧值的来历，不是一条
+  独立记忆的来源；`collectDerivedEdges` 跳过路径里含 `.history` 的节点。
+
+**一条后果：`sources` 上限 20，重建会删掉写路径累积下来的更早的边。** 写路径按次追加
+（`appendSources`，超限留最近 20 条，§11.1），一条记忆的 `sources` 被截断过时，最早的边
+在表里仍然存在；重建只复现磁盘上这 20 条，那些边随之消失。这是「`sources` 是真相」的直接
+结果——要更长的溯源先抬高 `MAX_SOURCES`。
 
 HTTP 层仍然只暴露读端点（见下），没有写端点：不开一个「谁能写边」的授权面。抽取端
 也不产出实体间链接——那要改抽取提示词与 `memory_extract` 的输出契约；`add_resource`
@@ -2607,17 +2636,20 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 **正文没变不写快照。** 同一份正文再写一遍（重放、补 `sources`）没有旧值可丢，快照只会
 凭空多出几份一样的文件。`addOnly` 类型（`events`）不允许覆盖写，不会走到这里。`pending`
 旧值同样不快照——`pending` 不是有效值，没有「正确的旧值」可回退；但新文档**继承**它的
-`supersedes`（`src/services/memory.ts:1004`），否则拒绝一次基于 `pending` 的覆盖写会丢掉
+`supersedes`（`src/services/memory.ts:1034`），否则拒绝一次基于 `pending` 的覆盖写会丢掉
 上一条有效版本的指向。
 
-**每个 identity 只留最新 5 份**（`MAX_VERSIONS`，`src/services/memory.ts:321`）。来源是
+**每个 identity 只留最新 5 份**（`MAX_VERSIONS`，`src/services/memory.ts:350`）。来源是
 经验假设：「回到上一次正确值」的粒度是上一次覆盖写，5 步够覆盖连续几次错误写入，同时把
-每个 identity 的历史占用固定在 5 份以内（一份与规范文件同量级）。`memory.ttl.defaultDays`
-默认 0 时滑动 TTL 不跑，版本文件不会被自动清理，所以磁盘有界靠这次截断兜，不靠 TTL。
-截断失败只记 `warn`：写盘已经成功，下一轮覆盖写会再试一次。
+每个 identity 的历史占用固定在 5 份以内（一份与规范文件同量级）。**版本文件不参与 TTL**：
+清扫的两条 SQL 都带 `NOT_VERSION_FILE_SQL`（`src/adapters/sqlite/node-repository.ts:117`，
+`uri NOT GLOB '*/memories/*/[.]history/*'`），第一段不归档它们、第二段也不物理删除它们，
+所以 `memory.ttl.defaultDays` / `retentionDays` 配成什么都动不到 `.history`。磁盘有界只靠
+这次截断——它也是版本文件唯一的删除点。截断失败只记 `warn`：写盘已经成功，下一轮覆盖写会
+再试一次。
 
 **`approve` 保留三个键。** 复核通过也是一次完整重写，`sources` 与 `valid_from` /
-`valid_until` / `supersedes` 都原样带过来（`src/services/memory.ts` 的 `approve`，`:1176`
+`valid_until` / `supersedes` 都原样带过来（`src/services/memory.ts` 的 `approve`，`:1206`
 起）；通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
 
 **`reject` 先回退，回退不了才删。** `reject` 读当前文件的 `supersedes`：是合法 URI、
@@ -2627,7 +2659,13 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 `.history`，`valid_until` 仍非空，检索看不到它。`supersedes` 为空、不是合法 URI、文件
 不存在、类型读不出来时，维持原来的行为：删掉 pending 文件。`supersedes` 为空没有目标，
 不记 warn；另外三种失败各记一条 `warn`（`src/services/memory.ts` 的
-`#restoreSuperseded`，`:1268` 起）。
+`#restoreSuperseded`，`:1308` 起）。
+
+**HTTP 出口如实报告终态。** `POST /memories/{uri}/reject` 回 `{ uri, outcome, reason }`，
+`outcome` 是 `'restored' | 'removed'`：`restored` 时另带 `restoredFrom`（被写回的那份
+版本文件的 URI），`removed` 时没有这个键。不合并成 `{ removed: true }`——恢复时没有删除
+任何东西，两个终态对用户是相反的结论，一个布尔会让恢复看起来像删除
+（`src/services/memory.ts:171` 的 `MemoryRejectResult`）。
 
 **`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
 覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
@@ -2643,11 +2681,11 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 `valid_until` 写丢；重放器只要少读一次这两列就会。
 
 **`supersedes` 只跟一跳，不回溯链。** `reject` 只读当前文档的 `supersedes`，恢复那份
-版本后不会再沿它的 `supersedes` 往上找。版本文件被 TTL 物理删除
-（`memory.ttl.retentionDays > 0`）或被 5 份截断之后，`reject` 静默退化成「删除」：日志里
-是「指向的文件不存在，拒绝时按删除处理」的 `warn`，终态是这条记忆消失，不是回到更早的
-版本。没有沿链回溯的代码；要做需要 `supersedes` 指向的每一跳都还在盘上，而 TTL 与截断
-都不保证这一点。
+版本后不会再沿它的 `supersedes` 往上找。TTL 删不到版本文件（见上），所以让回退目标消失的
+只有 `MAX_VERSIONS` 截断：同一个 identity 覆盖写超过 5 次之后，`reject` 拿到的是「指向的
+文件不存在」，静默退化成删除——日志里一条「指向的文件不存在，拒绝时按删除处理」的 `warn`，
+终态是这条记忆消失，不是回到更早的版本。没有沿链回溯的代码；要做需要 `supersedes` 指向的
+每一跳都还在盘上，而截断不保证这一点，链越长越早的跳越可能已经被删。
 
 ## 12. 权限模型
 
@@ -2758,6 +2796,13 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 - `GET /memories/pending`：`listPending` 递归扫 `memories/`，走的是**不传 `principals`** 的 `rawFilesystem`——`restricted` 切断或显式 `deny` 的子目录照样会被列出，而一条待复核记录的 URI、`fields`、`sources` 全是内容。路由层在 scope 根求 read 之后，再按**每条记录自己的 URI** 逐条求 read，无权限的记录整条不返回。
 - `GET /memories/{uri}/links`：查询的 URI 已求 read，边的**另一端**是独立资源，要再求一次 read（`links` 查 `to`，`backlinks` 查 `from`）。`backlinks` 列出的 `comem://user/bob/memories/profile/health-condition.md` 已经说出了 Bob 有哪些记忆，所以无权限的边也整条不返回，不留占位或打码。
+
+**待复核列表的三个有效期字段始终输出。** `GET /memories/pending` 的每条记录都带
+`validFrom` / `validUntil` / `supersedes`，没有值时是显式 `null`，不省略键。理由：前端要
+区分「这个字段不存在于响应里」与「这条记忆没有该值」——前者是契约漂移，后者是正常状态，
+省略键把两者压成同一个 `undefined`。字段原样取自 frontmatter（与 `updatedAt` 同为 ISO 8601
+UTC 形态，不在序列化层换格式）；`supersedes` 非空即「这条记忆顶替了某个版本」。复核页靠这
+三个键回答「是否只在某段区间有效、是否替换了上一版本」，而后端没有单条记忆 GET（§16）。
 
 **管理端点判定的是目标资源，不是调用方自己的根。** 对「自己的根」求 `manage` 对每个登录用户都成立（user 根 owner 恒为本人），用它当门禁等于任何登录用户都是管理员。所以改密码、改资料、启用禁用、删除用户，签发 / 列出 / 吊销 API Key，改组资料、删除组、加退组成员，一律对目标用户根或组根求 `manage`。吊销 API Key 的请求里只有 key ID，先反查持有者，再对持有者的根求权——否则任何登录用户都能吊销别人的凭据。组 owner 变更不能只看组根 manage 的历史原因见下。
 
@@ -3304,9 +3349,9 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 |---|---|
 | 登录 | 认证打开且浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
 | 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks` |
-| 文件树 | 左树右详情；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度 |
+| 文件树 | 左树右详情；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块 |
 | 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4） |
-| 记忆复核 | `pending` 列表 + diff 视图（before/after）；通过 / 拒绝 |
+| 记忆复核 | `pending` 列表 + diff 视图（before/after）；详情头显示有效期与「替换上一版本」提示；批量失败的原因逐条列在页面上；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
 | 会话与任务 | 会话列表、归档列表、任务状态；没有重试入口，也没有回收记录列表（理由见下） |
@@ -3314,11 +3359,16 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 | 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
 
-**一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。三处按这条原则实现：
+**一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
 
 - **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（`assertSystemAdmin`，名单是 `auth.adminUserIds`，默认 `[]`），因为 `task` 表没有可求权的目标（§12.4）；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
 - **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
+- **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
+
+**复核页把有效期、替换关系与失败原因都摆在页面上。** 详情头在有 `validUntil` 时写「有效期截止 …」，`validFrom` 与 `updatedAt` 不同时写「自 … 起生效」；`supersedes` 非空时在差异区上方给一条提示：通过会替换掉上一版本，拒绝则恢复到覆盖前的值（`web/components/domain/MemoryDiff.vue`）——用户在按按钮之前，需要知道按钮会做什么。服务端没有批量端点，批量操作逐条独立执行，**失败原因逐条列在队列上方**（可逐条看、可关闭，下一轮开始时清空），toast 只说「成功 N 条，失败 M 条」：3 秒后消失的 toast 装不下「哪几条、各自为什么」（`web/pages/review.vue`）。
+
+**403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 
 **身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
 `web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`GET /auth/config`

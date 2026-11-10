@@ -46,8 +46,9 @@
  * 检索默认看不到版本文件：`node.valid_until` 非空，`search` 的 `asOf` 过滤把它挡在
  * 外面。它只能按 URI 直接 `read`——版本没有独立入口是刻意的（不加工具、不加接口）。
  *
- * 每个 identity 只留最新 `MAX_VERSIONS` 份：`memory.ttl.defaultDays` 默认 0 时滑动
- * TTL 不跑，版本文件不会被自动清理，所以磁盘有界靠截断而不是 TTL。
+ * 每个 identity 只留最新 `MAX_VERSIONS` 份。版本文件**不参与 TTL**：清扫的两条 SQL
+ * 都带 `NOT_VERSION_FILE_SQL`（`adapters/sqlite/node-repository.ts`），配什么
+ * `memory.ttl.*` 都动不到 `.history`，所以磁盘有界只靠这里的截断。
  *
  * `pending` 的旧值不快照（`pending` 不是有效值，没有「正确的旧值」可言），但新文档
  * **继承**它的 `supersedes`：否则拒绝一次基于 pending 的覆盖写会丢掉上一条有效版本
@@ -340,8 +341,11 @@ const MAX_SOURCES = 20;
  *
  * 来源：经验假设。目的是「回到上一次正确值」——回滚的粒度是上一次覆盖写，5 步
  * 够覆盖连续几次错误写入；同时把每个 identity 的历史占用固定在 5 份以内（一份约与
- * 规范文件同量级）。`memory.ttl.defaultDays` 默认 0 时不跑滑动 TTL，版本文件不会
- * 被自动清理，所以磁盘有界性靠这里的截断兜，不靠 TTL。
+ * 规范文件同量级）。
+ *
+ * 这是版本文件**唯一**的删除点：TTL 不碰它们（`node-repository.ts` 的两条清扫 SQL
+ * 都带 `NOT_VERSION_FILE_SQL`，按路径段排除 `.history`），与 `defaultDays` /
+ * `retentionDays` 取值无关。所以「`supersedes` 回不去」只可能由这里造成。
  */
 const MAX_VERSIONS = 5;
 
@@ -1253,8 +1257,8 @@ export class MemoryService {
    * 会带出这个 URI，供复核界面说明「拒绝会回到哪一版」；它不是读取版本文件内容的
    * 入口。这样拒绝一次错误写入的终态是「写入前的数据」，不是「这条记忆消失了」。
    *
-   * 没有版本可回（首条写入、`supersedes` 指向的文件已被 TTL 清理或截断）时维持
-   * 原来的行为：删掉 pending 文件。已经不在了是空操作。
+   * 没有版本可回（首条写入、`supersedes` 指向的文件已被 `MAX_VERSIONS` 截断）时维持
+   * 原来的行为：删掉 pending 文件。同一 identity 覆盖写超过 5 次之后，更早的版本不在了。
    *
    * 返回值如实说明这两种终态（`MemoryRejectResult`）：恢复时没有删除任何东西，
    * 调用方不能把它当成「删掉了一条记忆」。

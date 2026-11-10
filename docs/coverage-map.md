@@ -3,7 +3,7 @@
 > 以代码为准。每个能力一行：**入口 → 实现 → 数据落到哪 → 哪条测试证明它成立**。
 > 行号是快照时刻的值，不是引文。`§x` 指 `docs/architecture.md` 的节号，那份文档定架构边界与数据布局，这份只回答「在哪、怎么流、谁证明」。
 >
-> **快照**：HEAD `a3abaa2`，时刻 `2026-11-10T03:57+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
+> **快照**：HEAD `282990b`，时刻 `2026-11-10T09:41+08:00`。行号随代码移动，用例名是稳定锚点，按名字重新定位即可。见文末「快照与漂移」。
 
 ## 一、能力矩阵
 
@@ -19,8 +19,8 @@
 | 记忆抽取 | 从对话产出可执行的操作列表 | 阶段二第 2 步 | `memory-extract.ts:425` | 预取记忆编号成 `page_id` → 落 `archive_NNN/memory_operations.json`；重放由 `rehydrate` 读回 | `commit-steps.test.ts:353`「把预取记忆编号成 page_id，并把输出解析回 URI」；重放 `:949` |
 | 补丁合并 | 同批多条操作合成一次写；SEARCH 按序应用 | 阶段二第 3 步 | `memory-merge.ts:205` | 逐 URI 分组 → `MemoryService.upsertMemory`（`exact` 锁内应用 patch）→ `archive_NNN/memory_diff.json`；并写 `memory_link` 的 `derived_from` 边 | `commit-steps.test.ts:715`「同 URI 的 5 条 patch 合并成一次写」；边 `:1100`「写盘成功后写入 derived_from 链接，指向本次归档」 |
 | 摘要失效 | 正文变了，父目录摘要必须脏 | 阶段二第 4 步 | `commit/steps/summary-invalidate.ts:32` | `SummaryService.markStale(父目录)` → `node.summary_pending` / `summary_baseline` / `summary_entries` | `commit-steps.test.ts:1416`「同一目录下的 N 个文件只触发一次父目录标记」 |
-| 复核通过 / 驳回 | 高风险类型要人放行才能进检索面 | `POST /memories/{uri}/approve`、`/reject`（仅 HTTP） | `services/memory.ts:1176` `approve` / `:1232` `reject`；路由 `routes/memories.ts:135` / `:143` | `approve`：`status: pending→active`（整份重写，`sources`、`valid_from`、`valid_until`、`supersedes` 原样保留）；`reject`：`supersedes` 指向的版本写回规范 URI 并清掉 `valid_until`，没有可回退的版本时删文件、原因进日志（§11.11） | `tests/integration/services/memory.test.ts:245`「…approve 后变 active」；`:884`「reject（有 supersedes）：规范文件恢复旧正文、valid_until 清空、pending 内容消失」；`:924`「reject（没有 supersedes）：维持删除」；`:941`「supersedes 指向的版本文件已被清理时，reject 退回删除而不是抛错」 |
-| TTL 软归档 + 物理删除 | 不再被访问的记忆要退出检索面 | 调度器职责 | `services/ttl.ts:131`；`scheduler.ts:648` | `max(updated_at,last_accessed_at)` 起算 → `node.status='archived'` + `archived_at`；第二段 `filesystem.remove` 连带删索引 / 物化权限 / 向量行 | `tests/integration/services/ttl.test.ts:219`；豁免四类 `:333`；物理删除 `:448` |
+| 复核通过 / 驳回 | 高风险类型要人放行才能进检索面 | `POST /memories/{uri}/approve`、`/reject`（仅 HTTP） | `services/memory.ts:1206` `approve` / `:1266` `reject`；路由 `routes/memories.ts:142` / `:143` | `approve`：`status: pending→active`（整份重写，`sources`、`valid_from`、`valid_until`、`supersedes` 原样保留）；`reject`：`supersedes` 指向的版本写回规范 URI 并清掉 `valid_until`，没有可回退的版本时删文件、原因进日志（§11.11） | `tests/integration/services/memory.test.ts:245`「…approve 后变 active」；`:884`「reject（有 supersedes）：规范文件恢复旧正文、valid_until 清空、pending 内容消失」；`:924`「reject（没有 supersedes）：维持删除」；`:941`「supersedes 指向的版本文件已被截断时，reject 退回删除而不是抛错」 |
+| TTL 软归档 + 物理删除 | 不再被访问的记忆要退出检索面 | 调度器职责 | `services/ttl.ts:140`；`scheduler.ts:648` | `max(updated_at,last_accessed_at)` 起算 → `node.status='archived'` + `archived_at`；第二段 `filesystem.remove` 连带删索引 / 物化权限 / 向量行；两段 SQL 都带 `NOT_VERSION_FILE_SQL`（`uri NOT GLOB '*/memories/*/[.]history/*'`），版本文件不参与 TTL，数量由每 identity 5 份的截断兜住 | `tests/integration/services/ttl.test.ts:219`；豁免四类 `:333`；物理删除 `:448` |
 | 记忆合并 | 多条相似记忆收敛，删掉的来源并进保留者 | `POST /memories/consolidate`（仅 HTTP） | `services/consolidation.ts:429` | agentic 循环（≤10 轮）→ 计划阶段校验全前移 → 逐条 upsert / 删除，`sources` 取并集 | `tests/integration/services/consolidation.test.ts:175`；`consolidation-enabled.test.ts:105` |
 | 会话过期 | 空闲会话归档或删除，别一直挂着 | 调度器职责 | `bootstrap/scheduler.ts:552` `#expireSession` | `.meta.json` `status: open→archived`（`session.expiry.action: delete` 时删目录）；删前查 `memory_diff.json` 里的 pending 记忆 | `session-scheduler.test.ts:226` / `:252`；`bootstrap/scheduler.test.ts:398`「delete 跳过有 pending 记忆来源的会话」 |
 
@@ -42,12 +42,12 @@
 | 能力 | 需求（为什么存在） | 入口 | 实现（file:line） | 数据流 | 测试证据（file:行） |
 |---|---|---|---|---|---|
 | 8 种内置类型 | 每种记忆有自己的落点与字段 | 写入路径（抽取 / 合并） | `domain/memory-types/index.ts:29` | `profile` / `identity` / `soul` → `memories/*.md`；`preferences` / `entities` / `events` / `experiences` → `memories/{type}/{id}.md`；`rules` → `memories/rules/{scenario}/{rule}.md` | `unit/domain/memory-type.test.ts:109`「内置记忆类型」 |
-| 记忆文件形态 | frontmatter 由服务端定值，模型只给字段 | 同上 | `services/memory.ts:915` `upsertMemory`；路径 `:849` `renderMemoryUri`；复核重写：`:1176` `approve`、`:1268` `#restoreSuperseded` | frontmatter 写 `memory_type` / `status` / `created_at` / `updated_at` / `uri` / `valid_from`（`upsertMemory` 写本次时刻；`approve` 沿用读到的值；`reject` 回退时用被恢复版本的起点，旧文件没有这个键就不写）+ schema 字段（有值才写）；`summary` / `sources` / `valid_until` / `supersedes` 同属保留键，只在有值时写入（`summary` 取正文首个非空行，正文为空不写；`sources` 为空不写；仍有效 → 不写 `valid_until`；覆盖写产生了版本文件 → `supersedes` 指向它）；`addOnly`（events）目标已存在抛 `ALREADY_EXISTS` | `memory.test.ts:109`「写盘是 §6.6 的 Markdown + frontmatter」；`addOnly` `:223` |
-| sources 溯源 | 回答「这条记忆由哪次归档产生」 | 写入时服务端定值；`read` 末尾 `## provenance` | `memory.ts:678` `appendSources`；`tools/read.ts:78` | frontmatter 保留键，上限 20（`memory.ts:311`），超限丢最旧；`read` 在分页切片之后拼接整块 | `memory.test.ts:447`；`mcp/tools.test.ts:603`「记忆正文后追加 ## provenance」 |
+| 记忆文件形态 | frontmatter 由服务端定值，模型只给字段 | 同上 | `services/memory.ts:945` `upsertMemory`；路径 `:878` `renderMemoryUri`；复核重写：`:1206` `approve`、`:1308` `#restoreSuperseded` | frontmatter 写 `memory_type` / `status` / `created_at` / `updated_at` / `uri` / `valid_from`（`upsertMemory` 写本次时刻；`approve` 沿用读到的值；`reject` 回退时用被恢复版本的起点，旧文件没有这个键就不写）+ schema 字段（有值才写）；`summary` / `sources` / `valid_until` / `supersedes` 同属保留键，只在有值时写入（`summary` 取正文首个非空行，正文为空不写；`sources` 为空不写；仍有效 → 不写 `valid_until`；覆盖写产生了版本文件 → `supersedes` 指向它）；`addOnly`（events）目标已存在抛 `ALREADY_EXISTS` | `memory.test.ts:109`「写盘是 §6.6 的 Markdown + frontmatter」；`addOnly` `:223` |
+| sources 溯源 | 回答「这条记忆由哪次归档产生」 | 写入时服务端定值；`read` 末尾 `## provenance` | `memory.ts:707` `appendSources`；`tools/read.ts:78` | frontmatter 保留键，上限 20（`memory.ts:337`），超限丢最旧；`read` 在分页切片之后拼接整块 | `memory.test.ts:447`；`mcp/tools.test.ts:603`「记忆正文后追加 ## provenance」 |
 | 经验归纳 | 会话里的做法要沉淀成「以后可以照做的整条结论」 | 阶段二第 5 步 | `services/commit/steps/experience-distill.ts:152` `run` | 预取同类型的已有经验 → 模型按 topic 输出完整正文 → `MemoryService.upsertMemory`（同 topic 落到同一 URI，正文整段覆盖）→ `sources` 指向归档 + `derived_from` 边；空数组是合法结论，不写盘 | `commit-steps.test.ts:1209`「归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接」 |
-| 复核队列 | 只让 `config.memory.reviewRequired`（默认 `experiences` / `rules`）落 pending | `GET /memories/pending` | `memory.ts:1340` `listPending`；路由 `routes/memories.ts:78` | `listPending` **递归扫盘**：从 `memories/` 逐层 list + 读文件，跳过 `.history`，再筛 `status='pending'`（不查 `node` 表）。路由先求 scope 根 read，再按每条记录 URI 求一次 read——`listPending` 走不传 `principals` 的 `rawFilesystem`，`restricted` 子目录会被列出；返回记录带 `sources` | `memory.test.ts:244`；`api/http.test.ts:962`「pending 列表带上 sources」 |
-| 记忆关联边 | 从 `sources` 派生可反查的 `derived_from` 边 | 写：阶段二第 3 步（补丁合并）、第 5 步（`experience_distill`）；读：`GET /memories/{uri}/links?direction=links\|backlinks` | 写 `memory-merge.ts:331`、`experience-distill.ts:220`；读 `routes/memories.ts:159` + `services/memory-link.ts:72` | `memory_link` 表（迁移 `0003`），唯一键 `(from_uri,to_uri,match_text)`，`weight` 取 max | `commit-steps.test.ts:1100`「写盘成功后写入 derived_from 链接，指向本次归档」、`:1209`「归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接」、`tests/integration/api/memories-links.test.ts:158`「归档后正向非空，且方向 backlinks 能从归档 URI 反查回这条记忆」、`:271`「backlinks：from 无读权限的边不返回，A 自己的边照常返回」、`:290`「links：to 无读权限的边不返回，A 自己的边照常返回」 |
-| 预取 | 抽取前把相关记忆编号给模型 | 阶段二第 2 步 | `memory.ts:1383` `prefetch` | 单文件类型直读该文件；多文件类型走检索，`limit = max(5, topN)`；`pending` 不进预取 | `memory.test.ts:301`「单文件类型直接读该文件，不检索」；`:336` |
+| 复核队列 | 只让 `config.memory.reviewRequired`（默认 `experiences` / `rules`）落 pending | `GET /memories/pending` | `memory.ts:1380` `listPending`；路由 `routes/memories.ts:85` | `listPending` **递归扫盘**：从 `memories/` 逐层 list + 读文件，跳过 `.history`，再筛 `status='pending'`（不查 `node` 表）。路由先求 scope 根 read，再按每条记录 URI 求一次 read——`listPending` 走不传 `principals` 的 `rawFilesystem`，`restricted` 子目录会被列出；返回记录带 `sources` 与 `validFrom` / `validUntil` / `supersedes`（无值时显式 `null`） | `memory.test.ts:244`；`api/http.test.ts:962`「pending 列表带上 sources」 |
+| 记忆关联边 | 从 `sources` 派生可反查的 `derived_from` 边 | 写：阶段二第 3 步（补丁合并）、第 5 步（`experience_distill`）；读：`GET /memories/{uri}/links?direction=links\|backlinks` | 写 `memory-merge.ts:331`、`experience-distill.ts:220`；读 `routes/memories.ts:178` + `services/memory-link.ts:72` | `memory_link` 表（迁移 `0003`），唯一键 `(from_uri,to_uri,match_text)`，`weight` 取 max | `commit-steps.test.ts:1100`「写盘成功后写入 derived_from 链接，指向本次归档」、`:1209`「归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接」、`tests/integration/api/memories-links.test.ts:158`「归档后正向非空，且方向 backlinks 能从归档 URI 反查回这条记忆」、`:271`「backlinks：from 无读权限的边不返回，A 自己的边照常返回」、`:290`「links：to 无读权限的边不返回，A 自己的边照常返回」 |
+| 预取 | 抽取前把相关记忆编号给模型 | 阶段二第 2 步 | `memory.ts:1423` `prefetch` | 单文件类型直读该文件；多文件类型走检索，`limit = max(5, topN)`；`pending` 不进预取 | `memory.test.ts:301`「单文件类型直接读该文件，不检索」；`:336` |
 
 ### 4. 身份与权限
 
@@ -103,7 +103,7 @@
 | 会话 | 建会话、加消息、提交 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` | `routes/sessions.ts:177` | `SessionService`；`POST /sessions` 已存在返回 409（不重置） | `http.test.ts:812`「create → messages → get → list → commit → tasks」 |
 | 任务 | 运维查看与重试 | `GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry` | `routes/tasks.ts:89` | `task` 表；列表只返回 `claimable`（见 §四） | `admin-access-control.test.ts:583`「非管理员读 / retry 都是 403；系统管理员能读、能 retry」 |
 | ACL | 管理层改授权（不进 MCP） | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` | `routes/acl.ts:107` | `.acl.json` 真相 + `node_permission` / `acl_entry` 重算 | `http.test.ts:898`「get → grant → get → revoke」 |
-| 记忆 | 复核队列与合并 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`/reject`、`GET /memories/{uri}/links` | `routes/memories.ts:78` | `MemoryService` / `ConsolidationService` / `MemoryLinkService` 读端口 | `http.test.ts:934`；`consolidation-enabled.test.ts:105` |
+| 记忆 | 复核队列与合并 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`/reject`、`GET /memories/{uri}/links` | `routes/memories.ts:85` | `MemoryService` / `ConsolidationService` / `MemoryLinkService` 读端口 | `http.test.ts:934`；`consolidation-enabled.test.ts:105` |
 | 资源与技能 | MCP 两个 ingest 工具的 HTTP 面 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` | `routes/resources.ts:106`；`routes/skills.ts:78` | 临时上传落 `_meta/tmp/`；`GET /skills` 列已装技能 | `http.test.ts:985`–`:1058` |
 | 用户与组 | 管理面 | `/admin/users*`、`/admin/groups*`、`/admin/api-keys/{keyId}` | `routes/admin.ts:272` | `app_user` / `app_group` / `group_member` / `api_key`；跨主体操作认 `adminUserIds` | `admin.test.ts:161`「创建 → 列表 → 更新 → 删除」；`admin-access-control.test.ts:114`「A 改 B 的密码 → 403」 |
 | 认证 | 登录 / 探测 / 登出 | `GET /auth/config`、`POST /auth/login`、`POST /auth/logout` | `routes/auth.ts:52` | `AuthService`；`auth.enabled: false` 时登录端点 404 | `api/auth.test.ts:132`；`:306` |
@@ -116,7 +116,7 @@
 
 | 能力 | 需求（为什么存在） | 入口 | 实现（file:line） | 数据流 | 测试证据（file:行） |
 |---|---|---|---|---|---|
-| 重建索引 | 索引坏了要能从磁盘重建 | `pnpm reindex` | `commands/reindex.ts:423` `runReindex` | 只读磁盘 → 重写 `node` / `node_fts` / `node_embedding`；`--only` 分段、断点续跑 | `commands/reindex.test.ts:146`「磁盘有文件、索引为空 → reindex 后能检索到」 |
+| 重建索引 | 索引坏了要能从磁盘重建 | `pnpm reindex` | `commands/reindex.ts:720` `runReindex` | 只读磁盘 → 重写 `node` / `node_fts` / `node_embedding`，`--only=links` / `all` 时按 `sources` 整批替换 `memory_link` 的 `derived_from`；`--only` 分段、断点续跑 | `commands/reindex.test.ts:146`「磁盘有文件、索引为空 → reindex 后能检索到」 |
 | 设密码 | 没有注册页，账号靠命令行引导 | `pnpm password <uid>`（密码走 stdin） | `commands/password.ts:45` `setPassword` | `app_user.password_hash` + 轮换 `session_epoch`（旧 token 全失效） | `commands/password.test.ts:81`「--data-dir 覆盖 COMEM_DATA_DIR：密码写到 --data-dir 指向的数据根」 |
 | 指定组 owner | 组 owner 丢失时的恢复入口 | `pnpm group:owner <gid> <uid>` | `commands/group-owner.ts:63` `setGroupOwner` | `app_group.owner_user_id` + 组根 `.acl.json` 预置 | `commands/group-owner.test.ts:79` |
 | 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:534` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
@@ -133,7 +133,7 @@
 | 七个事件 | 每个生命周期点一个脚本 | 宿主回调 → `integrations/servers/*.mjs` | 映射表 `integrations/lib/events.json`；三宿主适配 `integrations/hosts/*.mjs` | 内部名 snake_case ↔ 宿主名 PascalCase 只在这张表对应；`reportsOverhead: false` 的 `pre_tool_use` 不上报 | `integrations/tests/event-names.test.mjs:86`「事件名表：内部名 snake_case、宿主名 PascalCase，两个方向都能查」；`codex.test.mjs:124`「SessionEnd 是一等事件」 |
 | 召回注入 | 每轮把相关记忆塞进上下文 | `UserPromptSubmit` / `SessionStart` | `integrations/servers/user-prompt-submit.mjs:136`、`session-start.mjs:250` | `POST /api/v1/search/find` → 相对阈值过滤 → `<comem-recall>` 块进宿主上下文 | `integrations/tests/user-prompt-submit.test.mjs:58`「命中渲染成 <comem-recall> 块」；`session-start.test.mjs:35`「预算放得下时列出名字 + 描述」 |
 | 会话采集 | 对话与工具消息落进 CoMem | `PostToolUse` / `Stop` / `PreCompact` / `SessionEnd` | `servers/post-tool-use.mjs:72`、`servers/stop.mjs:180` | 读宿主 transcript → `POST /sessions` + `/messages` → `Stop` 时 `POST /commit`；去重靠事件 ID + 游标 | `post-tool-use.test.mjs:45`「工具调用与结果合成一条 tool 消息」、`stop.test.mjs:149`「Stop 不等待采集」、`pre-compact.test.mjs:51`「等提交完成：消息写入 + 触发提交都在返回之前」 |
-| 控制台十页 | 人要看、要改、要复核 | `web/pages/*.vue`（概览 `/health`+`/tasks`、文件树 `/fs/ls`+`/content/*`、检索 `/search/*`、复核 `/memories/pending`+`/content/read`、ACL `/acl`、用户与组 `/admin/*`、会话与任务 `/sessions`+`/tasks`、监控 `/health`+`/metrics`、提示词 `/prompts`、工具 `/mcp/tools`） | 概览 `web/pages/index.vue:151` `load`；复核 `review.vue:90`；工具页 `tools.vue:107` | 全部走 `/api/v1` 封套；身份由 `web/plugins/console-identity.ts` 探测 `/auth/config` 后决定；概览页的 `/health` 与 `/tasks` 各自独立加载（`index.vue:115` / `:128`），`/tasks` 403 时任务卡显示「需要管理员权限」空态（`:200`），不影响健康徽标与指标卡 | **无测试**（只有身份引导单测 `tests/unit/web/console-identity.test.ts:49`） |
+| 控制台十页 | 人要看、要改、要复核 | `web/pages/*.vue`（概览 `/health`+`/tasks`、文件树 `/fs/ls`+`/content/*`、检索 `/search/*`、复核 `/memories/pending`+`/content/read`、ACL `/acl`、用户与组 `/admin/*`、会话与任务 `/sessions`+`/tasks`、监控 `/health`+`/metrics`、提示词 `/prompts`、工具 `/mcp/tools`） | 概览 `web/pages/index.vue:140` `load`；复核 `review.vue:124`；工具页 `tools.vue:107` | 全部走 `/api/v1` 封套；身份由 `web/plugins/console-identity.ts` 探测 `/auth/config` 后决定；概览页的 `/health` 与 `/tasks` 各自独立加载（`index.vue:103` / `:116`），`/tasks` 403 时任务卡显示「需要管理员权限」空态（`:189`），不影响健康徽标与指标卡 | **无测试**（只有身份引导单测 `tests/unit/web/console-identity.test.ts:49`） |
 
 ### 8. 可观测
 
@@ -169,7 +169,7 @@
 ✓ 没有清单外的孤儿
 ```
 
-这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex.ts:399` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 复用它，补齐入口也只有一个（`pnpm reindex`）。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
+这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex.ts:519` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 与启动后台回填 `bootstrap/main.ts:172` `startVectorBackfill` 复用它，补齐入口（自动回填与 `pnpm reindex`）因此只有一份口径。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
 
 **关于 `check:orphans` 自身的两条限制**（判断上面结论时要扣除）：它只认「代码里提到了这个方法名」，不认字符串派发与默认关闭的分支（`scripts/check-orphans.ts:44`–`:70` 的「抓不到的那一类」）；它读的是磁盘上的源码文件，不是某个提交的树，所以清单跟着磁盘上的改动走。
 
@@ -193,10 +193,14 @@
 | `comem_hook_async_seconds{event}` 的 `event` 标签 | 假维度：进程级快照被贴到每个事件上，同一份数据被复制成七份 | `services/observability.ts:755` 起按 `phase` 输出 |
 | `comem_llm_cost_usd_total` 的 `?? 0` | 「没配单价」被渲染成「确实花了 0 美元」 | 未配单价时整条序列不存在，另有 `comem_llm_pricing_configured`（`observability.ts:802`） |
 | 控制台的四样展示 | 读不到或永远默认：`/memories/pending` 预取改读 `/health`；任务重试按钮（列表只返回可认领任务）；文档节点的 L1 概览档；置信度徽章（字段不存在）；API Key「最后使用」列（从未记录） | `web/pages/monitor.vue:226` 起说明请求明细无端点；`web/pages/review.vue:12` 起说明复核页改读内容 |
-| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:399`），启动自检 `warnIfVectorsMissing` 转调它（`bootstrap/main.ts:105`），补齐入口只有 `pnpm reindex` 一条；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后 `check:orphans` 从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
+| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:519`），启动自检 `warnIfVectorsMissing` 与启动后台回填 `startVectorBackfill` 都转调它（`bootstrap/main.ts:105`、`:172`），补齐入口（自动回填与 `pnpm reindex`）共用这一份；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后 `check:orphans` 从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
 | 向量补全阶段的 `status !== 'active'` 复检 | 候选集来自 `#readableUris` → `index.glob`，而 glob 的 SQL 已经带 `ACTIVE_STATUS_PREDICATE`（与 FTS 臂同一条谓词，`adapters/sqlite/retrieval-index.ts:72`、`:537`）；`NodeRepository.get` 读的是同一行，`NodeStatus` 只有 `active` / `pending` / `archived` 三个成员（`domain/node.ts:19`），所以 SQL 的 `= 'active'` 与 TS 的 `!== 'active'` 对同一行等价，第二次判断不改变结果；`glob` 到 `nodes.get` 之间隔着一次 `vectors.search` 的 await，这期间状态被 TTL 清扫改掉时向量臂比 FTS 臂多挡一次，那是竞态窗口，不是第二份状态过滤的职责 | `5369219` 删前删后检索测试都是 57 passed、全量 2322 passed——「删了测试还绿」正是这处是兜底的证据（与接线类改动相反，接线类要求「删了测试变红」） |
+| 死类型 `PendingMemoriesPayload` | 控制台声明过「待复核列表响应」的整套形状，但页面改成读 `/content/read` 的正文后就没人用了；留着它等于给一条不存在的响应继续做类型承诺 | `web/composables/useApi.ts` 无该类型；复核页从 `MemoryRecordPayload` 取字段（`web/pages/review.vue`） |
+| 两份任务类型标签映射里的 `extract` / `merge` / `summary` / `index` | `TaskType` 只有 `archive`：抽取、合并、摘要失效都是归档任务内部的步骤（`stepsDone`），重建索引走命令不入队。四个键没有生产者，`/tasks` 的类型列却看起来像还存在别的任务 | `src/domain/task.ts:23`；剩下的收进 `web/utils/taskLabels.ts:17`，未知值原样显示 |
+| `index.vue` 里的任务类型 / 状态映射 | 与 `TaskTable.vue` 逐字重复：改一处标签要记得改另一处，而两份里的死键也都各自留了一份 | `web/pages/index.vue` 改用 `web/utils/taskLabels.ts:21` / `:40` 的 `taskTypeLabelOf` / `taskStatusLabelOf`，只保留本页的徽章档位 |
+| 各页面各写一遍的 403 判定 | `caught.statusCode === 403` 曾分散在概览页、会话页、用户与组页、复核页、ACL 页与提示词页；加一个错误码要改每一处，漏一处就把「不是管理员」显示成故障 | 判定收在 `web/composables/useApi.ts:291` `isForbidden`，「取文案」统一走 `:307` `forbiddenMessageOf`，「置 forbidden 状态」仍各处保留但共用同一判定 |
 
-**没有砍、但两侧结论已统一**（`210a06f` 的「契约」段，逐条按代码复核）：`timeoutMs` 从覆盖值改成上限（`adapters/llm/rerank-provider.ts`）；MCP 与 HTTP 空查询统一 `INVALID_ARGUMENT`；`health` 两侧共用 `ObservabilityService.health()`；默认条数统一到 `services/search.ts:405` `DEFAULT_SEARCH_LIMIT = 10`；token 估算统一到 `domain`（`domain/session.ts:125` `estimateTokens`）；hook 事件名统一到 `integrations/lib/events.json`；`edit` 补上派生数据通知（`services/filesystem.ts:335` 起）。
+**没有砍、但两侧结论已统一**（`210a06f` 的「契约」段，逐条按代码复核）：`timeoutMs` 从覆盖值改成上限（`adapters/llm/rerank-provider.ts`）；MCP 与 HTTP 空查询统一 `INVALID_ARGUMENT`；`health` 两侧共用 `ObservabilityService.health()`；默认条数统一到 `services/search.ts:405` `DEFAULT_SEARCH_LIMIT = 10`；token 估算统一到 `domain`（`domain/session.ts:125` `estimateTokens`）；hook 事件名统一到 `integrations/lib/events.json`；`edit` 补上派生数据通知（`services/filesystem.ts:335` 起）。本轮又统一一处：「可读」的判定从 `p.level >= 1` 改成读位测试 `(p.level & 1) = 1`（`c02970a`），两份 SQL（`adapters/sqlite/retrieval-index.ts:251`、`adapters/sqlite/permission-repository.ts:138`）与读路径的 `levelSatisfies` 现在同一语义，对拍用例在 `tests/integration/sqlite/permission-visibility-consistency.test.ts`（含 `level = 2` / `5` / `6`）。
 
 ## 四、已知缺口
 
@@ -206,19 +210,19 @@
 |---|---|---|
 | `GET /tasks` 只列可认领任务 | 列表走 `claimable`（pending 或租约过期的 running），所以 `done` / `failed` 一条都不出现：`status=done` 的过滤恒空，控制台拿不到失败任务 id，`POST /tasks/{id}/retry` 只能手工给 id | `routes/tasks.ts:103`、`services/task.ts:180` |
 | HTTP 两条检索路径没有时间上限 | `/search/grep`、`/search/glob` 不套 `runWithDeadline`（MCP 的 16 个工具全部在 30 秒闸门下） | `routes/search.ts:397`、`:416`，对照 `:285` / `:322` |
-| 记忆合并没有墙上时钟上限 | `POST /memories/consolidate` 调模型且不套 deadline：上限是 10 轮 × 单次调用超时（默认 120 秒），最坏约 20 分钟无响应 | `routes/memories.ts:89`、`services/consolidation.ts:429`、`:172`（`DEFAULT_MAX_ITERATIONS`） |
+| 记忆合并没有墙上时钟上限 | `POST /memories/consolidate` 调模型且不套 deadline：上限是 10 轮 × 单次调用超时（默认 120 秒），最坏约 20 分钟无响应 | `routes/memories.ts:115`、`services/consolidation.ts:429`、`:172`（`DEFAULT_MAX_ITERATIONS`） |
 | 两个写路径只校验身份、没有目标资源求权 | `temp-upload` 只解析身份（没有目标）；`telemetry/hook` 同样只解析身份 | `routes/resources.ts:117`、`routes/telemetry.ts:66` |
-| 记忆关联边没有 HTTP 写入口 | 只有阶段二会写 `derived_from` 边（补丁合并与经验归纳两个写点）；手工改 `sources` 不会重算 `memory_link`，读端点会与文件不一致 | `routes/memories.ts:159`（只有读）、`memory-merge.ts:331`、`experience-distill.ts:220` |
+| 记忆关联边没有 HTTP 写入口 | 写 `derived_from` 的只有阶段二两个写点（补丁合并、经验归纳），重建走 CLI：`pnpm reindex --only=links`（`all` 也含）按 `sources` 整批替换这一类边，所以手工改 `sources` 之后可以修回来。仍然没有写端点；`references` / `related` 在 frontmatter 里没有真相，重建不动它们，写错的只能改 SQL | `routes/memories.ts:178`（只有读）、`memory-merge.ts:331`、`experience-distill.ts:220`、`services/memory-link.ts:94` `rebuildDerived` |
 | `request_log` 只写不读 | 没有查询端点，控制台只列指标名；裁剪挂在调度器上，四个开关全关时只剩启动清理一次 | `services/observability.ts:499`、`bootstrap/scheduler.ts:736`、`bootstrap/container.ts:620` |
-| 切换检索引擎后存量记忆不回填 | 启动只记一行 warn，补齐靠手工 `pnpm reindex`；缺向量的判定只有一份（`commands/reindex.ts` 的 `hasDocumentsMissingVectors`，`bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 复用它）。**仍然没有自动回填**：切到 `vector` / `hybrid` 后旧记忆在人工跑 reindex 之前一条都搜不到 | `bootstrap/main.ts:92`–`:105`、`commands/reindex.ts:399`、`:423` |
+| ~~切换检索引擎后存量记忆不回填~~（已解决） | 服务监听之后启动后台回填（`startVectorBackfill`，不 await，不阻塞 listen）：候选集按 `model` / `content_digest` 判定，正文与 digest 都从磁盘读（不拿 `node.body_digest` 当输入，否则会写出「digest 与向量来自不同次读盘」的行），分批嵌入，每批一行 info 带 embedded / skipped / failed / remaining；失败记 warn 跳过继续，关闭时先 abort 在途调用再等当前批收尾。启动那一行 warn 仍然保留，只是现在说的是「服务会在后台自动补齐」；`pnpm reindex` 是手工全量入口 | `bootstrap/main.ts:172` `startVectorBackfill`、`:214` `backfillMissingVectors`；用例 `tests/integration/bootstrap/missing-vectors.test.ts` |
 | 配置项只能手工核对 | `check:config` 四层都只证明「配置到达了代码」；3 处歧义匹配需人工看，17 处 `LEGACY_OPTIONAL_CONFIG_DEPS` 仍是可选属性 | `scripts/check-config.ts:272`、`docs/operations.md`「配置自检」 |
 | 控制台与 Hook 插件没有静态检查 | 根 `eslint` 不覆盖 `web/` 与 `integrations/`；控制台十个页面无自动化测试（只有身份合成 composable 的单测） | `eslint.config.js`、`tests/unit/web/console-identity.test.ts:49` |
-| 「可读」的判定有两套 SQL 谓词，读路径另有一套位测试 | 列表与检索用 `level >= 1`（`permissionPredicate`、`readableUris`），单节点读权限用 `MAX(level)` 再交给 `levelSatisfies` 的位测试。规范级别 1 / 3 / 7 下同结论；库里出现 2 / 4 / 6 这类非规范级别时两边分叉——列表可见而读被拒。这种行 API 写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手工 SQL 或旧数据 | `adapters/sqlite/retrieval-index.ts:255`、`adapters/sqlite/permission-repository.ts:143`、`services/acl.ts:962`、`:967` |
+| 已生效记忆的结构化元数据在控制台仍无出口 | 待复核列表带出 `validFrom` / `validUntil` / `supersedes` / `sources`，但已生效（`active`）的记忆没有单条 GET，控制台只能读 `/content/read` 的正文；一条记忆被通过之后，字段、有效期与来源就从界面上消失了。要补得先加单条记忆读取端点（MCP 仍是 16 个工具，这属于 HTTP 面） | `src/api/http/routes/memories.ts:85`（只有 `/pending`）、`adapters/fs/content-store.ts:183`（`/content/read` 只回 `document.body`） |
 | 多进程写同一 `dataDir` 会漏计已归档消息 | `totalMessageCount` 与消息幂等索引共用「单进程持有全量缓存」的假设 | `services/session.ts:499`；覆盖用例 `tests/integration/services/session.test.ts:452`「keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3」 |
 | 阶段二终态失败不写 `ArchivePhaseStatus.failed` | 归档停在 `ready`，只能从 `task.status=failed` 看出失败 | `services/commit/pipeline.ts:185`、`domain/archive.ts:20` |
 
 ## 快照与漂移
 
-- 本文的行号对应 `2026-11-10T03:57+08:00` 的 HEAD `a3abaa2`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
+- 本文的行号对应 `2026-11-10T09:41+08:00` 的 HEAD `282990b`。行号会随代码移动，**用例名是稳定锚点**：`grep -n '<用例名>' <测试文件>` 即可重新定位，行号只作快照。
 - `tests/integration/services/commit-steps.test.ts` 被持续追加用例，行号最容易偏移；引用它时优先给用例名。
 - 引用顺序：先看本文定位入口与测试，细节回 `docs/architecture.md` 对应节号；两侧冲突时以代码为准，并同步改文档。

@@ -134,7 +134,8 @@ const MAX_PURGE_SCAN_DIRECTORIES = 10_000;
  * `services/` 不能 import `node:sqlite`（§4.2，连类型导入都算依赖）。
  *
  * 这里只声明用到的形状：`node_permission` 的级别查询要按 `action` 过滤，而
- * `PermissionRepository.readableUris` 固定 `level >= 1`（只服务 read 过滤）；
+ * `PermissionRepository.readableUris` 固定只判 read 位（`(level & 1) = 1`，与
+ * `domain/acl.ts` 的 `levelSatisfies` 同义）；
  * `purgePrincipal` 按主体删两张表的行，仓储没有这个方法，只能写在这里。
  * `DatabaseSync` 结构上可赋值。
  */
@@ -952,12 +953,12 @@ export class AclService implements Authorizer {
   /**
    * 物化表里该主体集合拿到的最高级别。
    *
-   * 直接查 `node_permission` 而不是 `readableUris`：后者固定 `level >= 1`，
-   * 回答不了 `write` / `manage` 的检查。
+   * 直接查 `node_permission` 而不是 `readableUris`：后者固定只判读位
+   * （`(level & 1) = 1`），回答不了 `write` / `manage` 的检查。
    *
    * deny 优先（§12.2 不变量 2）：主体集合里有人被 deny 时 allow 一律作废。这与
-   * `PermissionRepository.readableUris` 是同一套谓词，只把「级别 >= read」换成
-   * `MAX(level)`。
+   * `PermissionRepository.readableUris` 是同一套谓词，只把读位测试换成 `MAX(level)`
+   * 再交给 `levelSatisfies`（同一处位测试，规范级别 1 / 3 / 7 上同结论）。
    */
   #maxLevel(uri: string, principals: readonly string[]): AclLevel | null {
     if (principals.length === 0) {
