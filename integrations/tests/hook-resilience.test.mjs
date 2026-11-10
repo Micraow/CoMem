@@ -71,8 +71,9 @@ function sleep(milliseconds) {
 async function startServer(handler) {
   const requests = [];
   const server = createServer(async (request, response) => {
-    for await (const _chunk of request) {
-      // 消费请求体。
+    for await (const chunk of request) {
+      // 消费请求体；内容不参与断言。
+      void chunk;
     }
     requests.push({ method: request.method, url: request.url });
     await handler(request, response);

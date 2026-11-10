@@ -24,15 +24,27 @@
  * `detached` + `stdio: 'ignore'` 的进程拿不到父进程的 stdin。载荷走环境变量会
  * 撞 Linux 的单个变量上限（DSH 适配器可能把整段对话放进载荷），所以写临时文件、
  * 把路径传过去；worker 读完立刻删。过期文件在每次写入前顺带清掉。
+ *
+ * ## transcript 的格式由宿主决定
+ *
+ * 采集的是宿主写出的 transcript 文件，**每个宿主的格式不同**（Claude Code 是带
+ * 顶层 `message` 的 JSONL，Codex 是 `type: "response_item"` + `payload` 的
+ * rollout）。解析器因此挂在 `hosts/<host>.mjs` 的 `parseTranscript` 上，本文件只
+ * 负责「拿路径 → 交给当前宿主的解析器」。反过来做的代价是真实的：内置一种格式时，
+ * 另一种宿主的每一行都被跳过，`Stop` 拿到空数组后早退——不发 `POST /sessions`、
+ * 不建会话、不建任务，进程还退出 0。
+ *
+ * 解析出 0 条消息时写一行诊断到 `{tmpdir}/comem-capture.log`（**不能只写 stderr**：
+ * `Stop` 的 worker 是 `stdio: 'ignore'` 的分离进程，stderr 被丢弃）。
  */
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
+import { DEFAULT_HOST_NAME, isBypassed, loadConfig, loadHost, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
 import { withSessionLock } from '../lib/lock.mjs';
@@ -60,87 +72,112 @@ const WORKER_PAYLOAD_MAX_AGE_MS = 3_600_000;
 const WORKER_FLAG = 'COMEM_WORKER';
 const WORKER_PAYLOAD = 'COMEM_WORKER_PAYLOAD';
 
-function asRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
-}
+/**
+ * 采集诊断日志的文件名（落在 `tmpDir` 下）。
+ *
+ * **为什么不是 stderr。** `Stop` 的采集跑在 `stdio: 'ignore'` 的分离 worker 里，
+ * 它的 stderr 被丢弃——写在那里等于没有。`PreCompact` / `SessionEnd` 走同一条
+ * 采集路径，也读同一份文件。
+ */
+const CAPTURE_LOG_FILE = 'comem-capture.log';
 
 /**
- * 从 transcript 的 `content` 里抽纯文本 part。
+ * 诊断日志的上限。
  *
- * 只认 `text` 块：`tool_use` / `tool_result` 由 `PostToolUse` 采集（两边不重叠），
- * 图片在 v1 的 Hook 里不采集（§10.1：图片只存 URL，解析交给 agent）。
+ * 262144（256 KiB）是经验值：一条诊断约 200 字节，足够放上千条；超过之后整份
+ * 重写，只留最新一条——诊断日志不该成为 `/tmp` 的无限增长源，也不值得为它引入
+ * 轮转配置。
  */
-function extractTextParts(content) {
-  if (typeof content === 'string') {
-    return content === '' ? [] : [{ kind: 'text', text: content }];
-  }
-  if (!Array.isArray(content)) {
-    return [];
-  }
-  const parts = [];
-  for (const block of content) {
-    const record = asRecord(block);
-    if (record['type'] === 'text' && typeof record['text'] === 'string' && record['text'] !== '') {
-      parts.push({ kind: 'text', text: record['text'] });
-    }
-  }
-  return parts;
-}
+const CAPTURE_LOG_MAX_BYTES = 262_144;
 
 /**
- * 读 transcript（Claude Code 的 JSONL），只保留 user / assistant 的文本消息。
+ * 交给**当前宿主**的解析器读 transcript。
  *
- * 畸形行跳过而不是整体失败：transcript 是宿主边写边追加的，最后一行经常是半个
- * JSON。为一行半截数据丢掉整轮会话，方向反了。
+ * 宿主名取自归一化后的 `event.host`：worker 是 `spawn` 出来的分离进程，只继承了
+ * 脚本路径（`--host` 不在它的 argv 里），从载荷里读才不会退回默认宿主。
  *
- * `isSidechain` 的行（子 agent 的对话）也跳过：它属于另一个会话，混进来会被
- * 抽取成「用户说过」的记忆。
- *
- * @param {string} transcriptPath
- * @param {string} sessionId
- * @returns {Promise<readonly Record<string, unknown>[]>}
+ * @param {{ host?: string, sessionId: string, transcriptPath: string }} event
+ * @returns {Promise<{
+ *   messages: Record<string, unknown>[],
+ *   lines: number,
+ *   skipped: number,
+ *   sample: string | null,
+ *   readError?: string,
+ *   note?: string,
+ * }>}
  */
-export async function readTranscriptMessages(transcriptPath, sessionId) {
+async function readTranscript(event) {
+  const hostName =
+    typeof event.host === 'string' && event.host !== '' ? event.host : DEFAULT_HOST_NAME;
+  const parseTranscript = (await loadHost(hostName)).parseTranscript;
+
   let text;
   try {
-    text = await readFile(transcriptPath, 'utf8');
-  } catch {
-    return [];
+    text = await readFile(event.transcriptPath, 'utf8');
+  } catch (error) {
+    return {
+      messages: [],
+      lines: 0,
+      skipped: 0,
+      sample: null,
+      readError: typeof error?.code === 'string' ? error.code : 'READ_FAILED',
+    };
+  }
+  return parseTranscript(text, { sessionId: event.sessionId });
+}
+
+/**
+ * 写一行「没有采集到消息」的诊断。
+ *
+ * 这条路径以前是静默 `return`：宿主名、transcript 路径、行数一个都看不到，用户
+ * 只能观察到「开了新对话，什么都没记住」。**不打印消息正文**——诊断只需要能回答
+ * 「这份文件是不是这个宿主的格式」。
+ *
+ * @param {string} dir
+ * @param {{ event: string, host?: string, sessionId: string, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event
+ * @param {Awaited<ReturnType<typeof readTranscript>> | null} transcript
+ * @param {readonly Record<string, unknown>[] | null} provided 载荷里自带的累积消息列表（没有则为 `null`）
+ */
+async function reportEmptyCapture(dir, event, transcript, provided) {
+  const record = {
+    level: 'warn',
+    component: 'capture',
+    event: event.event,
+    host: typeof event.host === 'string' && event.host !== '' ? event.host : DEFAULT_HOST_NAME,
+    sessionId: event.sessionId,
+    transcript: event.transcriptPath,
+    reason: 'no-transcript-path',
+    lines: 0,
+    skipped: 0,
+    sample: null,
+  };
+  if (transcript !== null) {
+    record.reason = transcript.readError === undefined ? 'no-messages' : 'transcript-read-failed';
+    record.lines = transcript.lines;
+    record.skipped = transcript.skipped;
+    record.sample = transcript.sample;
+    if (transcript.readError !== undefined) {
+      record['error'] = transcript.readError;
+    }
+    if (transcript.note !== undefined) {
+      record['note'] = transcript.note;
+    }
+  } else if (Array.isArray(provided)) {
+    record.reason = 'empty-messages';
   }
 
-  const messages = [];
-  for (const [index, line] of text.split('\n').entries()) {
-    if (line.trim() === '') {
-      continue;
+  const file = join(dir, CAPTURE_LOG_FILE);
+  const line = `${JSON.stringify(record)}\n`;
+  try {
+    const info = await stat(file).catch(() => null);
+    if (info !== null && info.size >= CAPTURE_LOG_MAX_BYTES) {
+      await writeFile(file, line, 'utf8');
+      return;
     }
-    let entry;
-    try {
-      entry = asRecord(JSON.parse(line));
-    } catch {
-      continue;
-    }
-    if (entry['isSidechain'] === true) {
-      continue;
-    }
-    const message = asRecord(entry['message']);
-    const role = message['role'];
-    if (role !== 'user' && role !== 'assistant') {
-      continue;
-    }
-    const parts = extractTextParts(message['content']);
-    if (parts.length === 0) {
-      continue;
-    }
-    messages.push({
-      // 用宿主给的 uuid：重投同一批消息时 ID 稳定，服务端能按 ID 去重。
-      id: typeof entry['uuid'] === 'string' ? entry['uuid'] : `${sessionId}:${index}`,
-      role,
-      parts,
-      createdAt:
-        typeof entry['timestamp'] === 'string' ? entry['timestamp'] : new Date().toISOString(),
-    });
+    await appendFile(file, line, 'utf8');
+  } catch {
+    // 诊断日志写不了就算了：它不能反过来让采集失败。
   }
-  return messages;
 }
 
 /**
@@ -173,7 +210,7 @@ async function ensureSession(event, deps) {
  * 失败时游标不动：下一次 `Stop` / `PreCompact` 把同一批消息重投一遍。宁可重复
  * （服务端按消息 ID 去重）不能丢。
  *
- * @param {{ event: string, sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
+ * @param {{ event: string, host?: string, sessionId: string, cwd: string, eventId: string | null, transcriptPath: string | null, messages: readonly Record<string, unknown>[] | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用；`host` 决定用哪个 transcript 解析器
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv }} deps
  * @returns {Promise<{ captured: number, committed: boolean, bypassed: boolean }>}
  */
@@ -191,13 +228,21 @@ export async function captureSession(event, deps) {
       // 失败会表现成「采集偶尔不生效」——那种问题最难查。
       await mkdir(dir, { recursive: true });
       const cursor = await readCursor(event.sessionId, { dir });
-      const messages =
-        event.messages ??
-        (event.transcriptPath === null
-          ? []
-          : await readTranscriptMessages(event.transcriptPath, event.sessionId));
+      // 宿主直接给了累积列表（DSH 的 `data.messages`）就用它；否则交给当前宿主的
+      // transcript 解析器（`hosts/<host>.mjs` 的 `parseTranscript`）。
+      const provided = Array.isArray(event.messages) ? event.messages : null;
+      const transcript =
+        provided === null && typeof event.transcriptPath === 'string'
+          ? await readTranscript(event)
+          : null;
+      const messages = provided ?? transcript?.messages ?? [];
       const pending = messages.slice(cursor);
       if (pending.length === 0) {
+        // 「0 条」不是正常返回：整条阶段二（建会话 → 写消息 → 提交 → 建任务）
+        // 都没有启动。留一行能定位的诊断，不打印消息正文。
+        if (messages.length === 0) {
+          await reportEmptyCapture(dir, event, transcript, provided);
+        }
         return { captured: 0, committed: false, bypassed: false };
       }
 
@@ -206,8 +251,11 @@ export async function captureSession(event, deps) {
       // 到这一步服务端已经接收，游标可以前进。
       await advanceCursor(event.sessionId, messages.length, { dir });
 
-      // 提交是否真的归档由服务端的 `session.autoCommit` 策略决定（§10.2.1），
-      // hook 只负责「每轮结束后提一次」。
+      // 提交是**无条件**的：`POST /sessions/{id}/commit` 直接调 `commitPhase1`
+      // （`src/api/http/routes/sessions.ts` 的 `/:id/commit`），不看
+      // `session.autoCommit`——那个配置只决定后台调度器什么时候自动提交、归档时
+      // 保留最近几条（`keepRecentCount`），不影响这次显式调用。hook 负责「每轮
+      // 结束后提一次」。
       await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/commit`, {});
       return { captured: pending.length, committed: true, bypassed: false };
     },

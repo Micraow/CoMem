@@ -94,6 +94,112 @@ function toolFilePath(toolName, toolInput) {
 }
 
 /**
+ * 从 transcript 的 `content` 里抽纯文本 part。
+ *
+ * 只认 `text` 块：`tool_use` / `tool_result` 由 `PostToolUse` 采集（两边不重叠），
+ * 图片在 v1 的 Hook 里不采集（§10.1：图片只存 URL，解析交给 agent）。
+ */
+function extractTextParts(content) {
+  if (typeof content === 'string') {
+    return content === '' ? [] : [{ kind: 'text', text: content }];
+  }
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const parts = [];
+  for (const block of content) {
+    const record = asRecord(block);
+    if (record['type'] === 'text' && typeof record['text'] === 'string' && record['text'] !== '') {
+      parts.push({ kind: 'text', text: record['text'] });
+    }
+  }
+  return parts;
+}
+
+/** 一行被跳过内容的形状：只看键名与 `type` 这类枚举值，不取正文。 */
+function describeEntry(entry) {
+  const keys = Object.keys(entry).slice(0, 3).join(',');
+  const type = typeof entry['type'] === 'string' ? entry['type'] : '?';
+  const payload = asRecord(entry['payload']);
+  const payloadType = typeof payload['type'] === 'string' ? payload['type'] : '?';
+  return `type=${type} payload.type=${payloadType} keys=${keys}`;
+}
+
+/**
+ * 读 Claude Code 的 transcript（JSONL），只保留 user / assistant 的文本消息。
+ *
+ * **transcript 的格式由写它的宿主决定**，所以这个解析器挂在宿主适配器上，而不是
+ * `servers/stop.mjs`（Codex 的 rollout 是另一种形状，见 `hosts/codex.mjs`）。
+ *
+ * 畸形行跳过而不是整体失败：transcript 是宿主边写边追加的，最后一行经常是半个
+ * JSON。为一行半截数据丢掉整轮会话，方向反了。
+ *
+ * `isSidechain` 的行（子 agent 的对话）也跳过：它属于另一个会话，混进来会被
+ * 抽取成「用户说过」的记忆。
+ *
+ * @param {string} text transcript 文件的内容
+ * @param {{ sessionId?: string }} [options]
+ * @returns {{
+ *   messages: Record<string, unknown>[],
+ *   lines: number,
+ *   skipped: number,
+ *   sample: string | null,
+ * }}
+ *   `lines` 是非空行数，`skipped` 是被跳过的行数，`sample` 是**第一行**被跳过内容
+ *   的形状。解析出 0 条时，`servers/stop.mjs` 靠这三项在诊断日志里指出「这份文件
+ *   不是这个宿主的格式」。
+ */
+export function parseTranscript(text, options = {}) {
+  const sessionId = typeof options.sessionId === 'string' ? options.sessionId : 'transcript';
+  const messages = [];
+  let lines = 0;
+  let skipped = 0;
+  let sample = null;
+
+  for (const [index, line] of text.split('\n').entries()) {
+    if (line.trim() === '') {
+      continue;
+    }
+    lines += 1;
+    let entry;
+    try {
+      entry = asRecord(JSON.parse(line));
+    } catch {
+      skipped += 1;
+      sample ??= 'invalid JSON';
+      continue;
+    }
+    if (entry['isSidechain'] === true) {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    const message = asRecord(entry['message']);
+    const role = message['role'];
+    if (role !== 'user' && role !== 'assistant') {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    const parts = extractTextParts(message['content']);
+    if (parts.length === 0) {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    messages.push({
+      // 用宿主给的 uuid：重投同一批消息时 ID 稳定，服务端能按 ID 去重。
+      id: typeof entry['uuid'] === 'string' ? entry['uuid'] : `${sessionId}:${index}`,
+      role,
+      parts,
+      createdAt:
+        typeof entry['timestamp'] === 'string' ? entry['timestamp'] : new Date().toISOString(),
+    });
+  }
+  return { messages, lines, skipped, sample };
+}
+
+/**
  * 宿主载荷 → 内部事件。
  *
  * 未知事件直接抛错：静默忽略等于让一个拼错的 settings 条目长期不生效，而宿主

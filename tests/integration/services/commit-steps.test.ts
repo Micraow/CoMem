@@ -695,18 +695,47 @@ function mergeContext(
 }
 
 
+/**
+ * `memory_diff.json` 的内存替身。
+ *
+ * 初始是一份**空的清单**：`experience_distill` 排在 `memory_merge` 之后，后者无论
+ * 有没有操作都会写这份文件。单独跑这一步时用一个空清单模拟「合并已经跑过」。
+ */
+function createDistillArchive(): ExperienceDistillStepDeps['archive'] & {
+  readonly diffs: MemoryDiff[];
+} {
+  const diffs: MemoryDiff[] = [
+    {
+      archiveUri: ARCHIVE,
+      extractedAt: UPDATED_AT,
+      operations: { adds: [], updates: [], deletes: [] },
+      skippedOperations: [],
+      summary: { totalAdds: 0, totalUpdates: 0, totalDeletes: 0, totalSkipped: 0 },
+    },
+  ];
+  return {
+    writeMemoryDiff: async (_archiveUri: Uri, diff: MemoryDiff) => {
+      diffs.push(diff);
+    },
+    readMemoryDiff: async () => diffs.at(-1) ?? null,
+    diffs,
+  };
+}
+
 /** 经验归纳步骤的装配：默认用真实 `MemoryService` / `MemoryLinkService`。 */
 function createDistillStep(
   provider: FakeLlmProvider,
   options: {
     readonly memory?: ExperienceDistillStepDeps['memory'];
     readonly links?: ExperienceDistillStepDeps['links'];
+    readonly archive?: ExperienceDistillStepDeps['archive'];
   } = {},
 ): ExperienceDistillStep {
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
   return new ExperienceDistillStep({
     memory: options.memory ?? memory,
     llm,
+    archive: options.archive ?? createDistillArchive(),
     links: options.links ?? linkService,
     logger,
   });
@@ -1308,6 +1337,23 @@ describe('ExperienceDistillStep', () => {
     // 正文相同、来源相同：磁盘上的字段没有因为重放而多出一份。
     expect(second?.fields['content']).toBe(first?.fields['content']);
     expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toHaveLength(1);
+  });
+
+  it('写出的经验追加进归档清单：重放不会留下同 URI 的两条记录', async () => {
+    const archive = createDistillArchive();
+    const output = {
+      json: { experiences: [{ topic: 'monorepo-migration', content: '迁移前先固定依赖版本。' }] },
+    };
+
+    await createDistillStep(new FakeLlmProvider([output]), { archive }).run(createContext());
+    await createDistillStep(new FakeLlmProvider([output]), { archive }).run(createContext());
+
+    // 清单按 URI 去重：第二次写入是更新，不再同时留一条新增。
+    const diff = archive.diffs.at(-1);
+    const entries = [...(diff?.operations.adds ?? []), ...(diff?.operations.updates ?? [])];
+    expect(entries.map((entry) => entry.uri)).toEqual([EXPERIENCE]);
+    expect(entries[0]?.memoryType).toBe('experiences');
+    expect((diff?.summary.totalAdds ?? 0) + (diff?.summary.totalUpdates ?? 0)).toBe(1);
   });
 
   it('空数组是合法结论：不写盘、记 info、步骤成功', async () => {

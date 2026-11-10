@@ -139,6 +139,35 @@ function normalizeMessages(value) {
 }
 
 /**
+ * DSH 不解析 transcript。
+ *
+ * DSH 的会话消息按本插件的约定从 hook 载荷的 `data.messages` 读（见文件头的
+ * 「载荷」），采集直接用它，**没有需要解析的 transcript 文件**。载荷里的
+ * `transcriptPath` 是为了兼容 Claude Code 的扁平形状而接受的，**DSH 的 transcript
+ * 文件格式未验证**——不在这里编一份解析器去猜（那会把一份猜出来的格式当成契约）。
+ *
+ * 返回空结果并带 `note`：`servers/stop.mjs` 在「解析出 0 条消息」时把它写进
+ * 诊断日志，而不是静默早退。
+ *
+ * @returns {{
+ *   messages: Record<string, unknown>[],
+ *   lines: number,
+ *   skipped: number,
+ *   sample: string | null,
+ *   note: string,
+ * }}
+ */
+export function parseTranscript() {
+  return {
+    messages: [],
+    lines: 0,
+    skipped: 0,
+    sample: null,
+    note: 'DSH 的会话消息来自 hook 载荷的 data.messages；transcript 文件格式未验证。',
+  };
+}
+
+/**
  * @param {unknown} raw
  */
 export function normalizeEvent(raw) {

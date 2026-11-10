@@ -2,8 +2,8 @@
  * FTS5 检索实现（架构文档 §8.1–§8.5）。
  *
  * 索引侧：`upsert` 把 `abstract` 与 `content` 用 `segmentCjk` 切分后写进 `node_fts`，
- * 同时维护 `node` 读模型。查询侧：`search` 把查询串同样切分、包成 FTS5 短语，
- * 一次 SQL 完成「匹配 + 路径范围 + 元数据过滤 + 状态 + 权限」。
+ * 同时维护 `node` 读模型。查询侧：`search` 把查询串按空白切词、每个词切分后包成
+ * FTS5 短语、词间用 `AND` 连接，一次 SQL 完成「匹配 + 范围 + 元数据 + 状态 + 权限」。
  *
  * **分数约定**：FTS5 的 `bm25()` 返回负数，越负越相关。这一层把分数取负后返回，
  * 于是「越大越相关」与 `domain/ranking.ts` 的排序方向一致，调用方不需要记住符号。
@@ -52,18 +52,17 @@ export interface SqliteFtsIndexOptions {
 /**
  * §18 `retrieval.candidateMultiplier` 的默认值。
  *
- * 来源是 §8.2 的代价分析：权限过滤在 SQL 里做，但候选仍可能因路径/元数据过滤掉
- * 一部分，先取 `limit × 4` 再截断，给「过滤后不足」留余量。这个系数没有实测数据
- * 支撑，调参时应该用真实查询对比「返回条数」与「查询成本」。
+ * 来源是 §8.2 的代价分析：权限过滤在 SQL 里做，但候选仍可能因路径/元数据被过滤掉
+ * 一部分，先取 `limit × 4` 再截断。这个系数没有实测数据支撑，调参时应该用真实查询
+ * 对比「返回条数」与「查询成本」。
  */
 const DEFAULT_CANDIDATE_MULTIPLIER = 4;
 
 /**
  * 归档只影响检索面（§11.7）。`search` 与 `glob` 的 SQL 都带这条谓词。
  *
- * 收成一个常量而不是各写一份字面量：`glob` 同时是 `grep` 与向量检索的候选集来源
- * （`services/search.ts` 的两条路径都调 `index.glob`），「已归档不出现」必须由
- * 同一条谓词保证，否则三个检索面会漂移。
+ * 收成一个常量而不是各写一份字面量：`glob` 同时是 `grep` 与向量检索的候选集来源，
+ * 「已归档不出现」必须由同一条谓词保证，否则三个检索面会漂移。
  */
 const ACTIVE_STATUS_PREDICATE = "n.status = 'active'";
 
@@ -90,12 +89,10 @@ function nullableText(value: SQLOutputValue | undefined): string | null {
 /**
  * 一行索引记录的 FTS `abstract` 列原文。
  *
- * 目录的 L1 概览行（`kind = 'directory'` 且 `level = 'L1'`）返回空串：L0 是从 L1 正文里提取的
- * （`domain/summary.ts` 的 `extractAbstract`），概览正文**已经包含**同一段文字。
- * 再把它写进 `abstract` 列，FTS5 会把同一处匹配的词频算两遍（`bm25()` 按列累加
- * 词频），这一行仅凭「摘要里出现过」就能压过真正的原文命中，层级权重（1.05）也
- * 就失去意义。
- *
+ * 目录的 L1 概览行（`kind = 'directory'` 且 `level = 'L1'`）返回空串：L0 是从 L1
+ * 正文里提取的（`domain/summary.ts` 的 `extractAbstract`），概览正文**已经包含**
+ * 同一段文字。再写进 `abstract` 列，FTS5 会把同一处匹配的词频算两遍（`bm25()` 按列
+ * 累加），这一行仅凭「摘要里出现过」就能压过真正的原文命中，层级权重（1.05）失去意义。
  * 展示用的摘要不受影响：`node.abstract` 仍然存 L0 原文，`search` 返回的是那一列。
  */
 function ftsAbstract(record: IndexRecord): string {
@@ -104,14 +101,21 @@ function ftsAbstract(record: IndexRecord): string {
 }
 
 /**
- * 查询串 → FTS5 短语。
+ * 查询串 → FTS5 布尔表达式：按空白切词，每个词切分后包成短语、用 `AND` 连接。
  *
- * 整串包成短语是唯一安全做法：`"` `*` `(` `)` `-` `:` `^` `+` 与 `AND` / `OR` / `NOT`
- * 都会改变 FTS5 的查询语义，用户输入里完全可能出现（`a*b`、`(x)`、`AND`）。包成短语
- * 之后这些字符全部按字面量参与匹配；内部双引号双写是 FTS5 的转义规则。
+ * 整串包成一个短语要求 token 连续（「重试 网关层 支付」要求文档原样出现「重试网关层
+ * 支付」），多词查询召回为 0；切词后词内仍要求相邻、词间允许间隔。用 `AND` 不用
+ * `OR`——FTS5 是词法召回（§8.5，语义召回交给 `vector` / `hybrid`），`OR` 会把「的」
+ * 这类虚词拉进候选集。词内的 `"` 双写；纯标点的词切出来是空短语（`AND` 里恒假），
+ * 丢掉。返回 `null` 表示没有可检索的词，调用方返回空集。
  */
-function toMatchExpression(textQuery: string): string {
-  return `"${segmentCjk(textQuery).replace(/"/g, '""')}"`;
+function toMatchExpression(textQuery: string): string | null {
+  const terms = textQuery
+    .split(/\s+/)
+    .map((word) => segmentCjk(word))
+    .filter((word) => /[\p{L}\p{N}]/u.test(word))
+    .map((word) => `"${word.replace(/"/g, '""')}"`);
+  return terms.length === 0 ? null : terms.join(' AND ');
 }
 
 /**
@@ -424,27 +428,23 @@ export class SqliteFtsIndex implements RetrievalIndex {
   }
 
   /**
-   * 全文检索。
-   *
-   * 过滤顺序：FTS5 匹配 → 路径范围（段边界）→ `contextTypes` / `levels` /
+   * 全文检索。过滤顺序：FTS5 匹配 → 路径范围（段边界）→ `contextTypes` / `levels` /
    * `memoryTypes` → 更新时间范围 → 状态 `active` → 权限 `EXISTS`。权限用相关子查询
    * 而不是先取候选再过滤，避免「取回的候选全无权限，最终返回不足 limit 条」（§8.2）。
-   *
-   * 排序用 `bm25()` 升序（越负越相关），返回时取负。`LIMIT` 是
+   * 排序用 `bm25()` 升序（越负越相关），返回时取负；`LIMIT` 是
    * `limit × candidateMultiplier`（§18）。
    */
   async search(query: SearchQuery): Promise<SearchHit[]> {
     validateSearchQuery(query);
 
-    const phrase = toMatchExpression(query.text);
-    // 纯空白查询切分后是空串，包出来就是 `""`。FTS5 对空短语返回空集，但对纯空格
-    // 会抛语法错误，所以在这里提前返回，不依赖 SQL 的宽容度。
-    if (phrase === '""') {
+    const expression = toMatchExpression(query.text);
+    // 没有可检索的词（空串 / 纯空白 / 纯标点）：FTS5 对空表达式抛语法错误，提前返回。
+    if (expression === null) {
       return [];
     }
 
     const conditions: string[] = ['node_fts MATCH ?', ACTIVE_STATUS_PREDICATE];
-    const params: SQLInputValue[] = [phrase];
+    const params: SQLInputValue[] = [expression];
 
     const scopes = scopeClause('n.uri', query.scopes);
     conditions.push(scopes.sql);

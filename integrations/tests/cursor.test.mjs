@@ -197,7 +197,7 @@ test('会话已存在（409）时继续写消息', async () => {
   await withTempDir(async ({ dir, config }) => {
     const calls = [];
     const http = {
-      async post(path, body) {
+      async post(path) {
         calls.push(path);
         if (path === '/api/v1/sessions') {
           const error = new Error('conflict');

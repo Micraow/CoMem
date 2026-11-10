@@ -212,6 +212,55 @@ describe('search：FTS5 元字符', () => {
   });
 });
 
+describe('search：多词查询', () => {
+  const PAY = 'comem://user/alice/mem/pay.md';
+  const GATEWAY = 'comem://user/alice/mem/gateway.md';
+
+  beforeEach(async () => {
+    await seed(PAY, '支付网关层实现重试时，必须用幂等键去重，避免重复扣款。');
+    await seed(GATEWAY, '网关层的超时应该小于上游的重试总预算。');
+  });
+
+  it('空白分隔的多个词分别命中（修复前整串是一个短语，要求字符连续）', async () => {
+    // 三个词在 PAY 里被其它字隔开，整串短语「重 试 网 关 层 支 付」必然落空。
+    expect(uris(await search('重试 网关层 支付'))).toContain(PAY);
+  });
+
+  it('词与词之间是合取：少一个词就不命中', async () => {
+    // GATEWAY 有「重试」「网关层」，没有「支付」——AND 语义下不出现。
+    expect(uris(await search('重试 网关层 支付'))).not.toContain(GATEWAY);
+    expect(uris(await search('重试 网关层'))).toContain(GATEWAY);
+  });
+
+  it('词内部仍然要求字符相邻：多词不会退化成字符级 OR', async () => {
+    const REORDER = 'comem://user/alice/mem/reorder.md';
+    await seed(REORDER, '记录的回忆');
+
+    // 「记」「忆」都在文档里，但中间隔着「录的回忆」。短语语义下「记忆」不命中。
+    expect(uris(await search('记忆 记录'))).not.toContain(REORDER);
+    expect(uris(await search('记录'))).toContain(REORDER);
+  });
+
+  it('含双引号与布尔关键字的多词查询按字面量匹配，不抛语法错误', async () => {
+    const META = 'comem://user/alice/mem/meta.md';
+    await seed(META, 'a"b AND (x)');
+
+    for (const text of ['a"b AND', 'a"b AND (x)', 'AND "', '"(x)" a*b', 'x" OR "y']) {
+      await expect(search(text)).resolves.toBeInstanceOf(Array);
+    }
+    // 引号被双写转义、AND 被包进短语：命中的是字面量，不是布尔运算。
+    expect(uris(await search('a"b AND'))).toContain(META);
+    // 注入形态只会被切成词，不扩大命中集合。
+    expect(uris(await search('" OR 1=1 --'))).toEqual([]);
+  });
+
+  it('全空白查询返回空集，不报错也不返回全部', async () => {
+    for (const text of [' ', '\t', '\n', '  \t\n ']) {
+      await expect(search(text)).resolves.toEqual([]);
+    }
+  });
+});
+
 describe('search：范围与权限', () => {
   it('路径 scope 按段边界：alice 不命中 alice2', async () => {
     const sibling = 'comem://user/alice2/x.md';

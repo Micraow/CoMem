@@ -311,19 +311,21 @@ function hostArgument(argv) {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** 没有指定宿主时用哪个适配器。 */
+export const DEFAULT_HOST_NAME = 'claude-code';
+
 /**
  * 按名字加载宿主适配器。名字只允许小写字母、数字与 `-`——它会被拼进文件路径，
  * 放过 `../` 等于让环境变量读写任意模块。
  *
- * @param {{ env?: NodeJS.ProcessEnv, argv?: readonly string[] }} [options]
+ * `Stop` 的采集 worker 是 `spawn` 出来的分离进程，只继承脚本路径（`--host` 不在
+ * 它的 argv 里），所以 worker 侧按**载荷里的宿主名**调这个函数，不走 `resolveHost`。
+ *
+ * @param {string} name
  */
-export async function resolveHost(options = {}) {
-  const env = options.env ?? process.env;
-  const argv = options.argv ?? process.argv;
-  const name = hostArgument(argv) ?? env['COMEM_HOST'] ?? 'claude-code';
-
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
-    throw new ComemHookError(`宿主名不合法：${name}`, { code: 'HOOK_INVALID_CONFIG' });
+export async function loadHost(name) {
+  if (typeof name !== 'string' || !/^[a-z][a-z0-9-]*$/.test(name)) {
+    throw new ComemHookError(`宿主名不合法：${String(name)}`, { code: 'HOOK_INVALID_CONFIG' });
   }
 
   try {
@@ -334,6 +336,17 @@ export async function resolveHost(options = {}) {
       { code: 'HOOK_INVALID_CONFIG', cause: error },
     );
   }
+}
+
+/**
+ * 从命令行（`--host`）或环境变量（`COMEM_HOST`）解析当前宿主。
+ *
+ * @param {{ env?: NodeJS.ProcessEnv, argv?: readonly string[] }} [options]
+ */
+export async function resolveHost(options = {}) {
+  const env = options.env ?? process.env;
+  const argv = options.argv ?? process.argv;
+  return loadHost(hostArgument(argv) ?? env['COMEM_HOST'] ?? DEFAULT_HOST_NAME);
 }
 
 /**

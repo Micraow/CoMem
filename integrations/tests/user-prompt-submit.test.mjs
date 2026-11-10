@@ -64,7 +64,7 @@ test('命中渲染成 <comem-recall> 块', async () => {
     http,
   );
   assert.match(result.context, /^<comem-recall>\n1\. \[profile\] comem:\/\/user\/alice\/memories\/profile\.md/);
-  assert.match(result.context, /\n  后端工程师\n/);
+  assert.match(result.context, /\n {2}后端工程师\n/);
   assert.match(result.context, /<\/comem-recall>$/);
   // 行首是编号，不是绝对分数：分数只在同一引擎内可比，写出来就是假精度。
   assert.doesNotMatch(result.context, /\[profile 0\.82\]/);

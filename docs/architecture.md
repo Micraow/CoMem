@@ -1041,17 +1041,26 @@ function segmentForIndex(text: string): string {
     .trim();
 }
 
-// 查询侧：切分后包成 FTS5 短语，双引号要转义
-function toMatchExpression(query: string): string {
-  return `"${segmentForIndex(query).replace(/"/g, '""')}"`;
+// 查询侧：按空白切词，每个词切分后包成 FTS5 短语，词之间 AND
+function toMatchExpression(query: string): string | null {
+  const terms = query
+    .split(/\s+/)
+    .map((word) => segmentForIndex(word))
+    .filter((word) => /[\p{L}\p{N}]/u.test(word))
+    .map((word) => `"${word.replace(/"/g, '""')}"`);
+  return terms.length === 0 ? null : terms.join(' AND ');
 }
 ```
 
+**为什么不是整串一个短语**：整串包短语要求字符**连续**出现，`重试 网关层 支付` 会被当成「文档里必须原样出现 `重试网关层支付` 这一段」，于是任何多词查询都召回 0。按空白切词后，每个词内部仍是「字符相邻」的短语（保住精度），词之间是合取（每词都必须出现）——`AND` 而不是 `OR`，因为 `OR` 会让「的」这类虚词把几乎所有文档拉进候选集，把精度全压给 BM25，抹平 §8.5 里词法臂与向量臂的分工。
+
 单字会拉低 BM25 的区分度（虚词「的」「在」到处都是），但**短语匹配要求字符相邻**，精度是够的。真正的排序靠 §8.5 的层级加权和后续的 rerank。
+
+**已知边界（不是缺陷，是词法检索的边界）**：无空格的整句中文（`重试网关层支付`）没有词边界，短语要求连续，仍然召回 0；自然语言问句里含文档中不存在的词时，`AND` 合取也返回 0。这两类由 `vector` / `hybrid` 引擎覆盖——这也是 `retrieval.engine` 默认 `fts5` 但文档建议自然语言场景切到 `hybrid` 的原因。
 
 **索引里存的是切分后的文本，不是原文。** `node_fts.content` 只服务于匹配，`snippet()` / `highlight()` 不用（返回的是 `abstract` 与 URI，摘要来自 `node` 表）。原文在磁盘上，`read` / `grep` 走文件系统，不走这张表。
 
-**查询里的 FTS5 元字符必须转义。** `"` `*` `(` `)` `-` `:` `^` 和 `AND` / `OR` / `NOT` 都会改变查询语义，用户输入里完全可能出现。整串包成短语 + 内部双引号双写，是唯一安全的做法。
+**查询里的 FTS5 元字符必须转义。** `"` `*` `(` `)` `-` `:` `^` 和 `AND` / `OR` / `NOT` 都会改变查询语义，用户输入里完全可能出现。**每个词**包成短语 + 词内双引号双写，是唯一安全的做法：短语里的元字符退化为字面量，用户输入无法改变表达式结构。切词后没有可检索字符的词（纯标点）直接丢弃——空短语在 `AND` 里恒假，会把整个查询变成 0 命中。
 
 ### 8.2 权限为什么要物化进索引
 
@@ -3310,7 +3319,9 @@ integrations/
 └── tests/                     # node:test
 ```
 
-宿主适配器只回答四个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**。其余状态机由 `lib/` 承担：去重（`dedup.mjs`）、游标（`cursor.mjs`）、跨进程锁（`lock.mjs`）、超时与重试（`http.mjs`）。
+宿主适配器只回答五个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**、**transcript 怎么解析**。
+
+第五个是踩过的坑：`Stop` 拿到的 `transcript_path` 是**宿主自己的格式**，不是通用格式。Claude Code 的 JSONL 每行有顶层 `message.{role,content}`；Codex 的 rollout 是 `{"type":"response_item","payload":{"type":"message","role":…,"content":[{"type":"input_text","text":…}]}}`，没有顶层 `message`。**共用一个解析器就等于只支持一个宿主**——被共用的那个会静默返回 0 条消息，hook 正常退出 0、什么都不报，整条被动捕获链路根本不会启动。所以解析下放到 `integrations/hosts/*.mjs` 的 `parseTranscript`，`stop.mjs` 只负责「拿路径 → 交给宿主 → 拿消息」。其余状态机由 `lib/` 承担：去重（`dedup.mjs`）、游标（`cursor.mjs`）、跨进程锁（`lock.mjs`）、超时与重试（`http.mjs`）。
 
 ### 15.9 召回阻塞与预算
 

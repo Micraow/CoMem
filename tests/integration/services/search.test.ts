@@ -244,6 +244,16 @@ describe('find', () => {
     expect(hits[0]?.contextType).toBe('memory');
   });
 
+  it('空白分隔的多个词能召回：`find` 走同一条 FTS5 查询构造', async () => {
+    await seed(DOC, '支付网关层实现重试时，必须用幂等键去重。');
+    const service = await createService();
+
+    // 整串包成一个短语时要求「重试网关层支付」连续出现，这条真实文档必然落空。
+    const hits = await service.find('重试 网关层 支付', findOptions());
+
+    expect(hits.map((hit) => hit.uri)).toEqual([DOC]);
+  });
+
   it('查询串先经过 queryFilters', async () => {
     await seed(DOC, '上下文记忆数据库的设计');
     const service = await createService();

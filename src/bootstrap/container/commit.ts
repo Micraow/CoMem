@@ -94,7 +94,13 @@ export function createCommitRunner(
           logger,
         }),
         summary_invalidate: new SummaryInvalidateStep({ summary, logger }),
-        experience_distill: new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
+        experience_distill: new ExperienceDistillStep({
+          memory,
+          llm,
+          archive: archiveArtifacts,
+          links: memoryLink,
+          logger,
+        }),
       };
       return new CommitPipeline({
         steps: COMMIT_STEP_NAMES.map((name) => stepByName[name]),

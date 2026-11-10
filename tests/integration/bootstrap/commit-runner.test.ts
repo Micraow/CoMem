@@ -288,7 +288,7 @@ function createRunner(
           }),
           new MemoryMergeStep({ memory, archive: archiveArtifacts, links: memoryLink, logger }),
           new SummaryInvalidateStep({ summary, logger }),
-          new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
+          new ExperienceDistillStep({ memory, llm, archive: archiveArtifacts, links: memoryLink, logger }),
         ],
         ports: createArchivePorts(archiveUri, deps),
         ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),

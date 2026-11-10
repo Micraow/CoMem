@@ -61,7 +61,7 @@ flowchart LR
 
 | | 你能得到什么 |
 |---|---|
-| 🎣 **被动捕获，零负担** | 不用教 agent「记这个」。它在干活时看到的事实、你的一句抱怨、它摸清的架构细节，会话结束自动抽取归档。 |
+| 🎣 **被动捕获，零负担** | 不用教 agent「记这个」。它在干活时看到的事实、你的一句抱怨、它摸清的架构细节，会话结束自动抽取归档。**前提是装了宿主 Hook**，见下文「被动捕获需要什么才能生效」。 |
 | 👥 **多人共享同一份上下文** | 记忆是有 URI 的资源，`group` 作用域下组内全员可见。新人接手直接从记忆树起步，不从零踩坑。 |
 | 🪜 **复杂的分级设计** | 三层加载（L0 摘要 256 字 / L1 概览 / L2 原文）+ 目录作用域 + 记忆类型分桶 + ACL 继承链。先判断相关性、再决定读多深。 |
 | 💰 **省 token，真的省** | 会话开头注入有硬预算（默认 2000 token，按宿主字节上限倒推）+ head/tail 省略；画像超 800 字自动整份重写收敛。不是「塞得越多越好」。 |
@@ -248,6 +248,56 @@ prompt 就是后一种形态。要上表里的召回率，把 `retrieval.engine`
 
 ---
 
+## 🎣 被动捕获需要什么才能生效
+
+「我什么都没提，它应该自动记下来」——这个预期只在**装了宿主 Hook** 的部署里成立。服务端本身不监听你的对话，它不知道什么时候该归档。下面四条决定了「被动」到底有多被动。
+
+### 1. 实时捕获靠 Hook，服务端的自动提交阈值基本不会触发
+
+每一轮对话结束时，宿主调 `Stop` Hook，后者把这一轮的消息 `POST /sessions/{id}/messages`，再 `POST /sessions/{id}/commit` 提交归档；阶段二（抽取、合并、归纳）随后在后台跑完，记忆才落盘。**提交接口本身不做阈值判断**——调了就归档，`session.autoCommit` 管不到它。
+
+**没装 Hook 时，只剩服务端的 `session.autoCommit` 阈值在兜底**，默认值是：
+
+| 阈值 | 默认 | 含义 |
+|---|---|---|
+| `session.autoCommit.pendingTokenThreshold` | 150,000 token | 未提交内容超过它才自动提交 |
+| `session.autoCommit.messageCountThreshold` | 100 条消息 | 消息数超过它才自动提交 |
+| `session.autoCommit.idleTimeoutSeconds` | 0（关） | 空闲多久自动提交 |
+
+**几句对话的新会话一条都不满足。** 装完服务端、不装 Hook，聊十轮也不会有一条记忆——不是坏了，是没有任何东西触发提交。要么装 Hook（见下一节），要么让 agent 主动调 `remember` 工具。
+
+### 2. 复核闸门：这两类记忆写盘了，但 `find` 搜不到
+
+> **这是「明明记了却说没记下来」最常见的原因。**
+
+`memory.reviewRequired` 默认是 `['experiences', 'rules']`。这两类记忆写入时状态是**待复核**：
+
+- 文件**已经**在磁盘上（`memories/experiences/`、`memories/rules/`），`GET /api/v1/memories/pending` 也能看到；
+- 但 `find` / `search` **不会返回它们**——待复核的记忆不参与检索。
+
+通过方式二选一：控制台左侧「记忆复核」页逐条通过，或调 `POST /api/v1/memories/{uri}/approve`（URI 要 URL 编码，比如 `encodeURIComponent`）。通过之后它们才会出现在检索结果里。
+
+所以「文件在那儿、`find` 搜不到」不是索引没建，是它在等复核。
+
+### 3. 记忆类型由对话内容决定，不是由工具决定
+
+抽取按内容路由，不是每次写画像：
+
+| 对话里出现 | 落到 |
+|---|---|
+| 稳定身份事实（名字、角色、沟通风格） | `profile`（`memories/profile.md`，单文件） |
+| 某天的决策、里程碑 | `events`（`memories/events/`） |
+| 以后能照做的经验教训 | `experiences`（`memories/experiences/`，待复核） |
+| 喜好、习惯、取舍 | `preferences` |
+
+「它把这件事写进 profile 了」是这次对话的内容被判成了稳定身份，不是 `remember` 的固定行为。想确认写了什么，直接看 `memories/` 下的文件。
+
+### 4. 批量导入是另一条通道
+
+`pnpm ingest`（需要 `ingest.enabled: true`）扫描本机历史会话日志，把它们归档后走同一条阶段二。它和实时 Hook **互不依赖**：没装 Hook 也能导历史，装了 Hook 也不影响游标。两者的产出是同一种记忆文件，区别只是「什么时候把消息交给服务端」。
+
+---
+
 ## 🔌 接入你的 Agent
 
 CoMem 通过 **MCP**（Streamable HTTP）和 **Hook 插件**接入 agent。Hook 在会话开始时检索并注入相关记忆，在会话结束时采集消息。**已适配三个宿主：Claude Code、Codex、DSH**——同一套命令，`--host` 选宿主。
@@ -268,7 +318,7 @@ node integrations/cli.mjs install --host claude-code    # 写入 ~/.claude/setti
 <details>
 <summary><strong>Codex</strong></summary>
 
-Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），六个事件与 CoMem 一一对应。
+Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），七个事件与 CoMem 一一对应：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `PreCompact` / `SessionEnd`。
 
 ```bash
 node integrations/cli.mjs install --host codex          # 写入 ~/.codex/hooks.json
@@ -291,7 +341,7 @@ node integrations/cli.mjs install --host dsh            # 写入 ~/.dsh/settings
 任何支持 Streamable HTTP 的 MCP 客户端都可以接 `http://127.0.0.1:1933/mcp`。不带 Hook 也能用——只是要自己调 `remember` / `find`，由你来决定存什么、取什么。
 </details>
 
-详细安装、六个 hook、MCP 接入细节、bypass 与去重规则见 [集成指南](integrations/README.md)。
+详细安装、七个 hook、MCP 接入细节、bypass 与去重规则见 [集成指南](integrations/README.md)。
 
 ---
 
@@ -378,7 +428,7 @@ pnpm verify     # typecheck + lint + check:config + check:reachability + check:s
 | [`docs/operations.md`](docs/operations.md) | 部署、配置、备份、监控、排障、已知限制 |
 | [`docs/coverage-map.md`](docs/coverage-map.md) | 按代码核对的能力全景图：每项能力给入口、实现 `file:line`、数据流、测试证据；另列已砍掉的东西与已知缺口 |
 | [`docs/ingest-prompt.md`](docs/ingest-prompt.md) | 历史会话导入提示词：整段复制给本机已接 CoMem MCP 的 Agent，由它盘点本机会话日志、解析成消息数组、用 `remember` 原样上传；抽取与复核在服务端，重跑按稳定 `sessionId` 幂等。与服务端适配器 `pnpm ingest` 互补——它覆盖 CoMem 进程读不到的导出目录 |
-| [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、六个 hook、MCP 接入、bypass、去重 |
+| [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、七个 hook、MCP 接入、bypass、去重 |
 
 ---
 

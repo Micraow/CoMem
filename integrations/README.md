@@ -55,7 +55,7 @@ co-mem uninstall --host claude-code
 `npx co-mem` 会拿到 `404 Not Found`。不 link 就用 `node integrations/cli.mjs`，命令都在
 **仓库根目录**执行。
 
-`install` 把六条 hook 写进宿主的 settings（默认 `~/.claude/settings.json`，可用
+`install` 把七个 hook 写进宿主的 settings（默认 `~/.claude/settings.json`，可用
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径
 匹配到的、我们自己加的条目，别人的 hook 一个不动。
 
@@ -515,7 +515,8 @@ queryFilters:
 `servers/` 里一行都不用改。
 
 **临时文件**：锁 `{tmpdir}/comem-{sessionId}.lock`、游标 `{tmpdir}/comem-cursors.json`、
-事件去重 `{tmpdir}/comem-events.json`、worker 载荷 `{tmpdir}/comem-stop-*.json`。
+事件去重 `{tmpdir}/comem-events.json`、worker 载荷 `{tmpdir}/comem-stop-*.json`、
+采集诊断 `{tmpdir}/comem-capture.log`（超过 256 KiB 整份重写）。
 `COMEM_HOOK_TMPDIR` 可以整体换一个目录（测试与多实例隔离用）。
 
 ## 宿主载荷
@@ -543,6 +544,41 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 返回 `{"status":"ok","result":{...}}`，`result.context` 注入、`result.block` +
 `result.reason` 拦截。同时兼容 Claude Code 的扁平形状。
 
+### transcript 格式与采集诊断
+
+`Stop` / `PreCompact` / `SessionEnd` 采集的是**宿主自己写出的 transcript 文件**，
+格式按宿主不同，由各自的 `hosts/<host>.mjs` 里的 `parseTranscript` 解析，
+`servers/stop.mjs` 不内置任何一种：
+
+| 宿主 | transcript 在哪 | 行形状 |
+|---|---|---|
+| Claude Code | 载荷里的 `transcript_path` | 每行 `{uuid, type, message: {role, content: [{type: 'text', text}]}}`；`isSidechain`（子 agent）与工具调用跳过 |
+| Codex | `~/.codex/sessions/<日期>/rollout-*.jsonl` | 每行 `{timestamp, ordinal, type, payload}`；只取 `type: "response_item"` 且 `payload.type: "message"` 的行，`content[*].text`（`input_text` / `output_text`）按换行拼接；`developer`、空文本与 `function_call` / `reasoning` 跳过 |
+| DSH | 不读文件 | 会话累积列表在 hook 载荷的 `data.messages` 里；transcript 文件格式**未验证** |
+
+**Codex 的 rollout 没有顶层 `message` 字段**，与 Claude Code 的 transcript 不是一种
+格式。只实现其中一种时，另一种宿主的每一行都被跳过，`Stop` 拿到空数组后直接返回——
+不发 `POST /sessions`、不建会话、不提交、不建任务，进程还退出 0。
+
+解析出 **0 条消息**时，`Stop` 往 `{tmpdir}/comem-capture.log` 写一行 JSON：`host` /
+`transcript` / `lines`（非空行数）/ `skipped`（跳过行数）/ `sample`（第一行被跳过
+内容的形状，只有键名与 `type`，**不含正文**）。诊断落在文件里而不是 stderr：
+`Stop` 的采集跑在 `stdio: 'ignore'` 的分离 worker 里，stderr 被丢弃。
+
+按文档装完 hook、跑完一轮对话后，用下面的命令验证「最近一次 `Stop` 采到了几条消息」：
+
+```bash
+# 游标值 = 该会话已经提交的消息条数，跑一轮后应该变大
+cat "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-cursors.json"
+```
+
+游标没动或采集为 0 时看诊断（`reason` 区分「宿主没给路径」`no-transcript-path`、
+「给了但解析不出」`no-messages`、「读不到文件」`transcript-read-failed`）：
+
+```bash
+tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
+```
+
 ## 插件依赖的 HTTP 契约
 
 插件是独立交付物，服务端接口以架构文档 §14 为准。这里列出**实际用到**的形状——
@@ -555,7 +591,7 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 | 召回 | `POST /api/v1/search/find`，`{query, limit}` | `result` 为命中数组或 `{hits}`；每条含 `uri` / `score` / `abstract?` / `memoryType?` |
 | 建会话 | `POST /api/v1/sessions`，`{sessionId, userId}` | 200 新建；409 已存在，复用（消息原样保留） |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
-| 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；是否真的归档由服务端 `session.autoCommit` 决定 |
+| 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关 |
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |
 | 自检 | `GET /health` | 2xx |
 
@@ -571,8 +607,9 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
    轮次、不改会话状态（活会话与已归档会话都查）。第 2 层的「宁可重投」靠这一层收口，
    两道合起来才是「不丢也不重」。
 
-插件给的消息 `id` 是稳定值：对话消息取 transcript 里的 `uuid`，工具消息取
-`tool_${toolUseId}`。**服务端只在调用方给了 `id` 时才能去重**：`POST
+插件给的消息 `id` 是稳定值：对话消息取 transcript 里的消息 ID（Claude Code 的
+`uuid`、Codex 的 `msg_…`），工具消息取 `tool_${toolUseId}`。**服务端只在调用方给了
+`id` 时才能去重**：`POST
 /sessions/{id}/messages` 在缺 `id` 时补一个随机 UUID，重投会变成两条——自己写客户端
 时不要省这个字段。
 
@@ -599,6 +636,13 @@ SQLite 的写锁。
 
 **hook 报「等宿主写 stdin 超时」**：宿主没有在 800ms 内写完 stdin 并关闭。多数是
 宿主侧的插件运行器出了问题；这条路径按「没有事件」放行，不会阻断对话。
+
+**`Stop` 跑了但没有采集到消息**：看
+`tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"`。`reason:
+"no-messages"` 说明 transcript 里一条 user / assistant 消息都没解析出来，`sample`
+是第一行被跳过内容的形状——对照「transcript 格式与采集诊断」的表，确认解析器是不是
+选错了宿主；`reason: "no-transcript-path"` 说明宿主没给 `transcript_path`；`reason:
+"transcript-read-failed"` 说明文件读不到（`error` 是 errno）。
 
 **同一段记忆被注入两次**：召回账本由服务端维护（§8.7），hook 侧只负责发请求。
 检查 `dedupTurns` 配置。

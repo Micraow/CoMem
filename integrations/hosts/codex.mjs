@@ -139,6 +139,129 @@ function toolFilePath(toolName, toolInput) {
 }
 
 /**
+ * 从 rollout 消息的 `content` 里抽纯文本。
+ *
+ * `content` 是数组，元素形如 `{type:'input_text'|'output_text', text}`；图片
+ * （`input_image`）没有 `text` 字段，自然被跳过。多个文本块按换行拼接——它们是
+ * 同一条消息的不同段落，拆成多条消息会让「用户说过什么」的边界错位。
+ */
+function extractTextParts(content) {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const texts = [];
+  for (const block of content) {
+    const record = asRecord(block);
+    if (typeof record['text'] === 'string' && record['text'] !== '') {
+      texts.push(record['text']);
+    }
+  }
+  return texts.length === 0 ? [] : [{ kind: 'text', text: texts.join('\n') }];
+}
+
+/** 一行被跳过内容的形状：只看键名与 `type` 这类枚举值，不取正文。 */
+function describeEntry(entry) {
+  const keys = Object.keys(entry).slice(0, 3).join(',');
+  const type = typeof entry['type'] === 'string' ? entry['type'] : '?';
+  const payload = asRecord(entry['payload']);
+  const payloadType = typeof payload['type'] === 'string' ? payload['type'] : '?';
+  return `type=${type} payload.type=${payloadType} keys=${keys}`;
+}
+
+/** rollout 里值得采集的 `payload.type`：对话消息。其余（`reasoning` 等）跳过。 */
+const MESSAGE_PAYLOAD_TYPE = 'message';
+
+/**
+ * 读 Codex 的 rollout（`~/.codex/sessions/<日期>/rollout-*.jsonl`），只保留 user /
+ * assistant 的文本消息。
+ *
+ * 行形状（本机实测，字段顺序与真实文件一致）：
+ *
+ * ```json
+ * {"timestamp":"2026-11-06T11:35:39.659Z","ordinal":2,"type":"response_item",
+ *  "payload":{"type":"message","id":"msg_…","role":"user",
+ *             "content":[{"type":"input_text","text":"…"}]}}
+ * ```
+ *
+ * 与 Claude Code 的 transcript **不是一种格式**：没有顶层 `message` 字段，文本在
+ * `payload.content[*].text` 里。早期实现只认 Claude Code 的形状，Codex 的每一行
+ * 都被跳过，`Stop` 拿到空数组后早退——整条阶段二没有启动。所以解析器必须由宿主
+ * 适配器提供，`servers/stop.mjs` 不内置任何一种。
+ *
+ * 跳过而不是抛错：一份 rollout 里绝大多数行是 `session_meta` / `event_msg` /
+ * `turn_context` / `reasoning` / 工具调用，只有 `response_item` + `payload.type =
+ * 'message'` 是对话正文。格式不认识的行同理——为一行新出现的类型丢掉整轮会话，
+ * 方向反了。
+ *
+ * @param {string} text rollout 文件的内容
+ * @param {{ sessionId?: string }} [options]
+ * @returns {{
+ *   messages: Record<string, unknown>[],
+ *   lines: number,
+ *   skipped: number,
+ *   sample: string | null,
+ * }}
+ */
+export function parseTranscript(text, options = {}) {
+  const sessionId = typeof options.sessionId === 'string' ? options.sessionId : 'transcript';
+  const messages = [];
+  let lines = 0;
+  let skipped = 0;
+  let sample = null;
+
+  for (const [index, line] of text.split('\n').entries()) {
+    if (line.trim() === '') {
+      continue;
+    }
+    lines += 1;
+    let entry;
+    try {
+      entry = asRecord(JSON.parse(line));
+    } catch {
+      skipped += 1;
+      sample ??= 'invalid JSON';
+      continue;
+    }
+    if (entry['type'] !== 'response_item') {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    const payload = asRecord(entry['payload']);
+    if (payload['type'] !== MESSAGE_PAYLOAD_TYPE) {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    const role = payload['role'];
+    if (role !== 'user' && role !== 'assistant') {
+      // `developer` 是宿主注入的系统指令，不是用户说过的话。
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    const parts = extractTextParts(payload['content']);
+    if (parts.length === 0) {
+      skipped += 1;
+      sample ??= describeEntry(entry);
+      continue;
+    }
+    messages.push({
+      // 用 rollout 里的 `msg_…`：重投同一批消息时 ID 稳定，服务端能按 ID 去重。
+      id:
+        typeof payload['id'] === 'string' && payload['id'] !== ''
+          ? payload['id']
+          : `${sessionId}:${index}`,
+      role,
+      parts,
+      createdAt:
+        typeof entry['timestamp'] === 'string' ? entry['timestamp'] : new Date().toISOString(),
+    });
+  }
+  return { messages, lines, skipped, sample };
+}
+
+/**
  * 宿主载荷 → 内部事件。
  *
  * 未知事件直接抛错：静默忽略等于让一个拼错的 hooks.json 条目长期不生效，而宿主

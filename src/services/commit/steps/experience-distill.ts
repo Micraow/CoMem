@@ -4,19 +4,16 @@
  * ## 为什么是一条独立步骤
  *
  * `experiences` 曾经和其余七类共用 `memory_extract`：提示词里只有类型清单的一行，
- * 模型顺手写一条 patch 就算「经验」。那是**抽取**——它看到的是消息和 `page_id`，
- * 判断的是「这条信息落在哪个字段」，没有「读整段会话、重写整条结论」的动作。
- *
- * 归纳要的是后者：从这次会话里提炼「以后遇到同类问题可以照做的做法」，并与已有
- * 经验里同 topic 的结论合并成**一份完整正文**。它与抽取的区别不在数据形状
- * （`{topic, content, updatedAt}` 已经够用），而在**谁写、写什么**。
+ * 模型顺手写一条 patch 就算「经验」。那是**抽取**，判断的是「这条信息落在哪个字段」，
+ * 没有「读整段会话、重写整条结论」的动作；归纳要的是后者——从这次会话提炼「以后
+ * 遇到同类问题可以照做的做法」，并与同 topic 的已有结论合并成**一份完整正文**。
  *
  * ## 为什么排在最后
  *
  * 它只依赖归档目录（`sources` 的来源）与记忆文件本身，不消费前四步的产物。放在
  * 最后有两个好处：前四步的产物（`memory_operations.json` / `memory_diff.json` /
  * 摘要失效）先落盘，归纳失败时它们已经可重放；而「这次没有可归纳的经验」也不
- * 影响前面的产物。
+ * 影响前面的产物。归纳写出的记忆追加进同一份清单（见 `experience-diff.ts`）。
  *
  * ## 与抽取的分工靠提示词隔离
  *
@@ -58,6 +55,7 @@ import type { MemoryLinkService } from '../../memory-link.js';
 import { buildExperiencePrompt, type ExistingExperience } from '../../prompts/experience.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
+import { appendExperienceDiff, experienceDiffEntry, type ExperienceDiffArchive } from './experience-diff.js';
 import {
   DEFAULT_PREFETCH_TOP_N,
   pageContent,
@@ -92,6 +90,7 @@ export interface ExperienceDistillStepDeps {
   readonly llm: {
     generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
   };
+  readonly archive: ExperienceDiffArchive;
   /**
    * `memory_link` 的写入口（§11.10）。只写 `derived_from`，所以只要 `addLinks`。
    *
@@ -138,6 +137,7 @@ export class ExperienceDistillStep extends CommitStep {
 
   readonly #memory: ExperienceDistillStepDeps['memory'];
   readonly #llm: ExperienceDistillStepDeps['llm'];
+  readonly #archive: ExperienceDiffArchive;
   readonly #links: ExperienceDistillStepDeps['links'];
   readonly #logger: Logger;
 
@@ -145,6 +145,7 @@ export class ExperienceDistillStep extends CommitStep {
     super();
     this.#memory = deps.memory;
     this.#llm = deps.llm;
+    this.#archive = deps.archive;
     this.#links = deps.links;
     this.#logger = deps.logger;
   }
@@ -176,7 +177,7 @@ export class ExperienceDistillStep extends CommitStep {
     // 模型看不到归档 URI，让它输出只会得到幻觉。
     const sources: readonly Uri[] = [context.archiveUri];
     const now = new Date().toISOString();
-    let written = 0;
+    const written: MemoryWriteResult[] = [];
 
     for (const experience of output.experiences) {
       const { topic, content } = experience;
@@ -206,13 +207,14 @@ export class ExperienceDistillStep extends CommitStep {
 
       // 同一个 topic 落到同一个 URI：已有正文由转换函数整段覆盖，这是「归纳」与
       // 「追加」的区别。补丁在 `upsertMemory` 的 `exact(uri)` 锁内应用。
-      await this.#memory.upsertMemory(context.scopeUri, experiencesMemoryType, {
+      const write = await this.#memory.upsertMemory(context.scopeUri, experiencesMemoryType, {
         uri,
         // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
         provenance: { sources },
         update: (current) => ({ ...current, topic, content, updatedAt: now }),
       });
-      written += 1;
+      // 清单只记真写过的（转换函数返回 `null` 时没落盘）。
+      if (write.written) written.push(write);
 
       // 先文件、后派生（与 `MemoryMergeStep` 同一个顺序）：反过来会让派生物比真相
       // 更早存在。links 写失败只记 error——记忆已经正确落盘，它能从 sources 重建。
@@ -227,20 +229,17 @@ export class ExperienceDistillStep extends CommitStep {
       }
     }
 
+    await appendExperienceDiff(this.#archive, context.archiveUri, written.map(experienceDiffEntry));
+
     this.#logger.info('经验归纳完成', {
       archive: context.archiveUri.toString(),
       existing: existing.length,
       distilled: output.experiences.length,
-      written,
+      written: written.length,
     });
   }
 
-  /**
-   * §11.3 的预取，只取 `experiences` 一个类型。
-   *
-   * 查询构造与会话末尾的取法复用 `memory-extract.ts` 的 `retrievalQuery`：两条步骤
-   * 按同一个问题找记忆，查询应当只有一份。
-   */
+  /** §11.3 的预取，只取 `experiences`；查询构造复用 `retrievalQuery`。 */
   async #prefetchExisting(context: StepContext): Promise<readonly ExistingExperience[]> {
     const records = await this.#memory.prefetch(
       context.scopeUri,

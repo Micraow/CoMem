@@ -145,7 +145,6 @@ async function unwrap(response, method, path) {
     typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? payload : undefined;
 
   if (!response.ok) {
-    const code = typeof envelope?.error?.code === 'string' ? envelope.error.code : undefined;
     const message =
       typeof envelope?.error?.message === 'string'
         ? envelope.error.message
