@@ -45,11 +45,12 @@ services:
       # 镜像默认已经是 0.0.0.0；显式写出来是为了让 `docker compose config`
       # 能看见「监听地址」这个部署参数。
       COMEM_SERVER_HOST: 0.0.0.0
-      # `config.example.yaml` 里 providers 用 `${COMEM_LLM_KEY}` 这类占位符引用
-      # 环境变量。这里透传，密钥放宿主环境或同目录的 `.env`（compose 自动读取），
-      # 不要写进这个文件。留空时服务能启动，模型调用会降级（见 operations.md）。
-      COMEM_LLM_KEY: "${COMEM_LLM_KEY:-}"
-      COMEM_EMBEDDING_KEY: "${COMEM_EMBEDDING_KEY:-}"
+      # 配置项的真实环境变量名（`config.example.yaml` 不再用 `${…}` 占位符，
+      # 改为按 `COMEM_` + 路径大写 + `_` 的规则覆盖）。密钥放宿主环境或同目录的
+      # `.env`（compose 自动读取），不要写进这个文件。留空时服务能启动，
+      # 模型调用会降级（见 operations.md「没有模型凭据的部署」）。
+      COMEM_PROVIDERS_LLM_DEFAULT_API_KEY: "${COMEM_PROVIDERS_LLM_DEFAULT_API_KEY:-}"
+      COMEM_PROVIDERS_EMBEDDING_API_KEY: "${COMEM_PROVIDERS_EMBEDDING_API_KEY:-}"
     volumes:
       # 数据根：内容文件 + SQLite 索引 + 提示词覆盖。
       - comem-data:/var/lib/comem

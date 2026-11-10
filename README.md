@@ -83,11 +83,25 @@ flowchart LR
 ```bash
 git clone https://github.com/Micraow/CoMem.git
 cd CoMem
-cp config.example.yaml config.yaml     # 填 provider 的 key；留空也能离线跑
+cp config.example.yaml config.yaml     # 可选；模板里没有必填的密钥，复制完直接能启动
 docker compose build
 docker compose up -d
 curl http://127.0.0.1:18080/health     # {"status":"ok",...}
 ```
+
+**不需要任何密钥就能起服务。** `config.yaml` 是本地文件、不进版本控制；没有它也能启动
+（全部走默认值，会 warn 一条占位的 `baseUrl`）。模板里 `providers.llm.default.apiKey` 与
+`providers.embedding.apiKey` 都是空串——摘要、记忆抽取、合并与检索改写要接真实模型才工作，
+接的时候在 `config.yaml` 里填 key，或用环境变量 `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` /
+`COMEM_PROVIDERS_EMBEDDING_API_KEY` 覆盖。
+
+**「留空」与「不设置」不是一回事。** 空串是「没有密钥」，能启动；`${VAR}` 引用的环境变量
+**没设置**时启动直接失败（`配置文件引用了未设置的环境变量 ...`），即使那个 provider 是
+`disabled`。这两条混起来是「复制完启动不了」最常见的原因。
+
+**如果你手上已经有一份 `config.yaml`**（例如从别的机器拷来的），它是**那台机器**的配置：
+`dataDir`、`baseUrl`、`ingest.paths` 都可能指向本机不存在的路径，还带着别人的密钥。从零
+开始请先把它移走（`mv config.yaml config.yaml.bak`），再决定要不要从模板重建。
 
 打开浏览器访问 **http://127.0.0.1:18080**，就是控制台。
 
@@ -188,12 +202,18 @@ L0 从 L1 正文提取，两层不会互相矛盾。**摘要是目录级的**，
 
 | 变体 | Recall@10 | MRR | NDCG@10 | p50 |
 |---|---|---|---|---|
-| 纯关键词 `fts5` | 0.315 | 0.372 | 0.335 | 0.2ms |
+| 纯关键词 `fts5`（默认） | 0.315 | 0.372 | 0.335 | 0.2ms |
 | 纯向量 `vector` | 0.880 | 0.782 | 0.777 | 1.5ms |
-| **`hybrid`（默认）** | **0.904** | **0.852** | **0.829** | 1.6ms |
+| **`hybrid`** | **0.904** | **0.852** | **0.829** | 1.6ms |
 | `hybrid+rerank` | 0.913 | 0.874 | 0.845 | 8.0s |
 
 （本机 2026-11-08 实测。改一个参数就能重跑，看变好还是变坏——不是靠感觉调参。）
+
+**默认引擎是 `fts5`**（`config.example.yaml` 的 `retrieval.engine` 与 `operations.md` 的默认值
+都是它），不是上表最快的 `hybrid`：它零依赖、不需要嵌入供应商，但查询按**短语**匹配，
+`TypeScript 严格模式` 能命中、`TypeScript 严格模式怎么配？` 命中 0 条——真实用户的自然语言
+prompt 就是后一种形态。要上表里的召回率，把 `retrieval.engine` 改成 `hybrid` 并配
+`providers.embedding`；只改引擎不配嵌入会在启动期报 `INVALID_ARGUMENT`，不会静默退回关键词。
 </details>
 
 <details>
@@ -232,12 +252,14 @@ L0 从 L1 正文提取，两层不会互相矛盾。**摘要是目录级的**，
 
 CoMem 通过 **MCP**（Streamable HTTP）和 **Hook 插件**接入 agent。Hook 在会话开始时检索并注入相关记忆，在会话结束时采集消息。**已适配三个宿主：Claude Code、Codex、DSH**——同一套命令，`--host` 选宿主。
 
+**Hook 插件用仓库内的脚本装，不是 `npx`。** `integrations/package.json` 是 `private: true`、没有发布到 npm，`npx co-mem` 会拿到 `404 Not Found`。下面的命令都要在**仓库根目录**执行。
+
 <details>
 <summary><strong>Claude Code</strong></summary>
 
 ```bash
 claude mcp add --transport http comem http://127.0.0.1:1933/mcp
-npx co-mem install --host claude-code    # 写入 ~/.claude/settings.json
+node integrations/cli.mjs install --host claude-code    # 写入 ~/.claude/settings.json
 ```
 
 装完它就自动采集会话、注入记忆了。
@@ -249,7 +271,7 @@ npx co-mem install --host claude-code    # 写入 ~/.claude/settings.json
 Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，默认开启），六个事件与 CoMem 一一对应。
 
 ```bash
-npx co-mem install --host codex          # 写入 ~/.codex/hooks.json
+node integrations/cli.mjs install --host codex          # 写入 ~/.codex/hooks.json
 ```
 
 首次使用需在 Codex 的 `/hooks` 里**信任一次** Hook（Codex 的安全机制，改动后需重审）。MCP 也可单独接 `http://127.0.0.1:1933/mcp`。
@@ -259,7 +281,7 @@ npx co-mem install --host codex          # 写入 ~/.codex/hooks.json
 <summary><strong>DSH</strong></summary>
 
 ```bash
-npx co-mem install --host dsh            # 写入 ~/.dsh/settings.json
+node integrations/cli.mjs install --host dsh            # 写入 ~/.dsh/settings.json
 ```
 </details>
 
@@ -323,7 +345,7 @@ flowchart TB
 ## 🛠️ 开发
 
 ```bash
-pnpm verify     # typecheck + lint + check:config + check:reachability + check:shape + 构建控制台 + 单元/集成测试 + Hook 测试
+pnpm verify     # typecheck + lint + check:config + check:reachability + check:shape + check:docs + 构建控制台 + 单元/集成测试 + Hook 测试
 ```
 
 <details>
@@ -336,6 +358,7 @@ pnpm verify     # typecheck + lint + check:config + check:reachability + check:s
 | `pnpm check:config` | 每个配置项必须有消费方（L1–L3，见 `docs/operations.md`） |
 | `pnpm check:reachability` | 写了但没接线的模块 / 导出 / 成员方法（见 `docs/operations.md`） |
 | `pnpm check:shape` | 文件只能变短：行数、超长函数、禁用指令、`any` 计数（见 `docs/operations.md`） |
+| `pnpm check:docs` | `docs/` 里的 `file:line` 引用必须仍然指向它声称的那个符号（重构搬走函数后行号漂移） |
 | `pnpm test` | vitest：`tests/unit`（领域纯函数）+ `tests/integration`（临时目录 + 内存数据库） |
 | `pnpm test:integrations` | Hook 插件的去重、游标、锁、超时预算 |
 | `pnpm test:e2e` | 六条链路端到端（临时数据根，不碰真实数据） |

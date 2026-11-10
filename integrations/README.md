@@ -45,11 +45,15 @@ integrations/
 
 ```bash
 node integrations/cli.mjs install --host claude-code
-# 或装好后用 bin 名
+# 也可以先 link，再用 bin 名：pnpm --dir integrations link
 co-mem install --host claude-code
 co-mem doctor
 co-mem uninstall --host claude-code
 ```
+
+**这个包不发布到 npm**（`integrations/package.json` 里是 `"private": true`），所以
+`npx co-mem` 会拿到 `404 Not Found`。不 link 就用 `node integrations/cli.mjs`，命令都在
+**仓库根目录**执行。
 
 `install` 把六条 hook 写进宿主的 settings（默认 `~/.claude/settings.json`，可用
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径

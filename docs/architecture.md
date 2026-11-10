@@ -3777,7 +3777,9 @@ providers:
       # summary.generator 改成 rule（否则启动期交叉校验失败）。
       baseUrl: https://api.example.com/v1
       model: gpt-4o-mini
-      apiKey: ${COMEM_LLM_KEY}
+      # 空串 = 没有密钥：能启动，调用时失败。接真实模型时填 key，或用
+      # COMEM_PROVIDERS_LLM_DEFAULT_API_KEY 覆盖。
+      apiKey: ""
       maxTokens: 32768
       timeoutSeconds: 120
       pricing:                  # 用于成本换算，按 1M token 计

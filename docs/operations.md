@@ -43,15 +43,22 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 
 - 不写 `--config` 时读当前工作目录的 `config.yaml`；**文件不存在不是错误**，全部走默认值。
 - 环境变量形如 `COMEM_<SECTION>_<KEY>`，嵌套段用下划线连接：
-  `COMEM_SERVER_PORT=8080`、`COMEM_RETRIEVAL_ASSEMBLY_MAX_TOKENS=3200`。
+  `COMEM_SERVER_PORT=8080`、`COMEM_RETRIEVAL_ASSEMBLY_MAX_TOKENS=3200`。两个供应商密钥的
+  真实名字是 `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` 与 `COMEM_PROVIDERS_EMBEDDING_API_KEY`。
 - 数值、布尔、数组都会按默认值的类型转换；转换失败直接报错，不静默取 0。
 - 字符串里的 `${VAR}` 在加载时展开，**变量未设置就报错**——静默保留字面量会把错误推迟到
-  第一次调用模型时才出现。
+  第一次调用模型时才出现。这条判定是**无条件**的：即使对应的 provider 是 `disabled` 也会
+  展开，所以「把 type 改成 disabled」并不能绕过它。
 
-`config.example.yaml` 是全量模板。把它复制成 `config.yaml` 之后必须给 `COMEM_LLM_KEY` 赋值，
-否则启动直接失败（`apiKey: ${COMEM_LLM_KEY}`）。没有模型凭据的部署（本地开发、CI、只用规则
-摘要）把 `providers.llm.default.type` 改成 `disabled`，同时把 `summary.generator` 改成 `rule`
-——两者不一致时启动期抛 `INVALID_ARGUMENT`，不会等到第一次写文件才静默失败。
+**「留空」与「不设置」是两回事。** 空串（`apiKey: ""`，或环境变量赋成空值）等于「没有
+密钥」：服务照常启动，模型调用在第一次用到时才失败（`PROVIDER_UNAVAILABLE`）。而 `${VAR}`
+引用的变量**没有设置**时启动直接失败。前者是配置值，后者是模板语法。
+
+`config.example.yaml` 是全量模板，**复制完不需要任何密钥就能启动**：里面两个 `apiKey` 都是
+空串（`providers.llm.default.apiKey`、`providers.embedding.apiKey`），接真实模型时才填。
+没有模型凭据的部署（本地开发、CI、只用规则摘要）把 `providers.llm.default.type` 改成
+`disabled`，同时把 `summary.generator` 改成 `rule`——两者不一致时启动期抛
+`INVALID_ARGUMENT`，不会等到第一次写文件才静默失败。
 
 ### 配置项
 
@@ -61,7 +68,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule`、`memory.consolidation.enabled` 与 `memory.workingMemory.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
 | `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。**默认值是 IANA 保留域名（RFC 2606），永远不可达**；保持它启动时会打一条 `warn`，说明摘要、记忆抽取、合并与检索改写都不会工作。换成自建网关或真实供应商地址 |
 | `providers.llm.default.model` | `gpt-4o-mini` | 模型名。摘要质量与成本由它决定 |
-| `providers.llm.default.apiKey` | `""` | 密钥。模板里是 `${COMEM_LLM_KEY}`；空串时调用会失败，但没有密钥也能启动 |
+| `providers.llm.default.apiKey` | `""` | 密钥。空串 = 没有密钥：能启动，调用时抛 `PROVIDER_UNAVAILABLE`。用 `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` 覆盖，或直接在 `config.yaml` 里填 |
 | `providers.llm.default.maxTokens` | `32768` | 单次生成的 token 上限。**截断（`finishReason = length`）不重试**，抽取被截断时调大它（§11.4） |
 | `providers.llm.default.timeoutSeconds` | `120` | 单次调用超时。长摘要或慢网关时调大 |
 | `providers.llm.default.pricing.inputPerMillion` | `0.15` | 每 100 万输入 token 的单价（美元）。`comem_llm_cost_usd_total` 用它换算（§17.4） |
@@ -323,6 +330,11 @@ auth:
 
 ### 建第一个账号
 
+**以下步骤只在 `auth.enabled: true` 时适用。** 默认 `auth.enabled: false`（单用户形态）下
+身份由 `x-comem-subject`（不带这个头就回落到 `server.subject`）决定，`POST /api/v1/auth/login`
+直接返回 404「认证未启用（auth.enabled = false）。」——不是密码设错了。要建可登录的账号，先
+在 `config.yaml` 里把 `auth.enabled` 改成 `true`，再重启。
+
 `user:local`（或 `server.subject` 指定的主体）在启动时自动创建，但没有密码。
 管理面设密码的端点自己也要认证，全新实例没有任何凭据，所以第一次用命令：
 
@@ -481,9 +493,9 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" \
 ### 开发
 
 ```bash
-pnpm dev                 # 等价于 pnpm dev:server，tsx 直接跑 TypeScript
-pnpm dev:web             # 控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
 pnpm dev                 # 后端 + 控制台一起起（端口跟着 COMEM_SERVER_PORT 走）
+pnpm dev:server          # 只起后端 127.0.0.1:1933，tsx 直接跑 TypeScript
+pnpm dev:web             # 只起控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
 bash scripts/demo.sh     # 一条命令跑完六条链路，用 /tmp/comem-demo 这个临时数据根
 ```
 
@@ -624,7 +636,7 @@ docker run -d --name comem \
 | `COMEM_SERVER_HOST` | `0.0.0.0` | 监听地址。**镜像把它设成了 0.0.0.0**，因为 `config.schema.ts` 的默认值是 `127.0.0.1`，容器里绑 loopback 时 `-p` 端口转发不可达 |
 | `COMEM_SERVER_PORT` | `1933` | 监听端口。`HEALTHCHECK` 与 `EXPOSE` 都跟它走 |
 | `COMEM_DATA_DIR` | `/var/lib/comem` | 数据根。容器内按 `/.dockerenv` 推导，显式覆盖见「数据卷」 |
-| `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY` | 无 | 只是示例配置里的变量名；`config.yaml` 用 `${VAR}` 引用它们 |
+| `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` / `COMEM_PROVIDERS_EMBEDDING_API_KEY` | 无 | 两个供应商密钥的**真实**环境变量名（`COMEM_<SECTION>_<KEY>`）。模板里的 `apiKey` 是空串，用它们覆盖。`docker-compose.yaml` 透传的是旧的 `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY`——只有在你自己的 `config.yaml` 里写 `${VAR}` 引用时才生效 |
 | `TZ` | 未设置（UTC） | 日志时间戳是 UTC ISO 8601。需要本地时间就 `-e TZ=Asia/Shanghai` |
 | `VK_ICD_FILENAMES` | 不需要 | Mesa 的 ICD 在默认搜索路径里，不用手工指定 |
 | `GGML_BACKEND_PATH` | `/opt/comem-inference/backends/libggml-vulkan.so` | **只存在于 `comem:local-inference`**。DL 构建里 ggml 不会自动加载 Vulkan 后端（见「踩过的坑」第 14 条），这个变量是唯一入口。native 构建里它指向已载入的同一个 `.so`，重复 dlopen 是幂等的 |
@@ -863,8 +875,9 @@ load_backend: loaded CPU backend from /usr/local/bin/libggml-cpu-alderlake.so
    要写成 `$$host`，否则 compose 把它们当环境变量展开成空串（启动时一串
    `The "host" variable is not set` 警告）。
 10. **`config.yaml` 里的 `${VAR}` 是「全有或全无」。** 只要文件里任一 `${VAR}` 未
-    设置，进程启动即失败——即使那个 provider 的 `type` 是 `disabled`。所以示例配置
-    的 `providers.embedding.apiKey: ${COMEM_EMBEDDING_KEY}` 也要给值。
+    设置，进程启动即失败——即使那个 provider 的 `type` 是 `disabled`。示例配置不用
+    `${VAR}`（两个 `apiKey` 都是空串，复制完就能启动）；自己写 `${VAR}` 时要把两个
+    key 都给上。
 11. **`node:sqlite` 在 Node 24.22.2 上不再打 `ExperimentalWarning`**（docs 里那句
     警告是 Node 22 的行为）。容器里 `require('node:sqlite')` 干净通过，不需要
     `--no-warnings`。
@@ -1713,12 +1726,14 @@ Codex」，导出目录是一次性的。
 
 ### 检索不到刚写的内容
 
-**症状**：`POST /content/write` 返回 200，`GET /content/read` 读得到，`POST /search/find` 查不到。
+**症状**：`POST /api/v1/content/write` 返回 200，`GET /api/v1/content/read` 读得到，
+`POST /api/v1/search/find` 查不到。
 
 **原因**：
 
 1. **`status` 不是 `active`**。`experiences` / `rules` 写入时是 `pending`，检索 SQL 固定
-   `status = 'active'`（`src/adapters/sqlite/retrieval-index.ts`）。先 `POST /memories/{uri}/approve`。
+   `status = 'active'`（`src/adapters/sqlite/retrieval-index.ts`）。先
+   `POST /api/v1/memories/{uri}/approve`。
 2. **中文查询没命中**。FTS5 索引的是 CJK 单字切分后的文本，查询侧同样切分再包成短语
    （§8.1）。短语匹配要求字符**相邻**：搜「门禁」不会命中「跑完全部门禁」，除非这两个字在
    原文里连续出现。
@@ -1840,10 +1855,12 @@ COMEM_SERVER_PORT=8080 pnpm dev
 判断「是不是入口」，不满足就不启动。用别的路径或别的加载器跑会被判成「只是被 import」。
 按文档里的两条命令跑（`pnpm dev` 或 `node --import tsx ...`）即可。
 
-**症状 C：`配置文件引用了未设置的环境变量 COMEM_LLM_KEY`**
+**症状 C：`配置文件引用了未设置的环境变量 COMEM_LLM_KEY`（或 `COMEM_EMBEDDING_KEY`）**
 
-`config.example.yaml` 里的 `apiKey: ${COMEM_LLM_KEY}` 是**强制展开**的。要么导出这个变量，
-要么把这一行删掉（空串也能启动）。
+你的 `config.yaml` 里有 `${VAR}`，而那个变量没设置。插值是**强制展开**的：报错只提第一个
+缺失的变量，所以修完 `COMEM_LLM_KEY` 还会撞上 `COMEM_EMBEDDING_KEY`。三条路：导出这两个
+变量；把它们设成空串（`COMEM_LLM_KEY= COMEM_EMBEDDING_KEY= pnpm dev`，等于「没有密钥」）；
+或者从 `config.example.yaml` 重新复制一份——模板里两个 `apiKey` 都是空串，不需要任何密钥。
 
 **症状 D：`Cannot find package 'tsx'`**
 

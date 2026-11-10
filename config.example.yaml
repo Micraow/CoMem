@@ -16,7 +16,14 @@ providers:
       # 不需要模型就把 type 改成 disabled。
       baseUrl: https://api.example.com/v1
       model: gpt-4o-mini
-      apiKey: ${COMEM_LLM_KEY}
+      # 密钥。**留空也能启动**：空串 = 没有密钥，模型调用在第一次用到时才失败
+      # （PROVIDER_UNAVAILABLE），不阻塞启动。
+      # 接真实供应商时在这里填 key，或用环境变量覆盖（优先级：
+      # CLI 参数 > 环境变量 > 配置文件 > 内置默认值）：
+      #   export COMEM_PROVIDERS_LLM_DEFAULT_API_KEY=sk-...
+      # 不要在模板里写 ${VAR} 引用：那是「全有或全无」，任一未设置就启动失败，
+      # 即使对应 provider 是 disabled（见 operations.md「配置」）。
+      apiKey: ""
       maxTokens: 32768
       timeoutSeconds: 120
       pricing:                  # 用于成本换算，按 1M token 计
@@ -34,7 +41,9 @@ providers:
     type: openai-compatible    # openai-compatible | disabled
     baseUrl: https://api.example.com/v1
     model: BAAI/bge-m3
-    apiKey: ${COMEM_EMBEDDING_KEY}
+    # 同上：留空也能启动。默认 retrieval.engine 是 fts5，根本不会调它。
+    # 用 COMEM_PROVIDERS_EMBEDDING_API_KEY 覆盖，或在这里填。
+    apiKey: ""
     # 必须与模型一致。写错在第一次嵌入时抛 PROVIDER_UNAVAILABLE——
     # 维度不匹配时向量检索会把所有行当噪音跳过，且不报错。
     dimension: 1024

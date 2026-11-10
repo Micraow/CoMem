@@ -246,9 +246,11 @@ describe('loadConfig', () => {
   });
 
   it('config.example.yaml 可被加载，且与 §18 一致', () => {
+    // **不设任何密钥**：模板是「`cp` 完就能启动」的那一份，两个 apiKey 都是空串。
+    // 这条用例是 README 快速开始的回归测试——模板里出现必填的 `${VAR}` 会在这里失败。
     const config = loadConfig({
       path: EXAMPLE_CONFIG_PATH,
-      env: testEnv({ COMEM_LLM_KEY: 'test-key', COMEM_EMBEDDING_KEY: 'test-embedding-key' }),
+      env: testEnv(),
       container: false,
       isRoot: false,
     });
@@ -261,7 +263,7 @@ describe('loadConfig', () => {
             type: 'openai-compatible',
             baseUrl: 'https://api.example.com/v1',
             model: 'gpt-4o-mini',
-            apiKey: 'test-key',
+            apiKey: '',
             maxTokens: 32768,
             timeoutSeconds: 120,
             pricing: { inputPerMillion: 0.15, outputPerMillion: 0.6 },
@@ -271,7 +273,7 @@ describe('loadConfig', () => {
           type: 'openai-compatible',
           baseUrl: 'https://api.example.com/v1',
           model: 'BAAI/bge-m3',
-          apiKey: 'test-embedding-key',
+          apiKey: '',
           dimension: 1024,
           maxBatchSize: 64,
           timeoutSeconds: 30,
