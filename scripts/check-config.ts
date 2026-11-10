@@ -5,8 +5,8 @@
  *
  * 配置只有「形状」（zod schema 说有哪些字段、什么类型），没有「消费方」（谁读、
  * 在哪条代码路径上读）。于是「忘了接线」在类型系统里是合法的：删掉
- * `container.ts` 的 `hotnessWeight` / `hotnessHalfLifeHours` 两行，`tsc` 仍然
- * exit 0，而 `telemetry.hotness.*` 静默失效。本脚本把这一类变成可执行的检查。
+ * 装配面的 `hotnessWeight` / `hotnessHalfLifeHours` 两行，`tsc` 仍然 exit 0，而
+ * `telemetry.hotness.*` 静默失效。本脚本把这一类变成可执行的检查。
  *
  * 三层各自回答一个问题：
  *
@@ -64,7 +64,13 @@ import { configSchema } from '../src/config/schema.js';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC_DIR = join(ROOT, 'src');
 const SCHEMA_FILE = join(ROOT, 'src', 'config', 'schema.ts');
-const CONTAINER_FILE = join(ROOT, 'src', 'bootstrap', 'container.ts');
+/**
+ * 装配面：`src/bootstrap/` 下的全部源文件。
+ *
+ * L2 判的是「配置值进入可选属性」，而装配代码按依赖域拆在这个目录里。把检查绑在
+ * 单个文件路径上，拆分一次它就静默失效（`resolvedLegacy` 全表报红或全表空转）。
+ */
+const ASSEMBLY_DIR = join(ROOT, 'src', 'bootstrap');
 const EXAMPLE_FILE = join(ROOT, 'config.example.yaml');
 
 /**
@@ -429,8 +435,12 @@ function main(): void {
 
   // ── L2：配置派生依赖不许可选 ──
   const optionalDependencies: OptionalDependency[] = [];
-  const containerSource = program.getSourceFile(CONTAINER_FILE);
-  if (containerSource !== undefined) {
+  const assemblySources = program
+    .getSourceFiles()
+    .filter(
+      (file) => !file.isDeclarationFile && file.fileName.startsWith(`${ASSEMBLY_DIR}${sep}`),
+    );
+  if (assemblySources.length > 0) {
     const readsConfig = (node: ts.Node): boolean => {
       let found = false;
       const inner = (child: ts.Node): void => {
@@ -504,7 +514,9 @@ function main(): void {
       }
       ts.forEachChild(node, visit);
     };
-    visit(containerSource);
+    for (const sourceFile of assemblySources) {
+      visit(sourceFile);
+    }
   }
 
   // ── L3：example 与 schema 双向一致 ──
