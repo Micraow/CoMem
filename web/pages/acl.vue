@@ -27,12 +27,9 @@ import {
 } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import type { AclChainLevel } from '~/components/domain/AclChain.vue'
+import type { AclEffect, AclLevel, AclMode } from '~/utils/aclLabels'
 
 useHead({ title: '权限管理 · CoMem 控制台' })
-
-type AclMode = 'inherit' | 'restricted'
-type AclLevel = 1 | 3 | 7
-type AclEffect = 'allow' | 'deny'
 
 const api = useApi()
 const scopeRoot = useScopeRoot()

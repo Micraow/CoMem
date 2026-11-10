@@ -30,7 +30,11 @@ import {
   type TaskPayload,
 } from '~/composables/useApi'
 import { healthStatusLabel } from '~/utils/healthLabels'
-import { taskStatusLabelOf, taskTypeLabelOf } from '~/utils/taskLabels'
+import {
+  taskStatusLabelOf,
+  taskTypeLabelOf,
+  type ClaimableTaskStatus,
+} from '~/utils/taskLabels'
 
 useHead({ title: '概览 · CoMem 控制台' })
 
@@ -55,10 +59,10 @@ const tasksForbidden = ref(false)
  */
 type BadgeVariant = 'blue' | 'green' | 'red' | 'orange' | 'purple' | 'teal' | 'gray' | 'outline'
 
-const TASK_STATUS_VARIANT: Readonly<Record<string, BadgeVariant>> = {
+const TASK_STATUS_VARIANT = {
   pending: 'gray',
   running: 'blue',
-}
+} satisfies Record<ClaimableTaskStatus, BadgeVariant>
 
 const stats = computed<readonly { key: string; label: string; value: string; tone?: string }[]>(
   () => [
@@ -224,7 +228,7 @@ onMounted(load)
               <td class="mono strong">{{ task.id }}</td>
               <td>{{ taskTypeLabelOf(task.type) }}</td>
               <td>
-                <UiBadge :variant="TASK_STATUS_VARIANT[task.status] ?? 'gray'">
+                <UiBadge :variant="TASK_STATUS_VARIANT[task.status]">
                   {{ taskStatusLabelOf(task.status) }}
                 </UiBadge>
               </td>

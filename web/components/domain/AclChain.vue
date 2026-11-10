@@ -35,6 +35,7 @@ import {
   ACL_EFFECT_LABEL,
   ACL_LEVEL_LABEL,
   ACL_MODE_LABEL,
+  type AclEffect,
   type AclLevel,
   type AclMode,
 } from '~/utils/aclLabels'
@@ -45,6 +46,21 @@ const props = defineProps<{
   subject: string
   loading: boolean
 }>()
+
+/**
+ * 没有直接授权时的说明。措辞沿用 `ACL_MODE_LABEL` 与 `AclEditor` 的空态：
+ * `inherit` 的权限来自祖先链，`restricted` 在这一级切断继承。
+ */
+const NO_GRANT_NOTE = {
+  inherit: '无直接授权，权限来自祖先链',
+  restricted: '无直接授权（继承已切断）',
+} satisfies Record<AclMode, string>
+
+/** 直接授权里 `effect` 的后缀：`allow` 是默认效果，不额外标注。 */
+const EFFECT_SUFFIX = {
+  allow: '',
+  deny: ` · ${ACL_EFFECT_LABEL.deny}`,
+} satisfies Record<AclEffect, string>
 
 function modeOf(level: AclChainLevel): AclMode | null {
   return level.snapshot?.mode ?? null
@@ -60,14 +76,12 @@ function grantsOf(level: AclChainLevel): string {
     return ''
   }
   if (level.snapshot.entries.length === 0) {
-    return level.snapshot.mode === 'restricted' ? '无直接授权（继承已切断）' : '继承'
+    return NO_GRANT_NOTE[level.snapshot.mode]
   }
   return level.snapshot.entries
     .map(
       (entry) =>
-        `${entry.principal} = ${ACL_LEVEL_LABEL[entry.level]}${
-          entry.effect === 'deny' ? ` · ${ACL_EFFECT_LABEL.deny}` : ''
-        }`,
+        `${entry.principal} = ${ACL_LEVEL_LABEL[entry.level]}${EFFECT_SUFFIX[entry.effect]}`,
     )
     .join('，')
 }

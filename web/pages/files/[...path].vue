@@ -37,7 +37,7 @@ import {
   type TreeEntryPayload,
 } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
-import { fsEntryDisplayName, fsEntryKindLabel } from '~/utils/fsLabels'
+import { fsEntryDisplayName, fsEntryKindLabel, type FsEntryKind } from '~/utils/fsLabels'
 import {
   LEVEL_OF_TAB,
   LEVEL_TABS,
@@ -75,11 +75,20 @@ const selectedUri = computed<string | null>(() =>
   segments.value.length === 0 ? null : `${URI_PREFIX}${segments.value.join('/')}`,
 )
 
-const documentName = computed(() => segments.value.at(-1) ?? '')
-
 const health = useState<HealthPayload | null>('comem-health', () => null)
 
 const stat = ref<FsStatPayload['stat']>(null)
+/** 节点还没取到（加载中 / 不存在）时为 null，不冒充「文档」。 */
+const entryKind = computed<FsEntryKind | null>(() => stat.value?.kind ?? null)
+const documentTitle = computed(() => {
+  const name = segments.value.at(-1) ?? ''
+  const kind = entryKind.value
+  return kind === null ? name : fsEntryDisplayName(kind, name)
+})
+const entryKindLabel = computed(() => {
+  const kind = entryKind.value
+  return kind === null ? null : fsEntryKindLabel(kind)
+})
 const abstractText = ref<string | null>(null)
 /** 摘要请求失败：与「这个节点还没有摘要」分开，前者不是数据状态。 */
 const abstractFailed = ref(false)
@@ -118,7 +127,7 @@ const copied = ref(false)
 
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
-const isDirectory = computed(() => stat.value?.kind === 'directory')
+const isDirectory = computed(() => entryKind.value === 'directory')
 
 /**
  * 文档没有 L1 概览（服务端恒返回 null，前端没有合成逻辑），这一档不展示。
@@ -375,9 +384,7 @@ onBeforeUnmount(() => {
 
             <div class="doc-head">
               <div class="doc-head__main">
-                <h1 class="doc-title">
-                  {{ isDirectory ? `${documentName}/` : documentName }}
-                </h1>
+                <h1 class="doc-title">{{ documentTitle }}</h1>
                 <div class="uri">{{ selectedUri }}</div>
               </div>
               <UiButton variant="secondary" size="sm" @click="copyUri">
@@ -387,7 +394,9 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="doc-pills mb-20">
-              <UiBadge variant="gray">{{ isDirectory ? '目录' : '文档' }}</UiBadge>
+              <UiBadge v-if="entryKindLabel !== null" variant="gray">{{
+                entryKindLabel
+              }}</UiBadge>
               <UiBadge v-if="degraded" variant="orange">摘要降级</UiBadge>
             </div>
 
