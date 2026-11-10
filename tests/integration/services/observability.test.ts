@@ -180,19 +180,31 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe('phase / 归因（通过 recordRequest 观察）', () => {
-  it('同名阶段累加：request_log.phases 是两条 recall 之和', async () => {
+  it('同名阶段累加：第二段为空时仍保留第一段，不覆盖', async () => {
+    // 不写「两段 sleep 之和 ≥ 6ms」：`setTimeout` 的 delay 在整毫秒时钟上生效，
+    // `phase()` 却用 `performance.now()` 的浮点精度计时。`sleep(5)` 可以只量到
+    // 4.6ms、`sleep(1)` 可以只量到 0.02ms，两个名义值相加不构成下界（本地实测
+    // 5+1 有 0.5% 的样本落在 6ms 以下，正是这条用例误报的来源）。
+    //
+    // 改成在同一 scope 里取两次快照：第二段刻意为空，耗时接近 0，与定时器精度
+    // 无关。累加实现让第二次快照至少保留第一段的耗时；覆盖实现会把它丢掉、只剩
+    // 接近 0 的值。判定只依赖「第二次 ≥ 第一次」，不依赖任何调度精度。
     await inScope(async () => {
       await service.phase('recall', async () => {
         await sleep(5);
       });
-      await service.phase('recall', async () => {
-        await sleep(1);
-      });
       await service.recordRequest(requestEntry('req_1', { durationMs: 104 }));
+
+      await service.phase('recall', async () => {});
+      await service.recordRequest(
+        requestEntry('req_1_after_empty_phase', { durationMs: 104 }),
+      );
     });
 
-    const phases = phasesOf('req_1');
-    expect(phases?.['recall']).toBeGreaterThanOrEqual(6);
+    const first = phasesOf('req_1')?.['recall'];
+    const after = phasesOf('req_1_after_empty_phase')?.['recall'];
+    expect(first).toBeGreaterThan(0);
+    expect(after).toBeGreaterThanOrEqual(first ?? 0);
     // 总耗时 104ms 大于阶段之和：差额是未归因间隙，不是错误信号。
     expect(logger.warn).not.toHaveBeenCalled();
   });

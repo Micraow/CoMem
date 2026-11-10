@@ -21,8 +21,9 @@
  * **比较集合，不比较 SQL 字符串**：谓词换个写法不该让测试变红，判定结果变了才该红。
  *
  * 不在本用例要求范围内的口径（只报告，不改）：
- * - `services/acl.ts` 的 `#maxLevel` 取 `MAX(level)` 且不带 `level >= 1`，服务
- *   `write` / `manage` 检查；
+ * - `services/acl.ts` 的 `#maxLevel` 取 `MAX(level)` 服务 `write` / `manage` 检查。
+ *   单行节点上它与读位测试同结论；多行节点的数值最大不等于位包含（`{1, 2}` 会取
+ *   2，读位反而为 0），本用例只对拍单行节点；
  * - `glob` 还有 `status = 'active'` 与「节点自身那一行」的过滤，`readableUris` 只
  *   回答「入参列表里哪些可读」——所以对拍的口径是「同一个节点集合里哪些可读」，
  *   见 `universe()`。
@@ -57,6 +58,18 @@ const OUTSIDE = 'comem://user/bob/elsewhere/x.md';
 
 /** 手工写入的 level 0 行所在节点。 */
 const LEGACY_ZERO = `${ROOT}/legacy-zero.md`;
+
+/**
+ * 手工写入的非规范级别行所在节点。生产写路径只产生 1 / 3 / 7（`isAclLevel`），
+ * 2 / 6 只带高位、读位为 0，5 同时带读位与 manage 位。这三格用来对拍两套 SQL
+ * 与单节点读路径的位测试是否同结论。
+ */
+const LEGACY_LEVEL_TWO = `${ROOT}/legacy-level-2.md`;
+const LEGACY_LEVEL_SIX = `${ROOT}/legacy-level-6.md`;
+const LEGACY_LEVEL_FIVE = `${ROOT}/legacy-level-5.md`;
+
+/** §12.1 的 read 位。单节点读路径的 `AclAction` 只要求 read。 */
+const READ: AclLevel = 1;
 
 /**
  * 物化之后才出现的节点。
@@ -96,6 +109,9 @@ const NODES: readonly SeedNode[] = [
   { uri: `${ROOT}/carol-dir`, kind: 'directory', level: 'L0', cell: '只授权 carol，bob 不可见' },
   { uri: `${ROOT}/carol-dir/note.md`, kind: 'document', level: 'L2', cell: 'carol 的授权继承到子文件' },
   { uri: LEGACY_ZERO, kind: 'document', level: 'L2', cell: 'level 0 的 allow 行不算 read' },
+  { uri: LEGACY_LEVEL_TWO, kind: 'document', level: 'L2', cell: '手工 level 2：只有 WRITE 位' },
+  { uri: LEGACY_LEVEL_SIX, kind: 'document', level: 'L2', cell: '手工 level 6：WRITE + MANAGE 位' },
+  { uri: LEGACY_LEVEL_FIVE, kind: 'document', level: 'L2', cell: '手工 level 5：READ + MANAGE 位' },
 ];
 
 /** 三个主体。`user:*` 与 `AclService.resolvePrincipals` 的输出同形；fixture 没有通配条目。 */
@@ -110,6 +126,7 @@ let db: DatabaseSync;
 let logger: Logger;
 let permissions: PermissionRepository;
 let index: SqliteFtsIndex;
+let acl: AclService;
 
 function createLogger(): Logger {
   const mock: Logger = {
@@ -162,7 +179,7 @@ async function seedIndex(): Promise<void> {
 
 /** 2) 生产写路径：根预置（owner 恒 manage）+ 五条子目录 ACL，各自重算整棵子树。 */
 async function materializeAcl(): Promise<void> {
-  const acl = new AclService({
+  acl = new AclService({
     db,
     aclFile: new AclFileStore({ dataDir, logger }),
     permissions,
@@ -187,17 +204,24 @@ async function materializeAcl(): Promise<void> {
 }
 
 /**
- * 3) 生产路径在这份 fixture 里写不出来的两格。
+ * 3) 生产路径在这份 fixture 里写不出来的几格。
  *
- * - level 0 的 allow 行：`level >= 1` 是对拍双方的共同条件，没有这一行，去掉任何
- *   一侧的 `level >= 1` 都不会改变结果，测试就没有区分力。物化永远写 `maxLevel()`
- *   （至少是 read），但旧数据与手工插入会留下任意整数。
+ * - level 0 / 2 / 6 / 5 的 allow 行：`isAclLevel` 只认 1 / 3 / 7，物化永远写
+ *   `maxLevel()`，所以这些级别只可能来自旧数据或手工 SQL。没有这些行，去掉任一侧
+ *   的读位判定都不会改变结果，测试就没有区分力。
  * - 物化之后才出现的节点：插在 `materializeAcl()` 之后，保证它真的一行都没有。
+ *
+ * 先物化再插行：这几行必须在 `alice` 的继承行写完之后落地，否则物化会按目录链
+ * 重算、把它们覆盖掉。
  */
 async function seedRawStates(): Promise<void> {
-  db.prepare(
+  const insert = db.prepare(
     'INSERT INTO node_permission (node_uri, principal, level, effect) VALUES (?, ?, ?, ?)',
-  ).run(LEGACY_ZERO, 'user:bob', 0, 'allow');
+  );
+  insert.run(LEGACY_ZERO, 'user:bob', 0, 'allow');
+  insert.run(LEGACY_LEVEL_TWO, 'user:bob', 2, 'allow');
+  insert.run(LEGACY_LEVEL_SIX, 'user:bob', 6, 'allow');
+  insert.run(LEGACY_LEVEL_FIVE, 'user:bob', 5, 'allow');
   await index.upsert([record(LATE, 'document', 'L2')]);
 }
 
@@ -252,6 +276,7 @@ async function globVisible(principals: readonly string[]): Promise<string[]> {
 
 /** bob：只有三条 allow 子树的节点可读。 */
 const BOB_VISIBLE = [
+  `${ROOT}/legacy-level-5.md`,
   `${ROOT}/manage-dir`,
   `${ROOT}/manage-dir/note.md`,
   `${ROOT}/read-dir`,
@@ -329,5 +354,33 @@ describe('ACL 可读谓词：readableUris 与 glob', () => {
         .prepare('SELECT level, effect FROM node_permission WHERE node_uri = ? AND principal = ?')
         .get(LEGACY_ZERO, 'user:bob'),
     ).toMatchObject({ level: 0, effect: 'allow' });
+  });
+
+  it('非规范级别：level 2 / 6 三处都不可读，level 5 三处都可读', async () => {
+    const bob = SUBJECTS[0].principals;
+    expect(
+      [LEGACY_LEVEL_TWO, LEGACY_LEVEL_SIX, LEGACY_LEVEL_FIVE].map((uri) =>
+        Number(
+          db
+            .prepare('SELECT level FROM node_permission WHERE node_uri = ? AND principal = ?')
+            .get(uri, 'user:bob')?.['level'],
+        ),
+      ),
+    ).toEqual([2, 6, 5]);
+
+    const viaBatch = readableVisible(bob);
+    const viaGlob = await globVisible(bob);
+
+    // 2 / 6 带高位但不带读位：`p.level >= 1` 会把它们判成可读，位测试判不可读。
+    for (const uri of [LEGACY_LEVEL_TWO, LEGACY_LEVEL_SIX]) {
+      expect(viaBatch, `readableUris 返回了 ${uri}`).not.toContain(uri);
+      expect(viaGlob, `glob 返回了 ${uri}`).not.toContain(uri);
+      expect(await acl.check(Uri.parse(uri), READ, bob), `单节点读允许了 ${uri}`).toBe(false);
+    }
+
+    // 5 同时带读位与 manage 位：判定必须是「读位为真」，不是 `level = 1`。
+    expect(viaBatch).toContain(LEGACY_LEVEL_FIVE);
+    expect(viaGlob).toContain(LEGACY_LEVEL_FIVE);
+    expect(await acl.check(Uri.parse(LEGACY_LEVEL_FIVE), READ, bob)).toBe(true);
   });
 });

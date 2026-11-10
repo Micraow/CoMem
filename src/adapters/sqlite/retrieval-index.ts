@@ -15,7 +15,7 @@
  * 再逐个读文件做行匹配。
  *
  * **权限判断是 deny 优先**（架构文档 §12.2 不变量 2）：可读 = 主体集合里有人拿到
- * `level >= read` 的 allow，且没有人在同一节点上有 deny 行。索引层与仓储层
+ * 带读位的 allow，且没有人在同一节点上有 deny 行。索引层与仓储层
  * （`PermissionRepository.readableUris`）必须用同一套谓词，否则同一次请求里
  * `search` 与 `grep` 会给出不同的可见集合。两处都收在 `permissionPredicate`。
  */
@@ -241,6 +241,12 @@ function metadataConditions(query: {
  *
  * 主体集合在 SQL 里出现两次（外层 allow、内层 deny 的排除），占位符复用同一个
  * 局部变量，绑定时按出现顺序展开成两段。`search` 与 `glob` 共用这一份。
+ *
+ * 读判定用位测试（`(p.level & READ_LEVEL) = READ_LEVEL`），与单节点读路径
+ * （`services/acl.ts` 的 `SELECT MAX(level)` + `domain/acl.ts` 的
+ * `levelSatisfies`）同一语义。`p.level >= 1` 只在规范级别 1/3/7 上等价：库里
+ * 出现 `level = 2` / `4` / `6` 这类只带高位、读位为 0 的行时，`>=` 判可读而
+ * 位测试判不可读，于是 `search` / `glob` 与 `read` 的可见集合分叉。
  */
 function permissionPredicate(principals: readonly string[]): {
   readonly sql: string;
@@ -252,7 +258,7 @@ function permissionPredicate(principals: readonly string[]): {
          SELECT 1 FROM node_permission p
          WHERE p.node_uri = n.uri
            AND p.principal IN (${principalList})
-           AND p.level >= ${READ_LEVEL}
+           AND (p.level & ${READ_LEVEL}) = ${READ_LEVEL}
            AND p.effect = 'allow'
            AND NOT EXISTS (
              SELECT 1 FROM node_permission d

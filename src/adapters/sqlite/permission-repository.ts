@@ -119,8 +119,13 @@ export class PermissionRepository {
    * 检索用：给定主体集合，返回有 read 权限的 URI 集合。
    *
    * 语义是「有 allow 且没有 deny」（§12.2 不变量 2）：主体集合里任一主体拿到
-   * `level >= read` 的 allow，且没有任何主体在同一个节点上有 deny 行。deny 优先
-   * 于 allow，所以这两个条件不能合并成 `MAX(level)`。
+   * 带读位的 allow，且没有任何主体在同一个节点上有 deny 行。deny 优先于 allow，
+   * 所以这两个条件不能合并成 `MAX(level)`。
+   *
+   * 读位用 `(p.level & READ_LEVEL) = READ_LEVEL` 判定，与 `domain/acl.ts` 的
+   * `levelSatisfies` 同义。不能写 `p.level >= READ_LEVEL`：规范级别 1/3/7 下
+   * 两者等价，但 `level = 2` / `6` 这类读位为 0 的非规范行会被 `>=` 误判为可读，
+   * 与单节点读路径（`MAX(level)` + 位测试）分叉。
    *
    * 一次 `IN (...)` 查询拿完，不按 URI 逐条查：`search` 一次要过滤 40 条候选，
    * 逐条查就是 40 次往返。SQLite 的变量上限默认 32766（`SQLITE_MAX_VARIABLE_NUMBER`），
@@ -140,7 +145,7 @@ export class PermissionRepository {
     const sql = `SELECT DISTINCT p.node_uri FROM node_permission p
       WHERE p.node_uri IN (${placeholders(uris.length)})
         AND p.principal IN (${principalList})
-        AND p.level >= ${READ_LEVEL}
+        AND (p.level & ${READ_LEVEL}) = ${READ_LEVEL}
         AND p.effect = 'allow'
         AND NOT EXISTS (
           SELECT 1 FROM node_permission d
