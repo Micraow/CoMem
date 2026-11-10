@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { RESERVED_NAMES } from '../../../src/adapters/fs/path.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import {
   identityFields,
@@ -12,6 +13,7 @@ import {
   preferencesMemoryType,
   profileMemoryType,
 } from '../../../src/domain/memory-types/index.js';
+import { VERSION_DIRECTORY } from '../../../src/domain/node.js';
 
 function expectInvalidArgument(run: () => void): ComemError {
   let caught: unknown;
@@ -57,6 +59,28 @@ describe('renderPath', () => {
   it('identity 值为空或含反斜杠时拒绝', () => {
     expectInvalidArgument(() => renderPath(preferencesMemoryType, { topic: '' }));
     expectInvalidArgument(() => renderPath(preferencesMemoryType, { topic: 'a\\b' }));
+  });
+
+  it('identity 值是保留名时拒绝，两份清单里的名字都挡', () => {
+    const rules = getMemoryType('rules');
+    expect(rules).toBeDefined();
+    if (rules === undefined) {
+      return;
+    }
+    // 元数据文件名由 `domain/uri.ts` 的段保留名 + `.history` 组成（`path.ts` 是它的
+    // 镜像）。逐名断言而不是只测 `.history`：漏一个就会有一条记忆落进内部地址。
+    for (const name of [...RESERVED_NAMES, VERSION_DIRECTORY]) {
+      const error = expectInvalidArgument(() => renderPath(rules, { scenario: name, rule: 'x' }));
+      expect(error.details?.['segment']).toBe(name);
+    }
+    // 判的是渲染后的段，不是原始值：同一份 `.history` 在 `{topic}.md` 里只是前缀，
+    // 落点是 `.history.md`——那是普通记忆，`isVersionFile` 也不该认它。
+    expect(renderPath(preferencesMemoryType, { topic: VERSION_DIRECTORY })).toBe(
+      'memories/preferences/.history.md',
+    );
+    expect(renderPath(rules, { scenario: '.history.md', rule: 'x' })).toBe(
+      'memories/rules/.history.md/x.md',
+    );
   });
 
   it('缺占位符值时报错，不会拼出带花括号的路径', () => {

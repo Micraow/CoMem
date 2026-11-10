@@ -844,6 +844,41 @@ describe('有效区间与版本快照（W98）', () => {
     expect(version?.validUntil).toBe('2026-11-10T02:01:00.000Z');
   });
 
+  it('identity 用保留名当 scenario 时拒绝：用户输入占不到版本目录', async () => {
+    // `.history` 曾经是合法 identity 值：`renderPath` 放行、`Uri` 也认，于是拼出
+    // 一条落点在版本目录里的「合法」记忆，被 `isVersionFile` 当成版本内容。
+    for (const scenario of ['.history', '.abstract.md']) {
+      await expect(
+        memory.upsertMemory(Uri.parse(SCOPE), rulesMemoryType, {
+          scenario,
+          rule: 'xxx',
+          content: '不该落盘的记忆。',
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect(await historyNames('memories/rules/.history')).toEqual([]);
+      expect(await historyNames(`memories/rules/${scenario}`)).toEqual([]);
+    }
+  });
+
+  it('版本快照照旧写进 .history：拒绝的是用户输入，不是内部写入', async () => {
+    const uri = Uri.parse(`${SCOPE}/memories/rules/backend/naming.md`);
+    await memory.upsertMemory(Uri.parse(SCOPE), rulesMemoryType, {
+      scenario: 'backend',
+      rule: 'naming',
+      content: '接口名用动词短语。',
+    });
+    await memory.approve(uri);
+    at(60);
+    // 系统自己拼 `memories/rules/.history/backend/...`：`Uri#child` 必须放行这个段。
+    await memory.upsertMemory(Uri.parse(SCOPE), rulesMemoryType, {
+      uri,
+      update: (current) => ({ ...current, content: '接口名用动词短语，字段名用名词。' }),
+    });
+    expect(await historyNames('memories/rules/.history/backend')).toEqual([
+      'naming.md--20261110T020100000Z.md',
+    ]);
+  });
+
   it('同一毫秒内的两次快照：文件名追加 -1，不覆盖前一份', async () => {
     const uri = Uri.parse(CODE_STYLE);
     // 时间不前进：两次覆盖的快照 stamp 相同。

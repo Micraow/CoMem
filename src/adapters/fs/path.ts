@@ -12,7 +12,7 @@
 import { isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
 
 import { ComemError } from '../../domain/errors.js';
-import { Uri, type UriScope } from '../../domain/uri.js';
+import { RESERVED_SEGMENT_NAMES, Uri, type UriScope } from '../../domain/uri.js';
 
 export interface DiskLocation {
   readonly uri: Uri;
@@ -28,24 +28,13 @@ const SCHEME_PREFIX = 'comem://';
 const URI_SEGMENT_SEPARATOR = '/';
 
 /**
- * 元数据文件名（架构文档 §6.2 规则 6、§6.7）。
+ * 元数据文件名（架构文档 §6.2 规则 6、§6.7）。判定与 `domain/uri.ts` 是**同一份集合**
+ * （那边导出、这边引用）：这些名字属于元数据文件，作为普通路径段写入会和它们抢地址。
  *
- * 这些名字属于元数据文件，不是目录内容：作为普通路径段写入会和元数据文件
- * 抢地址，也会让「按 URI 前缀鉴权」把元数据当成内容。
- *
- * 和 `domain/uri.ts` 里的私有集合必须完全一致——那边没有导出，所以这里自己
- * 声明一份，并由 `tests/integration/fs/path.test.ts` 断言两边对同一批候选名
- * 的判定相同。改一处忘了另一处，测试会红。
+ * `.history` 故意不在这里：它是合法的 URI 段（系统写版本快照要用），归成产物会让
+ * `list` / `tree` / `glob` 看不见版本文件（§11.11）；它由 identity 的标识清单拦。
  */
-export const RESERVED_NAMES: ReadonlySet<string> = new Set([
-  '.abstract.md',
-  '.overview.md',
-  '.acl.json',
-  '.meta.json',
-  '.done',
-  'memory_diff.json',
-  'memory_operations.json',
-]);
+export const RESERVED_NAMES: ReadonlySet<string> = RESERVED_SEGMENT_NAMES;
 
 /** 临时文件名前缀：原子写用（`.comem-tmp-<random>`）。 */
 export const TEMP_FILE_PREFIX = '.comem-tmp-';

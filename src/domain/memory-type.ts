@@ -9,6 +9,7 @@
  */
 
 import { ComemError } from './errors.js';
+import { isReservedIdentifier } from './identity.js';
 import type { MergeStrategy } from './merge-op.js';
 
 export type FieldType = 'string' | 'number' | 'boolean' | 'string[]';
@@ -192,7 +193,14 @@ export function renderPath(
     validateIdentityValue(value, name);
     rendered = rendered.split(`{${name}}`).join(value);
   }
-  return `${schema.directory}/${rendered}`;
+  const path = `${schema.directory}/${rendered}`;
+  // 保留名按**渲染后的段**判定，不按原始值：`{topic}` 取 `.history` 时落点是
+  // `.history.md`（普通记忆），只有当某段整段等于保留名时才真的占住内部地址。
+  const reserved = path.split('/').find((segment) => isReservedIdentifier(segment));
+  if (reserved !== undefined) {
+    throw invalidArgument('记忆路径不能使用系统保留名。', { type: schema.type, segment: reserved });
+  }
+  return path;
 }
 
 /**

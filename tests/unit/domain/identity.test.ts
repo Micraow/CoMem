@@ -7,8 +7,11 @@ import {
   assertValidUserId,
   buildIdentity,
   GROUP_ID_PATTERN,
+  isReservedIdentifier,
   USER_ID_PATTERN,
 } from '../../../src/domain/identity.js';
+import { VERSION_DIRECTORY } from '../../../src/domain/node.js';
+import { RESERVED_SEGMENT_NAMES, Uri } from '../../../src/domain/uri.js';
 
 function expectInvalidArgument(run: () => unknown): void {
   try {
@@ -50,8 +53,24 @@ describe('assertValidUserId', () => {
   it('与 adapters/fs/path.ts 的 RESERVED_NAMES 保持一致', () => {
     // 两处清单必须同时拒绝同一个名字（domain 不能 import adapters，靠断言兜底）。
     for (const name of RESERVED_NAMES) {
+      expect(isReservedIdentifier(name)).toBe(true);
       expectInvalidArgument(() => assertValidUserId(name));
     }
+  });
+
+  it('比段保留名多一个 .history：URI 段放行，用户标识拒绝', () => {
+    // 三份清单的关系是「同一份段保留名 + 一个差集」，不是三份同义清单：
+    // `.history` 必须是合法 URI 段（系统写版本快照要用 `Uri#child`），
+    // 但不能由用户选（会拼出落点在版本目录里的「合法」记忆）。
+    expect(RESERVED_SEGMENT_NAMES.has(VERSION_DIRECTORY)).toBe(false);
+    for (const name of RESERVED_SEGMENT_NAMES) {
+      expect(RESERVED_NAMES.has(name)).toBe(true);
+    }
+    expect(isReservedIdentifier(VERSION_DIRECTORY)).toBe(true);
+    expectInvalidArgument(() => assertValidUserId(VERSION_DIRECTORY));
+    expect(
+      Uri.tryParse('comem://user/alice/memories/rules/.history/xxx.md'),
+    ).not.toBeNull();
   });
 
   it('64 个字符通过，65 个字符拒绝', () => {

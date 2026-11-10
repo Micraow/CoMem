@@ -18,14 +18,16 @@
  * （§6.5 的 `_meta/comem.sqlite`），`attachments` 对应附件目录（§14 的
  * `download`）。这些名字被当成用户 ID 时，用户内容会和内部产物抢同一个地址。
  *
- * `RESERVED_NAMES` 与 `adapters/fs/path.ts` 的 `RESERVED_NAMES` **必须保持一致**：
- * 后者管 URI 路径段，这里管根标识，两处规则不一致时，一个名字能通过其中一个检查。
- * `domain/` 不能 import `adapters/`（§4.2），所以这里复制一份，并由
- * `tests/unit/domain/identity.test.ts` 断言两边对同一批候选名的判定相同。
+ * 方法名里的标识同理：`rules` 的 `{scenario}` 会落成一层目录，取 `.history` 就拼出
+ * 与版本目录同址的记忆。所以「用户不可选的标识」= `domain/uri.ts` 的段保留名再
+ * **加** `.history`：它是合法 URI 段（系统写版本快照要用），只是不许由用户选。
+ * 差集由 `tests/unit/domain/identity.test.ts` 钉住。
  */
 
 import { groupPrincipal, userPrincipal } from './acl.js';
 import { ComemError } from './errors.js';
+import { VERSION_DIRECTORY } from './node.js';
+import { RESERVED_SEGMENT_NAMES } from './uri.js';
 
 /** 用户。 */
 export interface User {
@@ -100,17 +102,6 @@ export const USER_ID_PATTERN: RegExp = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** 组 ID 同规则。 */
 export const GROUP_ID_PATTERN: RegExp = USER_ID_PATTERN;
 
-/** 与 `adapters/fs/path.ts` 的 `RESERVED_NAMES` 必须保持一致。 */
-const URI_RESERVED_NAMES: ReadonlySet<string> = new Set([
-  '.abstract.md',
-  '.overview.md',
-  '.acl.json',
-  '.meta.json',
-  '.done',
-  'memory_diff.json',
-  'memory_operations.json',
-]);
-
 /**
  * 数据根下的内部目录名（§6.5、§14）。
  *
@@ -118,13 +109,27 @@ const URI_RESERVED_NAMES: ReadonlySet<string> = new Set([
  */
 const ROOT_RESERVED_NAMES: ReadonlySet<string> = new Set(['_meta', 'attachments', '.', '..']);
 
-function isReservedName(id: string): boolean {
-  return URI_RESERVED_NAMES.has(id) || ROOT_RESERVED_NAMES.has(id);
+/**
+ * 用户不可选的标识（根 ID、记忆 identity 值）：`domain/uri.ts` 的段保留名 + `.history`。
+ * 后者能当 URI 段（系统写版本快照），但不能由用户选：拼出的路径会落在版本目录里。
+ */
+const IDENTIFIER_RESERVED_NAMES: ReadonlySet<string> = new Set([
+  ...RESERVED_SEGMENT_NAMES,
+  VERSION_DIRECTORY,
+]);
+
+/** 这个标识名是不是保留名。用户输入落成路径段的每一处都必须问它。 */
+export function isReservedIdentifier(name: string): boolean {
+  return IDENTIFIER_RESERVED_NAMES.has(name);
+}
+
+function isReservedRootId(id: string): boolean {
+  return isReservedIdentifier(id) || ROOT_RESERVED_NAMES.has(id);
 }
 
 function assertValidId(id: string, kind: 'user' | 'group'): string {
   const pattern = kind === 'user' ? USER_ID_PATTERN : GROUP_ID_PATTERN;
-  if (!pattern.test(id) || isReservedName(id)) {
+  if (!pattern.test(id) || isReservedRootId(id)) {
     throw new ComemError(
       'INVALID_ARGUMENT',
       `${kind === 'user' ? '用户' : '组'} ID 不合法：${String(id)}。只允许小写字母或数字开头，后接小写字母、数字、点、下划线、短横线，最长 64 个字符。`,

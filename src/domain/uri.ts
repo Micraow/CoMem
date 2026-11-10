@@ -26,17 +26,13 @@ const PATH_SEPARATOR = '/';
 const ROOT_ID_PATTERN = /^[A-Za-z0-9._@-]+$/;
 
 /**
- * 保留名（架构文档 §6.2 规则 6）。这些名字属于元数据文件，
- * 作为普通路径段写入会和元数据文件抢地址。
+ * 保留名（架构文档 §6.2 规则 6）：元数据文件名，作为普通路径段写入会和它们抢地址。
+ * `adapters/fs/path.ts` 与 `domain/identity.ts` 引用同一份。`.history` 不在其中：
+ * 版本快照本身就是 URI 段，系统自己也要写；它只拦用户可选的标识。
  */
-const RESERVED_SEGMENT_NAMES: ReadonlySet<string> = new Set([
-  '.abstract.md',
-  '.overview.md',
-  '.acl.json',
-  '.meta.json',
-  '.done',
-  'memory_diff.json',
-  'memory_operations.json',
+export const RESERVED_SEGMENT_NAMES: ReadonlySet<string> = new Set([
+  '.abstract.md', '.overview.md', '.acl.json', '.meta.json', '.done',
+  'memory_diff.json', 'memory_operations.json',
 ]);
 
 /** 单段 UTF-8 字节数上限（架构文档 §6.2 规则 5）。 */

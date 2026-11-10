@@ -42,8 +42,9 @@ function expectInvalidUri(run: () => unknown): ComemError {
 }
 
 /**
- * 架构文档 §6.2 规则 6 的六个保留名，硬编码一份：`uri.ts` 没有导出它的集合，
- * 只能靠行为断言两边一致，写死才能发现「一边改了另一边没改」。
+ * 架构文档 §6.2 规则 6 的六个保留名，硬编码一份：`path.ts` 现在是 `domain/uri.ts`
+ * 那份集合的引用（不再是副本），所以内容断言改成防「架构文档与唯一来源漂移」。
+ * `.history` 不在其中，理由见 `path.ts` 的注释。
  */
 const EXPECTED_RESERVED_NAMES = [
   '.abstract.md',

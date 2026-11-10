@@ -128,14 +128,15 @@ export function contextTypeOf(uri: Uri): ContextType {
 /**
  * 记忆版本快照目录（`.history`，架构文档 §11.11）。
  *
- * **它不是保留名**（`domain/uri.ts` 与 `adapters/fs/path.ts` 的保留名集合里都没有
- * 它）：`glob` / `grep` / `list` / `tree` 的契约是磁盘，应当看得到版本文件；检索面
- * 靠 `valid_until` 过滤，不靠目录名。但**凡是位于 `.history` 段之下的 URI 都不是
- * 常规内容**——写入方的版本快照、TTL 的排除、摘要传播的止步、合并清单的排除、
- * 重建索引时的 `sources` 边用的是同一条判据。
+ * 它**不是** URI 段的保留名（`domain/uri.ts` 的集合里没有它）：版本快照本身就是
+ * 合法的 URI 段，`glob` / `grep` / `list` / `tree` 的契约是磁盘，应当看得到版本
+ * 文件；检索面靠 `valid_until` 过滤，不靠目录名。但**凡是位于 `.history` 段之下
+ * 的 URI 都不是常规内容**——写入方的版本快照、TTL 的排除、摘要传播的止步、合并
+ * 清单的排除、重建索引时的 `sources` 边用的是同一条判据。
  *
- * 根标识 `comem://user/.history` 不可达（`USER_ID_PATTERN` 要求首字符是字母或
- * 数字），所以按「任意路径段等于 `.history`」判定不会误伤作用域根。
+ * 它**是**用户不可选的标识名：`rules` 的 `{scenario}` 取它就会拼出一条落点在版本
+ * 目录里的「合法」记忆（`isReservedIdentifier` 拦这类输入）；根标识
+ * `comem://user/.history` 本来就不可达，按段判定不会误伤作用域根。
  */
 export const VERSION_DIRECTORY = '.history';
 
