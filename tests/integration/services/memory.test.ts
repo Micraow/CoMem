@@ -159,6 +159,67 @@ describe('upsertMemory / read', () => {
     expect(await memory.read(Uri.parse(PROFILE))).toBeNull();
   });
 
+  it('status 键缺失仍读作 active（兼容历史文件）', async () => {
+    const legacy = `${SCOPE}/memories/preferences/legacy.md`;
+    await store.writeBytes(
+      Uri.parse(legacy),
+      Buffer.from(
+        [
+          '---',
+          'memory_type: preferences',
+          'created_at: 2026-11-01T00:00:00.000Z',
+          'updated_at: 2026-11-01T00:00:00.000Z',
+          'topic: legacy',
+          '---',
+          '',
+          '## content',
+          '',
+          '没有 status 键的历史文件。',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+
+    expect((await memory.read(Uri.parse(legacy)))?.status).toBe('active');
+  });
+
+  it('status 键存在但值非法：整份文档不可解析（read 返回 null、listPending 不含）', async () => {
+    const invalid = `${SCOPE}/memories/experiences/typo-status.md`;
+    await store.writeBytes(
+      Uri.parse(invalid),
+      Buffer.from(
+        [
+          '---',
+          'memory_type: experiences',
+          'status: Archived',
+          'created_at: 2026-11-01T00:00:00.000Z',
+          'updated_at: 2026-11-01T00:00:00.000Z',
+          'topic: typo-status',
+          '---',
+          '',
+          '## content',
+          '',
+          '状态写错了大小写。',
+        ].join('\n'),
+        'utf8',
+      ),
+    );
+    // 另写一条合法的 pending，证明 `listPending` 本身在工作、不是空列表碰巧通过。
+    const pending = await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'pending-ok',
+      content: '待复核。',
+    });
+
+    // 不猜 `active`：`status: Archived` 是手误，猜成 active 等于让手误绕过复核闸门。
+    expect(await memory.read(Uri.parse(invalid))).toBeNull();
+    const listed = await memory.listPending(Uri.parse(SCOPE));
+    expect(listed.map((record) => record.uri.toString())).toEqual([pending.uri.toString()]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('不是可解析的记忆文档'),
+      expect.objectContaining({ uri: invalid }),
+    );
+  });
+
   it('字段类型与 schema 不符时拒绝写入', async () => {
     await expect(
       memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {

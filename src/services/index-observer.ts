@@ -83,8 +83,8 @@ import type {
 import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { Logger } from '../domain/log.js';
-import type { ContextType, NodeStatus } from '../domain/node.js';
-import { contextTypeOf, isNodeStatus, stableDigest } from '../domain/node.js';
+import type { ContextType } from '../domain/node.js';
+import { contextTypeOf, parseStatusField, stableDigest, type StatusField } from '../domain/node.js';
 import { parseValidityInstant } from '../domain/retrieval.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
@@ -185,7 +185,8 @@ export interface IndexObserverDeps {
 
 export interface FrontmatterFields {
   readonly memoryType: string | null;
-  readonly status: NodeStatus | null;
+  /** `status` 的三档结果：缺键 / 合法 / 键存在但非法（见 `domain/node.ts`）。 */
+  readonly status: StatusField;
   /** 有效区间的起点（`valid_from`），UTC 形态；缺键/不可解析时是 `null` = 无界。 */
   readonly validFrom: string | null;
   /** 有效区间的终点（`valid_until`）；`null` = 仍然有效。 */
@@ -195,7 +196,7 @@ export interface FrontmatterFields {
 /** 没有 frontmatter、或不是记忆文件时的空结果。 */
 const EMPTY_FRONTMATTER_FIELDS: FrontmatterFields = {
   memoryType: null,
-  status: null,
+  status: { kind: 'absent' },
   validFrom: null,
   validUntil: null,
 };
@@ -280,16 +281,17 @@ export function parseFrontmatterFields(raw: string): FrontmatterFields {
     fields.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
   }
 
-  const scalar = (key: string): string | null => {
+  const scalar = (key: string): string | undefined => {
     const raw = fields.get(key);
-    return raw === undefined ? null : unquoteScalar(raw);
+    return raw === undefined ? undefined : unquoteScalar(raw);
   };
 
   const memoryType = scalar(MEMORY_TYPE_KEY);
-  const status = scalar(STATUS_KEY);
   return {
-    memoryType: memoryType === null || memoryType === '' ? null : memoryType,
-    status: status !== null && isNodeStatus(status) ? status : null,
+    memoryType: memoryType === undefined || memoryType === '' ? null : memoryType,
+    // `undefined` 是缺键；空值（`status:`）在这里是 `''`，与另外两个解析器的
+    // `[]` / `null` 一样落在 `invalid`——键存在却没有可用的值。
+    status: parseStatusField(scalar(STATUS_KEY)),
     validFrom: parseValidityField(fields.get(VALID_FROM_KEY)),
     validUntil: parseValidityField(fields.get(VALID_UNTIL_KEY)),
   };
@@ -1040,6 +1042,16 @@ export class IndexObserver implements NodeWriteObserver {
     const document = await this.#store.readText(uri);
     const fields = await this.#readFrontmatterFields(uri, contextType);
     const existing = this.#nodes.get(uri.toString());
+    // 记忆文件的 `status` 键存在但值非法：整份文档按不可解析的记忆处理。
+    // **不能保留索引旧值**：那会让索引与文件永久分叉（文件读作不存在、`find`
+    // 仍按旧的 pending/active 返回）。落法与「`memories/` 下手放的普通 Markdown」
+    // 相同：`memory_type = NULL`、`status = active`，由路径口径决定它仍是 memory。
+    const invalidStatus = contextType === 'memory' && fields.status.kind === 'invalid';
+    if (invalidStatus) {
+      this.#logger.warn('记忆文件的 status 不是合法状态，按不可解析的记忆文件处理', {
+        uri: uri.toString(),
+      });
+    }
 
     return {
       uri: uri.toString(),
@@ -1048,16 +1060,23 @@ export class IndexObserver implements NodeWriteObserver {
       kind: 'document',
       contextType,
       // frontmatter 是记忆类型的唯一真相；读不出来时保留索引里的旧值（重写一个
-      // 没有 frontmatter 的文件不应该把 memory_type 抹掉）。
-      memoryType: fields.memoryType ?? existing?.memoryType ?? null,
+      // 没有 frontmatter 的文件不应该把 memory_type 抹掉）。`status` 非法时例外：
+      // 那是整份文档不可解析，旧类型跟着一起作废。
+      memoryType: invalidStatus ? null : (fields.memoryType ?? existing?.memoryType ?? null),
       level: DOCUMENT_LEVEL,
       abstract: document.frontmatter?.summary ?? null,
       content: document.text,
       bodyDigest: stableDigest(document.text),
       size,
       updatedAt,
-      // 复核闸门（§11.6）在 frontmatter 的 status 上；没有就是 active。
-      status: fields.status ?? existing?.status ?? 'active',
+      // 复核闸门（§11.6）在 frontmatter 的 status 上。缺键 = active（历史文件）；
+      // 非记忆文件没有这个语义，保留索引旧值（它们不参与复核闸门）。
+      status:
+        contextType === 'memory'
+          ? fields.status.kind === 'value'
+            ? fields.status.value
+            : 'active'
+          : (existing?.status ?? 'active'),
       // 有效期从 frontmatter 读，**不做「保留索引旧值」的兜底**：缺键 / 不可解析
       // 就是无界。保留旧值会让一条删掉 `valid_until` 的记忆永远停在旧终点上，
       // 而「缺键 = 一直有效」是这一步的约定。

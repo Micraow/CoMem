@@ -11,7 +11,7 @@
  * 逐字节相同。否则摘要 digest 对不上，每次写都会触发一次假失效（§9.3）。
  */
 
-import { isNodeStatus, type NodeStatus } from '../../domain/node.js';
+import { parseStatusField, type NodeStatus } from '../../domain/node.js';
 import {
   assertMemoryIdentity,
   renderPath,
@@ -152,13 +152,17 @@ function extractContent(body: string): string | null {
 /**
  * frontmatter 的 `status` → 记忆状态。
  *
- * 入参是手改文件后的任意 YAML 标量，所以「不是合法状态」按 `active` 处理（旧文件
- * 没有这个键时也是 `active`）。合法集合取自 `domain/node.ts` 的 `isNodeStatus`：
- * 手抄 `value === 'pending' || value === 'archived'` 时，加一个状态会让它被静默读成
- * `active`。
+ * 合法集合与三档判定统一在 `domain/node.ts` 的 `parseStatusField`：写路径的索引
+ * 观察者与 `reindex` 读同一份结果，曾经各写一份时，同一份文件会在 `read` 里是
+ * `active`、在索引里是 `pending`。缺键读作 `active`；键存在但值不是合法状态时
+ * 返回 `null`，由 `parseMemoryDocument` 把整份文档当成不可解析（不猜一个值）。
  */
-function parseStatus(value: unknown): MemoryStatus {
-  return typeof value === 'string' && isNodeStatus(value) ? value : 'active';
+function parseStatus(value: unknown): MemoryStatus | null {
+  const field = parseStatusField(value);
+  if (field.kind === 'invalid') {
+    return null;
+  }
+  return field.kind === 'value' ? field.value : 'active';
 }
 
 /**
@@ -321,6 +325,12 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
   if (typeof memoryType !== 'string') {
     return null;
   }
+  const status = parseStatus(data[STATUS_KEY]);
+  if (status === null) {
+    // 键存在但值不是合法状态：文档损坏。猜成一个状态会让手误绕过复核闸门
+    // （`status: Archived` 被读成 `active`），所以整份文档按不可解析处理。
+    return null;
+  }
 
   // 写盘时固定写一个空行再进正文；这里对称地只吃掉一个。
   const body = lines.slice(closingIndex + 1).join('\n').replace(/^\n/, '');
@@ -344,7 +354,7 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
 
   return {
     memoryType,
-    status: parseStatus(data[STATUS_KEY]),
+    status,
     createdAt,
     updatedAt,
     fields,

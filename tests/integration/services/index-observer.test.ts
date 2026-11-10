@@ -228,6 +228,57 @@ describe('IndexObserver.onNodeWritten', () => {
     expect(row?.status).toBe('pending');
   });
 
+  it('status 非法：索引不保留旧值，按不可解析的记忆落（memory_type=NULL、active），find 仍能命中', async () => {
+    const file = Uri.parse(`${ROOT}/memories/experiences/typo-status.md`);
+    const write = async (status: string): Promise<void> => {
+      await harness.store.writeBytes(
+        file,
+        Uint8Array.from(
+          Buffer.from(
+            [
+              '---',
+              'memory_type: experiences',
+              `status: ${status}`,
+              'created_at: 2026-11-01T00:00:00.000Z',
+              'updated_at: 2026-11-01T00:00:00.000Z',
+              '---',
+              '',
+              '迁移到 monorepo。',
+            ].join('\n'),
+            'utf8',
+          ),
+        ),
+      );
+      await harness.observer.onNodeWritten(file, 'file');
+      await harness.observer.drain();
+    };
+
+    // 先落一条合法 pending，让索引里有「旧值」可保留——这是本用例的关键。
+    await write('pending');
+    expect(harness.nodes.get(file.toString())?.status).toBe('pending');
+
+    // 手工把值改成非法大小写：整份文档按不可解析的记忆处理，不能回退到 pending。
+    await write('Archived');
+
+    const row = harness.nodes.get(file.toString());
+    expect(row?.memoryType).toBeNull();
+    expect(row?.status).toBe('active');
+    expect(harness.logger.warn).toHaveBeenCalledWith(
+      '记忆文件的 status 不是合法状态，按不可解析的记忆文件处理',
+      expect.objectContaining({ uri: file.toString() }),
+    );
+
+    // 检索侧的口径是「磁盘上有什么」：它仍是一条 active 的 memory 节点，`find` 命中。
+    // 记忆层（`memory.read` / 合并清单 / TTL）才把它当非记忆。
+    const hits = await harness.index.search({
+      text: 'monorepo',
+      scopes: [ROOT],
+      principals: PRINCIPALS,
+      limit: 10,
+    });
+    expect(hits.map((hit) => hit.uri)).toContain(file.toString());
+  });
+
   it('物化权限：新节点继承根预置的 manage', async () => {
     const file = Uri.parse(`${ROOT}/memories/note.md`);
     await harness.filesystem.write(file, '正文。', PRINCIPALS);

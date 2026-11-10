@@ -45,6 +45,7 @@ import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/databa
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import type { NodeStatus } from '../../../src/domain/node.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { AclService } from '../../../src/services/acl.js';
 import { IndexObserver } from '../../../src/services/index-observer.js';
@@ -131,6 +132,103 @@ function documentOf(entry: ValidityCase): string {
   ].join('\n');
 }
 
+/**
+ * `status` 的输入形态与三层期望（§11.6 的复核闸门、§11.11 的索引口径）。
+ *
+ * `memoryStatus = null` 表示 `memory.read` 返回 null：键存在但值非法是**文档损坏**，
+ * 不猜 `active`。索引侧同一份文件落成 `memory_type = NULL`、`status = active`
+ * ——与 `memories/` 下手放的普通 Markdown 同形，检索面仍按路径契约命中。
+ */
+interface StatusCase {
+  readonly name: string;
+  /** `null` = 不写 status 行（缺键）。 */
+  readonly line: string | null;
+  readonly memoryStatus: NodeStatus | null;
+  readonly indexMemoryType: string | null;
+  readonly indexStatus: NodeStatus;
+}
+
+const STATUS_CASES: readonly StatusCase[] = [
+  {
+    name: 'absent',
+    line: null,
+    memoryStatus: 'active',
+    indexMemoryType: 'preferences',
+    indexStatus: 'active',
+  },
+  {
+    name: 'active',
+    line: 'status: active',
+    memoryStatus: 'active',
+    indexMemoryType: 'preferences',
+    indexStatus: 'active',
+  },
+  {
+    name: 'pending',
+    line: 'status: pending',
+    memoryStatus: 'pending',
+    indexMemoryType: 'preferences',
+    indexStatus: 'pending',
+  },
+  {
+    name: 'archived',
+    line: 'status: archived',
+    memoryStatus: 'archived',
+    indexMemoryType: 'preferences',
+    indexStatus: 'archived',
+  },
+  {
+    name: 'invalid-case',
+    line: 'status: Archived',
+    memoryStatus: null,
+    indexMemoryType: null,
+    indexStatus: 'active',
+  },
+  {
+    // YAML 的空值：`memory.ts` 读成 `[]`、`index-observer` 读成 `''`、`reindex`
+    // 的 YAML 读成 `null`——三种表示都必须落在 `invalid`，不能有一个读成缺键。
+    name: 'invalid-empty',
+    line: 'status:',
+    memoryStatus: null,
+    indexMemoryType: null,
+    indexStatus: 'active',
+  },
+  {
+    name: 'invalid-number',
+    line: 'status: 1',
+    memoryStatus: null,
+    indexMemoryType: null,
+    indexStatus: 'active',
+  },
+  {
+    name: 'invalid-null',
+    line: 'status: null',
+    memoryStatus: null,
+    indexMemoryType: null,
+    indexStatus: 'active',
+  },
+];
+
+function statusUriOf(entry: StatusCase): string {
+  return `${DIRECTORY}/${entry.name}.md`;
+}
+
+function statusDocumentOf(entry: StatusCase): string {
+  return [
+    '---',
+    'memory_type: preferences',
+    ...(entry.line === null ? [] : [entry.line]),
+    'created_at: 2026-11-01T00:00:00.000Z',
+    'updated_at: 2026-11-01T00:00:00.000Z',
+    `topic: ${entry.name}`,
+    '---',
+    '',
+    '## content',
+    '',
+    `状态用例：${entry.name}`,
+  ].join('\n');
+}
+
 /** 两列的观测结果（`null` = 无界）。 */
 interface Validity {
   readonly validFrom: string | null;
@@ -174,6 +272,16 @@ async function writeDocuments(store: ContentStore): Promise<void> {
   }
 }
 
+async function writeStatusDocuments(store: ContentStore): Promise<void> {
+  await store.mkdir(Uri.parse(DIRECTORY), { recursive: true });
+  for (const entry of STATUS_CASES) {
+    await store.writeBytes(
+      Uri.parse(statusUriOf(entry)),
+      Uint8Array.from(Buffer.from(statusDocumentOf(entry), 'utf8')),
+    );
+  }
+}
+
 /**
  * 链路一：`services/memory.ts` 的 `parseMemoryDocument`（经 `MemoryService.read`）。
  *
@@ -190,8 +298,8 @@ function rawFilesystem(store: ContentStore): MemoryServicePorts['filesystem'] {
   };
 }
 
-async function readByMemoryService(store: ContentStore): Promise<Map<string, Validity>> {
-  const memory = new MemoryService({
+function createMemoryService(store: ContentStore): MemoryService {
+  return new MemoryService({
     filesystem: rawFilesystem(store),
     locks: createPathLockManager({ dataDir, logger, pollIntervalMs: 1 }),
     search: {
@@ -199,6 +307,10 @@ async function readByMemoryService(store: ContentStore): Promise<Map<string, Val
     },
     logger,
   });
+}
+
+async function readByMemoryService(store: ContentStore): Promise<Map<string, Validity>> {
+  const memory = createMemoryService(store);
   const result = new Map<string, Validity>();
   for (const entry of CASES) {
     const record = await memory.read(Uri.parse(uriOf(entry)));
@@ -211,8 +323,25 @@ async function readByMemoryService(store: ContentStore): Promise<Map<string, Val
   return result;
 }
 
+/** 链路一（status）：`memory.read` 的 `status`；`null` = 文档不可解析。 */
+async function readStatusByMemoryService(
+  store: ContentStore,
+  uris: readonly string[],
+): Promise<Map<string, NodeStatus | null>> {
+  const memory = createMemoryService(store);
+  const result = new Map<string, NodeStatus | null>();
+  for (const uri of uris) {
+    const record = await memory.read(Uri.parse(uri));
+    result.set(uri, record?.status ?? null);
+  }
+  return result;
+}
+
 /** 链路二：`services/index-observer.ts` 的 `parseFrontmatterFields`（经真实写路径的索引行）。 */
-async function readByObserver(store: ContentStore): Promise<{
+async function readByObserver(
+  store: ContentStore,
+  uris: readonly string[] = CASES.map(uriOf),
+): Promise<{
   readonly observed: Map<string, Validity>;
   readonly db: DatabaseSync;
 }> {
@@ -255,8 +384,8 @@ async function readByObserver(store: ContentStore): Promise<{
     reconcile: new ReconcileLog({ dataDir, logger }),
   });
 
-  for (const entry of CASES) {
-    await observer.onNodeWritten(Uri.parse(uriOf(entry)), 'file');
+  for (const uri of uris) {
+    await observer.onNodeWritten(Uri.parse(uri), 'file');
   }
   await observer.drain();
 
@@ -270,6 +399,34 @@ async function readByReindex(): Promise<Map<string, Validity>> {
   const db = openDatabase(join(dataDir, '_meta', 'comem.sqlite'));
   try {
     return snapshot(db);
+  } finally {
+    db.close();
+  }
+}
+
+/** 文档行的 `memory_type` / `status`；三层 status 口径的对拍用。 */
+function statusSnapshot(db: DatabaseSync): Map<string, { memoryType: string | null; status: string }> {
+  const rows = db
+    .prepare("SELECT uri, memory_type, status FROM node WHERE kind = 'document' ORDER BY uri")
+    .all();
+  const result = new Map<string, { memoryType: string | null; status: string }>();
+  for (const row of rows) {
+    const memoryType = row['memory_type'];
+    result.set(String(row['uri']), {
+      memoryType: memoryType === null || memoryType === undefined ? null : String(memoryType),
+      status: String(row['status']),
+    });
+  }
+  return result;
+}
+
+/** 链路三（status）：`reindex` 重建出来的同一行。 */
+async function readStatusByReindex(): Promise<Map<string, { memoryType: string | null; status: string }>> {
+  const result = await runReindex({ dataDir, configPath, only: 'index' });
+  expect(result.failed).toBe(0);
+  const db = openDatabase(join(dataDir, '_meta', 'comem.sqlite'));
+  try {
+    return statusSnapshot(db);
   } finally {
     db.close();
   }
@@ -316,6 +473,26 @@ describe('记忆有效期的三处 frontmatter 解析一致', () => {
       expect(byReindex.get(uri), `reindex 与 observer 漂移：${entry.name}`).toEqual(
         observed.get(uri),
       );
+    }
+  });
+
+  it('status：缺键 active、合法值照抄、非法值三层都当不可解析', async () => {
+    const store = new ContentStore({ dataDir, logger });
+    await writeStatusDocuments(store);
+    const uris = STATUS_CASES.map(statusUriOf);
+
+    const byMemory = await readStatusByMemoryService(store, uris);
+    const { db } = await readByObserver(store, uris);
+    const observed = statusSnapshot(db);
+    db.close();
+    const byReindex = await readStatusByReindex();
+
+    for (const entry of STATUS_CASES) {
+      const uri = statusUriOf(entry);
+      expect(byMemory.get(uri), `memory：${entry.name}`).toBe(entry.memoryStatus);
+      const expected = { memoryType: entry.indexMemoryType, status: entry.indexStatus };
+      expect(observed.get(uri), `index-observer：${entry.name}`).toEqual(expected);
+      expect(byReindex.get(uri), `reindex：${entry.name}`).toEqual(expected);
     }
   });
 });

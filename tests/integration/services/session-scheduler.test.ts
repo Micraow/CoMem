@@ -59,6 +59,36 @@ async function startContainer(yaml: string): Promise<Container> {
   });
 }
 
+/**
+ * 写一条真正的记忆文件（带 frontmatter 的 `memory_type`）。
+ *
+ * TTL 只清理「确实是记忆」的文档：没有 `memory_type` 的普通 Markdown 不归档、也不
+ * 物理删除（§11.7）。这些用例测的是调度器把配置传给清扫，所以输入必须是记忆，
+ * 不能是裸正文——否则它们会在新判据下正确地什么也不做。
+ */
+async function writeMemory(
+  containerUnderTest: Container,
+  uri: Uri,
+  content: string,
+): Promise<void> {
+  await containerUnderTest.services.filesystem.write(
+    uri,
+    [
+      '---',
+      'memory_type: preferences',
+      'status: active',
+      'created_at: 2026-11-01T00:00:00.000Z',
+      'updated_at: 2026-11-01T00:00:00.000Z',
+      '---',
+      '',
+      '## content',
+      '',
+      content,
+    ].join('\n'),
+    AUTH_PRINCIPALS,
+  );
+}
+
 function message(id: string): Omit<SessionMessage, 'turn'> {
   return {
     id,
@@ -319,8 +349,8 @@ describe('记忆 TTL（container → 清扫）', () => {
 
     const stale = Uri.parse(SCOPE).child('memories', 'preferences', 'stale.md');
     const fresh = Uri.parse(SCOPE).child('memories', 'preferences', 'fresh.md');
-    await started.services.filesystem.write(stale, '很久以前写下的偏好。', AUTH_PRINCIPALS);
-    await started.services.filesystem.write(fresh, '刚写下的偏好。', AUTH_PRINCIPALS);
+    await writeMemory(started, stale, '很久以前写下的偏好。');
+    await writeMemory(started, fresh, '刚写下的偏好。');
     await started.services.indexObserver.drain();
 
     // 把其中一条改成「31 天前写入、之后再没被访问」。判据就是索引里的
@@ -355,8 +385,8 @@ describe('记忆 TTL（container → 清扫）', () => {
 
     const caught = Uri.parse(SCOPE).child('memories', 'preferences', 'caught.md');
     const cold = Uri.parse(SCOPE).child('memories', 'preferences', 'cold.md');
-    await started.services.filesystem.write(caught, '滑动窗口刷新访问时间。', AUTH_PRINCIPALS);
-    await started.services.filesystem.write(cold, '这条与查询无关。', AUTH_PRINCIPALS);
+    await writeMemory(started, caught, '滑动窗口刷新访问时间。');
+    await writeMemory(started, cold, '这条与查询无关。');
     await started.services.indexObserver.drain();
 
     // 两条都是 31 天前写入；窗口内只有「被检索命中」这一条活下来。
@@ -400,7 +430,7 @@ describe('记忆 TTL（container → 清扫）', () => {
     expect(started.scheduler.started).toBe(true);
 
     const stale = Uri.parse(SCOPE).child('memories', 'preferences', 'stale.md');
-    await started.services.filesystem.write(stale, '很久没被使用的偏好。', AUTH_PRINCIPALS);
+    await writeMemory(started, stale, '很久没被使用的偏好。');
     await started.services.indexObserver.drain();
 
     // 第一段：两天的写入时间越过 1 天窗口 → 只软归档，文件还在。
@@ -464,11 +494,7 @@ describe('记忆 TTL（container → 清扫）', () => {
     expect(started.scheduler.started).toBe(true);
 
     const archived = Uri.parse(SCOPE).child('memories', 'preferences', 'archived.md');
-    await started.services.filesystem.write(
-      archived,
-      '归档满一天，应当被回收。',
-      AUTH_PRINCIPALS,
-    );
+    await writeMemory(started, archived, '归档满一天，应当被回收。');
     await started.services.indexObserver.drain();
 
     // 直接造「已归档且 archived_at 在保留期之外」，不依赖第一段。

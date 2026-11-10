@@ -7,6 +7,7 @@
 
 import type { Logger } from '../../domain/log.js';
 import type { MemoryTypeSchema } from '../../domain/memory-type.js';
+import { isVersionFile } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
 import { renderMemoryUri, type MemoryStatus } from './document.js';
 import {
@@ -15,7 +16,6 @@ import {
   type MemoryFileStore,
   type MemorySearchPort,
 } from './ports.js';
-import { HISTORY_DIRECTORY } from './versioning.js';
 
 /** scope 下放记忆的目录（§6.5）。 */
 const MEMORIES_DIRECTORY = 'memories';
@@ -111,7 +111,7 @@ export async function listPendingMemories(
         return;
       }
       if (entry.kind === 'directory') {
-        if (entry.uri.name === HISTORY_DIRECTORY) {
+        if (isVersionFile(entry.uri)) {
           continue;
         }
         await visit(entry.uri);

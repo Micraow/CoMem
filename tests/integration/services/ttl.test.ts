@@ -365,12 +365,49 @@ describe('sweep 第一段：滑动窗口归档', () => {
     expect(statusOf(event)).toBe('archived');
   });
 
-  it('memory_type 为 NULL 的记忆行按普通记忆处理（豁免名单只认那四类）', async () => {
-    await insertNode(OLD, { memoryType: null, updatedAt: daysAgo(3650) });
+  it('没有 frontmatter 的 memories/**/*.md 不被归档，但仍能被 find 命中', async () => {
+    // 手放的普通 Markdown：`context_type = memory` 由路径推导，`memory_type` 为 NULL。
+    // 两条断言必须一起写——TTL 不动它（不是可解析的记忆），检索面照常命中（路径
+    // 工具的契约是「磁盘上有什么」）。只断言其中一条，就看不出这是刻意的口径差异。
+    const notes = `${PREFERENCES}/notes.md`;
+    await store.writeBytes(
+      Uri.parse(notes),
+      Uint8Array.from(Buffer.from('# 手放的笔记\n', 'utf8')),
+    );
+    const record: IndexRecord = {
+      uri: notes,
+      parentUri: PREFERENCES,
+      scope: 'user',
+      kind: 'document',
+      contextType: 'memory',
+      memoryType: null,
+      level: 'L2',
+      abstract: null,
+      content: '手放的笔记',
+      bodyDigest: 'digest',
+      size: 10,
+      updatedAt: daysAgo(3650),
+      status: 'active',
+    };
+    await fts.upsert([record]);
+    // FTS 的权限谓词读 `node_permission`（不是 `Authorizer`）。
+    db.prepare('INSERT INTO node_permission (node_uri, principal, level) VALUES (?, ?, ?)').run(
+      notes,
+      'user:alice',
+      1,
+    );
 
-    await expect(ttl.sweep()).resolves.toEqual({ expired: 1, purged: 0 });
+    // 先清扫再检索：`find` 的命中会写 `last_accessed_at`（TTL 的判据之一），
+    // 先检索会把这条行变成「刚用过」，让「不被归档」的断言失去意义。
+    await expect(ttl.sweep()).resolves.toEqual({ expired: 0, purged: 0 });
+    expect(statusOf(notes)).toBe('active');
 
-    expect(statusOf(OLD)).toBe('archived');
+    const hits = await createSearch(0).find('手放的笔记', {
+      scopes: ['comem://user/alice/memories'],
+      subject: 'user:alice',
+      principals: PRINCIPALS,
+    });
+    expect(hits.map((hit) => hit.uri)).toContain(notes);
   });
 
   it('resources 不参与记忆 TTL（context_type 不是 memory）', async () => {
@@ -822,6 +859,81 @@ describe('版本文件（.history）不参与 TTL', () => {
     expect(result.purged).toBe(1);
     await expect(exists(notes)).resolves.toBe(false);
     await expect(exists(version)).resolves.toBe(true);
+  });
+
+  it('.history 目录节点自身不被第一段归档（reindex 会为它建一行目录）', async () => {
+    const historyDirectory = Uri.parse(VERSION_DIRECTORY);
+    await world.store.mkdir(historyDirectory, { recursive: true });
+    // `pnpm reindex` 的 `walkDataDir` 会给磁盘上每个目录 upsert 一行：
+    // `kind = 'directory'`、`context_type = 'memory'`、`memory_type = NULL`。
+    // 这里用真实观察者建这一行，而不是手填 SQL。
+    await world.observer.onNodeWritten(historyDirectory, 'directory');
+    await world.observer.drain();
+
+    const row = world.nodes.get(VERSION_DIRECTORY);
+    expect(row?.kind).toBe('directory');
+    expect(row?.memoryType).toBeNull();
+    // 摘要失效会顺带给祖先目录建行；本用例只关心 `.history` 这一行，把其它候选
+    // 删掉，`expired` 才能直接读作「目录节点自身有没有被归档」。
+    world.db.prepare('DELETE FROM node WHERE uri <> ?').run(VERSION_DIRECTORY);
+
+    const first = await sweepTtl({ ttlDays: TTL_DAYS, retentionDays: TTL_DAYS });
+    // 目录行在窗口外（mkdtemp 的真实 mtime 早于 LATER - 30 天），若 SQL 只排除
+    // `.history/*` 而漏掉目录节点自身，它会被标成 archived。
+    expect(first.expired).toBe(0);
+    expect(world.nodes.get(VERSION_DIRECTORY)?.status).toBe('active');
+  });
+
+  it('rules 镜像的 .history/{scenario}/ 行为不变：目录与版本文件都不归档、不删除', async () => {
+    // `rules` 的 `{scenario}/{rule}.md` 在 `.history` 里镜像一层 scenario 目录。
+    // 两个节点都要排除：scenario 目录（`memory_type = NULL`，不靠类型豁免）与它
+    // 下面的版本文件。目录是这条用例的关键——它的 URI 在 `.history` 后面还有段，
+    // 但比版本文件浅一层，钉住 GLOB 的 `*` 跨 `/` 这一点。
+    const version = await overwriteOnce();
+    const scenario = Uri.parse(`${VERSION_SCOPE}/memories/rules/.history/license-review`);
+    await world.store.mkdir(scenario, { recursive: true });
+    const ruleVersion = scenario.child('must-locate-license.md--20261110T022746123Z.md');
+    await world.store.writeBytes(
+      ruleVersion,
+      Uint8Array.from(
+        Buffer.from(
+          [
+            '---',
+            'memory_type: rules',
+            'status: active',
+            'created_at: 2026-11-01T00:00:00.000Z',
+            'updated_at: 2026-11-01T00:00:00.000Z',
+            `uri: ${ruleVersion.toString()}`,
+            'scenario: license-review',
+            'rule: must-locate-license',
+            '---',
+            '',
+            '## content',
+            '',
+            '旧规则值。',
+          ].join('\n'),
+          'utf8',
+        ),
+      ),
+    );
+    await world.observer.onNodeWritten(scenario, 'directory');
+    await world.observer.onNodeWritten(ruleVersion, 'file');
+    await world.observer.drain();
+
+    // 规范文件在窗口外会被归档，证明清扫确实在跑；三个 `.history` 节点保持 active。
+    const first = await sweepTtl({ ttlDays: TTL_DAYS, retentionDays: TTL_DAYS });
+    expect(first.expired).toBeGreaterThanOrEqual(1);
+    expect(world.nodes.get(VERSION_CANONICAL)?.status).toBe('archived');
+    expect(world.nodes.get(version)?.status).toBe('active');
+    expect(world.nodes.get(scenario.toString())?.status).toBe('active');
+    expect(world.nodes.get(ruleVersion.toString())?.status).toBe('active');
+
+    // 第二段也不物理删除（归档超期是相对 `archived_at` 算的）。
+    const laterStill = new Date(LATER.getTime() + 40 * MILLISECONDS_PER_DAY);
+    const second = await sweepTtl({ ttlDays: 0, retentionDays: TTL_DAYS, now: laterStill });
+    expect(second.purged).toBeGreaterThanOrEqual(1);
+    await expect(exists(version)).resolves.toBe(true);
+    await expect(exists(ruleVersion.toString())).resolves.toBe(true);
   });
 
   it('文件名是 .history.md 的普通记忆照常过期删除（豁免按路径段，不看子串）', async () => {

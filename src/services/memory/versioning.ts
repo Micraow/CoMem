@@ -30,6 +30,7 @@
 
 import { getMemoryType } from '../../domain/memory-types/index.js';
 import type { Logger } from '../../domain/log.js';
+import { VERSION_DIRECTORY } from '../../domain/node.js';
 import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 import { Uri } from '../../domain/uri.js';
 import { serializeMemoryDocument, type MemoryDocument } from './document.js';
@@ -51,15 +52,6 @@ import {
  * `retentionDays` 取值无关。所以「`supersedes` 回不去」只可能由这里造成。
  */
 const MAX_VERSIONS = 5;
-
-/**
- * 版本文件所在的隐藏目录（记忆类型目录下，如 `memories/preferences/.history/`）。
- *
- * 它不是保留名（`adapters/fs/path.ts` 的 `RESERVED_NAMES`）：`glob` / `grep` /
- * `list` / `tree` 是路径工具，契约是磁盘，应当看得到版本文件。检索面看不到它们
- * 靠的是 `valid_until` 过滤，不是目录名。
- */
-export const HISTORY_DIRECTORY = '.history';
 
 /**
  * 版本文件名里时间戳之后的形态：`YYYYMMDDTHHMMSSmmmZ`，同一毫秒内撞名时追加
@@ -107,7 +99,7 @@ export async function writeVersionSnapshot(
   const mirror = identityUri.segments.slice(scopeUri.depth + directorySegments.length);
   const directory = scopeUri.child(
     ...directorySegments,
-    HISTORY_DIRECTORY,
+    VERSION_DIRECTORY,
     ...mirror.slice(0, -1),
   );
   const name = mirror.at(-1) ?? '';

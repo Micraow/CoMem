@@ -76,6 +76,7 @@ import {
 import { ComemError } from '../domain/errors.js';
 import type { LlmPrompt } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
+import { isVersionFile } from '../domain/node.js';
 import {
   assertFieldTypes,
   assertMemoryIdentity,
@@ -193,15 +194,13 @@ const SUMMARY_CHARS = 200;
 const MEMORIES_DIRECTORY = 'memories';
 
 /**
- * 版本快照所在的隐藏目录（`memories/{type}/.history/`，W98）。
+ * 版本快照不是记忆（W98）。
  *
- * 与 `MemoryService` 的 `HISTORY_DIRECTORY` 是同一个目录名，但**不复用它**：那个
- * 常量是记忆服务的内部实现（写入方的约定），导出来会把「合并服务不许把版本当记忆」
- * 这条判断绑到写入方的私有结构上。名字在这里各写一份，漂移时的表现是清单里又出现
- * 版本文件（本文件的测试会红），不是静默地删掉一份版本。
+ * 判据是 `domain/node.ts` 的 `isVersionFile`，不再在这里写一份本地字面量。之前这里
+ * 的注释说「故意不复用写入方的常量」，理由是 `.history` 属于记忆服务的私有结构；
+ * 判据进领域层之后那个理由消解了——`.history` 是路径语义，合并、TTL、摘要传播与
+ * 重建索引必须读同一份定义，各写一份只会让某处漂移。
  */
-const HISTORY_DIRECTORY = '.history';
-
 /** 记忆文件的扩展名。与 `MemoryService` 写入的形状一致。 */
 const GLOB_PATTERN = '**/*.md';
 
@@ -403,17 +402,6 @@ function compareByUri(left: WritePlan, right: WritePlan): number {
     return 0;
   }
   return leftUri < rightUri ? -1 : 1;
-}
-
-/**
- * 版本快照不是记忆：路径段里出现 `.history` 就是一份旧值（W98）。
- *
- * 判定按**段**而不是子串：`memories/preferences/.history/` 是 W98 写入的位置，
- * 而 `.history.md` 这样的文件名是普通记忆（`identity` 可以是 `.history`），按
- * `includes('/.history/')` 判会把它一起漏掉。
- */
-function isVersionFile(uri: Uri): boolean {
-  return uri.segments.includes(HISTORY_DIRECTORY);
 }
 
 /**

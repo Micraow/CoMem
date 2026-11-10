@@ -65,8 +65,7 @@ import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import type { NodeRepository, NodeRow } from '../adapters/sqlite/node-repository.js';
 import type { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
 import type { Logger } from '../domain/log.js';
-import type { NodeKind } from '../domain/node.js';
-import { contextTypeOf, stableDigest } from '../domain/node.js';
+import { contextTypeOf, isVersionFile, stableDigest, type NodeKind } from '../domain/node.js';
 import type { IndexRecord } from '../domain/retrieval.js';
 import {
   ABSTRACT_MAX_CHARS,
@@ -176,15 +175,6 @@ const SENTENCE_TERMINATORS = /[。！？!?\n]/;
 
 /** 空目录的规则摘要正文。与 `buildSummaryPrompt` 的「（这个目录是空的。）」同义。 */
 const EMPTY_DIRECTORY_TEXT = '（这个目录是空的。）';
-
-/**
- * 记忆版本快照的目录名（`memories/{type}/.history`，W98）。
- *
- * 与 `services/memory.ts` 的 `HISTORY_DIRECTORY` 是同一个字面量。不跨服务导出：
- * 这边只需判「这个目录是不是版本目录」，那边还要用它渲染版本文件路径，共享一个
- * 字符串会顺带把两边的依赖方向绑死。
- */
-const HISTORY_DIRECTORY = '.history';
 
 /** 生成器选项。两个预算同时进提示词，避免「提示词里 256、截断用 4000」。 */
 export interface SummarizerOptions {
@@ -496,7 +486,7 @@ export class SummaryService {
     // 它上面的类型目录），而版本文件不是给检索用的内容。直接返回 `unchanged`：
     // 传播在 `.history` 就停，类型目录的摘要保持原样（它的子项确实多了一个隐藏
     // 目录，接受这份摘要「比磁盘旧一拍」，由下一次真实改动收敛）。
-    if (directoryUri.segments.includes(HISTORY_DIRECTORY)) {
+    if (isVersionFile(directoryUri)) {
       return 'unchanged';
     }
 

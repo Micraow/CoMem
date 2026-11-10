@@ -104,7 +104,7 @@ export async function readMemoryDocument(
   const { text } = await filesystem.read(uri);
   const document = parseMemoryDocument(text);
   if (document === null) {
-    logger.warn('记忆文件缺少可解析的 frontmatter，按不存在处理', {
+    logger.warn('记忆文件不是可解析的记忆文档（缺 frontmatter / memory_type 或 status 非法），按不存在处理', {
       uri: uri.toString(),
     });
   }

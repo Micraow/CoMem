@@ -14,7 +14,7 @@ import { ComemError } from '../../domain/errors.js';
 import type { Level } from '../../domain/level.js';
 import type { Logger } from '../../domain/log.js';
 import { TTL_EXEMPT_MEMORY_TYPES } from '../../domain/memory-types/index.js';
-import type { ContextType, NodeKind, NodeStatus } from '../../domain/node.js';
+import { VERSION_DIRECTORY, type ContextType, type NodeKind, type NodeStatus } from '../../domain/node.js';
 import type { UriScope } from '../../domain/uri.js';
 import { withWriteTransaction } from './database.js';
 
@@ -91,7 +91,7 @@ const NODE_COLUMNS = NODE_COLUMN_NAMES.join(', ');
 const LAST_USED_AT_SQL = 'MAX(updated_at, COALESCE(last_accessed_at, updated_at))';
 
 /**
- * TTL 的两段都不碰记忆版本文件（架构文档 §11.11）。
+ * 「这个 URI 不在记忆版本快照目录下」的 SQL 判据（架构文档 §11.11）。
  *
  * 覆盖写把旧值快照到 `memories/{type}/.history/`，那份文件的 frontmatter 里 `status`
  * 仍是 `active`（设计如此：它是一条**旧值**，不是归档项），索引里只靠非空的
@@ -103,18 +103,27 @@ const LAST_USED_AT_SQL = 'MAX(updated_at, COALESCE(last_accessed_at, updated_at)
  * - 第二段会把它物理删除。`reject` 读 `supersedes` 指向的版本文件时只看到「文件不
  *   存在」，于是静默退化成删除：用户以为驳回回到了上一次正确值，实际这条记忆消失。
  *
+ * **必须两条 GLOB，不能只写带 `/*` 的那一条。** 目录节点自身（
+ * `memories/preferences/.history`）的 URI 在 `.history` 后面没有字符，`/*` 要求至少
+ * 一个 `/` 加内容，匹配不到它。漏掉它会怎样：`pnpm reindex` 的 `walkDataDir` 会给
+ * 磁盘上每个目录 upsert 一行（`kind = 'directory'`、`memory_type = NULL`、
+ * `status = 'active'`），第一段把它当过期记忆归档；而路径工具按 `status = 'active'`
+ * 取节点，从此 `.history` 目录在 `list` / `tree` 里消失，磁盘上却还在。
+ *
  * **判定按路径段，不看子串。** `memories/preferences/.history.md` 是一条普通记忆
  * （`identity` 可以是 `.history`），必须照常过期。SQL 没有「切段」函数，用 GLOB 表达
  * 段边界：模式要求 `.history` 两侧都是 `/`。锚在 `memories/` 之后是因为记忆类型目录
- * 全部是 `memories/{type}`（含 `projects/{pid}/memories`），这样根标识恰好叫
- * `.history` 的用户（`comem://user/.history/...`）不会被误伤；GLOB 的 `*` 跨 `/`，
- * 所以 `rules` 镜像出来的 `.history/{scenario}/...` 同样命中。
+ * 全部是 `memories/{type}`（含 `projects/{pid}/memories`）；GLOB 的 `*` 跨 `/`，所以
+ * `rules` 镜像出来的 `.history/{scenario}/...` 同样命中。
  *
  * 第二段的查询也要带它，不只是第一段：存量库（修复前跑过 TTL）里已经有被归档的版本
  * 行，它们归档得最早，会一直排在 `ORDER BY archived_at ASC` 的队首——不排除的话，
  * 每轮批次的名额被它们占满，真正的记忆一条也轮不到。
+ *
+ * 目录名从领域层常量派生，不在这里再写一份字面量：判据散开之后，改一处就会漏一处。
  */
-const NOT_VERSION_FILE_SQL = "uri NOT GLOB '*/memories/*/[.]history/*'";
+const VERSION_PATH_GLOB = `*/memories/*/${escapeGlobLiteral(VERSION_DIRECTORY)}`;
+const NOT_VERSION_FILE_SQL = `uri NOT GLOB '${VERSION_PATH_GLOB}' AND uri NOT GLOB '${VERSION_PATH_GLOB}/*'`;
 
 /**
  * 「节点自身那一行」的谓词（架构文档 §8.1、§8.5）。
@@ -134,6 +143,11 @@ const NOT_VERSION_FILE_SQL = "uri NOT GLOB '*/memories/*/[.]history/*'";
 export function nodeSelfRowSql(alias?: string): string {
   const prefix = alias === undefined ? '' : `${alias}.`;
   return `NOT (${prefix}kind = 'directory' AND ${prefix}level = 'L1')`;
+}
+
+/** GLOB 里把字面量段内的元字符（`*` `?` `[` `]`）转义成字符类。 */
+function escapeGlobLiteral(value: string): string {
+  return value.replace(/[[\]*?]/g, (char) => `[${char}]`);
 }
 
 /**
@@ -156,7 +170,7 @@ export function nodeSelfRowSql(alias?: string): string {
  * 保证转义规则不会各写一遍。
  */
 export function globPrefixPattern(prefix: string): string {
-  return `${prefix.replace(/[[\]*?]/g, (char) => `[${char}]`)}/*`;
+  return `${escapeGlobLiteral(prefix)}/*`;
 }
 
 /** `IN (?, ?, ...)` 的占位符列表。`count` 由调用方按已校验的数组长度传入。 */
@@ -285,10 +299,12 @@ export class NodeRepository {
    * 与时间顺序一致，所以 SQL 的 `max()` 与 `<` 直接对字符串成立。
    *
    * **豁免稳定身份与约束**：`TTL_EXEMPT_MEMORY_TYPES`（领域层）里的类型永不过期。
-   * 只有这四类被排除，其余一切 `context_type = 'memory'` 的行都按最后使用时刻过期
-   * ——包括 `memory_type IS NULL` 的目录行（它只承载一个 URI 与概览行，没有正文）
-   * 和 frontmatter 读不出类型的历史行。它们不是「未知所以不敢动」的对象：第一段
-   * 只改 `status`，可逆；把它们留成永不过期才会让 TTL 失去意义。
+   * 其余 `context_type = 'memory'` 的**文件**行按最后使用时刻过期，但必须有
+   * `memory_type`：没有它说明这份文件不是可解析的记忆（用户手放的 Markdown、
+   * `memory_type` 键丢失的历史行）。**TTL 是记忆的回收站，不是文件系统的回收站**
+   * ——看不懂的文件不动它，免得把用户手写的东西静默归档/删除。目录行没有
+   * frontmatter，不适用这一条（它只承载一个 URI 与概览行，第一段只改 `status`，
+   * 可逆），仍按最后使用时刻过期。
    *
    * **只对 `context_type = 'memory'` 生效**：`memory.ttl` 描述记忆的存活时间，
    * `resources` / `skills` 不该被套上它。
@@ -326,6 +342,7 @@ export class NodeRepository {
         .prepare(
           `SELECT uri FROM node
             WHERE context_type = 'memory'
+              AND (kind = 'directory' OR memory_type IS NOT NULL)
               AND COALESCE(memory_type, '') NOT IN (${placeholders(exempt.length)})
               AND ${LAST_USED_AT_SQL} < ?
               AND status <> 'archived'
@@ -365,6 +382,9 @@ export class NodeRepository {
    * 的 archived 行、或非 TTL 途径产生的 archived 行），不把未知当成「很久以前」——
    * 物理删除不可逆，宁可永远不删。
    *
+   * `memory_type IS NOT NULL` 与第一段同一判据：没有类型的文档不是可解析的记忆，
+   * 不归 TTL 的回收站管。第二段还要 `kind = 'document'`（目录行不删）。
+   *
    * `ORDER BY archived_at ASC LIMIT ?` 与第一段同一理由：先删最老的、每轮一个上界。
    */
   selectPurgeable(cutoff: Date, limit: number): readonly string[] {
@@ -374,6 +394,7 @@ export class NodeRepository {
         `SELECT uri FROM node
           WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?
             AND kind = 'document'
+            AND memory_type IS NOT NULL
             AND ${NOT_VERSION_FILE_SQL}
           ORDER BY archived_at ASC
           LIMIT ?`,

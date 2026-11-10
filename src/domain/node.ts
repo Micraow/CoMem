@@ -50,8 +50,42 @@ const NODE_STATUSES: Readonly<Record<NodeStatus, true>> = {
  * 用 `Object.hasOwn` 而不是 `status in NODE_STATUSES`：后者会命中原型链，
  * `'toString'` 这样的键会被判成合法状态。
  */
-export function isNodeStatus(value: unknown): value is NodeStatus {
+function isNodeStatus(value: unknown): value is NodeStatus {
   return typeof value === 'string' && Object.hasOwn(NODE_STATUSES, value);
+}
+
+/**
+ * frontmatter `status` 的解析结果（架构文档 §6.6、§11.6）。
+ *
+ * 三档必须分开，不能折成一个 `NodeStatus`：
+ *
+ * - `absent`：键不存在。历史文件没有这个键，读作 `active`（兼容存量文件）；
+ * - `value`：键存在且合法，照用；
+ * - `invalid`：键存在但值不是合法状态。这是**文档损坏**，不是「没有状态」——
+ *   猜一个值等于让一次手误绕过复核闸门（写成 `Archived` 的 `pending` 记忆会
+ *   变成 `active`）。
+ */
+export type StatusField =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'value'; readonly value: NodeStatus };
+
+/**
+ * frontmatter 原始值 → 三档状态。
+ *
+ * `undefined` 才是「键不存在」；`null`（YAML 的 `status:` / `status: null`）、数字、
+ * 布尔与非法字符串都是「键存在但不可用」。三个解析器对同一份文件必须给出同一档：
+ * `services/memory/document.ts` 的 YAML 子集把空值读成 `[]`、`index-observer` 读成
+ * `''`、`reindex` 的 YAML 读成 `null`，都落在 `invalid`。
+ */
+export function parseStatusField(raw: unknown): StatusField {
+  if (raw === undefined) {
+    return { kind: 'absent' };
+  }
+  if (typeof raw === 'string' && isNodeStatus(raw)) {
+    return { kind: 'value', value: raw };
+  }
+  return { kind: 'invalid' };
 }
 
 /** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
@@ -89,6 +123,30 @@ export function contextTypeOf(uri: Uri): ContextType {
     return DEFAULT_CONTEXT_TYPE;
   }
   return CONTEXT_TYPE_BY_DIRECTORY[head] ?? DEFAULT_CONTEXT_TYPE;
+}
+
+/**
+ * 记忆版本快照目录（`.history`，架构文档 §11.11）。
+ *
+ * **它不是保留名**（`domain/uri.ts` 与 `adapters/fs/path.ts` 的保留名集合里都没有
+ * 它）：`glob` / `grep` / `list` / `tree` 的契约是磁盘，应当看得到版本文件；检索面
+ * 靠 `valid_until` 过滤，不靠目录名。但**凡是位于 `.history` 段之下的 URI 都不是
+ * 常规内容**——写入方的版本快照、TTL 的排除、摘要传播的止步、合并清单的排除、
+ * 重建索引时的 `sources` 边用的是同一条判据。
+ *
+ * 根标识 `comem://user/.history` 不可达（`USER_ID_PATTERN` 要求首字符是字母或
+ * 数字），所以按「任意路径段等于 `.history`」判定不会误伤作用域根。
+ */
+export const VERSION_DIRECTORY = '.history';
+
+/**
+ * 这个 URI 是否位于版本快照目录下（**含 `.history` 目录节点自身**）。
+ *
+ * 按段比较，不看子串：`memories/preferences/.history.md` 是普通记忆（identity
+ * 恰好叫 `.history`），不能被当成版本文件。
+ */
+export function isVersionFile(uri: Uri): boolean {
+  return uri.segments.includes(VERSION_DIRECTORY);
 }
 
 /**
