@@ -201,7 +201,7 @@ pnpm check:config
 ### 孤儿检查
 
 ```bash
-pnpm check:orphans
+pnpm check:reachability
 ```
 
 静态检查 `src/services/` 与 `src/adapters/` 里 exported 类的 public 方法、`src/domain/`
@@ -220,7 +220,8 @@ pnpm check:orphans
 `commands/`、`ingest/`、`eval/` 调用算有调用方；端口实现（显式 `implements`，或结构上
 满足只声明方法的消费方契约）按接口另一端的调用判定，另一端没人调仍算孤儿。
 
-**遗留债务**：`scripts/check-orphans.ts` 的 `BASELINE` 记录尚未消化完的存量条目，每条带一句
+**遗留债务**：`scripts/reachability-baseline.json` 只记两个上限数字（`testOnly` / `methodTestOnly`），
+每条带一句
 判断（待删 / 该接线 / 待收窄）。条数以该文件的 `BASELINE` 为准，不在这里写死——这个数字每轮
 都在变，抄进文档就成了一份会漂移的副本。清单只允许缩小：修掉一条删一行，留着会报「清单过期」。
 新增孤儿直接失败——不要为了让检查通过而加白名单。
@@ -240,7 +241,7 @@ pnpm check:orphans
 | `pnpm lint` | `src/`、`tests/`、`scripts/`、根配置文件 | `web/`、`integrations/`、`docs/`（eslint ignores） |
 | `pnpm build:web` | `web/` 的类型检查（`nuxt typecheck`）+ 构建 | 没有 lint |
 | `pnpm check:config` | 配置项是否真的有消费方（L1–L3，加上 `pnpm test` 里的 L4） | 配置到达行为 |
-| `pnpm check:orphans` | `src/` 的生产引用图 | 字符串派发、默认关闭的分支、返回值恒空 |
+| `pnpm check:reachability` | `src/` 的生产引用图 | 字符串派发、默认关闭的分支、返回值恒空 |
 | `pnpm test` | `tests/**/*.test.ts`（unit + integration） | `integrations/` |
 | `pnpm test:integrations` | `integrations/tests/*.test.mjs` | `src/` |
 | `pnpm test:e2e`（不在 `verify` 里） | `scripts/demo.sh` 用临时数据根走一遍六条核心链路（演示脚本，失败即非零退出） | 不是单元测试，没有断言库 |

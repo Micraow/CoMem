@@ -281,7 +281,7 @@ npx co-mem install --host dsh            # 写入 ~/.dsh/settings.json
 flowchart TB
   API["① 接口层 api/http · api/mcp<br/>HTTP ↔ 服务调用、MCP 工具 ↔ 服务调用"]
   SVC["② 应用层 services/<br/>用例编排、事务边界、后台任务"]
-  DOM["③ 领域层 domain/<br/>Uri、Node、Acl、Patch、Ranking；纯函数，无 IO"]
+  DOM["③ 领域层 domain/<br/>Uri、Acl、Patch、Ranking、节点规则；纯函数，无 IO"]
   ADP["④ 适配层 adapters/<br/>文件系统、SQLite+FTS5、模型 SDK、日志"]
   API --> SVC
   SVC --> DOM

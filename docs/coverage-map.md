@@ -122,8 +122,8 @@
 | 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:534` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
 | 检索质量评估 | 改动检索要能量化前后 | `pnpm eval --dataset ...` | `commands/eval.ts:223` `runEval`；指标 `eval/metrics.ts` | 数据集跑 `find`，算 recall@k / MRR，输出报告 | `commands/eval.test.ts:25`「--config 坏 YAML 必须报错」；`unit/eval/metrics.test.ts:32` `recallAtK` |
 | 配置自检 | 加了配置项必须有人读 | `pnpm check:config` | `scripts/check-config.ts:272` `main` | L1 叶子被读 / L2 注入属性必填 / L3 与 `config.example.yaml` 双向一致；L4 变体差集在测试里 | `config-coverage.test.ts:132` |
-| 孤儿检查 | 方法存在不等于有人调 | `pnpm check:orphans` | `scripts/check-orphans.ts:812` | 静态扫描 `services/` `adapters/` 的 public 方法与 `domain/` 的函数，值引用才算 | `unit/scripts/check-orphans.test.ts:17` |
-| 门禁 | 本地跑完再提交 | `pnpm verify` | `package.json:20` `verify` | typecheck → lint → check:config → check:orphans → build:web → test → test:integrations | — |
+| 可达性检查 | 符号存在不等于有人调 | `pnpm check:reachability` | `scripts/check-reachability.ts` | 从 6 个进程入口沿值导入算模块与符号可达，再按成员方法调用点判 `method-no-caller` | `unit/scripts/check-reachability.test.ts` |
+| 门禁 | 本地跑完再提交 | `pnpm verify` | `package.json:20` `verify` | typecheck → lint → check:config → check:reachability → build:web → test → test:integrations | — |
 
 ### 7. 集成与控制台
 
@@ -158,7 +158,7 @@
 
 **结论：无。**
 
-工作区当前状态下 `pnpm check:orphans` 的实测输出（exit 0）：
+工作区当前状态下 `pnpm check:reachability` 的实测输出（exit 0）：
 
 ```
 目标 324 个（services/adapters 的 public 方法 245 个，domain 函数 79 个）
@@ -171,7 +171,7 @@
 
 这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex.ts:519` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:92` 的 `warnIfVectorsMissing` 与启动后台回填 `bootstrap/main.ts:172` `startVectorBackfill` 复用它，补齐入口（自动回填与 `pnpm reindex`）因此只有一份口径。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
 
-**关于 `check:orphans` 自身的两条限制**（判断上面结论时要扣除）：它只认「代码里提到了这个方法名」，不认字符串派发与默认关闭的分支（`scripts/check-orphans.ts:44`–`:70` 的「抓不到的那一类」）；它读的是磁盘上的源码文件，不是某个提交的树，所以清单跟着磁盘上的改动走。
+**关于 `check:reachability` 自身的限制**（判断上面结论时要扣除）：它只认 AST 层面的导入与 `.m(` 调用表达式，不认字符串派发、动态注册、默认关闭的分支，也不认「调用存在但执行无效」；它读的是磁盘上的源码文件，不是某个提交的树。
 
 ## 三、这一轮砍掉了什么
 
@@ -193,7 +193,7 @@
 | `comem_hook_async_seconds{event}` 的 `event` 标签 | 假维度：进程级快照被贴到每个事件上，同一份数据被复制成七份 | `services/observability.ts:755` 起按 `phase` 输出 |
 | `comem_llm_cost_usd_total` 的 `?? 0` | 「没配单价」被渲染成「确实花了 0 美元」 | 未配单价时整条序列不存在，另有 `comem_llm_pricing_configured`（`observability.ts:802`） |
 | 控制台的四样展示 | 读不到或永远默认：`/memories/pending` 预取改读 `/health`；任务重试按钮（列表只返回可认领任务）；文档节点的 L1 概览档；置信度徽章（字段不存在）；API Key「最后使用」列（从未记录） | `web/pages/monitor.vue:226` 起说明请求明细无端点；`web/pages/review.vue:12` 起说明复核页改读内容 |
-| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:519`），启动自检 `warnIfVectorsMissing` 与启动后台回填 `startVectorBackfill` 都转调它（`bootstrap/main.ts:105`、`:172`），补齐入口（自动回填与 `pnpm reindex`）共用这一份；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后 `check:orphans` 从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
+| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:519`），启动自检 `warnIfVectorsMissing` 与启动后台回填 `startVectorBackfill` 都转调它（`bootstrap/main.ts:105`、`:172`），补齐入口（自动回填与 `pnpm reindex`）共用这一份；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后，当时的孤儿检查（现已由 `check:reachability` 取代）从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
 | 向量补全阶段的 `status !== 'active'` 复检 | 候选集来自 `#readableUris` → `index.glob`，而 glob 的 SQL 已经带 `ACTIVE_STATUS_PREDICATE`（与 FTS 臂同一条谓词，`adapters/sqlite/retrieval-index.ts:72`、`:537`）；`NodeRepository.get` 读的是同一行，`NodeStatus` 只有 `active` / `pending` / `archived` 三个成员（`domain/node.ts:19`），所以 SQL 的 `= 'active'` 与 TS 的 `!== 'active'` 对同一行等价，第二次判断不改变结果；`glob` 到 `nodes.get` 之间隔着一次 `vectors.search` 的 await，这期间状态被 TTL 清扫改掉时向量臂比 FTS 臂多挡一次，那是竞态窗口，不是第二份状态过滤的职责 | `5369219` 删前删后检索测试都是 57 passed、全量 2322 passed——「删了测试还绿」正是这处是兜底的证据（与接线类改动相反，接线类要求「删了测试变红」） |
 | 死类型 `PendingMemoriesPayload` | 控制台声明过「待复核列表响应」的整套形状，但页面改成读 `/content/read` 的正文后就没人用了；留着它等于给一条不存在的响应继续做类型承诺 | `web/composables/useApi.ts` 无该类型；复核页从 `MemoryRecordPayload` 取字段（`web/pages/review.vue`） |
 | 两份任务类型标签映射里的 `extract` / `merge` / `summary` / `index` | `TaskType` 只有 `archive`：抽取、合并、摘要失效都是归档任务内部的步骤（`stepsDone`），重建索引走命令不入队。四个键没有生产者，`/tasks` 的类型列却看起来像还存在别的任务 | `src/domain/task.ts:23`；剩下的收进 `web/utils/taskLabels.ts:17`，未知值原样显示 |

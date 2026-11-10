@@ -93,8 +93,8 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 | 接口 | 定义在 | 实现 1 | 实现 2 |
 |---|---|---|---|
 | `RetrievalIndex` | `domain/retrieval.ts` | `SqliteFtsIndex` | 向量后端（brief 明确要求预留） |
-| `LlmProvider` | `domain/llm.ts` | `AiSdkLlmProvider` | `FakeLlmProvider`（测试） |
-| `Logger` | `domain/log.ts` | `ConsoleLogger` / `FileLogger` | `NullLogger`（测试） |
+| `LlmProvider` | `domain/llm.ts` | `AiSdkLlmProvider` | `FakeLlmProvider`（测试，`tests/helpers/`） |
+| `Logger` | `domain/log.ts` | `ConsoleLogger` / `FileLogger` | `NullLogger`（测试，`tests/helpers/`） |
 
 **没有 `ContentStore` 接口。** 内存实现没必要做：测试用 `fs.mkdtemp()` 建临时目录就够，文件系统在测试里一点不慢。既然只有一个实现，按 brief §7.2 的判据「只有一个实现时就地实现，不留接口」，它就是 `adapters/fs/content-store.ts` 里的一个具体类。分层靠「`node:fs` 只允许出现在 `adapters/`」这条 lint 规则保证，不靠接口。
 
@@ -145,7 +145,7 @@ CoMem/
 │   │
 │   ├── domain/                       # ③ 领域层：模型与规则，无 IO
 │   │   ├── uri.ts                    # Uri 值对象 + 规范化
-│   │   ├── node.ts                   # Node 抽象 + Directory + Document
+│   │   ├── node.ts                   # 节点规则：类别/状态守卫 + 摘要纯函数
 │   │   ├── summary.ts                # 摘要三层 + 新鲜度
 │   │   ├── acl.ts                    # Principal / AclEntry / Acl 求值
 │   │   ├── memory-type.ts            # 记忆 schema 与字段
@@ -197,12 +197,10 @@ CoMem/
 │   │   │   └── task-repository.ts
 │   │   ├── llm/
 │   │   │   ├── ai-sdk-provider.ts    # 内部用 Vercel AI SDK，外部只见 LlmProvider
-│   │   │   ├── provider-error-mapping.ts # 供应商错误 → ComemError，三个适配器共用
-│   │   │   └── fake-provider.ts      # 测试替身
+│   │   │   └── provider-error-mapping.ts # 供应商错误 → ComemError，三个适配器共用
 │   │   └── log/
 │   │       ├── console.ts
-│   │       ├── file.ts               # 写 error.log
-│   │       └── null.ts               # 测试
+│   │       └── file.ts               # 写 error.log
 │   │
 │   ├── api/                          # ① 接口层：协议转换
 │   │   ├── deadline.ts               # 30 秒调用上限（MCP 注册表与 HTTP 检索路由共用）
@@ -248,7 +246,9 @@ CoMem/
 ├── tests/
 │   ├── unit/                         # 领域层纯函数
 │   ├── integration/                  # 适配层：临时目录 + 内存 SQLite
-│   └── e2e/                          # 六条链路
+│   ├── helpers/                      # 测试替身（FakeLlmProvider、NullLogger、AllowAllAuthorizer）
+│   ├── contract/                     # 端口契约套件（一份套件跑所有实现）
+│   └── helpers/                      # 测试替身（不在 src/ 里占导出面）
 ├── docs/                             # 设计文档与静态 demo
 │   └── design/
 │       ├── mockups/                  # 第 1 版
@@ -268,6 +268,8 @@ CoMem/
 | `bootstrap/` | — | 装配与启动 |
 
 **为什么叫 `api/` 不叫 `interfaces/`。** `interface` 是 TypeScript 关键字，一个叫 `interfaces/` 的目录会让人以为里面装的是类型定义，实际装的是 HTTP 和 MCP 两套协议的路由。改名消除歧义。
+
+**节点模型不在内存里。** 节点的状态分两处：`node` 表的行（`kind`、`context_type`、`status`、摘要基线三列，§8.1）与文件本身（正文 + frontmatter，§6.7）。`domain/node.ts` 只放不依赖 IO 的规则——`ContextType` / `NodeStatus` 的枚举与守卫、URI → `context_type` 的推导、正文摘要 `stableDigest`。曾经有一对 `Node` 抽象类与 `Document` / `Directory` 子类表达同一棵对象树，生产代码从不实例化（只有测试 `new`），已删除。
 
 ## 6. URI 与磁盘布局
 
@@ -4018,7 +4020,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 
 测试在本地跑。核心链路测试用 `fs.mkdtemp()` 造临时数据根、用 SQLite `:memory:` 造索引，不需要内存替身（AGENTS.md §9）。
 
-**同一算法的两份实现靠测试对拍。** `domain/` 不能 import `node:*`，`domain/node.ts` 因此手写了一份 UTF-8 字节计数，`services/resource.ts` 用 `Buffer.byteLength`；`tests/unit/utf8-byte-length.test.ts` 对同一组语料断言两者与磁盘字节数相同（ASCII、CJK、4 字节 emoji、代理对边界、孤立代理项都在语料里）。这与 `RESERVED_NAMES` 的两份副本是同一个范式：domain 不能依赖另一层，两边各写一份，靠测试对齐。
+**同一算法的两份实现靠测试对拍。** `domain/` 不能 import `adapters/`，所以保留名集合有两份副本：`domain/identity.ts` 的 `URI_RESERVED_NAMES` 管根标识，`adapters/fs/path.ts` 的 `RESERVED_NAMES` 管 URI 路径段；`tests/unit/domain/identity.test.ts` 与 `tests/integration/fs/path.test.ts` 对同一批候选名断言两边判定相同。曾经还有一对 UTF-8 字节计数实现（`domain/node.ts` 的手写编码区间版与 `services/resource.ts` 的 `Buffer.byteLength` 版），前者唯一的消费者是已删除的 `Document.size`，两份实现与对拍测试一起删掉，现在只剩 `services/resource.ts` 一份。
 
 ## 21. 里程碑
 
