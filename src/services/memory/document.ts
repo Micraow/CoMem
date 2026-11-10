@@ -11,17 +11,17 @@
  * 逐字节相同。否则摘要 digest 对不上，每次写都会触发一次假失效（§9.3）。
  */
 
-import { parseStatusField, type NodeStatus } from '../../domain/node.js';
+import type { NodeStatus } from '../../domain/node.js';
 import {
   assertMemoryIdentity,
   renderPath,
   type MemoryTypeSchema,
 } from '../../domain/memory-type.js';
-import { parseValidityInstant } from '../../domain/retrieval.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../../domain/summary.js';
 import type { Uri } from '../../domain/uri.js';
 import { invalidArgument } from './errors.js';
-import { formatField, formatScalar, parseFrontmatterLines } from './yaml.js';
+import { frontmatterFieldsOf, parseSources, parseSupersedes, splitFrontmatter } from './frontmatter.js';
+import { formatField, formatScalar } from './yaml.js';
 
 /**
  * 记忆的状态。
@@ -150,47 +150,6 @@ function extractContent(body: string): string | null {
 }
 
 /**
- * frontmatter 的 `status` → 记忆状态。
- *
- * 合法集合与三档判定统一在 `domain/node.ts` 的 `parseStatusField`：写路径的索引
- * 观察者与 `reindex` 读同一份结果，曾经各写一份时，同一份文件会在 `read` 里是
- * `active`、在索引里是 `pending`。缺键读作 `active`；键存在但值不是合法状态时
- * 返回 `null`，由 `parseMemoryDocument` 把整份文档当成不可解析（不猜一个值）。
- */
-function parseStatus(value: unknown): MemoryStatus | null {
-  const field = parseStatusField(value);
-  if (field.kind === 'invalid') {
-    return null;
-  }
-  return field.kind === 'value' ? field.value : 'active';
-}
-
-/**
- * frontmatter 的 `supersedes` → 版本文件 URI。
- *
- * 不可信输入（手改文件）按「没有指向」处理：非字符串、空串都读作 `null`。解析不
- * 出合法 URI 的值留到 `reject` 里判断——那时才需要决定「删掉」还是「恢复」，
- * 在这里抛错会让整条记忆读不出来。
- */
-function parseSupersedes(value: unknown): string | null {
-  return typeof value === 'string' && value !== '' ? value : null;
-}
-
-/**
- * frontmatter 的 `sources` → 字符串数组。
- *
- * 缺键、写成标量、块里混进非字符串项都读作「没有可信的溯源」：一个解析不出来的
- * URI 写进输出没有用，而抛错会让整个记忆读不出来（溯源是辅助信息，不是正文的
- * 前置条件）。
- */
-function parseSources(value: unknown): readonly string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.filter((item): item is string => typeof item === 'string' && item !== '');
-}
-
-/**
  * 追加去重 + 截断到 `MAX_SOURCES`。
  *
  * 顺序 = 最旧在前：已有条目保持原顺序，新条目按传入顺序追加到尾部（同一个 URI
@@ -309,38 +268,31 @@ export function serializeMemoryDocument(input: {
  * 放的普通 Markdown，它不是记忆，按「不存在」处理比抛错更适合列表遍历。
  */
 export function parseMemoryDocument(text: string): MemoryDocument | null {
-  const lines = text.split('\n');
-  if (lines[0] !== FRONTMATTER_DELIMITER) {
-    return null;
-  }
-  const closingIndex = lines.findIndex(
-    (line, index) => index > 0 && line === FRONTMATTER_DELIMITER,
-  );
-  if (closingIndex < 0) {
+  const document = splitFrontmatter(text);
+  if (!document.hasFrontmatter) {
     return null;
   }
 
-  const data = parseFrontmatterLines(lines.slice(1, closingIndex));
-  const memoryType = data[MEMORY_TYPE_KEY];
-  if (typeof memoryType !== 'string') {
+  const frontmatter = frontmatterFieldsOf(document.data);
+  // 没有 `memory_type`（缺键、空串、非字符串）不是记忆文件。
+  if (frontmatter.memoryType === null) {
     return null;
   }
-  const status = parseStatus(data[STATUS_KEY]);
-  if (status === null) {
-    // 键存在但值不是合法状态：文档损坏。猜成一个状态会让手误绕过复核闸门
-    // （`status: Archived` 被读成 `active`），所以整份文档按不可解析处理。
+  // 键存在但值不是合法状态：文档损坏。猜成一个状态会让手误绕过复核闸门
+  // （`status: Archived` 被读成 `active`），所以整份文档按不可解析处理。
+  if (frontmatter.status.kind === 'invalid') {
     return null;
   }
+  const status: MemoryStatus =
+    frontmatter.status.kind === 'value' ? frontmatter.status.value : 'active';
 
-  // 写盘时固定写一个空行再进正文；这里对称地只吃掉一个。
-  const body = lines.slice(closingIndex + 1).join('\n').replace(/^\n/, '');
   const fields: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(data)) {
+  for (const [key, value] of Object.entries(document.data)) {
     if (!RESERVED_KEYS.has(key)) {
       fields[key] = value;
     }
   }
-  const content = extractContent(body);
+  const content = extractContent(document.body);
   if (content !== null) {
     fields[CONTENT_FIELD] = content;
   }
@@ -348,12 +300,14 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
   // `updated_at` 是 `updatedAt` 字段在磁盘上的写法（§6.6 的 frontmatter 用 snake_case）。
   // 只认 `memory_type` 就够：`read` 不该因为一个自定义类型没注册进内置表而返回「不存在」，
   // 那会让「写进去了但读不出来」看起来像「没有这条记忆」。
-  const createdAt = typeof data[CREATED_AT_KEY] === 'string' ? data[CREATED_AT_KEY] : '';
-  const updatedAt = typeof data[UPDATED_AT_KEY] === 'string' ? data[UPDATED_AT_KEY] : createdAt;
+  const createdAt =
+    typeof document.data[CREATED_AT_KEY] === 'string' ? document.data[CREATED_AT_KEY] : '';
+  const updatedAt =
+    typeof document.data[UPDATED_AT_KEY] === 'string' ? document.data[UPDATED_AT_KEY] : createdAt;
   fields[UPDATED_AT_FIELD] = updatedAt;
 
   return {
-    memoryType,
+    memoryType: frontmatter.memoryType,
     status,
     createdAt,
     updatedAt,
@@ -361,13 +315,13 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
     // 只有在 `RESERVED_KEYS` 里，`sources` 才是「溯源」而不是一列普通 frontmatter
     // 字段。不在保留键集合里时它会被上面的循环收进 `fields`，重写时又按 schema
     // 丢掉——这正是「新键必须做成保留键」的失败形态，不要把它读成溯源。
-    sources: RESERVED_KEYS.has(SOURCES_KEY) ? parseSources(data[SOURCES_KEY]) : [],
+    sources: RESERVED_KEYS.has(SOURCES_KEY) ? parseSources(document.data[SOURCES_KEY]) : [],
     // 有效期由写入点给出（W98）：缺键 / 不可解析都是无界，归一化成
     // `toISOString()` 形态以便与索引列按 TEXT 比较。
-    validFrom: parseValidityInstant(data[VALID_FROM_KEY]),
-    validUntil: parseValidityInstant(data[VALID_UNTIL_KEY]),
-    supersedes: parseSupersedes(data[SUPERSEDES_KEY]),
-    body,
+    validFrom: frontmatter.validFrom,
+    validUntil: frontmatter.validUntil,
+    supersedes: parseSupersedes(document.data[SUPERSEDES_KEY]),
+    body: document.body,
   };
 }
 

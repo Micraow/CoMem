@@ -161,20 +161,27 @@ async function seedThree(): Promise<void> {
   await writePreference('editor', '默认编辑器是 vim。');
 }
 
-/** 检索索引里的全部 `.md`：`glob` 是路径工具，包含 `.history/` 下的版本快照。 */
+/**
+ * 磁盘上的全部 `.md`（路径面）：`tree` 按磁盘枚举，包含 `.history/` 下的版本快照。
+ *
+ * 不用 `search.glob`：`glob` / `grep` 是检索面，索引 SQL 已经按路径段排除整个
+ * `.history` 子树（架构文档 §8.4）。
+ */
 async function listMemoryFiles(): Promise<readonly string[]> {
-  const uris = await container.services.search.glob('**/*.md', {
-    scopes: [`${SCOPE}/memories`],
-    subject: SUBJECT,
-    principals: PRINCIPALS,
-    limit: 50,
-  });
-  return [...uris].sort();
+  const { entries } = await container.services.filesystem.tree(
+    Uri.parse(`${SCOPE}/memories`),
+    PRINCIPALS,
+    { depth: 5, limit: 1000 },
+  );
+  return entries
+    .filter((entry) => entry.kind === 'file' && entry.uri.name.endsWith('.md'))
+    .map((entry) => entry.uri.toString())
+    .sort();
 }
 
 async function listMemories(): Promise<readonly string[]> {
-  // `.history` 里是记忆的版本快照（W98）。`glob` 是路径工具，看得到它们；
-  // 但「剩下几条记忆」问的是 identity，不是历史版本。
+  // `.history` 里是记忆的版本快照（W98），「剩下几条记忆」问的是 identity，
+  // 不是历史版本。判据按路径段：文件名是 `.history.md` 的普通记忆照常算一条。
   return (await listMemoryFiles()).filter((uri) => !uri.includes('/.history/'));
 }
 
@@ -860,7 +867,7 @@ describe('ConsolidationService.consolidate', () => {
     // 同一个 topic 覆盖写一次：旧值被快照到 `memories/preferences/.history/`（W98）。
     await writePreference('code-style', '缩进用 2 个空格。');
     await writePreference('code-style', '缩进用 4 个空格。');
-    // 前提：版本文件真的存在，且检索索引看得到它（`glob` 是路径工具，没有 `asOf`）。
+    // 前提：版本文件真的存在，且路径面看得到它（`tree` 按磁盘枚举，没有 `asOf`）。
     // 这两条不成立时下面的断言会因为「根本没有版本文件」而空转通过。
     const versions = await versionFiles();
     expect(versions).toHaveLength(1);

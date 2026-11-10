@@ -10,9 +10,10 @@ import type { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import type { NodeRow } from '../../adapters/sqlite/node-repository.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
-import { contextTypeOf, parseStatusField, stableDigest } from '../../domain/node.js';
-import type { NodeStatus, StatusField } from '../../domain/node.js';
-import { parseValidityInstant, type IndexRecord } from '../../domain/retrieval.js';
+import { contextTypeOf, stableDigest } from '../../domain/node.js';
+import type { NodeStatus } from '../../domain/node.js';
+import type { IndexRecord } from '../../domain/retrieval.js';
+import { frontmatterFieldsOf, parseFrontmatterFields } from '../../services/memory/frontmatter.js';
 
 import type { DiskNode } from './walk.js';
 
@@ -23,38 +24,6 @@ const DIRECTORY_LEVEL = 'L0';
 const OVERVIEW_LEVEL = 'L1';
 
 const ACTIVE_STATUS: NodeStatus = 'active';
-
-interface FrontmatterFields {
-  readonly memoryType: string | null;
-  /** `status` 的三档结果：缺键 / 合法 / 键存在但非法（`domain/node.ts`）。 */
-  readonly status: StatusField;
-  /** 有效区间的起点（`valid_from`），UTC 形态；缺键/不可解析时是 `null` = 无界。 */
-  readonly validFrom: string | null;
-  /** 有效区间的终点（`valid_until`）；`null` = 仍然有效。 */
-  readonly validUntil: string | null;
-}
-
-/**
- * 记忆文件的 `memory_type` / `status` / `valid_from` / `valid_until`
- * （`IndexObserver` 的同一份映射）。
- *
- * 前两个是内存里的枚举 / 标识，直接判类型；有效期交给 `parseValidityInstant`：
- * 它把 YAML 读出来的数字、布尔、解析不了的串一律读作「无界」，并把合法值归一化成
- * `toISOString()` 形态。`memory.ts` / `index-observer.ts` 用的是同一个函数，
- * 所以同一份文件在这三条链路上得到同样的两列（对拍见
- * `tests/integration/services/frontmatter-validity-consistency.test.ts`）。
- */
-function readFrontmatterFields(data: Readonly<Record<string, unknown>>): FrontmatterFields {
-  const memoryType = data['memory_type'];
-  return {
-    memoryType: typeof memoryType === 'string' && memoryType !== '' ? memoryType : null,
-    // YAML 的 `null`（`status:` / `status: null`）与数字、布尔、非法字符串一样
-    // 都是「键存在但不可用」，不是缺键——缺键才是 `undefined`。
-    status: parseStatusField(data['status']),
-    validFrom: parseValidityInstant(data['valid_from']),
-    validUntil: parseValidityInstant(data['valid_until']),
-  };
-}
 
 /**
  * 从磁盘重建一个节点的 `IndexRecord`（目录可能两条）。失败抛 `ComemError`
@@ -80,6 +49,15 @@ export async function buildRecords(
    * 路径——三处各读一次会把「重扫一遍磁盘」变成随机读放大。
    */
   document: ParsedDocument | null,
+  /**
+   * 文件的原始字节（UTF-8）；目录节点传 `null`。
+   *
+   * 记忆文件的字段判定必须与 `read` / 索引观察者走同一个子集解析器：通用 YAML
+   * 解析器比记忆格式宽松（单引号、内联注释），同一份手改文件会在 `read` 里是
+   * 「不可解析」、在重建里是另一个 `status`。非记忆文件没有这条口径，继续用
+   * `document.data`（通用 YAML 的记录）。
+   */
+  text: string | null,
 ): Promise<readonly IndexRecord[]> {
   const stat = await store.stat(node.uri);
   if (stat === null) {
@@ -126,7 +104,10 @@ export async function buildRecords(
     // 调用方约束：文件节点必须先把磁盘内容读出来。
     throw new ComemError('INTERNAL', '文件节点缺少磁盘解析结果。', { uri: node.uri.toString() });
   }
-  const fields = readFrontmatterFields(document.data);
+  const fields =
+    contextType === 'memory' && text !== null
+      ? parseFrontmatterFields(text)
+      : frontmatterFieldsOf(document.data);
   const summary = document.data['summary'];
   // 与 `IndexObserver` 同一处置：记忆文件的 `status` 键存在但值非法时整份文档按
   // 不可解析的记忆处理，`memory_type = NULL`、`status = active`。保留旧值会让重建

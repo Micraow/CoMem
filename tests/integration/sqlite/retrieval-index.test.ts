@@ -735,3 +735,43 @@ describe('同一 URI 的 L0 与 L1 行', () => {
     expect(countRows('SELECT COUNT(*) AS total FROM node_fts WHERE uri = ?', DIR)).toBe(0);
   });
 });
+
+/**
+ * 记忆的版本快照目录（`.history`，架构文档 §11.11）不在检索面上。
+ *
+ * 判据按路径段（`memories/*` 下的 `.history`），不看子串：文件名是 `.history.md`
+ * 的普通记忆照常命中。版本文件的 `valid_until` 在系统写路径上恒非空，但这里显式
+ * 把它写成 NULL——`write` 曾经能造出一份没有 frontmatter 的假快照，检索面的不变量
+ * 不能押在「写路径不会漏」上。
+ */
+describe('记忆版本快照目录（.history）不在检索面上', () => {
+  const MEMORIES = 'comem://user/alice/memories/preferences';
+  const HISTORY = `${MEMORIES}/.history`;
+  const VERSION = `${HISTORY}/design.md--20261110T022746123Z.md`;
+  const CANONICAL = `${MEMORIES}/design.md`;
+  const LOOKALIKE = `${MEMORIES}/.history.md`;
+
+  beforeEach(async () => {
+    await seed(HISTORY, '', { kind: 'directory', level: 'L0', abstract: '版本历史' });
+    await seed(VERSION, '唯一命中词', { memoryType: 'preferences', validUntil: null });
+    await seed(CANONICAL, '唯一命中词', { memoryType: 'preferences' });
+    await seed(LOOKALIKE, '唯一命中词', { memoryType: 'preferences' });
+  });
+
+  it('search 看不到版本文件与 .history 目录自身', async () => {
+    expect(uris(await search('唯一命中词')).sort()).toEqual([CANONICAL, LOOKALIKE].sort());
+  });
+
+  it('glob 的 ** 不含 .history 子树，但基名是 .history.md 的普通记忆照常命中', async () => {
+    const matched = await glob('**/*.md');
+
+    expect(matched).not.toContain(VERSION);
+    expect(matched).not.toContain(HISTORY);
+    expect(matched).toContain(CANONICAL);
+    expect(matched).toContain(LOOKALIKE);
+  });
+
+  it('路径面不受影响：stat 按版本文件 URI 仍然读得到', async () => {
+    expect(await index.stat(VERSION)).not.toBeNull();
+  });
+});

@@ -548,3 +548,63 @@ describe('观察者', () => {
     expect(observer.written).toEqual([{ uri: target.toString(), kind: 'file' }]);
   });
 });
+
+/**
+ * 版本快照目录（`.history`，架构文档 §11.11）不在用户写入面上。
+ *
+ * 版本文件由记忆服务经 `ContentStore` 的字节接口写（不经过本服务），所以这里拦的
+ * 只是「用户手工造一份看起来像旧值的文件」。判据按路径段：文件名是 `.history.md`
+ * 的普通记忆照常可写。
+ */
+describe('写入目标不能落在记忆的版本历史目录下', () => {
+  const VERSION = 'memories/preferences/.history/code-style.md--20261110T022746123Z.md';
+
+  it('write / edit / mkdir / remove 拒绝 .history 子树，且不落盘', async () => {
+    const target = uri(VERSION);
+
+    await expect(service.write(target, 'x', AUTH_PRINCIPALS)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+    await expect(
+      service.edit(target, [{ search: 'x', replace: 'y' }], AUTH_PRINCIPALS),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(
+      service.mkdir(uri('memories/preferences/.history'), AUTH_PRINCIPALS),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(service.remove(target, AUTH_PRINCIPALS)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+    expect(await store.exists(target)).toBe(false);
+  });
+
+  it('move 的两个端点都不能是版本文件', async () => {
+    const from = uri('memories/preferences/code-style.md');
+    const to = uri(VERSION);
+    await service.write(from, 'x', AUTH_PRINCIPALS);
+
+    await expect(service.move(from, to, AUTH_PRINCIPALS)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+    await expect(service.move(to, from, AUTH_PRINCIPALS)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
+  });
+
+  it('文件名是 .history.md 的普通记忆照常可写（按段判定，不看子串）', async () => {
+    const lookalike = uri('memories/preferences/.history.md');
+
+    await service.write(lookalike, 'x', AUTH_PRINCIPALS);
+
+    expect((await service.read(lookalike, AUTH_PRINCIPALS)).text).toBe('x');
+  });
+
+  it('版本快照的内部写路径不受影响：ContentStore 的字节接口仍然写得进去', async () => {
+    // `writeVersionSnapshot` 走 `MemoryServicePorts.filesystem.write`（`writeBytes`），
+    // 不经过 `FileSystemService`。这条用例钉住「服务层加校验没有把内部写入一起关掉」。
+    const version = uri(VERSION);
+
+    await store.writeBytes(version, Uint8Array.from(Buffer.from('旧值', 'utf8')));
+
+    expect(await store.exists(version)).toBe(true);
+  });
+});

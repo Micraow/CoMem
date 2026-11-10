@@ -1,6 +1,12 @@
 /**
  * 负责：`grep`（读文件做正则行匹配）与 `glob`（路径通配）两个路径型检索面。
  * 不负责：索引内的词/向量检索，也不把元数据（类型、层级、时间）收窄套到这两个面上。
+ *
+ * **记忆的版本快照目录（`.history`，架构文档 §11.11）不在结果里。** 排除发生在
+ * `index.glob` 的 SQL 里（`notVersionFileSql`），不在这一层：`grep` 的候选集也来自
+ * 同一次查询，在服务层过滤会让版本文件白占 `GREP_CANDIDATE_LIMIT` 的名额，库大一
+ * 点 `grep` 就什么都搜不到。`list` / `tree` / `read` / `download` 是路径面，照旧
+ * 按磁盘枚举。
  */
 
 import { ComemError } from '../../domain/errors.js';

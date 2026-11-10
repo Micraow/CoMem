@@ -389,6 +389,7 @@ interface SeedOverrides {
   readonly abstract?: string | null;
   readonly kind?: IndexRecord['kind'];
   readonly status?: NodeStatus;
+  readonly validUntil?: string | null;
 }
 
 function record(uri: string, content: string, overrides: SeedOverrides = {}): IndexRecord {
@@ -406,6 +407,7 @@ function record(uri: string, content: string, overrides: SeedOverrides = {}): In
     size: Buffer.byteLength(content),
     updatedAt: '2026-11-08T00:00:00.000Z',
     status: overrides.status ?? 'active',
+    ...(overrides.validUntil === undefined ? {} : { validUntil: overrides.validUntil }),
   };
 }
 
@@ -818,6 +820,44 @@ describe('glob', () => {
 
     expect(text).toContain('Found 2 file(s):');
     expect(text).not.toContain(`${DIR}/archived.md`);
+  });
+});
+
+describe('记忆版本快照目录（.history）', () => {
+  const DIR = `${SCOPE}/memories/preferences`;
+  const VERSION = `${DIR}/.history/code-style.md--20261110T022746123Z.md`;
+  const CANONICAL = `${DIR}/code-style.md`;
+
+  beforeEach(async () => {
+    // 版本文件的 `valid_until` 写成 NULL：系统写的快照恒非空，但检索面的排除不能
+    // 只靠有效期——这份数据就是「假快照」的形态。落盘走 `ContentStore` 的字节接口
+    // （系统写快照的路径），用户面的 `write` 已经拒绝写进 `.history`。
+    await harness.store.writeBytes(
+      Uri.parse(VERSION),
+      Uint8Array.from(Buffer.from('缩进用空格\n', 'utf8')),
+    );
+    await seed(VERSION, '缩进用空格', { memoryType: 'preferences', validUntil: null });
+    await harness.filesystem.write(Uri.parse(CANONICAL), '缩进用制表符\n', PRINCIPALS);
+    await seed(CANONICAL, '缩进用制表符', { memoryType: 'preferences' });
+  });
+
+  it('grep 的候选集不含 .history 下的版本文件', async () => {
+    expect(await callText('grep', { uri: DIR, pattern: '空格' })).toContain('Found 0 match(es):');
+    expect(await callText('grep', { uri: DIR, pattern: '制表符' })).toContain('Found 1 match(es):');
+  });
+
+  it('glob 不列出版本文件；read 仍按版本文件 URI 读得到（路径面不受影响）', async () => {
+    const text = await callText('glob', { pattern: '**/*.md', uri: DIR, nodeLimit: 10 });
+
+    expect(text).toContain('code-style.md');
+    expect(text).not.toContain('.history');
+    // 路径面按 URI 直接读：`read` 给正文，`download` 给签名 URL。
+    expect(await callText('read', { uri: VERSION })).toBe('缩进用空格\n');
+    expect(await callText('download', { uri: VERSION })).toContain('/content/download?');
+  });
+
+  it('find 对版本文件 0 命中（有效期之外还有路径段兜底）', async () => {
+    expect(await callText('find', { query: '空格' })).toContain('Found 0 item(s):');
   });
 });
 

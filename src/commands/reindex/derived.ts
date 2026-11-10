@@ -34,7 +34,7 @@ import { DERIVED_MATCH_TEXT, derivedEdgeKey, type DerivedEdge } from './edge-key
  */
 export function collectDerivedEdges(
   uri: Uri,
-  rawSources: unknown,
+  sources: readonly string[],
   target: DerivedEdge[],
   seen: Set<string>,
   logger: Logger,
@@ -42,13 +42,7 @@ export function collectDerivedEdges(
   if (contextTypeOf(uri) !== 'memory' || isVersionFile(uri)) {
     return;
   }
-  if (!Array.isArray(rawSources)) {
-    return;
-  }
-  for (const value of rawSources) {
-    if (typeof value !== 'string' || value === '') {
-      continue;
-    }
+  for (const value of sources) {
     const to = Uri.tryParse(value);
     if (to === null) {
       logger.warn('记忆来源不是合法 URI，重建关联边时跳过。', {

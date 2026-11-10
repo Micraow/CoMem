@@ -4,9 +4,8 @@
  * P2 的验收对象：`read` / `write` / `list` / `tree` / `edit` / `mkdir` / `remove` /
  * `move` 八个入口，每个都先求权、再拿路径锁、最后才碰 `ContentStore`。
  *
- * 为什么求权在锁外：权限判定是纯读，先拒绝掉无权请求，比先排队再拒绝便宜。为什么
- * 锁在存储外：`edit` 是「读正文 → 应用补丁 → 写回」，中间被别的写者插进来就是
- * 丢更新；锁必须覆盖整个读改写。
+ * 为什么求权在锁外：权限判定是纯读，先拒绝掉无权请求比先排队再拒绝便宜；为什么锁
+ * 在存储外：`edit` 是「读正文 → 应用补丁 → 写回」，中间被别的写者插进来就是丢更新。
  *
  * 锁模式（§10.6 的表格）：
  *
@@ -25,20 +24,19 @@
  * 内容写入本身就是原子的（`ContentStore.writeText`：同目录临时文件 → `fsync` →
  * `rename`），任何时刻被读到的都是完整的旧版本或完整的新版本。锁对读**不提供**
  * 额外的一致性，只提供阻塞：后台摘要重建在持有根目录锁的那 9.4 秒里调了一次模型，
- * 这段时间内 `GET /fs/tree` 会一直等到 `acquire` 超时，然后返回 409——读请求被
- * 一个与它无关的 LLM 调用打断，是纯粹的可用性损失。
+ * 这段时间内 `GET /fs/tree` 会一直等到 `acquire` 超时再返回 409——读请求被一个与
+ * 它无关的 LLM 调用打断，是纯粹的可用性损失。
  *
  * 代价是遍历期间子树可能被并发删除。这不是错误：节点真的没了，正确的回答是
  * 「它不存在」，而不是把它当成服务端故障。所以 `tree` 把**后代**目录的
  * `NOT_FOUND` 当成「这棵子树已经消失」跳过（根不存在仍然抛 `NOT_FOUND`），
- * `ContentStore.list` 跳过读到一半消失的子项。读到的是一份**快照**，不是加锁的
- * 一致视图——这两者的区别在于「可能少几个刚被删掉的条目」，而不在于「可能读到
- * 写了一半的文件」。
+ * `ContentStore.list` 跳过读到一半消失的子项。读到的是**快照**，不是加锁的一致
+ * 视图——区别在于「可能少几个刚被删掉的条目」，不在于「可能读到写了一半的文件」。
  */
 
 // 架构文档 §4.4 明确「没有 ContentStore 接口」：内容存储就是适配层里的一个具体类，
-// 分层靠「node:fs 只允许出现在 adapters/」保证。所以这里用 `import type` 引用具体类型，
-// 运行期实例由 bootstrap 构造注入，本服务不 new 适配器（§4.2 的 type-only 例外）。
+// 分层靠「node:fs 只允许出现在 adapters/」保证。这里用 `import type` 引用具体类型，
+// 运行期实例由 bootstrap 注入，本服务不 new 适配器（§4.2 的 type-only 例外）。
 import type {
   ContentStore,
   StoredStat,
@@ -54,6 +52,7 @@ import { applyPatch, type PatchBlock } from '../domain/patch.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
+import { assertNotVersionTarget } from './version-directory.js';
 
 /**
  * `tree` 的默认深度。来源：架构文档 §13.2 的 `tree` 工具契约 `levelLimit=3`。
@@ -179,8 +178,8 @@ export class FileSystemService {
    * 读成功之后累加访问计数。**不 await**：`read` 是热路径，一次 UPDATE 的写事务
    * 不该让读等它；写失败只记 warn，访问统计不是读取正确性的一部分。
    *
-   * 只记 `read`，不记 `readBytes`：TTL 只作用于 `context_type = 'memory'` 的文本
-   * 记忆，二进制资源没有滑动窗口语义。
+   * 只记 `read`，不记 `readBytes`：TTL 只作用于 `context_type = 'memory'` 的
+   * 文本记忆，二进制资源没有滑动窗口语义。
    */
   #touchAccess(uri: Uri): void {
     const record = this.#recordAccess;
@@ -210,10 +209,8 @@ export class FileSystemService {
   }
 
   /**
-   * 直接子项，逐条求 read 权限（§12.4）。
-   *
-   * 无权限的节点完全不出现：文件名和摘要本身就是信息，返回「存在但无权」的占位
-   * 等于泄露。
+   * 直接子项，逐条求 read 权限（§12.4）。无权限的节点完全不出现：文件名和摘要
+   * 本身就是信息，返回「存在但无权」的占位等于泄露。
    */
   async list(uri: Uri, principals: readonly string[]): Promise<readonly TreeEntry[]> {
     await this.#authorizer.assert(uri, READ_LEVEL, principals);
@@ -223,11 +220,10 @@ export class FileSystemService {
   /**
    * 深度优先的子树，同层按 name 升序（`ContentStore.list` 已排序）。
    *
-   * 超 `depth` 或 `limit` 时置 `truncated: true` 并停止。`depth` 边界上的目录
-   * 只有「有可读子项」才算截断——空目录没有省略任何东西。
-   *
-   * **不拿路径锁**（见文件头）：遍历读的是一份快照，并发 `rm -r` 删掉的子树直接
-   * 跳过；根自己不存在时仍然抛 `NOT_FOUND`。
+   * 超 `depth` 或 `limit` 时置 `truncated: true` 并停止。`depth` 边界上的目录只有
+   * 「有可读子项」才算截断——空目录没有省略任何东西。**不拿路径锁**（见文件头）：
+   * 遍历读的是一份快照，并发 `rm -r` 删掉的子树直接跳过；根不存在时仍抛
+   * `NOT_FOUND`。
    */
   async tree(
     uri: Uri,
@@ -289,10 +285,8 @@ export class FileSystemService {
   }
 
   /**
-   * 写正文。`created` 表示写入前目标不存在。
-   *
-   * `options` 原样透传：`expectedDigest` 由 `ContentStore` 做乐观并发，
-   * 不传 `frontmatter` 时保留磁盘上现有的（§10.6 元数据写保护）。
+   * 写正文。`created` 表示写入前目标不存在。`options` 原样透传：`expectedDigest`
+   * 由 `ContentStore` 做乐观并发；不传 `frontmatter` 时保留磁盘上现有的（§10.6）。
    */
   async write(
     uri: Uri,
@@ -300,10 +294,10 @@ export class FileSystemService {
     principals: readonly string[],
     options: WriteTextOptions = {},
   ): Promise<WriteResult> {
+    assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     // 写者建立父目录：目标父目录不存在时锁文件没有地方放，而写者会**创建**目标
-    // ——不建目录的话「同一时刻只有一个写者」对新路径不成立
-    // （见 `LockAcquireOptions.createParentDirectory`）。
+    // ——不建目录的话「同一时刻只有一个写者」对新路径不成立。
     return this.#locks.withLock(
       uri,
       'exact',
@@ -325,14 +319,15 @@ export class FileSystemService {
    * 「读到的正文」与「写回的正文」之间没有被别人插过。
    *
    * 落盘后与 `write` 走**同一条**派生数据通知：正文变了，索引里的 `body_digest` /
-   * `node_fts` / 摘要 / 物化权限都要跟着变。少了这一步，`edit` 之后 `find` 仍然
-   * 返回旧正文，而工具还会回报 `Index: indexed`（那一列只判断行存在）。
+   * `node_fts` / 摘要 / 物化权限都要跟着变。少了这一步，`edit` 之后 `find` 仍然返回
+   * 旧正文，而工具还会回报 `Index: indexed`（那一列只判断行存在）。
    */
   async edit(
     uri: Uri,
     blocks: readonly PatchBlock[],
     principals: readonly string[],
   ): Promise<EditResult> {
+    assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     return this.#locks.withLock(uri, 'exact', async () => {
       const document = await this.#store.readText(uri);
@@ -368,6 +363,7 @@ export class FileSystemService {
 
   /** 建目录，父目录不存在时一并建（`recursive`），已存在不报错。 */
   async mkdir(uri: Uri, principals: readonly string[]): Promise<void> {
+    assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     await this.#locks.withLock(uri, 'tree', async () => {
       await this.#store.mkdir(uri, { recursive: true });
@@ -377,6 +373,7 @@ export class FileSystemService {
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */
   async remove(uri: Uri, principals: readonly string[]): Promise<RemoveResult> {
+    assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, MANAGE_LEVEL, principals);
     return this.#locks.withLock(uri, 'tree', async () => {
       const removedFiles = await this.#store.remove(uri, { recursive: true });
@@ -388,11 +385,13 @@ export class FileSystemService {
   /**
    * 移动 / 改名。源与目标各持一把 `TREE` 锁。
    *
-   * 按 URI 字符串排序后获取，避免两个相反方向的 `move` 互相等；互为祖先的路径
-   * 直接拒绝——`move a → a/b` 会在拿第二把锁时等自己，报一个误导性的超时。
-   * 同一路径只拿一把锁，让 `ContentStore.move` 抛它自己的 `ALREADY_EXISTS`。
+   * 按 URI 字符串排序后获取，避免两个相反方向的 `move` 互相等；互为祖先的路径直接
+   * 拒绝——`move a → a/b` 会在拿第二把锁时等自己，报一个误导性的超时。同一路径只拿
+   * 一把锁，让 `ContentStore.move` 抛它自己的 `ALREADY_EXISTS`。
    */
   async move(from: Uri, to: Uri, principals: readonly string[]): Promise<void> {
+    assertNotVersionTarget(from);
+    assertNotVersionTarget(to);
     await this.#authorizer.assert(from, MANAGE_LEVEL, principals);
     await this.#authorizer.assert(to, MANAGE_LEVEL, principals);
 

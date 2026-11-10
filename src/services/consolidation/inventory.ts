@@ -82,14 +82,10 @@ export async function collectInventory(
       // （`candidates`），也就不会被模型当成一条可以 `delete` 的记忆（删掉一份版本
       // 就掐断了 `supersedes` 链）。
       //
-      // 但版本文件**占用 `glob` 的返回名额**：`limit: INVENTORY_LIMIT` 是
-      // `SearchService.glob` 查询本身的参数，按路径段过滤发生在它返回之后（下面的
-      // `continue`），所以 `uris` 里确实混着版本文件。占用有上界——写入时每个
-      // identity 只保留最新 `MAX_VERSIONS = 5` 份（`MemoryService` 的截断）。
-      //
-      // 检索面看不到版本文件是因为 `find` / `search` 带 `asOf`（`node.valid_until`
-      // 过滤）；`glob` 是路径工具，契约是磁盘，没有 `asOf`。不给 `SearchService.glob`
-      // 加这个参数（那会改检索层的公开签名，影响面比这条缺陷大），在路径段上排除。
+      // `SearchService.glob` 的索引 SQL 已经按路径段排除了整个 `.history` 子树
+      // （`notVersionFileSql`），这里不依赖它：合并清单是写操作的输入，服务层再按
+      // 同一条领域判据过一遍（与 `PathSearch.glob` 再过一遍 `filterReadable` 同理），
+      // 索引实现漂移时不会把版本文件送进模型。
       continue;
     }
     const record = await memory.read(uri);

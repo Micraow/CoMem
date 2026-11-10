@@ -17,6 +17,7 @@ import { parseDocument } from '../../adapters/fs/frontmatter.js';
 import { ConsoleLogger } from '../../adapters/log/console.js';
 import { openDatabase, runMigrations } from '../../adapters/sqlite/database.js';
 import { ComemError, errorMessage } from '../../domain/errors.js';
+import { parseSources } from '../../services/memory/frontmatter.js';
 import { loadCommandConfig } from '../config.js';
 import {
   EMBEDDING_BACKUP_TABLE,
@@ -133,20 +134,29 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
         const existing = nodeRepository.get(uri);
 
         try {
-          const document =
+          const text =
             node.kind === 'file'
-              ? parseDocument(Buffer.from(await store.readBytes(node.uri)).toString('utf8'))
+              ? Buffer.from(await store.readBytes(node.uri)).toString('utf8')
               : null;
+          const document = text === null ? null : parseDocument(text);
 
           // 1) 检索索引：按磁盘内容重建 `node` + `node_fts`。
           if (needsIndex) {
-            await index.upsert(await buildRecords(store, metadata, logger, node, existing, document));
+            await index.upsert(
+              await buildRecords(store, metadata, logger, node, existing, document, text),
+            );
             rewrittenUris.add(uri);
           }
 
           // 2) 关联边：只收集，结束前一次整批替换（见循环后的 `rebuildDerived`）。
           if (needsLinks && document !== null) {
-            collectDerivedEdges(node.uri, document.data[SOURCES_KEY], derivedEdges, seenEdges, logger);
+            collectDerivedEdges(
+              node.uri,
+              parseSources(document.data[SOURCES_KEY]),
+              derivedEdges,
+              seenEdges,
+              logger,
+            );
           }
         } catch (error) {
           // 坏文件（frontmatter 不合法、读盘失败）只影响自己：整批中断会让「一个
