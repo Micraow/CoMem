@@ -1064,7 +1064,8 @@ TTL 是统一策略，没有逐条设置过期时间的接口（`TtlService.setE
 记忆不过期，改它的类型，或把 `defaultDays` 设回 0。
 
 **版本文件不参与 TTL。** `memories/{type}/.history/` 下的旧值快照不在清扫范围：两段 SQL 都
-带 `NOT_VERSION_FILE_SQL`（`uri NOT GLOB '*/memories/*/[.]history/*'`），`defaultDays` 与
+带 `NOT_VERSION_FILE_SQL`（两条 GLOB，`*/memories/*/[.]history` 与
+`*/memories/*/[.]history/*`；只写后一条会漏掉 `.history` 目录节点自身），`defaultDays` 与
 `retentionDays` 配成什么都动不到它们。它们的数量由每次覆盖写的「每个 identity 只留 5 份」
 截断兜住（架构文档 §11.11）。
 
@@ -1924,7 +1925,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
    `TtlService.setExpiry` 都已删除（`0005_sliding_ttl.sql`）。要让某条记忆永不过期，
    改它的类型或把 `defaultDays` 设回 0。
 3. **认证默认关闭。** `auth.enabled: false` 时身份来自 `x-comem-subject`，且必须等于
-   `server.subject`（`src/bootstrap/container.ts` 的 `resolveIdentityOf`）——这是单用户
+   `server.subject`（`src/bootstrap/container/api.ts` 的 `resolveIdentityOf`）——这是单用户
    形态，控制台不需要登录。打开 `auth.enabled` 后身份来自凭据（session token 或 API Key），
    `Authorizer` 按每请求的 `principals` 求权：组外用户读不到组根
    （`tests/integration/services/acl.test.ts` 的 `user:bob` 用例）。控制台按同一份凭据
@@ -1939,7 +1940,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
    职责里——它由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径。索引坏了
    可以修；整库丢失时权限要另走 ACL 重建（目前没有命令）。参数见「备份与恢复」。
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
-   日志，不落盘也不进数据库（`src/services/memory.ts`）。事后要复盘「为什么拒了」只能翻日志。
+   日志，不落盘也不进数据库（`src/services/memory/review.ts`）。事后要复盘「为什么拒了」只能翻日志。
 6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
    description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模 `summary` 一个字段，
    `ContentStore.readText` 不暴露任意键。Hook 注入的 `<available-skills>` 因此只有名字，
@@ -2008,7 +2009,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
     逐条去重，v1 不做。
 
 18. **`ingest_cursor` 不随账号删除。** 游标表按 `(harness, native_session_id)` 存
-    `session_uri` 与 `cursor_value`（`src/adapters/sqlite/ingest-cursor-repository.ts:9`），
+    `session_uri` 与 `cursor_value` 列，行类型 `IngestCursorRow`（`src/adapters/sqlite/ingest-cursor-repository.ts:25`），
     而 `IdentityService.deleteUser` 只清身份行、成员关系、API Key、组 owner 与召回账本
     （`src/services/identity.ts:210`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
     原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest.ts:602`），
@@ -2182,15 +2183,15 @@ COMEM_SERVER_PORT=8080 pnpm dev
     数字。它们是计数，不含 URI、正文或别的记录枚举。控制台的概览页依赖它（§16）。
 
 39. **`supersedes` 只跟一跳，被截断的版本回不去。** `reject` 只读当前 pending 文件的
-    `supersedes`，把那一份版本写回规范 URI；它不沿链回溯（`src/services/memory.ts` 的
-    `#restoreSuperseded`）。版本文件不参与 TTL（两段清扫 SQL 都排除 `.history`），所以让
+    `supersedes`，把那一份版本写回规范 URI；它不沿链回溯（`src/services/memory/versioning.ts`
+    的 `restoreSuperseded`）。版本文件不参与 TTL（两段清扫 SQL 都排除 `.history`），所以让
     回退目标消失的只有「每个 identity 只留 5 份」的截断：同一个 identity 覆盖写超过 5 次
     之后，恢复失败只记一条 `warn`（「指向的文件不存在，拒绝时按删除处理」），终态是这条
     记忆被删除，不是回到更早的版本（架构文档 §11.11）。
 
 40. **`prefetch` 只返回 `active`，未复核的经验对下一轮归纳不可见。** 经验归纳步骤
     （`experience_distill`）用 `MemoryService.prefetch` 取同一 topic 的旧正文，而
-    `prefetch` 按 `status = 'active'` 过滤（`src/services/memory.ts:1423`）。上一轮写入的
+    `prefetch` 按 `status = 'active'` 过滤（`src/services/memory/query.ts` 的 `prefetchMemories`）。上一轮写入的
     经验还在 `pending`、没被复核时，下一轮归纳看不到它，模型按「没有旧经验」整段重写，
     旧结论被无合并覆盖（`pending` 旧值也不做版本快照，见架构文档 §11.11）。这是复核闸门
     的既有语义——未生效的结论不参与检索与预取——不是新缺陷；要让下一轮看到未复核的经验，

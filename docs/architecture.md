@@ -166,10 +166,30 @@ CoMem/
 │   │
 │   ├── services/                     # ② 应用层：用例编排
 │   │   ├── filesystem.ts             # ls / tree / read / write / edit / rm / mv
-│   │   ├── search.ts                 # find / search / grep / glob
+│   │   ├── search.ts                 # 门面：re-export，实现在 retrieval/
+│   │   ├── retrieval/                # 检索：三臂 / 合并 / 重排 / 路径面 / 预算 / 意图 / 交付
+│   │   │   ├── service.ts            # SearchService 装配与 find / search / context 编排
+│   │   │   ├── arms.ts               # fts / vector / hybrid 三臂与向量候选集
+│   │   │   ├── merge.ts              # 多查询合并、去重、层级加权与热度加权
+│   │   │   ├── rerank.ts             # 重排取文、条数上限、失败分类与健康度
+│   │   │   ├── paths.ts              # grep / glob 两个路径型检索面
+│   │   │   ├── intent.ts             # 意图分析（查询重写、降级成单条原查询）
+│   │   │   ├── delivery.ts           # 跨轮去重、召回账本、访问计数
+│   │   │   ├── budget.ts             # 条数上限与上游时间预算收窄
+│   │   │   ├── enrich.ts             # 向量命中补全成 SearchHit
+│   │   │   └── types.ts              # 对外类型与目录内中间结构
 │   │   ├── summary.ts                # 摘要生成与失效
 │   │   ├── session.ts                # 建会话 / 加消息 / 提交
-│   │   ├── memory.ts                 # 记忆读写与复核
+│   │   ├── memory.ts                 # 门面：re-export，实现在 memory/
+│   │   ├── memory/                   # 记忆读写：文档格式 / 版本 / 复核 / 预取
+│   │   │   ├── service.ts            # MemoryService 编排（锁、字段合并、闸门、快照触发）
+│   │   │   ├── document.ts           # frontmatter ↔ 结构、保留键、identity → URI
+│   │   │   ├── versioning.ts         # 版本快照、MAX_VERSIONS 截断、supersedes 回退
+│   │   │   ├── review.ts             # approve / reject 的判定与写回
+│   │   │   ├── query.ts              # read 投影、待复核列表、抽取预取
+│   │   │   ├── ports.ts              # 端口定义与文件级原语
+│   │   │   ├── yaml.ts               # 记忆文件用到的 YAML 子集
+│   │   │   └── errors.ts             # INVALID_ARGUMENT 的唯一构造
 │   │   ├── acl.ts                    # 授权管理与鉴权入口
 │   │   ├── resource.ts               # 资料导入
 │   │   ├── skill.ts                  # 技能包安装
@@ -242,6 +262,13 @@ CoMem/
 ├── integrations/                     # Hook 插件（独立交付物，装进宿主）
 │   ├── cli.mjs                       # co-mem install / doctor
 │   ├── scripts/  servers/  hosts/  lib/
+│
+├── scripts/                          # 质量闸门与运维脚本
+│   ├── check-config.ts               # 配置项必须有消费方（L1–L3）
+│   ├── check-reachability.ts         # 写了但没接线
+│   ├── check-shape.ts                # 行数 ratchet：文件只能变短
+│   ├── shape-baseline.json           # 形状检查基线（只允许收紧）
+│   └── demo.sh                       # 六条链路端到端演示
 │
 ├── tests/
 │   ├── unit/                         # 领域层纯函数
@@ -509,10 +536,10 @@ updated_at: 2026-11-05T16:40:00Z
   版本时不写这个键。
 
 模型改不了它们：`parseMemoryDocument` 把保留键从 `fields` 里剔掉
-（`src/services/memory.ts:815`），`serializeMemoryDocument` 只写 `schema.fields` 与保留键
-（`:740`），三个键的值取自元数据（`MemoryDocument` 的 `:485`–`:490`），不从 `fields` 读。`fields` 里出现同名键也不会落盘——
-整份重写时被丢弃。保留键集合在 `src/services/memory.ts:371`。版本文件的完整语义见
-§11.11。
+（`src/services/memory/document.ts`），`serializeMemoryDocument` 只写 `schema.fields` 与保留键
+（同文件），三个键的值取自 `MemoryDocument` 的元数据字段，不从 `fields` 读。`fields` 里出现
+同名键也不会落盘——整份重写时被丢弃。保留键集合是同文件的 `RESERVED_KEYS`。版本文件的完整
+语义见 §11.11。
 
 **`user/alice/memories/.abstract.md`** —— 这个目录的 L0
 
@@ -1059,13 +1086,20 @@ LIMIT ?;
 ```
 
 **`level` 用读位测试，不用 `>=`。** 两份 SQL（`retrieval-index.ts` 的 `permissionPredicate`、
-`permission-repository.ts` 的 `readableUris`）与单节点读路径（`MAX(level)` 交给
-`domain/acl.ts` 的 `levelSatisfies`）必须是同一个判定，所以谓词写成 `(p.level & 1) = 1`。
-规范级别 1 / 3 / 7 下它与 `p.level >= 1` 等价；库里出现 `level = 2` / `6` 这类读位为 0 的
-非规范行时两者分叉——`>=` 说可读、位测试说不可读，症状是「列表里有、点进去读不了」。这种
-行 API 写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手工 SQL 或旧数据；两侧一致由
+`permission-repository.ts` 的 `readableUris`）与单节点读路径必须是同一个判定，所以谓词写成
+`(p.level & 1) = 1`。规范级别 1 / 3 / 7 下它与 `p.level >= 1` 等价；库里出现 `level = 2` / `6`
+这类读位为 0 的非规范行时两者分叉——`>=` 说可读、位测试说不可读，症状是「列表里有、点进去
+读不了」。这种行 API 写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手改库；两侧一致由
 `tests/integration/sqlite/permission-visibility-consistency.test.ts` 对拍（含 `level = 2` /
 `5` / `6`）。
+
+**单节点读路径求的是级别位并集，不是 `MAX(level)`。** `PermissionRepository.maxLevel` 把命中
+的 allow 行逐行 `granted |= level`，再把结果交给 `domain/acl.ts` 的 `levelSatisfies` 做位测试。
+`MAX` 只在规范级别 1 / 3 / 7 上等于并集：同一个节点上有 `{user:bob = 1, group:eng = 4}` 时
+`MAX` 取 4、读位是 0，而 `readableUris` 会因为 bob 那一行读位为真而放行——`check` 与检索的
+可见集合必然分叉。位并集保留每个位，在规范数据上与 `MAX` 同值，在非规范组合下与列表路径同
+结论。这类非规范行同样写不出来（`isAclLevel` 只认 1 / 3 / 7），只可能来自手改库；并集是让读
+路径与列表路径给出同一答案的那个定义，不是为「让非规范数据变得可读」而放宽判据。
 
 **`effect` 列不能省，否则 deny 在检索路径上完全失效。** 链式求值（§12.2）是正确的，但检索走的是物化表。只有 `level` 的话，`restricted` 节点上「`user:* = allow read` + `user:alice = deny`」会物化成一行 `(N, 'user:*', 1)`，alice 命中通配行就读到了本该被拒绝的节点——跨用户越权，而且不报错。
 
@@ -1118,7 +1152,7 @@ export interface RetrievalIndex {
 
 **时间边界是闭区间，且先归一化再比较。** `updatedAfter` / `updatedBefore` 收 ISO 8601 绝对时刻；`node.updated_at` 一律由 `Date#toISOString()` 写入（定长、带 `Z`），所以过滤边界也要归一化成同一形态（`canonicalInstant`），带时区偏移的输入（`2026-11-08T08:00:00+08:00`）才不会被按字符串比较。区间为空（`updatedAfter` 晚于 `updatedBefore`）在进 SQL 之前报 `INVALID_ARGUMENT`。自然语言日期解析不在这一层，也不在当前接口里。
 
-**向量检索的候选集同样在 SQL 里过滤。** `vec0` 的输入是候选 URI 列表：`services/search.ts` 的 `#readableUris` 用 `GlobQuery` 枚举「路径 + 权限 + 上面三个过滤维度」之后的 URI，再交给 `SqliteVectorIndex.search`。因此 `hybrid` 的 RRF 融合发生在两路都已过滤之后——不是先融合、再截断、最后筛。`GlobQuery` 因此也带可选的 `memoryTypes` / `updatedAfter` / `updatedBefore`，它们只为向量候选集枚举存在，MCP / HTTP 的 `glob` 面不暴露。
+**向量检索的候选集同样在 SQL 里过滤。** `vec0` 的输入是候选 URI 列表：`services/retrieval/arms.ts` 的 `#readableUris` 用 `GlobQuery` 枚举「路径 + 权限 + 上面三个过滤维度」之后的 URI，再交给 `SqliteVectorIndex.search`。因此 `hybrid` 的 RRF 融合发生在两路都已过滤之后——不是先融合、再截断、最后筛。`GlobQuery` 因此也带可选的 `memoryTypes` / `updatedAfter` / `updatedBefore`，它们只为向量候选集枚举存在，MCP / HTTP 的 `glob` 面不暴露。
 
 `principals` 由 `Authorizer` 统一算好传进来，FTS5 实现和向量实现共用同一套权限谓词。
 
@@ -1133,7 +1167,7 @@ export interface RetrievalIndex {
 | `grep` | 正则 + 路径范围 | 行级命中，带行号与前后文 | 否 |
 | `glob` | 路径通配 | 文件 URI 列表 | 否 |
 
-**默认条数。** `find` / `search` / `grep` 默认返回 10 条，常量是 `src/services/search.ts` 的 `DEFAULT_SEARCH_LIMIT`，HTTP 的 `/search/*` 与 MCP 三个工具共用同一个值——各写一份（曾经是 MCP 10 / HTTP 20）会让同一个能力按调用方式返回不同规模。值定义在服务层而不是 `api/`：`services/` 不能 import `api/`（§4.2），而服务层的 `resolveLimit` 与两个入口的默认值必须是同一个数。`src/api/search-defaults.ts` 只是 `export { DEFAULT_SEARCH_LIMIT } from '../services/search.js'`，给 api 层一个稳定的导入路径，api 内部不必直接指向服务层文件。`glob` 默认 100 条，两个入口也一致，但用的是各自的常数（MCP 仍叫 `nodeLimit`）。
+**默认条数。** `find` / `search` / `grep` 默认返回 10 条，常量是 `src/services/retrieval/budget.ts` 的 `DEFAULT_SEARCH_LIMIT`（`src/services/search.ts` 只做转出），HTTP 的 `/search/*` 与 MCP 三个工具共用同一个值——各写一份（曾经是 MCP 10 / HTTP 20）会让同一个能力按调用方式返回不同规模。值定义在服务层而不是 `api/`：`services/` 不能 import `api/`（§4.2），而服务层的 `resolveLimit` 与两个入口的默认值必须是同一个数。`src/api/search-defaults.ts` 只是 `export { DEFAULT_SEARCH_LIMIT } from '../services/search.js'`，给 api 层一个稳定的导入路径，api 内部不必直接指向服务层文件。`glob` 默认 100 条，两个入口也一致，但用的是各自的常数（MCP 仍叫 `nodeLimit`）。
 
 **`search` 与 `find` 的差别只有一条：`search` 在检索之前先问模型「这句话该拆成哪几个查询」。** 没有这一条，两个面就是同一份实现套两个名字。
 
@@ -1207,7 +1241,7 @@ score(d) = Σ_retriever levelWeight(level_d) / (k + rank_retriever(d))
 
 RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF（`1.0 * x === x`）。
 
-单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎是 `fts5`**（`src/config/schema.ts:165` 的 `engine` 默认值），只给单引擎加权的实现会在切到 `hybrid` 时让配置项失效。
+单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎是 `fts5`**（`engine` 默认值写在 `src/config/schema.ts:182`），只给单引擎加权的实现会在切到 `hybrid` 时让配置项失效。
 
 **重排之后先验仍然保留**（§18 的「重排的实际语义」）：模型分替换的是相关性判断，不是层级先验。不保留时 `hybrid + rerank` 下层级权重只在「模型没给分」的尾部候选上生效。
 
@@ -1247,7 +1281,7 @@ L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` �
 
 | 层 | 位置 | 键 | 作用 |
 |---|---|---|---|
-| 命中列表 | `find` 的 `#rank`（`services/search.ts`）、`search` 的 `mergeHits` | `(uri, abstract)` / `uri` | 不把同一句摘要返回两遍，也不让重复行占掉 `limit` 名额 |
+| 命中列表 | `find` 的 `rankHits`（`services/retrieval/merge.ts`）、`search` 的 `mergeHits` | `(uri, abstract)` / `uri` | 不把同一句摘要返回两遍，也不让重复行占掉 `limit` 名额 |
 | 上下文组装 | `ranking.dedupeByRenderedText`（`domain/assembly.ts`） | 渲染后的正文 | 纯逻辑兜底：即使上游给出两条，也只投一条 |
 
 `(uri, abstract)` 而不是 `uri`：同一个 URI 的两行**如果**携带不同摘要（将来的其他层级
@@ -1977,6 +2011,23 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
   （§11.11）
 - 其余类型直接 `active`
 
+**`status` 键存在但值非法 = 不可解析的记忆。** `domain/node.ts` 的 `parseStatusField(raw)`
+分三档：键**缺失** → `active`（兼容没有这个键的历史文件）；合法值 → 照抄；**存在但非法**
+（`status:` 空值、`status: Archived`、布尔或数字）→ 文档损坏。第三档不是「没有状态」：
+猜一个值等于让一次手误绕过复核闸门（写成 `Archived` 的 `pending` 记忆会被读成
+`active`）。各层的结论：
+
+- 内容层：`parseMemoryDocument` 返回 `null`，`memory.read` 得 `null`，`listPending`
+  不含它（`services/memory/document.ts`、`services/memory/query.ts`）。
+- 索引层：`IndexObserver` 与 `pnpm reindex` 把它落成 `memory_type = NULL` +
+  `status = 'active'` 并记一条 `warn`，**不保留索引里的旧值**——旧 `memory_type` 与旧
+  `status` 一起作废。保留旧值会让索引与文件永久分叉：文件读不出来，`find` 却仍按上次
+  的 `pending` / `active` 返回它。
+
+**两侧的结论刻意不同。** 检索路径按「磁盘上有什么」工作，所以 `find` 仍能命中它（文件
+存在、索引行是 `active`）；内容层按「是不是一条可解析的记忆」工作，所以读不到。`find`
+的契约是「这里有东西」，`read` 的契约是「这是一条记忆」。
+
 ### 11.7 记忆 TTL 与过期清扫
 
 记忆有存活时间，判据是**最后一次被使用**，不是写入时间：一条记忆在
@@ -1989,11 +2040,11 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 「被模型引用」——后者不可观测（模型有没有在回答里用上一条注入的记忆，服务端拿不到
 证据），不追求。
 
-| 路径 | 进入调用方上下文的部分 | 记不记 | 实现点（`src/services/search.ts` / `filesystem.ts`） |
+| 路径 | 进入调用方上下文的部分 | 记不记 | 实现点（`src/services/retrieval/delivery.ts` / `filesystem.ts`） |
 |---|---|---|---|
-| `find` | 返回的命中列表 | 记 | `findWithDiagnostics` 里的 `#recordHits(outcome.hits)` |
-| `search` `mode=list` | 合并去重后的命中列表 | 记 | `search()` 在 `mergeHits` 之后 `#recordHits(hits)` |
-| `search` `mode=context` | 组装后注入块里的条目（`AssemblyResult.items`） | **只记这些** | `contextWithDiagnostics` 在 `assemble` 之后 `#recordHits(result.items)` |
+| `find` | 返回的命中列表 | 记 | `findWithDiagnostics` 里的 `DeliveryService.recordHits(outcome.hits)` |
+| `search` `mode=list` | 合并去重后的命中列表 | 记 | `search()` 在 `mergeHits` 之后 `recordHits(hits)` |
+| `search` `mode=context` | 组装后注入块里的条目（`AssemblyResult.items`） | **只记这些** | `contextWithDiagnostics` 在 `assemble` 之后 `recordHits(result.items)` |
 | `rule_search` | 返回的规则列表 | 记 | 走 `findWithDiagnostics`，同一处 |
 | `read` | 读到的正文 | 记 | `FileSystemService.read` → `#touchAccess` |
 | `grep` / `glob` / `list` / `tree` / `stat` | 文件名 / 行匹配 / 目录结构 | 不记 | 无记账点 |
@@ -2016,8 +2067,8 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 是刻意的：TTL 问「这条记忆还有没有被用到」，账本问「下一轮还用不用再发」。
 
 **`rule_search` 有一处同类的残余。** 它的相对阈值（默认 0.65）在工具层生效
-（`src/api/mcp/tools/rule-search.ts:89`），而记账发生在服务层的 `findWithDiagnostics`：
-被阈值裁掉、没进返回文本的规则也会记一次。上界是 `RULE_LIMIT`（5）条，且被裁掉的规则不会
+（`src/api/mcp/tools/rule-search.ts:89`），而记账发生在服务层的 `findWithDiagnostics`
+（`services/retrieval/service.ts`）：被阈值裁掉、没进返回文本的规则也会记一次。上界是 `RULE_LIMIT`（5）条，且被裁掉的规则不会
 再随后的 `read` 续一次，量级可以接受；要消掉它得给 `find` 加一个「不记账」的入口，
 那是一个只为工具层服务的开关，不值。
 
@@ -2096,9 +2147,16 @@ agent 忘掉自己是谁、忘掉用户是谁、忘掉约定；TTL 要清理的�
 SQL 里不出现字面量列表）。不做配置项：哪些类型承载身份是记忆模型的语义，不是部署
 偏好，做成配置只会多一个「配错之后 agent 忘了自己是谁」的入口（§6）。
 
-类型从 `node.memory_type` 取。`memory_type` 为 `NULL` 的行（目录行、frontmatter
-读不出类型的历史行）**不豁免**：它们不是「未知所以不敢动」的对象——第一段只改
-`status`，可逆；留成永不过期才会让 TTL 失去意义。
+类型从 `node.memory_type` 取。**没有 `memory_type` 的文档不进 TTL。** 第一段（软归档）的
+候选集带 `AND (kind = 'directory' OR memory_type IS NOT NULL)`，第二段（物理删除）带
+`AND memory_type IS NOT NULL`（`src/adapters/sqlite/node-repository.ts` 的 `sweepExpired`
+与 `selectPurgeable`）。**TTL 是记忆的回收站，不是文件系统的回收站**：`memories/**` 下手工
+放的、没有 frontmatter / `memory_type` 的 Markdown 不再被归档或删除，仍然是 `active`，仍然能
+被 `find` 命中。存量部署里若原来靠 TTL 回收这类文件，现在需要人工清理——已经归档的这类行
+也不会被第二段清掉（`memory_type = NULL` 不入选），同样只能人工处理。这是刻意的口径，
+不是遗漏。目录节点仍按原行为参与第一段（软归档），`.history` 子树例外（§11.11）。
+
+`memory_type` 非空的四类豁免见上；没有类型的行同样不在候选集里，谈不上「豁免」。
 
 **只对 `context_type = 'memory'` 生效。** `memory.ttl` 描述记忆的存活时间，
 `resources` / `skills` 不参与。
@@ -2619,7 +2677,7 @@ MCP 契约变更。`links` 不是「读这条记忆的正文」的一部分—�
 
 **覆盖写不销毁旧值。** `upsertMemory` 在三个条件同时成立时，把磁盘上的旧文档**原样**
 写成一份版本文件：旧文档 `status = 'active'`、记忆类型的 `operationMode` 是 `upsert`、
-正文真的变了（`src/services/memory.ts` 的 `contentChanged` 与 `snapshot` 判据）。快照放在
+正文真的变了（`src/services/memory/service.ts` 的 `contentChanged` 与 `snapshot` 判据）。快照放在
 记忆类型目录下的 `.history/`，路径镜像 identity 的相对路径：
 
 ```
@@ -2638,21 +2696,29 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 **正文没变不写快照。** 同一份正文再写一遍（重放、补 `sources`）没有旧值可丢，快照只会
 凭空多出几份一样的文件。`addOnly` 类型（`events`）不允许覆盖写，不会走到这里。`pending`
 旧值同样不快照——`pending` 不是有效值，没有「正确的旧值」可回退；但新文档**继承**它的
-`supersedes`（`src/services/memory.ts:1034`），否则拒绝一次基于 `pending` 的覆盖写会丢掉
+`supersedes`（`src/services/memory/service.ts`），否则拒绝一次基于 `pending` 的覆盖写会丢掉
 上一条有效版本的指向。
 
-**每个 identity 只留最新 5 份**（`MAX_VERSIONS`，`src/services/memory.ts:350`）。来源是
+**每个 identity 只留最新 5 份**（`MAX_VERSIONS`，`src/services/memory/versioning.ts`）。来源是
 经验假设：「回到上一次正确值」的粒度是上一次覆盖写，5 步够覆盖连续几次错误写入，同时把
 每个 identity 的历史占用固定在 5 份以内（一份与规范文件同量级）。**版本文件不参与 TTL**：
-清扫的两条 SQL 都带 `NOT_VERSION_FILE_SQL`（`src/adapters/sqlite/node-repository.ts:117`，
-`uri NOT GLOB '*/memories/*/[.]history/*'`），第一段不归档它们、第二段也不物理删除它们，
-所以 `memory.ttl.defaultDays` / `retentionDays` 配成什么都动不到 `.history`。磁盘有界只靠
-这次截断——它也是版本文件唯一的删除点。截断失败只记 `warn`：写盘已经成功，下一轮覆盖写会
-再试一次。
+清扫的两条 SQL 都带 `NOT_VERSION_FILE_SQL`（`src/adapters/sqlite/node-repository.ts`），
+第一段不归档它们、第二段也不物理删除它们，所以 `memory.ttl.defaultDays` / `retentionDays`
+配成什么都动不到 `.history`。磁盘有界只靠这次截断——它也是版本文件唯一的删除点。截断失败
+只记 `warn`：写盘已经成功，下一轮覆盖写会再试一次。
+
+**`NOT_VERSION_FILE_SQL` 是两条 GLOB，不是一条。** 它要求 URI 既不匹配
+`*/memories/*/[.]history`，也不匹配 `*/memories/*/[.]history/*`。只写带 `/*` 的那一条会漏掉
+目录节点自身（`memories/preferences/.history`）：它在 `.history` 后面没有字符，而 `/*` 要求
+至少一个 `/` 加内容。漏掉它的后果是 `pnpm reindex` 为目录建的那一行（`memory_type = NULL`、
+`status = 'active'`）被第一段当成过期记忆归档，而路径工具按 `status = 'active'` 取节点，
+`.history` 目录从此在 `list` / `tree` 里消失，磁盘上却还在。判定按路径段、不看子串：
+`memories/preferences/.history.md` 是同一目录下的一条普通记忆文件（`.history` 不是路径段），
+必须照常过期，所以两条 GLOB 都要求 `.history` 两侧是 `/`。
 
 **`approve` 保留三个键。** 复核通过也是一次完整重写，`sources` 与 `valid_from` /
-`valid_until` / `supersedes` 都原样带过来（`src/services/memory.ts` 的 `approve`，`:1206`
-起）；通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
+`valid_until` / `supersedes` 都原样带过来（`src/services/memory/review.ts` 的
+`approveMemory`）；通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
 
 **`reject` 先回退，回退不了才删。** `reject` 读当前文件的 `supersedes`：是合法 URI、
 指向的文件存在、且能读出记忆类型时，把那份版本写回规范 URI 并清掉 `valid_until`（它现在
@@ -2660,14 +2726,15 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 `updated_at`，也不再过一次复核闸门（那个版本本来就是 `active`）。版本文件本身留在
 `.history`，`valid_until` 仍非空，检索看不到它。`supersedes` 为空、不是合法 URI、文件
 不存在、类型读不出来时，维持原来的行为：删掉 pending 文件。`supersedes` 为空没有目标，
-不记 warn；另外三种失败各记一条 `warn`（`src/services/memory.ts` 的
-`#restoreSuperseded`，`:1308` 起）。
+不记 warn；另外三种失败各记一条 `warn`（`src/services/memory/versioning.ts` 的
+`restoreSuperseded`）。版本文件本身也按同一口径解析：手改成非法 `status` 后它读不出来，
+恢复目标随之消失，`reject` 退回删除（日志里表现为「指向的文件不存在」）。
 
 **HTTP 出口如实报告终态。** `POST /memories/{uri}/reject` 回 `{ uri, outcome, reason }`，
 `outcome` 是 `'restored' | 'removed'`：`restored` 时另带 `restoredFrom`（被写回的那份
 版本文件的 URI），`removed` 时没有这个键。不合并成 `{ removed: true }`——恢复时没有删除
 任何东西，两个终态对用户是相反的结论，一个布尔会让恢复看起来像删除
-（`src/services/memory.ts:171` 的 `MemoryRejectResult`）。
+（`src/services/memory/review.ts` 的 `MemoryRejectResult`）。
 
 **`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
 覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
@@ -2992,7 +3059,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 
 **`write` / `add_resource` 没有 `wait` 参数。** 写入是同步完成的：`write` 返回时文件、索引与物化权限已经写完，`add_resource` 返回时整批文件已落盘。原先的 `wait` 只被写进日志、不改变行为，所以删掉了——一个不改变行为的布尔参数会让调用方以为存在可以等的异步路径。
 
-**`write`（MCP）与 `POST /content/write`（HTTP）不丢 frontmatter，丢的是提交语义。** MCP `write` 的 `replace` / `append` 与 HTTP `POST /content/write` 都走 `ContentStore.writeText`：不传 `frontmatter` 时它保留磁盘上现有的 frontmatter，只替换正文（键、值与类型语义保留；YAML 会按统一格式重新序列化，注释、引号与流式数组写法会归一化——语义保留，字节不保证）。这两条路径绕过 `MemoryService`，因此跳过的是补丁合并、复核状态流转、`sources` 的追加与去重、字段类型校验，以及 **`addOnly` 类型（如 `events`）的既有文件保护**——记忆写入点（`services/memory.ts` 的 `upsertMemory`）对 `addOnly` 类型的既有文件抛 `ALREADY_EXISTS`，`write` 直接覆盖。一条记忆被 `write` 改过正文后仍然是一条记忆，`memory_type` / `status` 都还在，但**这次改动没有溯源**（`sources` 不追加），也**没有经过复核**；对 `events` 这类记忆，覆盖写等于改写「已经发生过的事」，被覆盖的正文没有第二份副本可以核对。想定点改一条记忆的正文，目前**没有既保提交语义的入口**：`edit`（文本级 patch）能改正文、保住 frontmatter（索引与父目录摘要照常失效重算），在**提交语义**上它与 `write` 一样：都不追加 `sources`、不经复核、不做字段类型校验；差别在**正文改法**（`edit` 是行级 patch，`write` 是整份替换）与**是否重写 frontmatter**（`edit` 不重写），所以 `edit` 不是「语义安全」的写入路径。`remember` 提交的是会话，由抽取决定改哪条记忆，不能指名。要连提交语义一起保留，只能走记忆抽取 / 合并那条链路，由系统决定写什么，而不是直接改。`create` 模式在目标已存在时抛 `ALREADY_EXISTS`，不会覆盖。
+**`write`（MCP）与 `POST /content/write`（HTTP）不丢 frontmatter，丢的是提交语义。** MCP `write` 的 `replace` / `append` 与 HTTP `POST /content/write` 都走 `ContentStore.writeText`：不传 `frontmatter` 时它保留磁盘上现有的 frontmatter，只替换正文（键、值与类型语义保留；YAML 会按统一格式重新序列化，注释、引号与流式数组写法会归一化——语义保留，字节不保证）。这两条路径绕过 `MemoryService`，因此跳过的是补丁合并、复核状态流转、`sources` 的追加与去重、字段类型校验，以及 **`addOnly` 类型（如 `events`）的既有文件保护**——记忆写入点（`services/memory/service.ts` 的 `upsertMemory`）对 `addOnly` 类型的既有文件抛 `ALREADY_EXISTS`，`write` 直接覆盖。一条记忆被 `write` 改过正文后仍然是一条记忆，`memory_type` / `status` 都还在，但**这次改动没有溯源**（`sources` 不追加），也**没有经过复核**；对 `events` 这类记忆，覆盖写等于改写「已经发生过的事」，被覆盖的正文没有第二份副本可以核对。想定点改一条记忆的正文，目前**没有既保提交语义的入口**：`edit`（文本级 patch）能改正文、保住 frontmatter（索引与父目录摘要照常失效重算），在**提交语义**上它与 `write` 一样：都不追加 `sources`、不经复核、不做字段类型校验；差别在**正文改法**（`edit` 是行级 patch，`write` 是整份替换）与**是否重写 frontmatter**（`edit` 不重写），所以 `edit` 不是「语义安全」的写入路径。`remember` 提交的是会话，由抽取决定改哪条记忆，不能指名。要连提交语义一起保留，只能走记忆抽取 / 合并那条链路，由系统决定写什么，而不是直接改。`create` 模式在目标已存在时抛 `ALREADY_EXISTS`，不会覆盖。
 
 **检索分数的可比范围。** `find` / `search` 返回的分数只在**同一次检索的同一个引擎内**可比：`fts5` 是取负的 bm25，`vector` 是余弦（`[-1, 1]`），`hybrid` 是 RRF 融合分（`Σ levelWeight / (60 + rank)`，上限约 `2/61 ≈ 0.033`）。三种量纲不同，任何绝对阈值跨引擎都不可比。`rule_search` 的 `threshold` 因此是**相对于本次最高分**的比例（`score >= topScore × threshold`），不是绝对分数下限；默认 `0.65` 表示「只保留与最佳规则差距不到 35% 的」。Hook 的 `recallScoreThreshold` 是同一个语义（§15.9）。
 
@@ -3041,7 +3108,7 @@ interface AddResourceInput {
 
 **每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「不读模型就不该限时」，而是 30 秒是检索路径的推导值，对不调模型、只查索引与读盘的操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
 
-30000 是**推导值**：MCP 检索路径的三段上游预算之和是 10000（意图分析）+ 6000（查询嵌入）+ 12000（重排）= 28000 毫秒，留 2000 给本地索引、ACL 与序列化。三段预算的来源见 `services/search.ts` 的 `REWRITE_TIMEOUT_MS` / `QUERY_EMBED_TIMEOUT_MS` / `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
+30000 是**推导值**：MCP 检索路径的三段上游预算之和是 10000（意图分析）+ 6000（查询嵌入）+ 12000（重排）= 28000 毫秒，留 2000 给本地索引、ACL 与序列化。三段预算的来源见 `services/retrieval/intent.ts` 的 `REWRITE_TIMEOUT_MS`、`services/retrieval/arms.ts` 的 `QUERY_EMBED_TIMEOUT_MS`、`services/retrieval/rerank.ts` 的 `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
 
 **这一层兜的是「上游预算本身失效」。** 没有它时 16 个工具没有任何工具级上限：`find` / `search` / `rule_search` 会一直等供应商返回，`search` 的最坏等待约 91 秒——意图分析 3 次重试 × 10 秒，查询嵌入与重排各 30 秒（5 路 `find` 并行，嵌入不叠加）。`providers.*.timeoutSeconds` 只校验正数（`src/config/schema.ts` 里都是 `positive()`），写 3600 也合法，因此那种配置下的最坏等待不封顶。宿主看到的现象是 agent 卡住，用户看不出卡在哪一环。
 
@@ -3051,7 +3118,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 **只停止等待，不取消在途调用。** `runWithDeadline` 用 `Promise.race` 加一个 `unref()` 的定时器；到点后调用方不再等，上游能不能立刻停下是上游契约的事——工具层不假设每个上游都正确响应 `AbortSignal`。
 
-**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由都把 `deadlineAt` 传给 `SearchService`，只在传了它的路径上收窄上游预算（Hook 不传，行为不变）：每个上游的预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析另按「最多用剩余的一半」收窄（`services/search.ts` 的 `remainingBudget` 与 `#analyze`）。provider 侧把这个预算当**上限**（`min(配置 timeoutSeconds × 1000, timeoutMs)`），预算到点时由 `AbortController` 真正中止在途 HTTP，不是等它跑完再丢弃结果（§19）；总上限本身只停止等待，不取消在途调用（`api/deadline.ts` 的文件头）。预留这份余量的目的是让降级先于总上限失败发生：两者同时到点时谁先返回取决于定时器顺序，降级路径可能输给总上限，把一次本可以返回 FTS 结果的检索变成错误。LLM 另传 `AbortSignal`——后者让 `LlmService` 在第一次超时后不再打剩下两次（`services/llm.ts` 的 `options?.abortSignal?.aborted !== true`）。
+**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由都把 `deadlineAt` 传给 `SearchService`，只在传了它的路径上收窄上游预算（Hook 不传，行为不变）：每个上游的预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析另按「最多用剩余的一半」收窄（`services/retrieval/budget.ts` 的 `remainingBudget` 与 `services/retrieval/intent.ts` 的 `analyze`）。provider 侧把这个预算当**上限**（`min(配置 timeoutSeconds × 1000, timeoutMs)`），预算到点时由 `AbortController` 真正中止在途 HTTP，不是等它跑完再丢弃结果（§19）；总上限本身只停止等待，不取消在途调用（`api/deadline.ts` 的文件头）。预留这份余量的目的是让降级先于总上限失败发生：两者同时到点时谁先返回取决于定时器顺序，降级路径可能输给总上限，把一次本可以返回 FTS 结果的检索变成错误。LLM 另传 `AbortSignal`——后者让 `LlmService` 在第一次超时后不再打剩下两次（`services/llm.ts` 的 `options?.abortSignal?.aborted !== true`）。
 
 `find` / `rule_search` / `search`（`mode=context`）在 `degradation` 或 `rerankFailure` 非空时，于命中列表后追加 `Degraded:` 行：
 
@@ -3665,7 +3732,7 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 
 **「一项统计失败」不算服务故障。** MCP 的 `health` 数不到索引时记 `degraded`，并把 `index.visibleNodes` 写成 `unavailable`（不是 `0`）：`0` 会被读成「库里什么都没有」。HTTP 侧拿不到 `ObservabilityService.health()` 时直接返回 500 错误封套。两种返回形态不同，但都不把「统计失败」升级成第三种 `status`——那会让监控里「服务坏了」与「一项计数失败」变成同一件事。
 
-**MCP 工具侧的降级另有一条出口。** 向量与重排在单次工具调用里降级时，`find` / `search` / `rule_search` 直接把 `Degraded:` 行写进本次结果（§13.3），调用方当场就知道这批结果缺了哪一路，不必等上线采样 `/health`。两条出口不矛盾：`Degraded` 行回答「这次结果缺了什么」，`rerank.degraded` 回答「服务现在是否健康」。重排失败会同时出现在两边，恢复后行消失、`rerank.degraded` 也跟着变回 `false`（`services/search.ts` 在成功一次后清空 `#rerankLastFailure`）；向量不可用只在结果行里出现，`/health` 没有对应的嵌入字段。
+**MCP 工具侧的降级另有一条出口。** 向量与重排在单次工具调用里降级时，`find` / `search` / `rule_search` 直接把 `Degraded:` 行写进本次结果（§13.3），调用方当场就知道这批结果缺了哪一路，不必等上线采样 `/health`。两条出口不矛盾：`Degraded` 行回答「这次结果缺了什么」，`rerank.degraded` 回答「服务现在是否健康」。重排失败会同时出现在两边，恢复后行消失、`rerank.degraded` 也跟着变回 `false`（`services/retrieval/rerank.ts` 在成功一次后清空 `#lastFailure`）；向量不可用只在结果行里出现，`/health` 没有对应的嵌入字段。
 
 ### 17.10 控制台「监控」页
 
@@ -3816,7 +3883,7 @@ task:
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
 
-**`server.subject` 是 `auth.enabled: false` 时的绑定身份，不是认证配置。** 认证关闭时每个请求的 `x-comem-subject` 必须与它一致，否则 401；`Authorizer` 收的是每请求的 `principals`，但这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container.ts` 的 `resolveIdentityOf`）。打开 `auth.enabled` 后身份来自凭据，每个请求独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
+**`server.subject` 是 `auth.enabled: false` 时的绑定身份，不是认证配置。** 认证关闭时每个请求的 `x-comem-subject` 必须与它一致，否则 401；`Authorizer` 收的是每请求的 `principals`，但这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container/api.ts` 的 `resolveIdentityOf`）。打开 `auth.enabled` 后身份来自凭据，每个请求独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
 
 **控制台跟随这个值，不重复配置。** `GET /health` 返回 `subject` 与 `scopes`（§17.9），控制台启动时拉一次，用 `subject` 拼请求头。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改 `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
 
@@ -3926,10 +3993,10 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 引用了定义外的变量（拼写错误）、模板需要的变量没有传。第三条是「代码少传了」的失败——
 渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
 
-**渲染器是进程级绑定。** 提示词的调用点有四个（`services/search.ts`、`services/summary.ts`、
+**渲染器是进程级绑定。** 提示词的调用点有四个（`services/retrieval/intent.ts`、`services/summary.ts`、
 `services/commit/steps/memory-extract.ts`、`services/commit/steps/experience-distill.ts`，
 每处渲染一对系统 / 用户提示词），这些文件不在本 wave 的文件所有权内，而
-`REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
+`REWRITE_SYSTEM_PROMPT` 在 `retrieval/intent.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
 没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入
 渲染路径。**这是为「不改别人的文件」付的代价**：下一个 wave 把 `PromptService` 注入
 `SearchServiceDeps` / `MemoryExtractStepDeps` / `LlmSummarizer` 之后，这个文件应当删掉。
@@ -4019,6 +4086,13 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 | 可观测性 | `request_log.phases` 落服务端可测的阶段（`recall` / `capture`），阶段之和不超过总耗时、差额即未归因间隙；`requestId` 从 HTTP 贯穿到后台任务与日志；`/metrics` 输出能被 Prometheus 解析 |
 
 测试在本地跑。核心链路测试用 `fs.mkdtemp()` 造临时数据根、用 SQLite `:memory:` 造索引，不需要内存替身（AGENTS.md §9）。
+
+**门禁一条链，`pnpm verify` 串完。** 顺序是 `typecheck → lint → check:config →
+check:reachability → check:shape → build:web → test → test:integrations`（`package.json`
+的 `verify`）。`check:shape`（`scripts/check-shape.ts`）是结构 ratchet：单文件行数、函数体
+> 120 行的个数、`src/` 总行数、禁用指令与 `any` 计数都只能降；基线在
+`scripts/shape-baseline.json`，更新要显式跑 `--update-baseline`，且拒绝任何让上限变大的
+写入。各项口径与残余见 `docs/operations.md`「形状检查」。
 
 **同一算法的两份实现靠测试对拍。** `domain/` 不能 import `adapters/`，所以保留名集合有两份副本：`domain/identity.ts` 的 `URI_RESERVED_NAMES` 管根标识，`adapters/fs/path.ts` 的 `RESERVED_NAMES` 管 URI 路径段；`tests/unit/domain/identity.test.ts` 与 `tests/integration/fs/path.test.ts` 对同一批候选名断言两边判定相同。曾经还有一对 UTF-8 字节计数实现（`domain/node.ts` 的手写编码区间版与 `services/resource.ts` 的 `Buffer.byteLength` 版），前者唯一的消费者是已删除的 `Document.size`，两份实现与对拍测试一起删掉，现在只剩 `services/resource.ts` 一份。
 
