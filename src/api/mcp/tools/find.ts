@@ -5,6 +5,8 @@
  * 一次检索只会更慢，而且 `read` 的报错更直接。
  */
 
+import { LEVELS } from '../../../domain/level.js';
+import { CONTEXT_TYPES } from '../../../domain/node.js';
 import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
 
 import {
@@ -36,10 +38,10 @@ export const findTool: McpToolDefinition = {
         description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
       },
       limit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT, description: '最多返回条数' },
-      level: { type: 'string', enum: ['L0', 'L1', 'L2'], description: '只看某一层级' },
+      level: { type: 'string', enum: LEVELS, description: '只看某一层级' },
       contextType: {
         type: 'string',
-        enum: ['memory', 'resource', 'skill', 'session'],
+        enum: CONTEXT_TYPES,
         description: '只看某类上下文',
       },
       memoryTypes: {

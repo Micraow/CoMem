@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { toDiskPath } from '../adapters/fs/path.js';
-import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../domain/archive.js';
+import type { ArchiveMeta, CommitStepName, MemoryDiff, MemoryOperationsFile } from '../domain/archive.js';
 import { isMemoryDiff, isMemoryOperationsFile } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
@@ -70,7 +70,7 @@ export interface ArchivePortsDeps {
    * 重放的依据，`task.steps_done` 让「卡在第几步」能直接 SQL 查出来而不用去翻
    * 每个归档目录。不接这个回调，任务行的 `steps_done` 永远是空的。
    */
-  readonly onStepsChanged?: (steps: readonly string[]) => void;
+  readonly onStepsChanged?: (steps: readonly CommitStepName[]) => void;
 }
 
 /** `MemoryMergeStepDeps.archive` / `MemoryExtractStepDeps.archive` 的形状（归档产物）。 */

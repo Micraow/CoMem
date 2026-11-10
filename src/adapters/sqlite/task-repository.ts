@@ -23,7 +23,14 @@ import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
-import type { TaskStatus, TaskType } from '../../domain/task.js';
+import {
+  isClaimableTaskStatus,
+  isTaskStatus,
+  isTaskType,
+  type ClaimableTaskStatus,
+  type TaskStatus,
+  type TaskType,
+} from '../../domain/task.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
@@ -41,6 +48,16 @@ export interface TaskRow {
   readonly error: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * `claimable()` 返回的行：`status` 已收缩到可认领集合。
+ *
+ * SQL 的 `WHERE` 只留下 `pending` 与「租约过期的 `running`」，所以返回类型如实写成
+ * `ClaimableTaskStatus`——`/tasks` 的消费方不需要为 `done` / `failed` 写分支。
+ */
+export interface ClaimableTaskRow extends Omit<TaskRow, 'status'> {
+  readonly status: ClaimableTaskStatus;
 }
 
 export interface TaskRepositoryDeps {
@@ -99,17 +116,45 @@ function parseStepsDone(raw: string, taskId: string): readonly string[] {
 }
 
 /**
+ * 数据库里的 `status` → 领域状态。
+ *
+ * 旧写法是 `text(row['status']) as TaskStatus`：一个被改坏的值会带着假的类型一路
+ * 走到 `/tasks` 与重试判定里。写入路径只接受领域类型，所以走到这里的非法值说明
+ * 表被改坏了，按 `INTERNAL` 报出去。
+ */
+function requireTaskStatus(value: string): TaskStatus {
+  if (!isTaskStatus(value)) {
+    throw new ComemError('INTERNAL', `任务状态不合法：${value}`, { status: value });
+  }
+  return value;
+}
+
+/**
+ * `type` 列的解析。
+ *
+ * 旧写法是 `text(row['type']) as TaskType`：`as` 让「表里有个类型不在联合里」这件事
+ * 不可见，那个值会被当成 `archive` 一路走到 `CommitRunner`。写入路径只接受
+ * `TaskType`，所以非法值说明表被改坏了。
+ */
+function requireTaskType(value: string): TaskType {
+  if (!isTaskType(value)) {
+    throw new ComemError('INTERNAL', `任务类型不合法：${value}`, { type: value });
+  }
+  return value;
+}
+
+/**
  * 数据库行 → `TaskRow`。
  *
- * `type` / `status` 用 `as` 收窄：写入路径只接受领域类型，表里出现的值一定是枚举
- * 成员；这里再写一遍校验只会给两个字段各加一个不可能走到的分支。
+ * `status` 走校验（见上），`type` 仍用 `as` 收窄：两者都只由写入路径赋值，但
+ * `status` 还要被 `/tasks` 的响应类型当成子集来用，多走一次校验才拿得到那个子集。
  */
 function toTaskRow(row: Record<string, SQLOutputValue>): TaskRow {
   const id = text(row['id']);
   return {
     id,
-    type: text(row['type']) as TaskType,
-    status: text(row['status']) as TaskStatus,
+    type: requireTaskType(text(row['type'])),
+    status: requireTaskStatus(text(row['status'])),
     payload: parseJsonColumn(text(row['payload']), 'payload', id),
     stepsDone: parseStepsDone(text(row['steps_done']), id),
     attempts: integer(row['attempts']),
@@ -118,6 +163,24 @@ function toTaskRow(row: Record<string, SQLOutputValue>): TaskRow {
     createdAt: text(row['created_at']),
     updatedAt: text(row['updated_at']),
   };
+}
+
+/**
+ * 数据库行 → `ClaimableTaskRow`。
+ *
+ * `WHERE` 只留下 `pending` 与租约过期的 `running`，所以这里的状态已经是子集；
+ * 还是过一遍守卫：`CLAIMABLE_TASK_STATUSES` 与那段 SQL 是两个独立写下的判据，
+ * 改其中一个忘了另一个时，这里报 `INTERNAL` 而不是把一个 `done` 任务交给调用方。
+ */
+function toClaimableTaskRow(row: Record<string, SQLOutputValue>): ClaimableTaskRow {
+  const task = toTaskRow(row);
+  if (!isClaimableTaskStatus(task.status)) {
+    throw new ComemError('INTERNAL', `可认领任务的状态不合法：${task.id}`, {
+      taskId: task.id,
+      status: task.status,
+    });
+  }
+  return { ...task, status: task.status };
 }
 
 function leaseUntilOf(now: Date, leaseSeconds: number): string {
@@ -309,7 +372,7 @@ export class TaskRepository {
    *
    * 升序是 FIFO：先建的任务先跑，归档序号与提交顺序才不会交叉。
    */
-  claimable(now: Date, limit: number): readonly TaskRow[] {
+  claimable(now: Date, limit: number): readonly ClaimableTaskRow[] {
     return this.#db
       .prepare(
         `SELECT ${TASK_COLUMNS} FROM task
@@ -319,7 +382,7 @@ export class TaskRepository {
           LIMIT ?`,
       )
       .all(now.toISOString(), limit)
-      .map(toTaskRow);
+      .map(toClaimableTaskRow);
   }
 
   countByStatus(status: TaskStatus): number {

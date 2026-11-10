@@ -30,12 +30,40 @@ export interface Principal {
   readonly id: string;
 }
 
-export type AclEffect = 'allow' | 'deny';
+/**
+ * 授权效果。
+ *
+ * 数组是唯一来源，类型从它派生：HTTP 的 `effect` 参数校验从它取。手抄一份时
+ * 加第三种效果（例如 `conditional`）不会编译失败，接口会继续拒绝它。
+ */
+export const ACL_EFFECTS = ['allow', 'deny'] as const;
+
+export type AclEffect = (typeof ACL_EFFECTS)[number];
 
 /** 权限级别（§12.1）：read = 1、write = 3、manage = 7，高位包含低位。 */
-export type AclLevel = 1 | 3 | 7;
+export const ACL_LEVELS = [1, 3, 7] as const;
 
-export type AclMode = 'inherit' | 'restricted';
+export type AclLevel = (typeof ACL_LEVELS)[number];
+
+/** 继承模式。数组是唯一来源，类型从它派生（HTTP 的 `mode` 参数校验从它取）。 */
+export const ACL_MODES = ['inherit', 'restricted'] as const;
+
+export type AclMode = (typeof ACL_MODES)[number];
+
+/** 级别守卫（`.acl.json` 与 HTTP 入参都是不可信输入）。 */
+export function isAclLevel(value: unknown): value is AclLevel {
+  return ACL_LEVELS.some((level) => level === value);
+}
+
+/** 效果守卫。 */
+export function isAclEffect(value: unknown): value is AclEffect {
+  return ACL_EFFECTS.some((effect) => effect === value);
+}
+
+/** 继承模式守卫。 */
+export function isAclMode(value: unknown): value is AclMode {
+  return ACL_MODES.some((mode) => mode === value);
+}
 
 export interface AclEntry {
   readonly principal: string;

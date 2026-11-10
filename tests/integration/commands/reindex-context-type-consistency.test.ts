@@ -23,7 +23,7 @@ import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { ReconcileLog } from '../../../src/adapters/fs/reconcile-log.js';
-import { NullLogger } from '../../../src/adapters/log/null.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';

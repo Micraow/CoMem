@@ -45,7 +45,7 @@ import {
 } from './middleware.js';
 
 /** 业务路由的统一前缀（§14）。 */
-export const API_PREFIX = '/api/v1';
+const API_PREFIX = '/api/v1';
 
 /** Prometheus 文本的 Content-Type（§17.1 的抓取格式）。 */
 export const PROMETHEUS_CONTENT_TYPE = 'text/plain; version=0.0.4; charset=utf-8';

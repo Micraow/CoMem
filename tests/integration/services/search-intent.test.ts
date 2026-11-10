@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
-import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider, type FakeResponse } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';

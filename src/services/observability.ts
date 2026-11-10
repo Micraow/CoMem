@@ -103,11 +103,30 @@ export interface ObservabilityDatabase {
  */
 export const NODE_SELF_ROW = "NOT (kind = 'directory' AND level = 'L1')";
 
+/**
+ * 这个阶段名是不是后台阶段。
+ *
+ * 写成 `.some()` 而不是 `ASYNC_PHASES.includes(name)`：元组式数组的 `includes`
+ * 要求入参就是联合类型，调用方得先断言——那等于在唯一一处判定上关掉类型检查。
+ */
+function isAsyncPhase(name: string): boolean {
+  return ASYNC_PHASES.some((phase) => phase === name);
+}
+
 /** §17.2 的四个阻塞阶段。名字与 `phase()` 的调用参数一致。 */
 const BLOCKING_PHASES: readonly string[] = ['processStart', 'recall', 'serialize', 'capture'];
 
-/** §17.2 表格里的后台阶段：归档、抽取、合并、摘要、经验归纳。不计入阻塞开销。 */
-const ASYNC_PHASES: readonly string[] = ['archive', 'extract', 'merge', 'summary', 'distill'];
+/**
+ * §17.2 表格里的后台阶段：归档、抽取、合并、摘要、经验归纳。不计入阻塞开销。
+ *
+ * 数组是唯一来源，类型从它派生：`CommitPipeline` 的 `STEP_PHASE`
+ * （`Record<CommitStepName, AsyncPhase>`）用它当值域。两边各写一份字面量时，给
+ * 提交管线加一步会多出一个阶段名，而 `#asyncPhases` 的求和与 `/metrics` 的输出
+ * 继续只认这五个——新步骤的耗时静默消失。
+ */
+const ASYNC_PHASES = ['archive', 'extract', 'merge', 'summary', 'distill'] as const;
+
+export type AsyncPhase = (typeof ASYNC_PHASES)[number];
 
 /**
  * `#attribute()` 的容差：0.5ms。
@@ -441,12 +460,12 @@ export class ObservabilityService {
       // `finally` 保证失败路径也记到耗时：慢请求和慢失败对归因同样重要。
       const elapsed = performance.now() - startedAt;
       // 后台阶段记进程级最近值：它不属于某个请求（见 `#asyncPhases` 的注释）。
-      if (ASYNC_PHASES.includes(name)) {
+      if (isAsyncPhase(name)) {
         this.#asyncPhases.set(name, elapsed);
       }
       const scope = this.#scope.getStore();
       if (scope === undefined) {
-        if (!ASYNC_PHASES.includes(name)) {
+        if (!isAsyncPhase(name)) {
           this.#logger.warn('阶段计时不在请求作用域里，已丢弃。', { phase: name });
         }
       } else {
@@ -623,7 +642,8 @@ export class ObservabilityService {
    *
    * 不对外公开：`health()` 的 `memory.profileFormat` 是唯一出口。曾经有过一个
    * 分析端点只为避开 `health()` 的目录摘要读盘而单独调它，那个端点已删——没有
-   * 第二个调用方就不留公开面（`pnpm check:orphans` 的口径）。
+   * 第二个调用方就不留公开面（`pnpm check:reachability` 的口径：导出符号必须在
+   * 入口可达的生产代码里被值引用）。
    */
   private async profileFormatHealth(): Promise<ProfileFormatHealth> {
     // 多取一行判断是否还有更多，避免再跑一次 COUNT。

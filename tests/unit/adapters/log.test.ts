@@ -5,7 +5,9 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ConsoleLogger, FileLogger, NullLogger } from '../../../src/adapters/log/index.js';
+import { ConsoleLogger } from '../../../src/adapters/log/console.js';
+import { FileLogger } from '../../../src/adapters/log/file.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 const FIXED_NOW = new Date('2026-11-08T00:00:00.000Z');

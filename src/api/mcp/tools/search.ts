@@ -10,8 +10,11 @@
  */
 
 import { ComemError } from '../../../domain/errors.js';
+import { LEVELS } from '../../../domain/level.js';
+import { CONTEXT_TYPES } from '../../../domain/node.js';
 import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
+import { isSearchMode, SEARCH_MODES, type SearchMode } from '../../search-mode.js';
 import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
 import {
   asRecord,
@@ -28,23 +31,18 @@ import {
   type McpToolDefinition,
 } from '../registry.js';
 
-/** `search` 的出参形态（§8.6）：`list` 是默认，`context` 返回可直接注入模型的文本。 */
-type SearchMode = 'list' | 'context';
-
-const SEARCH_MODES: readonly SearchMode[] = ['list', 'context'];
-
 function parseMode(value: string | undefined): SearchMode {
   if (value === undefined) {
     return 'list';
   }
-  const match = SEARCH_MODES.find((candidate) => candidate === value);
-  if (match === undefined) {
-    throw new ComemError('INVALID_ARGUMENT', `search 的 mode 只能是 list / context。`, {
-      tool: 'search',
-      mode: value,
-    });
+  if (!isSearchMode(value)) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      `search 的 mode 只能是 ${SEARCH_MODES.join(' / ')}。`,
+      { tool: 'search', mode: value },
+    );
   }
-  return match;
+  return value;
 }
 
 /**
@@ -109,8 +107,8 @@ export const searchTool: McpToolDefinition = {
         description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
       },
       limit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT },
-      level: { type: 'string', enum: ['L0', 'L1', 'L2'] },
-      contextType: { type: 'string', enum: ['memory', 'resource', 'skill', 'session'] },
+      level: { type: 'string', enum: LEVELS },
+      contextType: { type: 'string', enum: CONTEXT_TYPES },
       memoryTypes: {
         type: 'array',
         items: { type: 'string' },

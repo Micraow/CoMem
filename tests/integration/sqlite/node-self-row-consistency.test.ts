@@ -20,7 +20,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
-import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';

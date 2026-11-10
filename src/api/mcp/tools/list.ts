@@ -24,6 +24,7 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
+import { ComemError } from '../../../domain/errors.js';
 import { TRUNCATED_MARKER } from '../text.js';
 
 /** 递归列目录的深度上限。经验值：再深的目录树用户也不会逐条读。 */
@@ -46,6 +47,14 @@ function compareEntries(left: TreeEntry, right: TreeEntry, order: SortOrder): nu
       return left.size - right.size;
     case 'size_desc':
       return right.size - left.size;
+    default: {
+      // `SORT_ORDERS` 加一种排序时这一行编译失败。缺分支会让比较器返回
+      // `undefined`，`Array#sort` 把它当 0——排序静默变成「不动」。
+      const exhaustive: never = order;
+      throw new ComemError('INTERNAL', `未知的排序方式：${String(exhaustive)}`, {
+        sortBy: exhaustive,
+      });
+    }
   }
 }
 

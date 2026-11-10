@@ -93,6 +93,7 @@ import {
   assertOwnerUserId,
   effectiveAcl,
   groupPrincipal,
+  isAclLevel,
   levelSatisfies,
   parsePrincipal,
   rootPreset,
@@ -199,10 +200,6 @@ export interface AclServiceOptions {
   readonly groupDefaultLevel?: AclLevel;
 }
 
-function isAclLevel(value: unknown): value is AclLevel {
-  return value === 1 || value === 3 || value === 7;
-}
-
 /** 磁盘级别名 → 领域级别。映射只在这一个方向发生（写 `.acl.json` 时）。 */
 function levelName(level: AclLevel): AclFileEntry['level'] {
   switch (level) {
@@ -212,10 +209,15 @@ function levelName(level: AclLevel): AclFileEntry['level'] {
       return 'write';
     case 7:
       return 'manage';
-    default:
-      // 类型上不可达。运行时脏数据在写盘之前挡掉——写进 `undefined` 会被
-      // `JSON.stringify` 静默删键，读回来时那一条授权就消失了。
-      throw new ComemError('INVALID_ARGUMENT', `ACL 级别不合法：${String(level)}`, { level });
+    default: {
+      // 类型上不可达（`AclLevel` 加了成员时这一行编译失败）。运行时脏数据在写盘
+      // 之前挡掉——写进 `undefined` 会被 `JSON.stringify` 静默删键，读回来时那一条
+      // 授权就消失了。
+      const exhaustive: never = level;
+      throw new ComemError('INVALID_ARGUMENT', `ACL 级别不合法：${String(exhaustive)}`, {
+        level: exhaustive,
+      });
+    }
   }
 }
 
@@ -228,6 +230,14 @@ function levelByName(name: AclFileEntry['level']): AclLevel {
       return 3;
     case 'manage':
       return 7;
+    default: {
+      // 磁盘格式加了级别名时这里编译失败。手改的 `.acl.json` 走到这里说明写盘前
+      // 的校验被绕过了，按程序缺陷处理。
+      const exhaustive: never = name;
+      throw new ComemError('INTERNAL', `ACL 文件里的级别名不合法：${String(exhaustive)}`, {
+        level: exhaustive,
+      });
+    }
   }
 }
 
@@ -977,6 +987,9 @@ export class AclService implements Authorizer {
         )`;
     const row = this.#db.prepare(sql).get(uri, ...principals, ...principals);
     const value = row?.['level'];
+    // 这里**不能**换成 `isAclLevel(value) ? value : null`：级别是位掩码（read=1、
+    // write=3、manage=7），非规范值 5 / 6 仍然含 read 位，必须可读。
+    // `permission-visibility-consistency.test.ts` 钉住了这条语义。
     return typeof value === 'number' ? (value as AclLevel) : null;
   }
 

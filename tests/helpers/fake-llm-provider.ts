@@ -10,8 +10,8 @@
 
 import type { ZodType } from 'zod';
 
-import { ComemError } from '../../domain/errors.js';
-import type { LlmOptions, LlmPrompt, LlmProvider, LlmResult, LlmUsage } from '../../domain/llm.js';
+import { ComemError } from '../../src/domain/errors.js';
+import type { LlmOptions, LlmPrompt, LlmProvider, LlmResult, LlmUsage } from '../../src/domain/llm.js';
 
 export interface FakeResponse {
   readonly text?: string;

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { NullLogger } from '../../../src/adapters/log/null.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { GroupRepository } from '../../../src/adapters/sqlite/group-repository.js';
 import { UserRepository } from '../../../src/adapters/sqlite/user-repository.js';

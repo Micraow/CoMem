@@ -97,14 +97,14 @@ import { createHttpRouteGroups } from '../api/http/routes/index.js';
 import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
 import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
-import type { CommitStepName, CommitStepSkipReason } from '../domain/archive.js';
+import { COMMIT_STEP_NAMES, type CommitStepName, type CommitStepSkipReason } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { AclService } from '../services/acl.js';
 import { permissionDenied, type AclAction, type Authorizer } from '../services/authorizer.js';
-import { CommitPipeline } from '../services/commit/pipeline.js';
+import { CommitPipeline, type CommitStep } from '../services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../services/commit/steps/archive-summary.js';
 import { ExperienceDistillStep } from '../services/commit/steps/experience-distill.js';
 import { MemoryExtractStep } from '../services/commit/steps/memory-extract.js';
@@ -1107,26 +1107,35 @@ async function ensureUserNamespace(userId: string): Promise<void> {
         logger,
         dataDir,
       });
+      // 名字 → 实现。写成 `Record<CommitStepName, CommitStep>`：`domain/archive.ts` 的
+      // `COMMIT_STEP_NAMES` 加一步时这里编译失败，逼你补实现。数组写法漏一步只表现为
+      // 那一步永远不跑——`stepsDone` 里也永远不会出现它。
+      const stepByName: Readonly<Record<CommitStepName, CommitStep>> = {
+        archive_summary: new ArchiveSummaryStep({
+          summary,
+          llm,
+          metadata,
+          workingMemory: { enabled: config.memory.workingMemory.enabled },
+          logger,
+        }),
+        memory_extract: new MemoryExtractStep({
+          memory,
+          llm,
+          archive: archiveArtifacts,
+          logger,
+          profile: { maxChars: config.memory.profile.maxChars },
+        }),
+        memory_merge: new MemoryMergeStep({
+          memory,
+          archive: archiveArtifacts,
+          links: memoryLink,
+          logger,
+        }),
+        summary_invalidate: new SummaryInvalidateStep({ summary, logger }),
+        experience_distill: new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
+      };
       return new CommitPipeline({
-        steps: [
-          new ArchiveSummaryStep({
-            summary,
-            llm,
-            metadata,
-            workingMemory: { enabled: config.memory.workingMemory.enabled },
-            logger,
-          }),
-          new MemoryExtractStep({
-            memory,
-            llm,
-            archive: archiveArtifacts,
-            logger,
-            profile: { maxChars: config.memory.profile.maxChars },
-          }),
-          new MemoryMergeStep({ memory, archive: archiveArtifacts, links: memoryLink, logger }),
-          new SummaryInvalidateStep({ summary, logger }),
-          new ExperienceDistillStep({ memory, llm, links: memoryLink, logger }),
-        ],
+        steps: COMMIT_STEP_NAMES.map((name) => stepByName[name]),
         ports,
         skippedSteps: commitSkippedSteps,
         // 后台阶段计时（§17.2）：管线在任务里跑，`phase()` 会写进程级 gauge。

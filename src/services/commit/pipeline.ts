@@ -48,6 +48,7 @@ import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import type { SessionMessage } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
+import type { AsyncPhase } from '../observability.js';
 
 /**
  * 步骤能用的外部能力。
@@ -151,10 +152,11 @@ const SKIP_REASON_LABELS: Readonly<Record<CommitStepSkipReason, string>> = {
  * `summary_invalidate` 是摘要阶段（标记目录摘要失效）。阶段一（写归档目录）是请求
  * 内的同步工作，不在这里——把它算进「后台耗时」会把用户等过的时间重复计一次。
  *
- * 用 `Record<CommitStepName, string>` 而不是普通对象：新增步骤时类型检查会强制
- * 给出阶段名，避免新步骤静默不计时。
+ * 用 `Record<CommitStepName, AsyncPhase>` 而不是普通对象：新增步骤时类型检查会强制
+ * 给出阶段名，避免新步骤静默不计时。值域是 `services/observability.ts` 的
+ * `AsyncPhase`——新阶段名要先进 `ASYNC_PHASES`，否则 `/metrics` 的求和看不到它。
  */
-const STEP_PHASE: Readonly<Record<CommitStepName, string>> = {
+const STEP_PHASE: Readonly<Record<CommitStepName, AsyncPhase>> = {
   archive_summary: 'archive',
   memory_extract: 'extract',
   memory_merge: 'merge',

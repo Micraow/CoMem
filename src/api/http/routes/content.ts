@@ -27,6 +27,7 @@ import { ComemError } from '../../../domain/errors.js';
 import type { PatchBlock } from '../../../domain/patch.js';
 import type { Uri } from '../../../domain/uri.js';
 import { verifyDownloadToken } from '../../mcp/tools/download.js';
+import { isWriteMode, WRITE_MODES, type WriteMode } from '../../write-mode.js';
 import { sliceText } from '../../text-slice.js';
 
 import { ok } from '../envelope.js';
@@ -49,20 +50,16 @@ const WRITE = 3;
 /** 下载的 MIME。附件不猜类型：内容是二进制，猜错只会让浏览器把它当图片打开。 */
 const DOWNLOAD_CONTENT_TYPE = 'application/octet-stream';
 
-const WRITE_MODES = ['replace', 'append', 'create'] as const;
-
-type WriteMode = (typeof WRITE_MODES)[number];
-
 function parseWriteMode(value: unknown): WriteMode {
   if (value === undefined) {
     return 'replace';
   }
-  if (value === 'replace' || value === 'append' || value === 'create') {
-    return value;
+  if (!isWriteMode(value)) {
+    throw new ComemError('INVALID_ARGUMENT', `write 的 mode 只能是 ${WRITE_MODES.join(' / ')}。`, {
+      mode: value,
+    });
   }
-  throw new ComemError('INVALID_ARGUMENT', `write 的 mode 只能是 ${WRITE_MODES.join(' / ')}。`, {
-    mode: value,
-  });
+  return value;
 }
 
 function parsePatchBlocks(value: unknown): readonly PatchBlock[] {
@@ -233,6 +230,15 @@ export function createContentRoutes(services: HttpRouteServices): HttpRouteGroup
             }
             const result = await filesystem.write(uri, content, principals);
             return ok({ uri: uri.toString(), created: result.created, size: result.stat.size });
+          }
+          default: {
+            // `WRITE_MODES`（`api/write-mode.ts`）加一个模式时这一行编译失败。
+            const exhaustive: never = mode;
+            throw new ComemError(
+              'INVALID_ARGUMENT',
+              `write 的 mode 不受支持：${String(exhaustive)}`,
+              { mode: exhaustive },
+            );
           }
         }
       });

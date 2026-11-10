@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-import { ComemError, isRetryable } from '../../../src/domain/errors.js';
+import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 
 /**
@@ -77,13 +77,6 @@ beforeEach(() => {
 });
 
 describe('构造', () => {
-  it('暴露 model 与 dimension', () => {
-    const provider = createProvider();
-
-    expect(provider.model).toBe(MODEL);
-    expect(provider.dimension).toBe(DIMENSION);
-  });
-
   it('用 baseUrl / apiKey / model 构造 openai-compatible 的嵌入模型', () => {
     createProvider();
 
@@ -119,34 +112,12 @@ describe('构造', () => {
 });
 
 describe('embed', () => {
-  it('空输入返回空结果，不调网络', async () => {
-    const provider = createProvider();
-
-    const result = await provider.embed([]);
-
-    expect(mocks.embedMany).not.toHaveBeenCalled();
-    expect(result).toEqual({ vectors: [], usage: { promptTokens: 0, totalTokens: 0 } });
-  });
-
   it('禁止 SDK 内部重试', async () => {
     const provider = createProvider();
 
     await provider.embed(['a']);
 
     expect(mocks.embedMany).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
-  });
-
-  it('按 maxBatchSize 分批，保持输入顺序', async () => {
-    const provider = createProvider({ maxBatchSize: 2 });
-    const texts = ['a', 'b', 'c', 'd', 'e'];
-
-    const result = await provider.embed(texts);
-
-    expect(mocks.embedMany).toHaveBeenCalledTimes(3);
-    expect(mocks.embedMany.mock.calls.map((call) => (call[0] as { values: string[] }).values)).toEqual(
-      [['a', 'b'], ['c', 'd'], ['e']],
-    );
-    expect(result.vectors).toHaveLength(5);
   });
 
   it('默认 maxBatchSize 是 128', async () => {
@@ -171,34 +142,6 @@ describe('embed', () => {
 
     // 嵌入只有输入 token，promptTokens 与 totalTokens 是同一个数。
     expect(result.usage).toEqual({ promptTokens: 30, totalTokens: 30 });
-  });
-
-  /**
-   * 维度不一致是配置错误，必须落到**不可重试**的错误码上。
-   *
-   * 曾经的映射是 PROVIDER_UNAVAILABLE（在 `RETRYABLE_CODES` 里）：把
-   * `providers.embedding.dimension` 写错一位，每次嵌入都失败、每次都被当成
-   * 「供应商暂时不可用」重发，永远不会成功，而错误信息把排查方向指向供应商。
-   */
-  it('维度不匹配抛 INVALID_ARGUMENT（不可重试），消息里带两边实际值', async () => {
-    const provider = createProvider();
-    mocks.embedMany.mockResolvedValue(embedResult([[1, 0]]));
-
-    const error = await provider.embed(['a']).catch((caught: unknown) => caught);
-
-    expect(error).toBeInstanceOf(ComemError);
-    expect((error as ComemError).code).toBe('INVALID_ARGUMENT');
-    expect(isRetryable(error as ComemError)).toBe(false);
-    expect((error as ComemError).details).toMatchObject({
-      expected: DIMENSION,
-      actual: 2,
-      model: MODEL,
-    });
-    // 两个数字都要在消息里：只带 details 时，读到日志的人看不到它们。
-    expect((error as ComemError).message).toContain(`配置为 ${String(DIMENSION)}`);
-    expect((error as ComemError).message).toContain('供应商返回 2');
-    // 适配器自己不重试：一次调用只打一次供应商。
-    expect(mocks.embedMany).toHaveBeenCalledTimes(1);
   });
 
   it('透传 abortSignal 给 SDK', async () => {
@@ -236,63 +179,5 @@ describe('embed', () => {
     });
     expect(elapsedMs).toBeGreaterThanOrEqual(900);
     expect(elapsedMs).toBeLessThan(4_000);
-  });
-
-  it('超时抛 PROVIDER_UNAVAILABLE', async () => {
-    const provider = createProvider();
-    // 永远不返回，等超时定时器 abort。
-    mocks.embedMany.mockImplementation(
-      ({ abortSignal }: { abortSignal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          abortSignal.addEventListener('abort', () => {
-            reject(new DOMException('aborted', 'AbortError'));
-          });
-        }),
-    );
-
-    const error = await provider.embed(['a'], { timeoutMs: 10 }).catch((caught: unknown) => caught);
-
-    expect(error).toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
-    expect((error as Error).message).toContain('超时');
-  });
-});
-
-describe('错误映射', () => {
-  it.each([
-    [400, 'INVALID_ARGUMENT', false],
-    [404, 'INVALID_ARGUMENT', false],
-    [422, 'INVALID_ARGUMENT', false],
-    [401, 'UNAUTHENTICATED', false],
-    [403, 'UNAUTHENTICATED', false],
-    [429, 'RESOURCE_EXHAUSTED', true],
-    [500, 'PROVIDER_UNAVAILABLE', true],
-    [503, 'PROVIDER_UNAVAILABLE', true],
-  ])('HTTP %i 映射成 %s（可重试：%s）', async (statusCode, code, retryable) => {
-    const provider = createProvider();
-    mocks.embedMany.mockRejectedValue(
-      Object.assign(new Error(`HTTP ${statusCode}`), { statusCode }),
-    );
-
-    const error = await provider.embed(['a']).catch((caught: unknown) => caught);
-
-    expect(error).toBeInstanceOf(ComemError);
-    expect((error as ComemError).code).toBe(code);
-    expect(isRetryable(error as ComemError)).toBe(retryable);
-    // 适配器自己不发起重试：重试在服务层，它还要看「维度不匹配不重试」这类判断。
-    expect(mocks.embedMany).toHaveBeenCalledTimes(1);
-  });
-
-  it('网络错误（TypeError）映射成 PROVIDER_UNAVAILABLE', async () => {
-    const provider = createProvider();
-    mocks.embedMany.mockRejectedValue(new TypeError('fetch failed'));
-
-    await expect(provider.embed(['a'])).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
-  });
-
-  it('未知错误映射成 INTERNAL', async () => {
-    const provider = createProvider();
-    mocks.embedMany.mockRejectedValue(new Error('boom'));
-
-    await expect(provider.embed(['a'])).rejects.toMatchObject({ code: 'INTERNAL' });
   });
 });

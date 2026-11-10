@@ -94,6 +94,7 @@
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
+import { isNodeStatus, type NodeStatus } from '../domain/node.js';
 import {
   assertFieldTypes,
   assertMemoryIdentity,
@@ -106,7 +107,14 @@ import { parseValidityInstant } from '../domain/retrieval.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
-export type MemoryStatus = 'active' | 'pending' | 'archived';
+/**
+ * 记忆的状态。
+ *
+ * 与索引里的 `NodeStatus`（`domain/node.ts`）是同一个集合：两者都来自记忆文件
+ * frontmatter 的 `status` 键，索引观察者与这里读的是同一份字段。曾经各写一份字面量
+ * 联合，加第三个状态时只改一处会让「文件里写得出、索引里认不出」。
+ */
+export type MemoryStatus = NodeStatus;
 
 export interface MemoryRecord {
   readonly uri: Uri;
@@ -654,8 +662,16 @@ function extractContent(body: string): string | null {
   return rest.startsWith('\n') ? rest.slice(1) : rest;
 }
 
+/**
+ * frontmatter 的 `status` → 记忆状态。
+ *
+ * 入参是手改文件后的任意 YAML 标量，所以「不是合法状态」按 `active` 处理（旧文件
+ * 没有这个键时也是 `active`）。合法集合取自 `domain/node.ts` 的 `isNodeStatus`：
+ * 手抄 `value === 'pending' || value === 'archived'` 时，加一个状态会让它被静默读成
+ * `active`。
+ */
 function parseStatus(value: unknown): MemoryStatus {
-  return value === 'pending' || value === 'archived' ? value : 'active';
+  return typeof value === 'string' && isNodeStatus(value) ? value : 'active';
 }
 
 /**

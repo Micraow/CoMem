@@ -22,7 +22,41 @@ import { ComemError } from './errors.js';
  */
 export type SessionStatus = 'open' | 'archived';
 
-export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
+/**
+ * 会话状态的合法取值。
+ *
+ * 类型是来源，这张表是运行期清单：加第三个状态时这里编译失败，`isSessionStatus`
+ * 只查这张表。旧写法在适配层手抄一个 `Set<SessionStatus>`，加成员时不报错——
+ * 一个合法状态被读成「元数据损坏」。
+ */
+const SESSION_STATUSES: Readonly<Record<SessionStatus, true>> = {
+  open: true,
+  // 空闲过期的终态（`session.expiry.action: archive`）。这一行曾经在适配层是手抄的
+  // `Set`，漏掉时归档写盘成功、读回却抛 INTERNAL——「归档了一个会话，之后它从列表
+  // 里消失」。
+  archived: true,
+};
+
+/** 会话状态守卫（`.meta.json` 是不可信输入）。 */
+export function isSessionStatus(value: unknown): value is SessionStatus {
+  return typeof value === 'string' && Object.hasOwn(SESSION_STATUSES, value);
+}
+
+/**
+ * 消息角色，**顺序即人类可读说明的顺序**。
+ *
+ * 数组是唯一来源，类型从它派生：HTTP 的 `role` 参数、MCP `remember` 的
+ * `inputSchema.enum` 都从它取。这两处各自手抄一份时（曾经就是），加一个角色
+ * （例如 `tool_result`）只有一处跟上，另一处会把它拒成 `INVALID_ARGUMENT`。
+ */
+export const MESSAGE_ROLES = ['user', 'assistant', 'system', 'tool'] as const;
+
+export type MessageRole = (typeof MESSAGE_ROLES)[number];
+
+/** 角色守卫。写成 `.some()` 而不是 `includes(value as MessageRole)`：不打断言。 */
+export function isMessageRole(value: string): value is MessageRole {
+  return MESSAGE_ROLES.some((role) => role === value);
+}
 
 /**
  * 消息的组成部分（架构文档 §10.1 的四种 part）。
@@ -238,6 +272,12 @@ function renderContentPart(part: ContentPart): string {
       return `[tool_use ${part.name} ${part.toolUseId}] ${renderJson(part.input)}`;
     case 'tool_result':
       return `[tool_result ${part.toolUseId}${part.isError ? ' error' : ''}] ${part.output}`;
+    default: {
+      // `ContentPart` 加一种 part 时这一行编译失败。缺分支会让归档与抽取拿不到
+      // 这一段的文字：消息还在，内容静默消失。
+      const exhaustive: never = part;
+      throw new ComemError('INTERNAL', `未知的消息组成部分：${renderJson(exhaustive)}`, {});
+    }
   }
 }
 

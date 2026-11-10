@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
-import { NullLogger } from '../../../src/adapters/log/null.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repository.js';
 import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';

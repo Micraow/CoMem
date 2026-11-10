@@ -113,6 +113,20 @@ export function assertMemoryIdentity(
 }
 
 /**
+ * 字段类型的判据表。
+ *
+ * 键必须是 `FieldType` 的每个成员、值必须能判断任意输入：加一种字段类型时这里
+ * 编译失败。旧写法是 `field.type === 'string[]' ? ... : typeof value === field.type`，
+ * 加 `'date'` 之类的成员时那段表达式不会报错——它会把一个合法值判成类型不符。
+ */
+const FIELD_TYPE_CHECKS: Readonly<Record<FieldType, (value: unknown) => boolean>> = {
+  string: (value) => typeof value === 'string',
+  number: (value) => typeof value === 'number',
+  boolean: (value) => typeof value === 'boolean',
+  'string[]': (value) => Array.isArray(value) && value.every((item) => typeof item === 'string'),
+};
+
+/**
  * 字段类型必须与 schema 声明一致，否则写进去再读回来是另一种类型。
  *
  * 与 `assertMemoryIdentity` 同一套共用关系：`upsertMemory` 锁内一次、合并的计划阶段
@@ -127,11 +141,7 @@ export function assertFieldTypes(
     if (value === undefined) {
       continue;
     }
-    const valid =
-      field.type === 'string[]'
-        ? Array.isArray(value) && value.every((item) => typeof item === 'string')
-        : typeof value === field.type;
-    if (!valid) {
+    if (!FIELD_TYPE_CHECKS[field.type](value)) {
       throw invalidArgument(`记忆字段 ${field.name} 的类型必须是 ${field.type}。`, {
         memoryType: schema.type,
         field: field.name,

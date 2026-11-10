@@ -23,7 +23,7 @@ import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
-import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider, type FakeResponse } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
@@ -33,7 +33,11 @@ import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js'
 import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { createArchiveArtifacts, createArchivePorts } from '../../../src/bootstrap/archive-ports.js';
 import { CommitRunner } from '../../../src/bootstrap/commit-runner.js';
-import type { ArchiveTaskPayload, MemoryDiff } from '../../../src/domain/archive.js';
+import type {
+  ArchiveTaskPayload,
+  CommitStepName,
+  MemoryDiff,
+} from '../../../src/domain/archive.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { AutoCommitPolicy, SessionMessage } from '../../../src/domain/session.js';
@@ -242,7 +246,7 @@ afterEach(async () => {
 interface RunnerHarness {
   readonly runner: CommitRunner;
   readonly createPipeline: Mock<
-    (archiveUri: Uri, onStepsChanged: (steps: readonly string[]) => void) => CommitPipeline
+    (archiveUri: Uri, onStepsChanged: (steps: readonly CommitStepName[]) => void) => CommitPipeline
   >;
   readonly provider: FakeLlmProvider;
 }
@@ -262,7 +266,7 @@ function createRunner(
   const createPipeline = vi.fn(
     (
       archiveUri: Uri,
-      onStepsChanged: (steps: readonly string[]) => void,
+      onStepsChanged: (steps: readonly CommitStepName[]) => void,
     ): CommitPipeline => {
       const deps = { store, metadata, logger, dataDir, onStepsChanged };
       const archiveArtifacts = createArchiveArtifacts(archiveUri, deps);

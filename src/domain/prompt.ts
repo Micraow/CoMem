@@ -81,9 +81,17 @@ export interface PromptDefinition {
  * 顺序就是控制台的展示顺序：按「抽取 → 经验归纳 → 摘要 → 重写」的业务链路排，
  * 不按字母。
  */
-export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
-  {
-    id: 'extract-system',
+/**
+ * 八条提示词的定义，**按标识索引**。
+ *
+ * 写成 `Record<PromptId, ...>` 而不是数组：`PROMPT_IDS` 加一条提示词时这里编译
+ * 失败，逼你补定义。数组写法只会让 `tools/list` 与 `/prompts` 少一条——`PROMPT_IDS`
+ * 有八个成员而定义表只有七个时，`promptDefinition` 只能在运行期抛 `INTERNAL`。
+ *
+ * 展示顺序不在这里：它由 `PROMPT_IDS` 决定（见下面的 `PROMPT_DEFINITIONS`）。
+ */
+const PROMPT_BODIES: Readonly<Record<PromptId, Omit<PromptDefinition, 'id'>>> = {
+  'extract-system': {
     description: '记忆抽取 · 系统提示词',
     variables: [
       { name: 'memoryTypes', description: '内置记忆类型清单（类型、目录、字段与合并策略）' },
@@ -95,8 +103,7 @@ export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
       { name: 'newPageIdExamples', description: '从起始编号起连续三个编号，用于示例' },
     ],
   },
-  {
-    id: 'extract-user',
+  'extract-user': {
     description: '记忆抽取 · 用户消息',
     variables: [
       { name: 'pages', description: '预取到的已读记忆（编号、地址与正文）' },
@@ -104,42 +111,36 @@ export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
       { name: 'messages', description: '这次要抽取的会话消息' },
     ],
   },
-  {
-    id: 'experience-system',
+  'experience-system': {
     description: '经验归纳 · 系统提示词',
     variables: [{ name: 'today', description: '今天的日期（YYYY-MM-DD）' }],
   },
-  {
-    id: 'experience-user',
+  'experience-user': {
     description: '经验归纳 · 用户消息',
     variables: [
       { name: 'existingExperiences', description: '预取到的已有经验（话题、正文与有效期）' },
       { name: 'messages', description: '这次要归纳的会话消息' },
     ],
   },
-  {
-    id: 'summarize-system',
+  'summarize-system': {
     description: '目录摘要 · 系统提示词',
     variables: [
       { name: 'abstractMaxChars', description: '简述的字数预算' },
       { name: 'overviewMaxChars', description: '整篇概览的字数预算' },
     ],
   },
-  {
-    id: 'summarize-user',
+  'summarize-user': {
     description: '目录摘要 · 用户消息',
     variables: [
       { name: 'uri', description: '要生成摘要的目录' },
       { name: 'children', description: '直接子节点（名字、类别与摘要）' },
     ],
   },
-  {
-    id: 'rewrite-system',
+  'rewrite-system': {
     description: '查询重写 · 系统提示词',
     variables: [{ name: 'maxTypedQueries', description: '一次最多产出多少条查询' }],
   },
-  {
-    id: 'rewrite-user',
+  'rewrite-user': {
     description: '查询重写 · 用户消息',
     variables: [
       { name: 'query', description: '用户当前这句话' },
@@ -147,15 +148,23 @@ export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = [
       { name: 'knownScopes', description: '调用方可见的路径范围' },
     ],
   },
-];
+};
 
-/** 按标识取定义。标识是联合类型，查不到只可能是定义表漏了一项。 */
+/** 八条提示词的目录，顺序取自 `PROMPT_IDS`（「抽取 → 经验归纳 → 摘要 → 重写」）。 */
+export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = PROMPT_IDS.map((id) => ({
+  id,
+  ...PROMPT_BODIES[id],
+}));
+
+/**
+ * 按标识取定义。
+ *
+ * 不再「查数组 + 查不到抛 INTERNAL」：`PROMPT_BODIES` 是 `Record<PromptId, ...>`，
+ * 「缺一条定义」在编译期就不成立，那个抛错分支永远走不到。返回新建的对象——调用方
+ * 只读它，不需要跨调用共享同一份引用。
+ */
 export function promptDefinition(id: PromptId): PromptDefinition {
-  const definition = PROMPT_DEFINITIONS.find((candidate) => candidate.id === id);
-  if (definition === undefined) {
-    throw new ComemError('INTERNAL', `提示词定义缺失：${id}`, { promptId: id });
-  }
-  return definition;
+  return { id, ...PROMPT_BODIES[id] };
 }
 
 const ID_SET: ReadonlySet<string> = new Set(PROMPT_IDS);

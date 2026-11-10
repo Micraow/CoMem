@@ -20,7 +20,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { NullLogger } from '../../../src/adapters/log/null.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repository.js';
 import { SqliteVectorIndex } from '../../../src/adapters/sqlite/vector-index.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';

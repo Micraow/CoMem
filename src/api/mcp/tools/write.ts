@@ -12,6 +12,7 @@
 
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
+import { WRITE_MODES, type WriteMode } from '../../write-mode.js';
 import type { McpToolContext } from '../context.js';
 import {
   asRecord,
@@ -21,10 +22,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-const MODES = ['replace', 'append', 'create'] as const;
-
-type WriteMode = (typeof MODES)[number];
 
 /** `append` / `create` 需要先读现有正文；不存在按空串处理。 */
 async function readExisting(context: McpToolContext, uri: Uri): Promise<string> {
@@ -48,7 +45,7 @@ export const writeTool: McpToolDefinition = {
     properties: {
       uri: { type: 'string', description: '文件 URI；~ 是当前身份的根' },
       content: { type: 'string', description: '正文；空串表示写空文件' },
-      mode: { type: 'string', enum: MODES, default: 'replace' },
+      mode: { type: 'string', enum: WRITE_MODES, default: 'replace' },
     },
     required: ['uri', 'content'],
   },
@@ -56,7 +53,7 @@ export const writeTool: McpToolDefinition = {
     const args = asRecord(input, 'write');
     const uri = Uri.parse(requiredString(args, 'uri', 'write'));
     const content = requiredString(args, 'content', 'write');
-    const mode = optionalEnum(args, 'mode', MODES, 'replace', 'write');
+    const mode = optionalEnum(args, 'mode', WRITE_MODES, 'replace', 'write');
 
     const result = await writeWithMode(context, uri, content, mode);
     const index = await indexStatus(context, uri, 'indexed');
@@ -92,6 +89,14 @@ async function writeWithMode(
         });
       }
       return context.filesystem.write(uri, content, context.principals);
+    }
+    default: {
+      // `WRITE_MODES`（`api/write-mode.ts`）加一个模式时这一行编译失败——
+      // 否则新模式会掉进「没有分支」的缝隙里，返回 `undefined` 而不是写盘。
+      const exhaustive: never = mode;
+      throw new ComemError('INVALID_ARGUMENT', `write 的 mode 不受支持：${String(exhaustive)}`, {
+        mode: exhaustive,
+      });
     }
   }
 }

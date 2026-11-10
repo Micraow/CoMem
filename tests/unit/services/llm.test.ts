@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { FakeLlmProvider, type FakeResponse } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider, type FakeResponse } from '../../helpers/fake-llm-provider.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { LlmService } from '../../../src/services/llm.js';
-import { buildExtractPrompt, buildSummaryPrompt } from '../../../src/services/prompts/index.js';
+import { buildExtractPrompt } from '../../../src/services/prompts/extract.js';
+import { buildSummaryPrompt } from '../../../src/services/prompts/summarize.js';
 import { BUILTIN_MEMORY_TYPES } from '../../../src/domain/memory-types/index.js';
 import { Uri } from '../../../src/domain/uri.js';
 

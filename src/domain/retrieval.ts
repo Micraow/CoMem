@@ -120,19 +120,22 @@ export interface SearchHit {
  * 也是将来 rerank 的输入；**当前不参与合并**——多条查询的命中按 URI 去重，与
  * `intent` 无关（§8.4 第 5 步）。
  */
-export type TypedQueryIntent =
+export const TYPED_QUERY_INTENTS = [
   /** 用户的偏好、习惯、风格 */
-  | 'preference'
+  'preference',
   /** 事实性知识（项目结构、约定、配置） */
-  | 'fact'
+  'fact',
   /** 做过的决定与理由 */
-  | 'decision'
+  'decision',
   /** 发生过的事（某次提交、某次讨论） */
-  | 'event'
+  'event',
   /** 步骤、流程、怎么操作 */
-  | 'procedure'
+  'procedure',
   /** 兜底：模型给了契约外的 intent，或这条查询不该分类 */
-  | 'other';
+  'other',
+] as const;
+
+export type TypedQueryIntent = (typeof TYPED_QUERY_INTENTS)[number];
 
 /**
  * `SearchPlan.queries` 的上限（§8.4 的「0–5 条 TypedQuery」）。
@@ -202,7 +205,9 @@ export interface SearchResult {
  * 由 `reciprocalRankFusion` 定义。写进联合类型是因为它是配置里的一个合法取值，
  * 名字必须与 §18 的 YAML 逐字一致。
  */
-export type RetrievalEngine = 'fts5' | 'vector' | 'hybrid';
+export const RETRIEVAL_ENGINES = ['fts5', 'vector', 'hybrid'] as const;
+
+export type RetrievalEngine = (typeof RETRIEVAL_ENGINES)[number];
 
 /** 混合检索的融合结果。 */
 export interface FusedHit extends SearchHit {

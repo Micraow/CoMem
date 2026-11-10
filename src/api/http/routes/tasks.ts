@@ -32,6 +32,12 @@
 import type { FastifyInstance } from 'fastify';
 
 import { ComemError } from '../../../domain/errors.js';
+import {
+  isTaskStatus,
+  TASK_STATUSES,
+  type ClaimableTaskStatus,
+  type TaskStatus,
+} from '../../../domain/task.js';
 import { ok } from '../envelope.js';
 import { assertSystemAdmin } from '../middleware.js';
 import { optionalQueryInteger, optionalString, requireRecord, type HttpRouteGroup } from '../server.js';
@@ -42,7 +48,7 @@ import type { HttpRouteServices } from './index.js';
 export interface TaskRecord {
   readonly id: string;
   readonly type: string;
-  readonly status: string;
+  readonly status: TaskStatus;
   readonly payload: unknown;
   readonly stepsDone: readonly string[];
   readonly attempts: number;
@@ -53,6 +59,20 @@ export interface TaskRecord {
 }
 
 /**
+ * `GET /tasks` 的行。
+ *
+ * `status` 收缩到 `ClaimableTaskStatus`：这个端点只列可认领的任务（`pending`，或
+ * 租约过期的 `running`），`done` / `failed` 不会出现。写成全集的 `TaskStatus` 会让
+ * 消费方为不会出现的状态写文案，或用 `??` 兜底把「真的出现了意外状态」显示成空白。
+ *
+ * **只有 `claimable()` 用这个形状。** `get(id)` 必须返回全集：`POST /tasks/:id/retry`
+ * 的判据就是 `status === 'failed'`，把它们写成子集会让那条判断变成恒假。
+ */
+export interface ClaimableTaskRecord extends Omit<TaskRecord, 'status'> {
+  readonly status: ClaimableTaskStatus;
+}
+
+/**
  * 任务查询端口。
  *
  * `TaskRepository` 结构上满足它（`TaskRow` 的联合类型字段可赋值给 `string`），
@@ -60,26 +80,29 @@ export interface TaskRecord {
  */
 export interface TaskQueryStore {
   get(id: string): TaskRecord | null;
-  claimable(now: Date, limit: number): readonly TaskRecord[];
+  claimable(now: Date, limit: number): readonly ClaimableTaskRecord[];
   requeue(id: string, now: Date): void;
 }
-
-const TASK_STATUSES: readonly string[] = ['pending', 'running', 'done', 'failed'];
 
 /** 默认返回条数。与 `TaskService.claimable` 的上限一致。 */
 const DEFAULT_TASK_LIMIT = 100;
 
-function requireStatus(value: string | undefined): string | undefined {
+/**
+ * `status` 查询参数的取值。
+ *
+ * 取自 `domain/task.ts` 的 `TASK_STATUSES`（唯一来源）：手抄一份 `readonly string[]`
+ * 时，加一个任务状态既没有编译错误也没有运行期错误——查询参数会继续拒绝它。
+ */
+function requireStatus(value: string | undefined): TaskStatus | undefined {
   if (value === undefined) {
     return undefined;
   }
-  const status = TASK_STATUSES.find((candidate) => candidate === value);
-  if (status === undefined) {
+  if (!isTaskStatus(value)) {
     throw new ComemError('INVALID_ARGUMENT', `status 只能是 ${TASK_STATUSES.join(' / ')}。`, {
       status: value,
     });
   }
-  return status;
+  return value;
 }
 
 export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {

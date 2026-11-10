@@ -15,7 +15,14 @@ import type { FastifyInstance } from 'fastify';
 
 import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
-import type { ContentPart, MessageRole, Session, SessionMessage } from '../../../domain/session.js';
+import {
+  isMessageRole,
+  MESSAGE_ROLES,
+  type ContentPart,
+  type MessageRole,
+  type Session,
+  type SessionMessage,
+} from '../../../domain/session.js';
 import { Uri } from '../../../domain/uri.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -32,7 +39,6 @@ import type { HttpRouteServices } from './index.js';
 const READ = 1;
 const WRITE = 3;
 
-const ROLES: readonly MessageRole[] = ['user', 'assistant', 'system', 'tool'];
 
 /** `GET /sessions` 的默认条数。经验值：控制台一页展示 100 条已经要滚动。 */
 const DEFAULT_LIST_LIMIT = 100;
@@ -76,11 +82,10 @@ function parseRole(value: unknown): MessageRole {
   if (typeof value !== 'string') {
     throw invalid('role 必须是字符串。', { field: 'role' });
   }
-  const role = ROLES.find((candidate) => candidate === value);
-  if (role === undefined) {
-    throw invalid(`role 只能是 ${ROLES.join(' / ')}。`, { field: 'role' });
+  if (!isMessageRole(value)) {
+    throw invalid(`role 只能是 ${MESSAGE_ROLES.join(' / ')}。`, { field: 'role' });
   }
-  return role;
+  return value;
 }
 
 /** 一条 `ContentPart`。五种 kind 各自校验字段，不接受未校验的值进服务层。 */

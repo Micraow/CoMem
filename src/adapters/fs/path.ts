@@ -59,23 +59,6 @@ export const TEMP_FILE_PREFIX = '.comem-tmp-';
  */
 export const LOCK_FILE_SUFFIX = '.comem-lock';
 
-/**
- * Windows 设备名（`CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`）。
- *
- * 这些名字在 Windows 上不能作为文件名，`git checkout` 到 Windows 会直接失败。
- * `Uri` 是冻结契约，不在里面拦；仓库又跑在 Linux 上，所以要有一个显式判断函数，
- * 让需要跨平台导出的调用方自己决定怎么处理。
- */
-const WINDOWS_DEVICE_NAMES: ReadonlySet<string> = new Set([
-  'CON',
-  'PRN',
-  'AUX',
-  'NUL',
-  // COM1–COM9 / LPT1–LPT9：Windows 传统串口与并口设备名，各 9 个。
-  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
-  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
-]);
-
 /** 数据根本身不是合法 URI 时的提示（它连 scope 段都没有）。 */
 function invalidDiskPath(reason: string, diskPath: string): ComemError {
   return new ComemError('INVALID_URI', `磁盘路径不合法：${reason}`, { diskPath, reason });
@@ -96,18 +79,6 @@ export function isArtifactName(name: string): boolean {
   return (
     isReservedName(name) || name.endsWith(LOCK_FILE_SUFFIX) || name.startsWith(TEMP_FILE_PREFIX)
   );
-}
-
-/**
- * 是否是 Windows 保留设备名。
- *
- * Windows 的判定看**第一个点之前的部分**，`CON.md`、`con.tar.gz` 同样不可创建，
- * 并且名字末尾的空格会被系统吞掉，所以先 `trimEnd` 再比较。这里只回答「这个
- * 名字在 Windows 上会不会炸」，不做拦截。
- */
-export function isWindowsReservedName(name: string): boolean {
-  const baseName = name.split('.')[0] ?? '';
-  return WINDOWS_DEVICE_NAMES.has(baseName.trimEnd().toUpperCase());
 }
 
 /** 数据根 + 作用域根 → 该作用域的绝对目录。如 `<dataDir>/user/alice`。 */

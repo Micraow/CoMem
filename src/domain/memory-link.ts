@@ -12,12 +12,25 @@
 import type { Uri } from './uri.js';
 
 /**
+ * 内置的三种边类型。
+ *
+ * 这份清单**不是**闭集（见 `MemoryLinkType`），它只用来消除「同一个字面量抄三遍」：
+ * 产生端的 `DERIVED_FROM` 与控制台的展示映射都以它为准（后者由
+ * `tests/unit/web/link-type-labels.test.ts` 对拍）。
+ */
+export const BUILTIN_MEMORY_LINK_TYPES = ['references', 'derived_from', 'related'] as const;
+
+/**
  * 边的语义标签。
  *
- * 只做收敛，不做穷举：`link_type` 是开放字符串，这里给三个常见取自作为文档参考，
+ * 只做收敛，不做穷举：`link_type` 是开放字符串，这里给三个常见取值作为文档参考，
  * 不校验——收紧成枚举会让「资源 → 记忆」以外的产生端每次想加一种关系都要改领域层。
+ * 所以 `MemoryLinkType` 在类型上是开放的（`string & ` 分支），消费方必须显式处理
+ * 「未知类型」：`services/memory-link.ts` 原样存储，控制台显示原值。
  */
-export type MemoryLinkType = 'references' | 'derived_from' | 'related' | (string & {});
+export type MemoryLinkType =
+  | (typeof BUILTIN_MEMORY_LINK_TYPES)[number]
+  | (string & {});
 
 /** 一条关联边：起点、终点、语义标签、权重、原文出处、说明。 */
 export interface MemoryLink {

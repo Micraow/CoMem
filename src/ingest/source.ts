@@ -168,7 +168,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** 文件系统错误的 `code` 判断（`ENOENT` 等）。各源共用，避免各写一份。 */
-export function isErrno(error: unknown, code: string): boolean {
+function isErrno(error: unknown, code: string): boolean {
   const actual = typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
   return actual === code;
 }

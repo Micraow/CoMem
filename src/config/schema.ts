@@ -12,7 +12,9 @@
 import { z } from 'zod';
 
 import { ComemError } from '../domain/errors.js';
+import { QUOTA_PRESETS } from '../domain/assembly.js';
 import { USER_ID_PATTERN } from '../domain/identity.js';
+import { RETRIEVAL_ENGINES } from '../domain/retrieval.js';
 
 const llmProviderSchema = z.object({
   /**
@@ -177,7 +179,7 @@ const retrievalSchema = z.object({
    * 值域与 `domain/retrieval.ts` 的 `RetrievalEngine` 是同一个联合，少一个就是「写进
    * 去不生效」的假配置。
    */
-  engine: z.enum(['fts5', 'vector', 'hybrid']).default('fts5'),
+  engine: z.enum(RETRIEVAL_ENGINES).default('fts5'),
   /** 先取 limit×N 候选，再按权限过滤 */
   candidateMultiplier: z.number().int().positive().default(4),
   /** 层级加权，用于 BM25 平局时打破 */
@@ -191,7 +193,7 @@ const retrievalSchema = z.object({
       /** 这么多轮内投过的 URI 不再投 */
       dedupTurns: z.number().int().nonnegative().default(3),
       /** chat | coding */
-      quotaPreset: z.enum(['chat', 'coding']).default('coding'),
+      quotaPreset: z.enum(QUOTA_PRESETS).default('coding'),
     })
     .prefault({}),
   /**

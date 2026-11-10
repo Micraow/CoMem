@@ -6,7 +6,7 @@
  * 时还要全改一遍。
  */
 
-import type { Logger } from '../../domain/log.js';
+import type { Logger } from '../../src/domain/log.js';
 
 export class NullLogger implements Logger {
   debug(): void {}

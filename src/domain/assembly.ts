@@ -74,7 +74,9 @@ export interface AssemblyPorts {
   readonly logger: Logger;
 }
 
-export type QuotaPreset = 'chat' | 'coding';
+export const QUOTA_PRESETS = ['chat', 'coding'] as const;
+
+export type QuotaPreset = (typeof QUOTA_PRESETS)[number];
 
 export interface AssemblyOptions {
   /**
@@ -122,7 +124,7 @@ const EVENT_MEMORY_TYPE = 'events';
  * 会话（§8.7 的账本粒度）只给摘要：同一段对话的原文对下一轮的检索没有增量信息，
  * 反而重复占预算。资源与记忆没有理由设限，全文有用就升。
  */
-export const DEPTH_CEILING: Readonly<Record<ContextType, ContextDetail>> = Object.freeze({
+const DEPTH_CEILING: Readonly<Record<ContextType, ContextDetail>> = Object.freeze({
   memory: 'full',
   resource: 'full',
   skill: 'overview',
@@ -276,6 +278,14 @@ function textAt(
       return state.readOverview(candidate.uri);
     case 'full':
       return state.readBody(candidate.uri);
+    default: {
+      // `ContextDetail` 加一个层级时这一行编译失败（`COARSER_DETAIL` 也会同时
+      // 失败）。缺分支只会返回 `undefined`，调用方拿到的是一个「没有正文」的槽位。
+      const exhaustive: never = detail;
+      throw new ComemError('INTERNAL', `未知的正文层级：${String(exhaustive)}`, {
+        detail: exhaustive,
+      });
+    }
   }
 }
 

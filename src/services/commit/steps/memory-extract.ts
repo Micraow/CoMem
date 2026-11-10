@@ -380,7 +380,7 @@ export function isMemoryExtractResult(value: unknown): value is MemoryExtractRes
 }
 
 /** 抽取结果 → 落盘形状（§6.6 的 `memory_operations.json`）。 */
-export function toMemoryOperationsFile(
+function toMemoryOperationsFile(
   archiveUri: Uri,
   result: MemoryExtractResult,
 ): MemoryOperationsFile {
@@ -394,7 +394,7 @@ export function toMemoryOperationsFile(
 }
 
 /** 落盘形状 → 抽取结果（`memoryTypes` 还原成 `Map`）。 */
-export function fromMemoryOperationsFile(file: MemoryOperationsFile): MemoryExtractResult {
+function fromMemoryOperationsFile(file: MemoryOperationsFile): MemoryExtractResult {
   return {
     operations: file.operations,
     skipped: file.skipped,

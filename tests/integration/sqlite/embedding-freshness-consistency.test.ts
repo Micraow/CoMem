@@ -37,7 +37,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
-import { NullLogger } from '../../../src/adapters/log/null.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../../../src/adapters/sqlite/embedding-repository.js';
 import { stableDigest } from '../../../src/domain/node.js';

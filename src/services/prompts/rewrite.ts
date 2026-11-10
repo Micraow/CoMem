@@ -29,13 +29,11 @@ import { z } from 'zod';
 import {
   MAX_TYPED_QUERIES,
   normalizeTypedQueries,
+  TYPED_QUERY_INTENTS,
   type TypedQuery,
 } from '../../domain/retrieval.js';
 
 import { onPromptRendererChange, promptRenderer } from './registry.js';
-
-/** 契约里的六个 intent（`domain/retrieval.ts` 的 `TypedQueryIntent`）。 */
-const INTENTS = ['preference', 'fact', 'decision', 'event', 'procedure', 'other'] as const;
 
 /**
  * 一条查询的 schema。
@@ -48,7 +46,13 @@ const INTENTS = ['preference', 'fact', 'decision', 'event', 'procedure', 'other'
  */
 const typedQuerySchema = z.object({
   text: z.string(),
-  intent: z.enum(INTENTS).catch('other'),
+  /**
+   * 取值来自 `domain/retrieval.ts` 的 `TYPED_QUERY_INTENTS`（唯一来源）。
+   *
+   * 手抄一份数组时，领域层加一个 intent 不会让这里编译失败——schema 继续只接受
+   * 旧的六个，模型永远产不出新值。
+   */
+  intent: z.enum(TYPED_QUERY_INTENTS).catch('other'),
   confidence: z.coerce.number().catch(0),
   derivedFrom: z.string().nullish(),
 });

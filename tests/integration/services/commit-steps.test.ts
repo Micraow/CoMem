@@ -11,7 +11,7 @@ import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
-import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';
 import type { ArchiveMeta, MemoryDiff, MemoryOperationsFile } from '../../../src/domain/archive.js';

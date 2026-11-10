@@ -19,6 +19,24 @@ import type { BatchOperation } from './merge-op.js';
  */
 export type ArchivePhaseStatus = 'preparing' | 'ready';
 
+/**
+ * 阶段状态的合法取值。
+ *
+ * 类型是来源，这张表是运行期清单：往 `ArchivePhaseStatus` 加成员时这里编译失败，
+ * 而 `isArchivePhaseStatus` 只查这张表。旧写法在适配层手抄
+ * `value === 'preparing' || value === 'ready'`，加成员时那段比较不会报错——
+ * 表现为一个合法的 `phase1.status` 被当成「元数据损坏」。
+ */
+const ARCHIVE_PHASE_STATUSES: Readonly<Record<ArchivePhaseStatus, true>> = {
+  preparing: true,
+  ready: true,
+};
+
+/** 阶段状态守卫（`.meta.json` 是不可信输入，见 `MetadataFileStore`）。 */
+export function isArchivePhaseStatus(value: unknown): value is ArchivePhaseStatus {
+  return typeof value === 'string' && Object.hasOwn(ARCHIVE_PHASE_STATUSES, value);
+}
+
 export interface ArchivePhase1 {
   readonly status: ArchivePhaseStatus;
   /** `messages.jsonl` 的 sha256，阶段二读回来先校验 */
@@ -30,21 +48,33 @@ export interface ArchivePhase1 {
 }
 
 /**
- * 提交步骤名。
+ * 提交步骤名，**按执行顺序**。
  *
  * 写成字面量联合而不是 `string`：`stepsDone` 是重放判据，一个拼写错误会让某一步
  * 被静默重放（记忆操作不幂等，重放会造出重复记忆）。
+ *
+ * 数组是唯一来源，类型从它派生：步骤顺序在此定义（`CommitPipeline` 按它装配），
+ * `stepsDone` 的人读顺序也来自它。加一步时 `STEP_PHASE`（阶段名）与装配处的
+ * `Record<CommitStepName, CommitStep>` 会同时编译失败，逼你补齐实现与计时归档。
  */
-export type CommitStepName =
-  | 'archive_summary'
-  | 'memory_extract'
-  | 'memory_merge'
-  | 'summary_invalidate'
+export const COMMIT_STEP_NAMES = [
+  'archive_summary',
+  'memory_extract',
+  'memory_merge',
+  'summary_invalidate',
   /**
    * 经验归纳（§10.1 阶段二的第 5 步）。排在最后：它只消费归档目录与记忆文件，不依赖前四步的
    * `state`，而新增一步不能改变既有步骤的重放判据。
    */
-  | 'experience_distill';
+  'experience_distill',
+] as const;
+
+export type CommitStepName = (typeof COMMIT_STEP_NAMES)[number];
+
+/** 步骤名守卫。`stepsDone` 从 `.meta.json` 读回，属于不可信输入。 */
+export function isCommitStepName(value: unknown): value is CommitStepName {
+  return typeof value === 'string' && COMMIT_STEP_NAMES.some((step) => step === value);
+}
 
 /**
  * 步骤被跳过的原因。

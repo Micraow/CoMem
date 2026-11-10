@@ -125,8 +125,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * 磁盘上的级别名（`.acl.json` 的 `level`）。
+ *
+ * `Record` 的键必须是 `AclFileEntry['level']` 的每个成员：给磁盘格式加一个级别名
+ * （或者删一个）时这里编译失败，而手写 `=== 'read' || === 'write'` 的链不会——
+ * 表现为一个合法的 ACL 文件被读成「不合法」。
+ */
+const ACL_FILE_LEVELS: Readonly<Record<AclFileEntry['level'], true>> = {
+  read: true,
+  write: true,
+  manage: true,
+};
+
 function isAclFileLevel(value: unknown): value is AclFileEntry['level'] {
-  return value === 'read' || value === 'write' || value === 'manage';
+  return typeof value === 'string' && Object.hasOwn(ACL_FILE_LEVELS, value);
 }
 
 function describe(value: unknown): string {

@@ -11,7 +11,6 @@ import {
   fromDiskPath,
   isArtifactName,
   isReservedName,
-  isWindowsReservedName,
   scopeRootOf,
   toDiskLocation,
   toDiskPath,
@@ -105,27 +104,6 @@ describe('isArtifactName', () => {
     expect(TEMP_FILE_PREFIX).toBe('.comem-tmp-');
     // 锁文件是「目标文件名 + 后缀」，不是恰好叫 .comem-lock。
     expect(`${'a.md'}${LOCK_FILE_SUFFIX}`).toBe('a.md.comem-lock');
-  });
-});
-
-describe('isWindowsReservedName', () => {
-  it('识别设备名，大小写不敏感', () => {
-    for (const name of ['CON', 'con', 'PRN', 'AUX', 'NUL', 'COM1', 'com9', 'LPT1', 'lpt9']) {
-      expect(isWindowsReservedName(name), name).toBe(true);
-    }
-  });
-
-  it('按第一个点之前的部分判定，CON.md 同样不可创建', () => {
-    expect(isWindowsReservedName('CON.md')).toBe(true);
-    expect(isWindowsReservedName('con.tar.gz')).toBe(true);
-    // Windows 会吞掉名字末尾的空格。
-    expect(isWindowsReservedName('CON ')).toBe(true);
-  });
-
-  it('普通名字与相似前缀不误判', () => {
-    for (const name of ['console.md', 'com10', 'lpt0', 'null.md', 'auxiliary', 'a.md']) {
-      expect(isWindowsReservedName(name), name).toBe(false);
-    }
   });
 });
 

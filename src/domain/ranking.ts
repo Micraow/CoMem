@@ -10,6 +10,7 @@
  * 做对比，不要在这几个数字上继续叠加经验系数。
  */
 
+import { ComemError } from './errors.js';
 import { LEVEL_ORDER } from './level.js';
 import type { Level } from './level.js';
 
@@ -39,6 +40,14 @@ function weightFor(level: Level, weights: LevelWeights): number {
       return weights.l1;
     case 'L2':
       return weights.l2;
+    default: {
+      // `LEVELS`（`domain/level.ts`）加一个层级时这一行编译失败。缺了分支的
+      // switch 只会走到函数末尾返回 `undefined`，排序会拿 `NaN` 比较，静默乱序。
+      const exhaustive: never = level;
+      throw new ComemError('INTERNAL', `未知的层级：${String(exhaustive)}`, {
+        level: exhaustive,
+      });
+    }
   }
 }
 

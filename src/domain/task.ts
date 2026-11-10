@@ -6,10 +6,49 @@
  * 「还值不值得重试」。
  */
 
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
+/**
+ * 任务状态。
+ *
+ * 数组是唯一来源，类型从它派生：`/tasks` 的 `status` 查询参数校验、`task` 表列
+ * 的取值都从它取。旧写法在路由里手抄一份 `readonly string[]`，加一个状态时既没有
+ * 编译错误、也没有运行期错误——查询参数继续拒绝它。
+ */
+export const TASK_STATUSES = ['pending', 'running', 'done', 'failed'] as const;
+
+export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
- * 后台任务类型。
+ * `/tasks` 只会返回**可认领**的任务（§10.4）：`pending`，或租约过期的 `running`。
+ *
+ * 单独声明这个子集而不是让消费方用 `TaskStatus` 加 `??` 兜底：`done` / `failed`
+ * 在这个接口里不会出现，为它们写文案是给「不会发生的状态」写代码；而用兜底又会把
+ * 「真的出现了意外状态」变成空白。子集的每个成员都必须仍是 `TaskStatus`
+ * （`satisfies`），删掉一个状态时这里跟着编译失败。
+ */
+export const CLAIMABLE_TASK_STATUSES = [
+  'pending',
+  'running',
+] as const satisfies readonly TaskStatus[];
+
+export type ClaimableTaskStatus = (typeof CLAIMABLE_TASK_STATUSES)[number];
+
+/** 任务状态守卫。`task` 表的 `status` 列读出来是字符串。 */
+export function isTaskStatus(value: string): value is TaskStatus {
+  return TASK_STATUSES.some((status) => status === value);
+}
+
+/** 类型守卫。`task` 表的 `type` 列读出来是字符串（`task-repository.ts` 用它）。 */
+export function isTaskType(value: string): value is TaskType {
+  return TASK_TYPES.some((type) => type === value);
+}
+
+/** 可认领状态守卫（`claimable()` 的 SQL 与这个集合是同一个判据）。 */
+export function isClaimableTaskStatus(value: string): value is ClaimableTaskStatus {
+  return CLAIMABLE_TASK_STATUSES.some((status) => status === value);
+}
+
+/**
+ * 后台任务类型。数组是唯一来源，类型从它派生。
  *
  * 只有 `archive` 一个值：它是 `session.ts` 的两阶段提交（§10.1）落队列时创建的
  * 任务，也是全仓唯一的创建点。`extract` / `merge` / `summary` / `index` 曾经写
@@ -20,7 +59,9 @@ export type TaskStatus = 'pending' | 'running' | 'done' | 'failed';
  * 加类型之前先确认有真实的创建点：没有生产者的类型值会让 `/tasks` 的类型列和
  * 「按类型分支」看起来像还存在别的任务。
  */
-export type TaskType = 'archive';
+export const TASK_TYPES = ['archive'] as const;
+
+export type TaskType = (typeof TASK_TYPES)[number];
 
 export interface Task {
   readonly id: string;

@@ -2,7 +2,7 @@
  * 结构化日志接口（架构文档 §17.8）。
  *
  * 日志每行一个 JSON，`requestId` 贯穿到后台任务与模型调用。实现放在
- * `adapters/log/`：`ConsoleLogger` / `FileLogger` 走生产，`NullLogger` 给测试。
+ * `adapters/log/`：`ConsoleLogger` / `FileLogger` 走生产，`NullLogger` 在 `tests/helpers/`。
  */
 
 export interface LogFields {

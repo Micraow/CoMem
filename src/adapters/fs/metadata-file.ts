@@ -38,13 +38,14 @@ import { dirname, join } from 'node:path';
 import type {
   ArchiveMeta,
   ArchivePhase1,
-  ArchivePhaseStatus,
   CommitStepName,
   SkippedCommitStep,
 } from '../../domain/archive.js';
+import { isArchivePhaseStatus, isCommitStepName } from '../../domain/archive.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
-import type { SessionMeta, SessionStatus } from '../../domain/session.js';
+import type { SessionMeta } from '../../domain/session.js';
+import { isSessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
 import { createFsErrorMapper, fsErrorCode } from './error-map.js';
@@ -176,23 +177,6 @@ function toGenerationRecord(generation: SummaryGeneration): Record<string, unkno
   return record;
 }
 
-/** 阶段一的提交步骤名集合（`domain/archive.ts` 的 `CommitStepName`）。 */
-const COMMIT_STEP_NAMES: ReadonlySet<string> = new Set<CommitStepName>([
-  'archive_summary',
-  'memory_extract',
-  'memory_merge',
-  'summary_invalidate',
-  'experience_distill',
-]);
-
-/** 会话状态集合（`domain/session.ts` 的 `SessionStatus`）。 */
-const SESSION_STATUSES: ReadonlySet<string> = new Set<SessionStatus>([
-  'open',
-  // 空闲过期的终态（`session.expiry.action: archive`）。漏掉它时归档写盘成功、读回
-  // 却抛 INTERNAL——「归档了一个会话，之后它从列表里消失」。
-  'archived',
-]);
-
 /**
  * 磁盘上的 `.meta.json` 是本模块自己写的；内容不合法说明数据被改坏了，是程序缺陷。
  *
@@ -213,10 +197,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-function isCommitStepName(value: string): value is CommitStepName {
-  return COMMIT_STEP_NAMES.has(value);
 }
 
 function isCommitStepNameArray(value: unknown): value is readonly CommitStepName[] {
@@ -243,14 +223,6 @@ function isSkippedCommitStep(value: unknown): value is SkippedCommitStep {
 
 function isSkippedCommitStepArray(value: unknown): value is readonly SkippedCommitStep[] {
   return Array.isArray(value) && value.every(isSkippedCommitStep);
-}
-
-function isArchivePhaseStatus(value: unknown): value is ArchivePhaseStatus {
-  return value === 'preparing' || value === 'ready';
-}
-
-function isSessionStatus(value: unknown): value is SessionStatus {
-  return typeof value === 'string' && SESSION_STATUSES.has(value);
 }
 
 function toArchivePhase1(value: unknown, uri: Uri): ArchivePhase1 {

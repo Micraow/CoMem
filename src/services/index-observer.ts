@@ -84,7 +84,7 @@ import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextType, NodeStatus } from '../domain/node.js';
-import { contextTypeOf, stableDigest } from '../domain/node.js';
+import { contextTypeOf, isNodeStatus, stableDigest } from '../domain/node.js';
 import { parseValidityInstant } from '../domain/retrieval.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
@@ -199,10 +199,6 @@ const EMPTY_FRONTMATTER_FIELDS: FrontmatterFields = {
   validFrom: null,
   validUntil: null,
 };
-
-function isNodeStatus(value: string): value is NodeStatus {
-  return value === 'active' || value === 'pending' || value === 'archived';
-}
 
 /**
  * 手改的数值标量（`valid_from: 123`）不是时间串。

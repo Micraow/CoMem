@@ -209,12 +209,11 @@ function decodeText(bytes: Uint8Array): string {
 /**
  * 正文的 UTF-8 字节数，用于「实际写入磁盘多少字节」的上限判定。
  *
- * 与 `domain/node.ts` 的手写实现重复：domain 层被 lint 禁止 import `node:*`，不能
- * 直接用 `Buffer`，所以那边另写了一份按编码区间计数的版本。两份结果必须相同，由
- * `tests/unit/utf8-byte-length.test.ts` 对同一组语料断言——那是唯一的对齐保证。
- * 导出只为这个测试能直接比对。
+ * 按实际写盘的编码计：孤立代理项在这里算 3 字节（编码成 U+FFFD），与
+ * `fs.writeFile` 的 utf8 行为一致。这个函数原来还有一个 domain 层的手写副本要
+ * 对齐，副本随 `Document` 一起删了，现在只有这一份。
  */
-export function utf8ByteLength(text: string): number {
+function utf8ByteLength(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }
 

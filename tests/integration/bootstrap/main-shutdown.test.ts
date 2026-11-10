@@ -13,7 +13,8 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { FileLogger, NullLogger } from '../../../src/adapters/log/index.js';
+import { FileLogger } from '../../../src/adapters/log/file.js';
+import { NullLogger } from '../../helpers/null-logger.js';
 import { shutdownGracefully } from '../../../src/bootstrap/main.js';
 
 const tempDirs: string[] = [];

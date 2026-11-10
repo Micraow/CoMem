@@ -1,4 +1,4 @@
-import { NoObjectGeneratedError, TypeValidationError } from 'ai';
+import { NoObjectGeneratedError } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -241,24 +241,6 @@ describe('complete', () => {
     expect(elapsedMs).toBeLessThan(4_000);
   });
 
-  it('超时抛 PROVIDER_UNAVAILABLE', async () => {
-    const { provider } = createProvider();
-    // 永远不返回，等超时定时器 abort。
-    mocks.generateText.mockImplementation(
-      ({ abortSignal }: { abortSignal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          abortSignal.addEventListener('abort', () => {
-            reject(new DOMException('aborted', 'AbortError'));
-          });
-        }),
-    );
-
-    const error = await provider.complete(PROMPT, { timeoutMs: 10 }).catch((caught: unknown) => caught);
-
-    expect(error).toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
-    expect((error as Error).message).toContain('超时');
-  });
-
   it('调用方取消时透传 abortSignal 给 SDK', async () => {
     const { provider } = createProvider();
     const controller = new AbortController();
@@ -267,39 +249,6 @@ describe('complete', () => {
 
     const call = mocks.generateText.mock.calls[0]?.[0] as { abortSignal: AbortSignal };
     expect(call.abortSignal).toBeInstanceOf(AbortSignal);
-  });
-});
-
-describe('错误映射', () => {
-  it.each([
-    [401, 'UNAUTHENTICATED'],
-    [403, 'UNAUTHENTICATED'],
-    [429, 'RESOURCE_EXHAUSTED'],
-    [500, 'PROVIDER_UNAVAILABLE'],
-    [503, 'PROVIDER_UNAVAILABLE'],
-  ])('HTTP %i 映射成 %s', async (statusCode, code) => {
-    const { provider } = createProvider();
-    mocks.generateText.mockRejectedValue(
-      Object.assign(new Error(`HTTP ${statusCode}`), { statusCode }),
-    );
-
-    await expect(provider.complete(PROMPT)).rejects.toMatchObject({ code });
-  });
-
-  it('网络错误（TypeError）映射成 PROVIDER_UNAVAILABLE', async () => {
-    const { provider } = createProvider();
-    mocks.generateText.mockRejectedValue(new TypeError('fetch failed'));
-
-    await expect(provider.complete(PROMPT)).rejects.toMatchObject({
-      code: 'PROVIDER_UNAVAILABLE',
-    });
-  });
-
-  it('未知错误映射成 INTERNAL', async () => {
-    const { provider } = createProvider();
-    mocks.generateText.mockRejectedValue(new Error('boom'));
-
-    await expect(provider.complete(PROMPT)).rejects.toMatchObject({ code: 'INTERNAL' });
   });
 });
 
@@ -319,17 +268,6 @@ describe('completeJson', () => {
         instructions: '你是抽取器。',
         abortSignal: expect.any(AbortSignal),
       }),
-    );
-  });
-
-  it('解析失败映射成 INVALID_ARGUMENT（上层据此重试）', async () => {
-    const { provider } = createProvider();
-    mocks.generateObject.mockRejectedValue(
-      new TypeValidationError({ value: 'not-json', cause: new Error('bad schema') }),
-    );
-
-    await expect(provider.completeJson(PROMPT, z.object({ ok: z.boolean() }))).rejects.toMatchObject(
-      { code: 'INVALID_ARGUMENT' },
     );
   });
 

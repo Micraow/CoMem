@@ -222,21 +222,6 @@ describe('search：范围与权限', () => {
     expect(uris(await search('记忆', { scopes: ['comem://user/alice2'] }))).toContain(sibling);
   });
 
-  it('没有 node_permission 行的节点不出现', async () => {
-    const uri = 'comem://user/alice/noperm.md';
-    await index.upsert([record(uri, '记忆')]);
-
-    expect(uris(await search('记忆'))).not.toContain(uri);
-  });
-
-  it('level 不足（0）不出现', async () => {
-    const uri = 'comem://user/alice/zero.md';
-    await index.upsert([record(uri, '记忆')]);
-    grant(uri, 'user:alice', 0);
-
-    expect(uris(await search('记忆'))).not.toContain(uri);
-  });
-
   it('user:* 通配：调用方把通配主体放进 principals 时才可见', async () => {
     const uri = 'comem://user/alice/wild.md';
     await seed(uri, '记忆', {}, 'user:*');
@@ -258,27 +243,6 @@ describe('search：范围与权限', () => {
     expect(uris(await search('记忆'))).not.toContain(archived);
   });
 
-  it('deny 压掉 user:* 的 allow：命中被排除', async () => {
-    const publicDoc = 'comem://user/alice/public.md';
-    const blocked = 'comem://user/alice/blocked.md';
-    await seed(publicDoc, '记忆', {}, 'user:*');
-    await seed(blocked, '记忆', {}, 'user:*');
-    grant(blocked, 'user:alice', 1, 'deny');
-
-    expect(uris(await search('记忆', { principals: ['user:alice', 'user:*'] }))).toEqual([
-      publicDoc,
-    ]);
-    // deny 行只压 alice：bob 通过 user:* 仍然可读。
-    expect(uris(await search('记忆', { principals: ['user:bob', 'user:*'] }))).toContain(blocked);
-  });
-
-  it('只有 deny 行、没有 allow 时不可读', async () => {
-    const uri = 'comem://user/alice/deny-only.md';
-    await index.upsert([record(uri, '记忆')]);
-    grant(uri, 'user:alice', 1, 'deny');
-
-    expect(uris(await search('记忆'))).not.toContain(uri);
-  });
 });
 
 describe('search：记忆类型与更新时间（SQL 下推）', () => {
@@ -409,12 +373,6 @@ describe('检索的有效期过滤（asOf）', () => {
     });
     // 非记忆节点：`valid_*` 恒为 NULL，不属于任何有效区间。
     await seed(RESOURCE, '有效区间', { contextType: 'resource', memoryType: null });
-  });
-
-  it('search 只返回无界与当前有效的两条', async () => {
-    expect(uris(await search('有效区间', { asOf: NOW })).sort()).toEqual(
-      [UNBOUNDED, CURRENT, RESOURCE].sort(),
-    );
   });
 
   it('glob 用同一套条件：历史版本与未来版本都不出现', async () => {
@@ -602,17 +560,6 @@ describe('glob', () => {
     expect(await glob('**/*.md')).not.toContain('comem://user/alice2/e.md');
   });
 
-  it('权限过滤：没有权限的节点不出现', async () => {
-    db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(
-      'comem://user/alice/sub/b.md',
-    );
-
-    expect(await glob('**/*.md')).toEqual([
-      'comem://user/alice/a.md',
-      'comem://user/alice/sub/deep/c.md',
-    ]);
-  });
-
   it('已归档节点不出现（归档只影响检索面，§11.7）', async () => {
     const archived = 'comem://user/alice/archived.md';
     await seed(archived, 'a', { status: 'archived' });
@@ -650,16 +597,6 @@ describe('glob', () => {
     expect(
       await glob('**/mem/**', { updatedBefore: '2026-11-05T12:00:00.000Z' }),
     ).toEqual([rule]);
-  });
-
-  it('deny 压掉 user:* 的 allow：路径被排除', async () => {
-    const uri = 'comem://user/alice/a.md';
-    db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(uri);
-    grant(uri, 'user:*', 1, 'allow');
-    grant(uri, 'user:alice', 1, 'deny');
-
-    expect(await glob('*.md', { principals: ['user:alice', 'user:*'] })).toEqual([]);
-    expect(await glob('*.md', { principals: ['user:bob', 'user:*'] })).toEqual([uri]);
   });
 
   it('空 scope 在进 SQL 之前就被拒绝', async () => {

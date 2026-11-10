@@ -15,6 +15,7 @@
  *   `skippedOperations`，不做模糊匹配（§11.5）。
  */
 
+import { ComemError } from './errors.js';
 import { applyPatch } from './patch.js';
 import type { PatchBlock } from './patch.js';
 
@@ -184,6 +185,15 @@ export function applyOperation(
       }
 
       return { ok: true, value: { ...current, [operation.field]: operation.value } };
+    }
+    default: {
+      // `MergeOperation` 加一种操作时这一行编译失败。缺分支只会返回 `undefined`，
+      // 而 `applyOperations` 会把它当成「操作成功、值不变」——模型发出的那条操作
+      // 静默丢掉，`memory_diff.json` 也不会记 skipped。
+      const exhaustive: never = operation;
+      throw new ComemError('INVALID_ARGUMENT', '未知的合并操作。', {
+        operation: JSON.stringify(exhaustive) ?? typeof exhaustive,
+      });
     }
   }
 }

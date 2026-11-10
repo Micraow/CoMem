@@ -25,7 +25,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { ComemError } from '../../../domain/errors.js';
-import type { MessageRole } from '../../../domain/session.js';
+import { isMessageRole, MESSAGE_ROLES, type MessageRole } from '../../../domain/session.js';
 import type { Uri } from '../../../domain/uri.js';
 import { stableMessageId } from '../../../services/session.js';
 import type { McpToolContext } from '../context.js';
@@ -38,7 +38,6 @@ import {
   type McpToolDefinition,
 } from '../registry.js';
 
-const ROLES: readonly MessageRole[] = ['user', 'assistant', 'system', 'tool'];
 
 /** §12.1：write = 3。合成会话写在个人根下，需要写权限。 */
 const WRITE = 3;
@@ -49,13 +48,13 @@ function invalidArgument(message: string, details: Record<string, unknown>): Com
 
 function requireRole(message: Record<string, unknown>, index: number): MessageRole {
   const value = message['role'];
-  if (typeof value !== 'string' || !ROLES.includes(value as MessageRole)) {
-    throw invalidArgument(`remember 的 messages[${index}].role 只能是 ${ROLES.join(' / ')}。`, {
-      tool: 'remember',
-      index,
-    });
+  if (typeof value !== 'string' || !isMessageRole(value)) {
+    throw invalidArgument(
+      `remember 的 messages[${index}].role 只能是 ${MESSAGE_ROLES.join(' / ')}。`,
+      { tool: 'remember', index },
+    );
   }
-  return value as MessageRole;
+  return value;
 }
 
 /** 源日志的时间戳（ISO 8601）；不传时用当前时刻。它是幂等键的一部分。 */
@@ -179,7 +178,7 @@ export const rememberTool: McpToolDefinition = {
         items: {
           type: 'object',
           properties: {
-            role: { type: 'string', enum: ROLES, description: '消息角色；只能是 user / assistant / system / tool' },
+            role: { type: 'string', enum: MESSAGE_ROLES, description: '消息角色；只能是 user / assistant / system / tool' },
             content: { type: 'string', description: '消息正文，不能为空串' },
             createdAt: {
               type: 'string',

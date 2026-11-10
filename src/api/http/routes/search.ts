@@ -33,8 +33,8 @@ import type { FastifyInstance } from 'fastify';
 import { parsePrincipal } from '../../../domain/acl.js';
 import type { AssembledItem } from '../../../domain/assembly.js';
 import { ComemError } from '../../../domain/errors.js';
-import type { Level } from '../../../domain/level.js';
-import type { ContextType } from '../../../domain/node.js';
+import { isLevel, LEVELS, type Level } from '../../../domain/level.js';
+import { CONTEXT_TYPES, isContextType, type ContextType } from '../../../domain/node.js';
 import type { GrepHit, SearchPlan, SearchResultHit } from '../../../domain/retrieval.js';
 import type { ScoredHit } from '../../../services/search.js';
 import { API_CALL_DEADLINE_MS, CallDeadline, runWithDeadline } from '../../deadline.js';
@@ -51,13 +51,12 @@ import {
   type HttpRouteGroup,
 } from '../server.js';
 
+import { isSearchMode, SEARCH_MODES, type SearchMode } from '../../search-mode.js';
 import type { HttpRouteServices } from './index.js';
 
 /** §12.1：read = 1（`grep` / `glob` 的范围求权只用这一个级别）。 */
 const READ = 1;
 
-const CONTEXT_TYPES: readonly ContextType[] = ['memory', 'resource', 'skill', 'session'];
-const LEVELS: readonly Level[] = ['L0', 'L1', 'L2'];
 
 /**
  * `search` 的出参形态（§8.6）。
@@ -65,9 +64,6 @@ const LEVELS: readonly Level[] = ['L0', 'L1', 'L2'];
  * `list` 是默认值，保持向后兼容；`context` 返回可直接注入模型的文本与分层明细。
  * 这是同一个 `search` 能力的出参变体，不是第 17 个 MCP 工具。
  */
-type SearchMode = 'list' | 'context';
-
-const SEARCH_MODES: readonly SearchMode[] = ['list', 'context'];
 
 /**
  * §8.4 的默认条数。与 MCP 的 `find` / `search` / `grep` 共用 `api/search-defaults.ts`
@@ -80,13 +76,12 @@ function parseContextTypes(value: readonly string[] | undefined): readonly Conte
     return undefined;
   }
   return value.map((item) => {
-    const match = CONTEXT_TYPES.find((candidate) => candidate === item);
-    if (match === undefined) {
+    if (!isContextType(item)) {
       throw new ComemError('INVALID_ARGUMENT', `contextTypes 只能是 ${CONTEXT_TYPES.join(' / ')}。`, {
         contextTypes: value,
       });
     }
-    return match;
+    return item;
   });
 }
 
@@ -95,13 +90,12 @@ function parseLevels(value: readonly string[] | undefined): readonly Level[] | u
     return undefined;
   }
   return value.map((item) => {
-    const match = LEVELS.find((candidate) => candidate === item);
-    if (match === undefined) {
+    if (!isLevel(item)) {
       throw new ComemError('INVALID_ARGUMENT', `levels 只能是 ${LEVELS.join(' / ')}。`, {
         levels: value,
       });
     }
-    return match;
+    return item;
   });
 }
 
@@ -109,13 +103,12 @@ function parseMode(value: string | undefined): SearchMode {
   if (value === undefined) {
     return 'list';
   }
-  const match = SEARCH_MODES.find((candidate) => candidate === value);
-  if (match === undefined) {
+  if (!isSearchMode(value)) {
     throw new ComemError('INVALID_ARGUMENT', `mode 只能是 ${SEARCH_MODES.join(' / ')}。`, {
       mode: value,
     });
   }
-  return match;
+  return value;
 }
 
 /** `user:alice` → `comem://user/alice`（不带末尾斜杠）。 */

@@ -85,7 +85,7 @@ export interface CommitRunnerOptions {
    */
   readonly createPipeline: (
     archiveUri: Uri,
-    onStepsChanged: (steps: readonly string[]) => void,
+    onStepsChanged: (steps: readonly CommitStepName[]) => void,
   ) => CommitPipeline;
   readonly logger: Logger;
   /** 轮询间隔（秒），默认 1。 */
@@ -177,6 +177,21 @@ export class CommitRunner {
   }
 
   async #runOne(task: TaskRow): Promise<void> {
+    // 任务类型只有 `archive`：这一段之后的所有代码都在按归档载荷解释 `payload`。
+    //
+    // 写成穷举的 switch 而不是直接往下走：`domain/task.ts` 的 `TASK_TYPES` 加一个
+    // 类型时这里编译失败，逼你给它写处理器。缺处理器不会报错——新类型会被当成
+    // 归档载荷解析，然后在某个 `payload.xxx` 上静默失败。
+    switch (task.type) {
+      case 'archive':
+        break;
+      default: {
+        const exhaustive: never = task.type;
+        await this.#failTask(task, `未知的任务类型：${String(exhaustive)}。`);
+        return;
+      }
+    }
+
     const payload = readArchivePayload(task.payload);
     if (payload === null) {
       // 载荷坏了不能当成功：标 failed 让它进死信，否则它会永远被 `claimable`
@@ -205,7 +220,7 @@ export class CommitRunner {
           // 管线每完成一步就回写任务行：`markStepDone` 内部去重，重复写同一步是
           // 一次幂等的 UPDATE。
           for (const step of steps) {
-            void context.markStepDone(step as CommitStepName);
+            void context.markStepDone(step);
           }
         });
         await pipeline.run(archiveUri, scopeUri);

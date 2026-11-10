@@ -18,8 +18,8 @@
 
 import { parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
-import { LEVELS, type Level } from '../../domain/level.js';
-import type { ContextType } from '../../domain/node.js';
+import { isLevel, LEVELS, type Level } from '../../domain/level.js';
+import { CONTEXT_TYPES, isContextType, type ContextType } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
 import type { AclAction } from '../../services/authorizer.js';
 import type { RerankFailure, ScoredHit } from '../../services/search.js';
@@ -35,26 +35,15 @@ import type { McpToolContext } from './context.js';
 /** §12.1：read = 1。 */
 const READ: AclAction = 1;
 
-/** §13.2 的 16 个工具名，顺序与表格一致。测试用 `toEqual` 对比硬编码数组。 */
-export type McpToolName =
-  | 'find'
-  | 'search'
-  | 'rule_search'
-  | 'read'
-  | 'list'
-  | 'tree'
-  | 'grep'
-  | 'glob'
-  | 'download'
-  | 'health'
-  | 'write'
-  | 'edit'
-  | 'remember'
-  | 'forget'
-  | 'add_resource'
-  | 'add_skill';
-
-export const MCP_TOOL_NAMES: readonly McpToolName[] = Object.freeze([
+/**
+ * §13.2 的 16 个工具名，**按表格顺序**。
+ *
+ * 数组是唯一来源，类型从它派生：`tools/list` 的顺序、启动自检的白名单、各工具
+ * 定义的 `name` 都从它来。往数组加第 17 个名字时，`src/api/mcp/tools/index.ts` 的
+ * `Record<McpToolName, McpToolDefinition>` 会编译失败，逼你补实现（`AGENTS.md` §3
+ * 「16 个，不多不少」）。测试用 `toEqual` 对比文档里硬编码的清单。
+ */
+export const MCP_TOOL_NAMES = [
   'find',
   'search',
   'rule_search',
@@ -71,13 +60,18 @@ export const MCP_TOOL_NAMES: readonly McpToolName[] = Object.freeze([
   'forget',
   'add_resource',
   'add_skill',
-]);
+] as const;
 
-/** 16 个，不多不少。 */
-const MCP_TOOL_COUNT = 16;
+export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
 
-/** §13.2 的 `contextType` 取值（§8.1 的 `context_type`）。 */
-const CONTEXT_TYPES: readonly ContextType[] = ['memory', 'resource', 'skill', 'session'];
+/**
+ * 16 个，不多不少（`AGENTS.md` §3）。
+ *
+ * 从数组长度取：再手写一个 `16` 就成了第三份清单。数量本身仍被
+ * `tests/integration/mcp/registry.test.ts` 对照文档硬编码的清单锁住——这里的自检
+ * 只负责「装配时少注册/多注册一个就崩」。
+ */
+const MCP_TOOL_COUNT = MCP_TOOL_NAMES.length;
 
 export type McpToolResult =
   | { readonly type: 'text'; readonly text: string }
@@ -130,7 +124,7 @@ const PATH_SEPARATOR = '/';
  * 没有主体时抛 `INVALID_URI`，**不兜底到 `user:local`**——那是猜，空库上猜错的
  * 根会让所有写入落进别人的空间。
  */
-export function expandUriAlias(raw: string, subject: string): string {
+function expandUriAlias(raw: string, subject: string): string {
   if (raw !== '~' && !raw.startsWith(`~${PATH_SEPARATOR}`)) {
     return raw;
   }
@@ -384,7 +378,7 @@ export async function indexStatus(
 // ── 权限与范围 ──
 
 /** 当前身份的个人根：`user:alice` → `comem://user/alice`。 */
-export function subjectScope(context: McpToolContext): Uri {
+function subjectScope(context: McpToolContext): Uri {
   const principal = parsePrincipal(context.subject);
   if (principal.kind !== 'user') {
     throw new ComemError(
@@ -613,10 +607,10 @@ export function optionalLevel(
   if (value === undefined) {
     return undefined;
   }
-  if (typeof value !== 'string' || !LEVELS.includes(value as Level)) {
-    throw invalidArgument(`${tool} 的 ${field} 只能是 L0 / L1 / L2。`, { tool, field });
+  if (typeof value !== 'string' || !isLevel(value)) {
+    throw invalidArgument(`${tool} 的 ${field} 只能是 ${LEVELS.join(' / ')}。`, { tool, field });
   }
-  return value as Level;
+  return value;
 }
 
 export function optionalContextType(
@@ -628,13 +622,13 @@ export function optionalContextType(
   if (value === undefined) {
     return undefined;
   }
-  if (typeof value !== 'string' || !CONTEXT_TYPES.includes(value as ContextType)) {
+  if (typeof value !== 'string' || !isContextType(value)) {
     throw invalidArgument(
       `${tool} 的 ${field} 只能是 ${CONTEXT_TYPES.join(' / ')}。`,
       { tool, field },
     );
   }
-  return value as ContextType;
+  return value;
 }
 
 /** 对象数组（`uris` / `files` / `messages`）。 */

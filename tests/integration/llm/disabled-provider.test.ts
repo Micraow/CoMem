@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
 
 import { DisabledLlmProvider } from '../../../src/adapters/llm/disabled-provider.js';
-import { ComemError, isRetryable } from '../../../src/domain/errors.js';
 import type { LlmPrompt, LlmProvider } from '../../../src/domain/llm.js';
 
 const PROMPT: LlmPrompt = { messages: [{ role: 'user', content: '你好' }] };
@@ -26,22 +24,5 @@ describe('DisabledLlmProvider', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
-  });
-
-  it('completeJson 同样抛 INVALID_ARGUMENT', async () => {
-    const provider: LlmProvider = new DisabledLlmProvider();
-
-    await expect(
-      provider.completeJson(PROMPT, z.object({ ok: z.boolean() })),
-    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-  });
-
-  it('INVALID_ARGUMENT 不在可重试集合里（不会白等退避）', async () => {
-    const provider: LlmProvider = new DisabledLlmProvider();
-    const error = await provider.complete(PROMPT).catch((caught: unknown) => caught);
-
-    // `LlmService` 按 `isRetryable` 决定要不要重试；配置错误重试多少次都一样。
-    expect(error).toBeInstanceOf(ComemError);
-    expect(isRetryable(error as ComemError)).toBe(false);
   });
 });

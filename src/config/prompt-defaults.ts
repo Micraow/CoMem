@@ -29,7 +29,7 @@ import type { PromptId } from '../domain/prompt.js';
  * 容器入口），而模板跟着代码走。v1 没有构建步骤（`tsx` 直接跑源码，见
  * `docs/operations.md`），所以 `src/config/` 往上两级就是仓库根。
  */
-export const PROMPTS_DIRECTORY = fileURLToPath(new URL('../../prompts/', import.meta.url));
+const PROMPTS_DIRECTORY = fileURLToPath(new URL('../../prompts/', import.meta.url));
 
 function errorCodeOf(error: unknown): string | null {
   if (typeof error !== 'object' || error === null || !('code' in error)) {

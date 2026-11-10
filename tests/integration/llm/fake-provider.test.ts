@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { FakeLlmProvider } from '../../../src/adapters/llm/fake-provider.js';
+import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
 

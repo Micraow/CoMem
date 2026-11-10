@@ -442,6 +442,14 @@ export class IdentityService {
         }
         return this.#contextFor(credential.userId, null);
       }
+      default: {
+        // `Credential` 加一种凭据时这一行编译失败。缺分支会让 `resolve` 返回
+        // `undefined`——调用方拿到一个假身份，而不是 401。
+        const exhaustive: never = credential;
+        throw new ComemError('INTERNAL', '未知的认证凭据形态。', {
+          credential: JSON.stringify(exhaustive) ?? typeof exhaustive,
+        });
+      }
     }
   }
 

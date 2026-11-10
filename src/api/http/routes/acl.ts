@@ -14,7 +14,18 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import type { AclEffect, AclEntry, AclLevel, AclMode } from '../../../domain/acl.js';
+import {
+  ACL_EFFECTS,
+  ACL_LEVELS,
+  ACL_MODES,
+  isAclEffect,
+  isAclLevel,
+  isAclMode,
+  type AclEffect,
+  type AclEntry,
+  type AclLevel,
+  type AclMode,
+} from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -25,44 +36,38 @@ import type { HttpRouteServices } from './index.js';
 /** §12.1：manage = 7。ACL 的读写都要求它。 */
 const MANAGE = 7;
 
-const MODES: readonly AclMode[] = ['inherit', 'restricted'];
-const EFFECTS: readonly AclEffect[] = ['allow', 'deny'];
-const LEVELS: readonly AclLevel[] = [1, 3, 7];
 
 function invalid(message: string, details: Record<string, unknown>): ComemError {
   return new ComemError('INVALID_ARGUMENT', message, details);
 }
 
 function parseMode(value: unknown): AclMode {
-  const mode = MODES.find((candidate) => candidate === value);
-  if (mode === undefined) {
-    throw invalid(`mode 只能是 ${MODES.join(' / ')}。`, { mode: value });
+  if (!isAclMode(value)) {
+    throw invalid(`mode 只能是 ${ACL_MODES.join(' / ')}。`, { mode: value });
   }
-  return mode;
+  return value;
 }
 
 function parseEffect(value: unknown): AclEffect {
   if (value === undefined) {
     return 'allow';
   }
-  const effect = EFFECTS.find((candidate) => candidate === value);
-  if (effect === undefined) {
-    throw invalid(`effect 只能是 ${EFFECTS.join(' / ')}。`, { effect: value });
+  if (!isAclEffect(value)) {
+    throw invalid(`effect 只能是 ${ACL_EFFECTS.join(' / ')}。`, { effect: value });
   }
-  return effect;
+  return value;
 }
 
 function parseLevel(value: unknown): AclLevel {
   if (typeof value !== 'number') {
     throw invalid('level 必须是数字。', { level: value });
   }
-  const level = LEVELS.find((candidate) => candidate === value);
-  if (level === undefined) {
-    throw invalid(`level 只能是 ${LEVELS.join(' / ')}（read / write / manage）。`, {
+  if (!isAclLevel(value)) {
+    throw invalid(`level 只能是 ${ACL_LEVELS.join(' / ')}（read / write / manage）。`, {
       level: value,
     });
   }
-  return level;
+  return value;
 }
 
 function requirePrincipal(body: Record<string, unknown>): string {
