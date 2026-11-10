@@ -80,6 +80,7 @@ import {
   assertFieldTypes,
   assertMemoryIdentity,
   identityFields,
+  memoryContentOf,
   type MemoryTypeSchema,
 } from '../domain/memory-type.js';
 import { Uri } from '../domain/uri.js';
@@ -298,8 +299,7 @@ type WritePlan = DeletePlan | UpsertPlan;
 
 /** 把记忆正文压成一行摘要；空正文（`add` 之外理论上都有）给空串。 */
 function summarize(record: MemoryRecord): string {
-  const content = record.fields[CONTENT_FIELD];
-  const text = typeof content === 'string' ? content.replace(/\s+/gu, ' ').trim() : '';
+  const text = memoryContentOf(record.fields).replace(/\s+/gu, ' ').trim();
   return text.length <= SUMMARY_CHARS ? text : `${text.slice(0, SUMMARY_CHARS)}…`;
 }
 
@@ -615,7 +615,7 @@ export class ConsolidationService {
               { iteration, uri: uri.toString() },
             );
           }
-          reads.set(uri.toString(), pageContent(record));
+          reads.set(uri.toString(), memoryContentOf(record.fields));
           readUris.push(uri.toString());
         }
         trace.push({
@@ -937,8 +937,3 @@ export class ConsolidationService {
   }
 }
 
-/** 读正文用 `content` 字段，与合并步骤的输入同一形态（`memory-extract.ts`）。 */
-function pageContent(record: MemoryRecord): string {
-  const content = record.fields[CONTENT_FIELD];
-  return typeof content === 'string' ? content : '';
-}

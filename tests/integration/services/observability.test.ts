@@ -10,6 +10,7 @@ import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
+import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { LlmService, type LlmCallStats } from '../../../src/services/llm.js';
@@ -85,6 +86,8 @@ function createService(overrides: Partial<ObservabilityServiceDeps> = {}): Obser
     requestLog,
     db,
     metadata,
+    // 孤儿任务计数走仓储的方法：谓词在 `task-repository.ts`，与 `recoverExpired` 同一份。
+    tasks: new TaskRepository({ db, logger }),
     llm,
     // 默认没有任何画像：健康度里的 profileFormat 全 0，与空库语义一致。
     profileBodies: { readContent: async () => null },
@@ -570,6 +573,9 @@ describe('health', () => {
     insertTask({ id: 'task-running', status: 'running', leaseUntil: '2026-11-07T23:59:00.000Z' });
     insertTask({ id: 'task-future', status: 'running', leaseUntil: '2026-11-08T01:00:00.000Z' });
     insertTask({ id: 'task-pending', status: 'pending', leaseUntil: null });
+    // `lease_until IS NULL` 的 running 行也按孤儿算：认领一定会写租约，这种行说明
+    // 数据被改坏了，`recoverExpired` 会把它捞回去（谓词是同一份 `LEASE_EXPIRED_SQL`）。
+    insertTask({ id: 'task-no-lease', status: 'running', leaseUntil: null });
 
     const health = await service.health();
 
@@ -577,7 +583,7 @@ describe('health', () => {
       pendingReview: 2,
       staleSummaries: 1,
       degradedSummaries: 1,
-      orphanTasks: 1,
+      orphanTasks: 2,
       indexNodes: 5,
       // 最老的 pending 是 2026-11-07T22:00:00Z，距今 2 小时。
       oldestPendingAgeSeconds: 2 * 60 * 60,

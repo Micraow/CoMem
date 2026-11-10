@@ -194,3 +194,19 @@ export function renderPath(
   }
   return `${schema.directory}/${rendered}`;
 }
+
+/**
+ * 记忆记录的正文：取 `content` 字段，非字符串按空串处理。
+ *
+ * 每个记忆类型的 schema 都有 `content` 这一栏（§11.1），正文渲染时它单独成节
+ * （`## content`），其余字段进 frontmatter。
+ *
+ * 取**字段值**而不是整份文件正文：合并步骤在 `fields.content` 上应用 SEARCH/REPLACE
+ * （§11.2 `merge: 'patch'`），模型看到的若是带 frontmatter 的整段文件，SEARCH 永远
+ * 匹配不上。抽取、合并、经验归纳三条路径都从这里取正文——三处各写一遍时，一处改了
+ * 取法（比如去掉类型判断或换成正文段），另外两处就与合并步骤的输入悄悄分叉。
+ */
+export function memoryContentOf(fields: Readonly<Record<string, unknown>>): string {
+  const content = fields['content'];
+  return typeof content === 'string' ? content : '';
+}

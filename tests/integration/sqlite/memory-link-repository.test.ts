@@ -89,6 +89,23 @@ describe('MemoryLinkRepository', () => {
     expect(links).toHaveLength(2);
   });
 
+  /**
+   * 表的唯一键是三列：`(from_uri, to_uri, match_text)`。
+   *
+   * `reindex` 重建 `derived_from` 时直接整批 INSERT，去重键必须与这三列一致
+   * （`commands/reindex.ts` 的 `derivedEdgeKey`）。今天没有产生端给 `derived_from`
+   * 填非空 `match_text`，所以这一格只能在仓储层构造——它是「键少一维会吞边」的地基。
+   */
+  it('replaceByLinkType：同一 from→to、不同 match_text 的两条边都保留', () => {
+    const result = repository.replaceByLinkType('derived_from', [
+      row({ linkType: 'derived_from', matchText: '' }),
+      row({ linkType: 'derived_from', matchText: 'see b' }),
+    ]);
+
+    expect(result).toEqual({ inserted: 2, deleted: 0 });
+    expect(repository.linksFrom('comem://user/alice/memories/entities/a.md')).toHaveLength(2);
+  });
+
   it('空批次不改表', () => {
     expect(repository.upsertMany([])).toEqual({ inserted: 0, merged: 0 });
     expect(repository.linksFrom('comem://user/alice/memories/entities/a.md')).toHaveLength(0);

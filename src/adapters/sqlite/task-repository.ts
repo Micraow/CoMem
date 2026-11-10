@@ -84,6 +84,28 @@ const TASK_COLUMNS = TASK_COLUMN_NAMES.join(', ');
 /** 1 秒 = 1000 毫秒；租约时长按秒配置（§18 的 `task.leaseSeconds`）。 */
 const MILLISECONDS_PER_SECOND = 1000;
 
+/**
+ * 「租约已过期」：`running` 行的租约时间早于给定时刻。
+ *
+ * `lease_until IS NULL` 也按过期算：认领一定会写租约，出现这种行说明数据被改坏了，
+ * 让它能被捞回来而不是永远卡在 `running`。
+ *
+ * 谓词带一个 `?`（当前时刻）。`recoverExpired` 的回收扫描与 `countExpiredLeases` 的
+ * 孤儿计数共用这一份——两处各写一份时，健康度报出的孤儿数会与实际能被回收的集合
+ * 分叉，运维看到的数字就不再是「下次启动扫描会捞回多少」。
+ *
+ * **只覆盖 `running`**：回收租约不碰 `pending`，把它并进来会改变「回收」的行为。
+ */
+const LEASE_EXPIRED_SQL = '(lease_until IS NULL OR lease_until < ?)';
+
+/**
+ * 「可认领」：`pending` 随时可领，`running` 只在租约过期后可领（§10.4）。
+ *
+ * `tryClaim` 的 `WHERE` 与 `claimable()` 的候选集共用这一份，两处对「什么任务能跑」
+ * 给出同一个答案。带一个 `?`（当前时刻），与 `LEASE_EXPIRED_SQL` 同一个占位符。
+ */
+const CLAIMABLE_SQL = `(status = 'pending' OR (status = 'running' AND ${LEASE_EXPIRED_SQL}))`;
+
 function text(value: SQLOutputValue | undefined): string {
   return String(value);
 }
@@ -244,11 +266,7 @@ export class TaskRepository {
         .prepare(
           `UPDATE task
               SET status = 'running', attempts = attempts + 1, lease_until = ?, updated_at = ?
-            WHERE id = ?
-              AND (
-                status = 'pending'
-                OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
-              )`,
+            WHERE id = ? AND ${CLAIMABLE_SQL}`,
         )
         .run(leaseUntilOf(now, leaseSeconds), nowIso, id, nowIso).changes,
     );
@@ -343,7 +361,7 @@ export class TaskRepository {
       const rows = this.#db
         .prepare(
           `SELECT id FROM task
-            WHERE status = 'running' AND (lease_until IS NULL OR lease_until < ?)
+            WHERE status = 'running' AND ${LEASE_EXPIRED_SQL}
             ORDER BY created_at ASC`,
         )
         .all(nowIso);
@@ -376,13 +394,29 @@ export class TaskRepository {
     return this.#db
       .prepare(
         `SELECT ${TASK_COLUMNS} FROM task
-          WHERE status = 'pending'
-             OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
+          WHERE ${CLAIMABLE_SQL}
           ORDER BY created_at ASC
           LIMIT ?`,
       )
       .all(now.toISOString(), limit)
       .map(toClaimableTaskRow);
+  }
+
+  /**
+   * 租约过期的 `running` 任务数（§17.5 的孤儿任务）。
+   *
+   * 与 `recoverExpired` 同一个谓词（`LEASE_EXPIRED_SQL`）：健康度报的就是「下次启动
+   * 扫描能捞回多少」。只读聚合放在仓储上而不是让 `services/observability.ts` 自己写
+   * SQL：谓词只有一份，两处不会各改一半。
+   */
+  countExpiredLeases(now: Date): number {
+    const row = this.#db
+      .prepare(
+        `SELECT COUNT(*) AS total FROM task
+          WHERE status = 'running' AND ${LEASE_EXPIRED_SQL}`,
+      )
+      .get(now.toISOString());
+    return Number(row?.['total'] ?? 0);
   }
 
   countByStatus(status: TaskStatus): number {

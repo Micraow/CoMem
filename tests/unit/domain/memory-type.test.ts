@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ComemError } from '../../../src/domain/errors.js';
 import {
   identityFields,
+  memoryContentOf,
   renderPath,
 } from '../../../src/domain/memory-type.js';
 import {
@@ -155,5 +156,26 @@ describe('内置记忆类型', () => {
     expect(getMemoryType('constructor')).toBeUndefined();
     expect(getMemoryType('toString')).toBeUndefined();
     expect(getMemoryType('unknown-type')).toBeUndefined();
+  });
+});
+
+/**
+ * 正文取法只有这一份（`services/consolidation.ts` 与
+ * `services/commit/steps/memory-extract.ts` 都调它）：合并步骤在 `fields.content`
+ * 上应用 SEARCH/REPLACE，取错字段或去掉类型判断会让「模型读到的正文」与「打补丁的
+ * 正文」分叉。
+ */
+describe('memoryContentOf', () => {
+  it('取 content 字段的字符串值', () => {
+    expect(memoryContentOf({ content: '缩进用 2 个空格。', topic: 'code-style' })).toBe(
+      '缩进用 2 个空格。',
+    );
+  });
+
+  it('字段缺失或不是字符串时给空串', () => {
+    // frontmatter 是 YAML：`content: 42` 解析出来是数字，不是字符串。
+    expect(memoryContentOf({})).toBe('');
+    expect(memoryContentOf({ content: 42 })).toBe('');
+    expect(memoryContentOf({ content: null })).toBe('');
   });
 });

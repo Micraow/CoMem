@@ -70,6 +70,7 @@ import type {
   RequestLogRepository,
   RequestLogRow,
 } from '../adapters/sqlite/request-log-repository.js';
+import type { TaskRepository } from '../adapters/sqlite/task-repository.js';
 import type { Logger } from '../domain/log.js';
 import { validateProfileBody } from '../domain/profile-format.js';
 import { Uri } from '../domain/uri.js';
@@ -316,6 +317,14 @@ export interface ObservabilityServiceDeps {
   readonly db: ObservabilityDatabase;
   /** 读目录的 `.abstract.md`，判定降级摘要（§17.5） */
   readonly metadata: Pick<MetadataFileStore, 'readSummary'>;
+  /**
+   * 孤儿任务计数（§17.5 的 `orphanTasks`）。
+   *
+   * 用仓储的方法而不是在这里再写一条 `WHERE`：「租约过期」这个谓词只有一份
+   * （`task-repository.ts` 的 `LEASE_EXPIRED_SQL`），健康度报的数字必须等于
+   * `recoverExpired` 下次启动能捞回的集合。
+   */
+  readonly tasks: Pick<TaskRepository, 'countExpiredLeases'>;
   /** §17.4 的模型用量；`LlmService.stats` 是累加器 */
   readonly llm: Pick<LlmService, 'stats'>;
   /**
@@ -420,6 +429,8 @@ export class ObservabilityService {
   #requestDurationCount = 0;
   /** `telemetry.metrics.includeAccountLabel` 打开时按账号分组的请求耗时。 */
   readonly #accountDurations = new Map<string, { sumSeconds: number; count: number }>();
+  /** 孤儿任务计数的端口（`TaskRepository`）。 */
+  readonly #tasks: Pick<TaskRepository, 'countExpiredLeases'>;
   /** `telemetry.metrics.includeAccountLabel`。关掉时只输出全局汇总。 */
   readonly #includeAccountLabel: boolean;
   /** `telemetry.hookOverhead.enabled`。关掉时 `recordHookOverhead` 直接丢弃。 */
@@ -429,6 +440,7 @@ export class ObservabilityService {
     this.#requestLog = deps.requestLog;
     this.#db = deps.db;
     this.#metadata = deps.metadata;
+    this.#tasks = deps.tasks;
     this.#llm = deps.llm;
     this.#profileBodies = deps.profileBodies;
     this.#logger = deps.logger;
@@ -608,14 +620,10 @@ export class ObservabilityService {
       `SELECT COUNT(*) AS total FROM node
         WHERE kind = 'directory' AND summary_pending > 0`,
     );
-    // 租约过期的 running 任务就是孤儿：没人续租，正常的执行器不会再碰它。
-    // 与 `TaskRepository.recoverExpired` 同义：`lease_until IS NULL` 的 running 行
-    // 也按过期处理（认领一定会写租约，出现这种行说明数据被改坏了）。
-    const orphanTasks = this.#count(
-      `SELECT COUNT(*) AS total FROM task
-        WHERE status = 'running' AND (lease_until IS NULL OR lease_until < ?)`,
-      now.toISOString(),
-    );
+    // 租约过期的 running 任务就是孤儿：没人续租，正常的执行器不会再碰它。谓词与
+    // `TaskRepository.recoverExpired` 是同一份（`LEASE_EXPIRED_SQL`），所以这里报的
+    // 数字就是下次启动扫描能捞回的任务数。
+    const orphanTasks = this.#tasks.countExpiredLeases(now);
     const indexNodes = this.#count(`SELECT COUNT(*) AS total FROM node WHERE ${NODE_SELF_ROW}`);
     const oldestPendingAgeSeconds = this.#oldestPendingAgeSeconds(now);
     const degradedSummaries = await this.#countDegradedSummaries();

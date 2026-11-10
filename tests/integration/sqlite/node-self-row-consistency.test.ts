@@ -24,6 +24,7 @@ import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { nodeSelfRowSql } from '../../../src/adapters/sqlite/node-repository.js';
 import { RequestLogRepository } from '../../../src/adapters/sqlite/request-log-repository.js';
+import { TaskRepository } from '../../../src/adapters/sqlite/task-repository.js';
 import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import type { Level } from '../../../src/domain/level.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -136,6 +137,7 @@ beforeEach(async () => {
     requestLog: new RequestLogRepository({ db, logger }),
     db,
     metadata: new MetadataFileStore({ dataDir, logger }),
+    tasks: new TaskRepository({ db, logger }),
     llm: new LlmService({ provider: new FakeLlmProvider([{ text: 'ok' }]), logger }),
     // 画像正文与「节点自身那一行」无关，`health()` 只会在有记忆行时读它。
     profileBodies: { readContent: async () => null },

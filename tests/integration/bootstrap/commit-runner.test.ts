@@ -316,6 +316,7 @@ function createObservability(): ObservabilityService {
     requestLog: new RequestLogRepository({ db, logger }),
     db,
     metadata,
+    tasks: new TaskRepository({ db, logger }),
     llm,
     profileBodies: { readContent: async () => null },
     logger,

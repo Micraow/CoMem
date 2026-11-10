@@ -356,6 +356,36 @@ async function buildRecords(
 }
 
 /**
+ * `derived_from` 边的匹配文本。
+ *
+ * `sources` 只给归档 URI，写路径也固定写空串（`MemoryLinkService.rebuildDerived`），
+ * 所以重建出来的边没有匹配文本。它仍然占去重键的一维：唯一索引是三列。
+ */
+const DERIVED_MATCH_TEXT = '';
+
+/** 一条待写入的 `derived_from` 边。 */
+interface DerivedEdge {
+  readonly from: Uri;
+  readonly to: Uri;
+  readonly matchText: string;
+}
+
+/**
+ * `derived_from` 边的去重键：三列逐一对应
+ * `memory_link_unique(from_uri, to_uri, match_text)`（`0003_memory_link.sql`）。
+ *
+ * 重建直接 INSERT（`replaceByLinkType` 刚把这一类边删空），重复的三元组会撞唯一键
+ * 让整批回滚，所以去重口径必须与索引一致。按 `(from, to)` 两列去重时，表说三列唯一、
+ * 重建说两列唯一：一旦某个产生端填了匹配文本，同一个 `from → to` 的两条边就会被静默
+ * 吞掉一条，而表允许它们共存。
+ *
+ * 导出是给用例钉住这个口径的（`tests/integration/commands/reindex.test.ts`）。
+ */
+export function derivedEdgeKey(edge: DerivedEdge): string {
+  return `${edge.from.toString()}\n${edge.to.toString()}\n${edge.matchText}`;
+}
+
+/**
  * 从一份记忆文件的 `sources` 收集 `derived_from` 边（`from` = 记忆自身，`to` = 来源）。
  *
  * 语义与写路径一致（§11.10）：`sources` 里的每一条归档 URI 对应一条边，
@@ -374,12 +404,13 @@ async function buildRecords(
  * 现状不同而得到不同的边，重建不再幂等（§11.10「悬空边写时不拦、读时容忍」）。
  *
  * 不合法的来源值跳过并记 `warn`：反查时终点用 `Uri.parse` 还原，一个非法值会让整次
- * 反查抛错。手改 `sources` 撞出重复值时按 `(from, to)` 去重——唯一索引会拒绝整批。
+ * 反查抛错。手改 `sources` 撞出重复值时按 `derivedEdgeKey()` 去重——那是唯一索引的
+ * 三列，少一列就会让一次插入撞键、整批回滚。
  */
 function collectDerivedEdges(
   uri: Uri,
   rawSources: unknown,
-  target: { from: Uri; to: Uri }[],
+  target: DerivedEdge[],
   seen: Set<string>,
   logger: Logger,
 ): void {
@@ -401,12 +432,13 @@ function collectDerivedEdges(
       });
       continue;
     }
-    const key = `${uri.toString()}\n${to.toString()}`;
+    const edge: DerivedEdge = { from: uri, to, matchText: DERIVED_MATCH_TEXT };
+    const key = derivedEdgeKey(edge);
     if (seen.has(key)) {
       continue;
     }
     seen.add(key);
-    target.push({ from: uri, to });
+    target.push(edge);
   }
 }
 
@@ -816,7 +848,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     /** 失败的节点。索引与向量两条路径可能都失败，同一个节点仍只算一次。 */
     const failedUris = new Set<string>();
     /** 按 `sources` 收集到的 `derived_from` 边；循环结束后一次整批替换。 */
-    const derivedEdges: { readonly from: Uri; readonly to: Uri }[] = [];
+    const derivedEdges: DerivedEdge[] = [];
     const seenEdges = new Set<string>();
 
     // 维度变了要整表重建：`vec0` 的维度固定在 `CREATE VIRTUAL TABLE` 时，旧表里的

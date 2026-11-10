@@ -85,8 +85,14 @@ const MANAGE_LEVEL: AclLevel = 7;
 /** 架构文档 §12.6：组根预置的级别是 write。 */
 const WRITE_LEVEL: AclLevel = 3;
 
-/** 架构文档 §12.1：唯一的通配主体。`group:*` 不支持。 */
-const USER_WILDCARD = 'user:*';
+/**
+ * 架构文档 §12.1：唯一的通配主体。`group:*` 不支持。
+ *
+ * 导出是给 `services/acl.ts` 的撤权判定用的（它按链判断主体是否被 deny）：通配形态
+ * 只有这一个，两处各写一份字符串字面量时，改一处就会让求权与撤权对同一个条目给出
+ * 不同答案。
+ */
+export const USER_WILDCARD = 'user:*';
 
 /** 通配主体与普通主体共用的 id 段。`user:*` 是唯一合法的通配形态。 */
 const WILDCARD_ID = '*';
@@ -182,8 +188,13 @@ export function levelSatisfies(granted: AclLevel, required: AclLevel): boolean {
   return (granted & required) === required;
 }
 
-/** ACL 条目是否命中主体。`user:*` 命中所有 user 主体，不命中 group 主体。 */
-function entryMatches(entryPrincipal: string, subject: string): boolean {
+/**
+ * ACL 条目是否命中主体。`user:*` 命中所有 user 主体，不命中 group 主体。
+ *
+ * 导出是给 `services/acl.ts` 的 `hasDenyEntry` 用的：它回答「整条链上有没有 deny」，
+ * 与 `isDenied`（单节点）用途不同，但「这个条目命中这个主体吗」是同一个判据。
+ */
+export function entryMatches(entryPrincipal: string, subject: string): boolean {
   if (entryPrincipal === subject) {
     return true;
   }

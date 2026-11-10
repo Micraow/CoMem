@@ -15,9 +15,10 @@
  * 再逐个读文件做行匹配。
  *
  * **权限判断是 deny 优先**（架构文档 §12.2 不变量 2）：可读 = 主体集合里有人拿到
- * 带读位的 allow，且没有人在同一节点上有 deny 行。索引层与仓储层
- * （`PermissionRepository.readableUris`）必须用同一套谓词，否则同一次请求里
- * `search` 与 `grep` 会给出不同的可见集合。两处都收在 `permissionPredicate`。
+ * 带读位的 allow，且没有人在同一节点上有 deny 行。谓词本体只有一份，在
+ * `permission-repository.ts` 的 `readablePredicateSql()`——`readableUris`（`grep` 的
+ * 前置过滤、列表类查询）与本文件的 `EXISTS` 子查询都引用它。各存一份时两份写法会
+ * 漂移，同一次请求里 `search` 与 `grep` 就会给出不同的可见集合。
  */
 
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
@@ -39,6 +40,7 @@ import {
 import { segmentCjk } from '../../domain/text.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
+import { readablePredicateSql } from './permission-repository.js';
 
 export interface SqliteFtsIndexOptions {
   readonly db: DatabaseSync;
@@ -46,12 +48,6 @@ export interface SqliteFtsIndexOptions {
   /** §18 的 `retrieval.candidateMultiplier`，默认 4 */
   readonly candidateMultiplier?: number;
 }
-
-/**
- * §12.1：read = 1。检索只要求 read；写级别（3）与 manage（7）在服务层求权。
- * 用常量而不是字面量，避免「SQL 里的 1」和「ACL 位值」各改一处。
- */
-const READ_LEVEL = 1;
 
 /**
  * §18 `retrieval.candidateMultiplier` 的默认值。
@@ -240,13 +236,9 @@ function metadataConditions(query: {
  * 权限谓词：节点对主体集合可读。
  *
  * 主体集合在 SQL 里出现两次（外层 allow、内层 deny 的排除），占位符复用同一个
- * 局部变量，绑定时按出现顺序展开成两段。`search` 与 `glob` 共用这一份。
- *
- * 读判定用位测试（`(p.level & READ_LEVEL) = READ_LEVEL`），与单节点读路径
- * （`services/acl.ts` 的 `SELECT MAX(level)` + `domain/acl.ts` 的
- * `levelSatisfies`）同一语义。`p.level >= 1` 只在规范级别 1/3/7 上等价：库里
- * 出现 `level = 2` / `4` / `6` 这类只带高位、读位为 0 的行时，`>=` 判可读而
- * 位测试判不可读，于是 `search` / `glob` 与 `read` 的可见集合分叉。
+ * 局部变量，绑定时按出现顺序展开成两段。`search` 与 `glob` 共用这一份，谓词本体在
+ * `permission-repository.ts` 的 `readablePredicateSql()`——它的文档说明了为什么读位
+ * 必须用位测试、以及为什么不能与「有 allow 且没有 deny」拆成两处。
  */
 function permissionPredicate(principals: readonly string[]): {
   readonly sql: string;
@@ -258,14 +250,7 @@ function permissionPredicate(principals: readonly string[]): {
          SELECT 1 FROM node_permission p
          WHERE p.node_uri = n.uri
            AND p.principal IN (${principalList})
-           AND (p.level & ${READ_LEVEL}) = ${READ_LEVEL}
-           AND p.effect = 'allow'
-           AND NOT EXISTS (
-             SELECT 1 FROM node_permission d
-             WHERE d.node_uri = p.node_uri
-               AND d.principal IN (${principalList})
-               AND d.effect = 'deny'
-           )
+           AND ${readablePredicateSql(principalList)}
        )`,
     params: [...principals, ...principals],
   };

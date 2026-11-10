@@ -38,6 +38,7 @@ import type { MemoryOperationsFile, SkippedMemoryOperation } from '../../../doma
 import { ComemError } from '../../../domain/errors.js';
 import type { LlmPrompt } from '../../../domain/llm.js';
 import type { Logger } from '../../../domain/log.js';
+import { memoryContentOf } from '../../../domain/memory-type.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
 import { BUILTIN_MEMORY_TYPES, getMemoryType } from '../../../domain/memory-types/index.js';
 import type { BatchOperation, MergeOperation } from '../../../domain/merge-op.js';
@@ -203,12 +204,11 @@ export function retrievalQuery(messages: readonly SessionMessage[]): string {
 /**
  * 页面正文取 `content` 字段。
  *
- * 必须与 `applyPatch` 的输入一致：合并步骤在 `fields.content` 上应用 SEARCH/REPLACE，
- * 模型看到的若是带 `## content` 标题的整段正文，SEARCH 永远匹配不上。
+ * 规则本体在 `domain/memory-type.ts` 的 `memoryContentOf()`；这里只把记录形状适配成
+ * `fields`。保留这个导出是因为 `commit/steps/experience-distill.ts` 从这里取它。
  */
 export function pageContent(record: MemoryRecord): string {
-  const content = record.fields['content'];
-  return typeof content === 'string' ? content : '';
+  return memoryContentOf(record.fields);
 }
 
 /**

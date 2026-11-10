@@ -100,6 +100,7 @@ import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
 import { COMMIT_STEP_NAMES, type CommitStepName, type CommitStepSkipReason } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
+import { memoryContentOf } from '../domain/memory-type.js';
 import type { RetrievalIndex } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { AclService } from '../services/acl.js';
@@ -1242,16 +1243,14 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     requestLog,
     db,
     metadata,
+    // 孤儿任务计数（§17.5）：谓词在仓储里，健康度不自己写 `WHERE`。
+    tasks: taskRepository,
     llm,
     // 画像格式自查（§11.1）读正文：索引只说明「这是一条画像」，说明不了格式。
     profileBodies: {
       readContent: async (uri) => {
         const record = await memory.read(uri);
-        if (record === null) {
-          return null;
-        }
-        const content = record.fields['content'];
-        return typeof content === 'string' ? content : '';
+        return record === null ? null : memoryContentOf(record.fields);
       },
     },
     logger,

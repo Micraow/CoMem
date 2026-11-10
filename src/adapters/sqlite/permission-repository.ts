@@ -55,6 +55,36 @@ const READ_LEVEL = 1;
 
 const ACL_COLUMNS = 'uri, principal, level, effect';
 
+/**
+ * 「这个节点对主体集合可读」的谓词（§12.2 不变量 2）。**这是唯一一份。**
+ *
+ * 三个条件缺一不可：命中主体集合的 allow 行带读位、没有任何主体在该节点的链上被
+ * deny。deny 优先，所以不能合并成 `MAX(level)`——被 deny 的主体集合没有 allow 行
+ * 但仍然必须被 deny 行压掉。
+ *
+ * 读位用位测试而不是 `>=`：规范级别 1 / 3 / 7 上两者等价，但 `level = 2` / `6` 这类
+ * 只带高位、读位为 0 的非规范行会被 `>=` 判成可读，与单节点读路径
+ * （`services/acl.ts` 的 `MAX(level)` + `levelSatisfies` 位测试）分叉。
+ *
+ * `principalList` 是主体集合的占位符片段（`placeholders(n)`）；它在 SQL 里出现两次
+ * （外层 allow、内层 deny），调用方按出现顺序绑定两遍。调用方必须把 `node_permission`
+ * 别名为 `p`。
+ *
+ * `SqliteFtsIndex` 的 `EXISTS` 子查询（`search` / `glob`）与 `readableUris` 的批量
+ * `IN (...)`（`grep` 的前置过滤、列表类查询）共用它：各存一份时两份写法会漂移，
+ * 同一次请求里 `search` 与 `grep` 就会给出不同的可见集合。
+ */
+export function readablePredicateSql(principalList: string): string {
+  return `(p.level & ${READ_LEVEL}) = ${READ_LEVEL}
+      AND p.effect = 'allow'
+      AND NOT EXISTS (
+        SELECT 1 FROM node_permission d
+        WHERE d.node_uri = p.node_uri
+          AND d.principal IN (${principalList})
+          AND d.effect = 'deny'
+      )`;
+}
+
 function text(value: SQLOutputValue | undefined): string {
   return String(value);
 }
@@ -120,20 +150,15 @@ export class PermissionRepository {
    *
    * 语义是「有 allow 且没有 deny」（§12.2 不变量 2）：主体集合里任一主体拿到
    * 带读位的 allow，且没有任何主体在同一个节点上有 deny 行。deny 优先于 allow，
-   * 所以这两个条件不能合并成 `MAX(level)`。
-   *
-   * 读位用 `(p.level & READ_LEVEL) = READ_LEVEL` 判定，与 `domain/acl.ts` 的
-   * `levelSatisfies` 同义。不能写 `p.level >= READ_LEVEL`：规范级别 1/3/7 下
-   * 两者等价，但 `level = 2` / `6` 这类读位为 0 的非规范行会被 `>=` 误判为可读，
-   * 与单节点读路径（`MAX(level)` + 位测试）分叉。
+   * 所以这两个条件不能合并成 `MAX(level)`。谓词本体在 `readablePredicateSql()`：
+   * `search` / `glob` 的 `EXISTS` 子查询用的是同一份。
    *
    * 一次 `IN (...)` 查询拿完，不按 URI 逐条查：`search` 一次要过滤 40 条候选，
    * 逐条查就是 40 次往返。SQLite 的变量上限默认 32766（`SQLITE_MAX_VARIABLE_NUMBER`），
    * 40 条候选加几个主体远不到上限。
    *
-   * 注意：FTS5 检索把同样的条件折进了 `SqliteFtsIndex.search` 的 SQL（EXISTS 子查询），
-   * 一次查询完成「匹配 + 权限」。这个方法服务的是「候选已经在内存里、需要批量过滤」
-   * 的路径（`grep` 读文件前先过滤、控制台批量操作）。
+   * 这个方法服务的是「候选已经在内存里、需要批量过滤」的路径（`grep` 读文件前先
+   * 过滤、控制台批量操作）。
    */
   readableUris(uris: readonly string[], principals: readonly string[]): ReadonlySet<string> {
     if (uris.length === 0 || principals.length === 0) {
@@ -145,14 +170,7 @@ export class PermissionRepository {
     const sql = `SELECT DISTINCT p.node_uri FROM node_permission p
       WHERE p.node_uri IN (${placeholders(uris.length)})
         AND p.principal IN (${principalList})
-        AND (p.level & ${READ_LEVEL}) = ${READ_LEVEL}
-        AND p.effect = 'allow'
-        AND NOT EXISTS (
-          SELECT 1 FROM node_permission d
-          WHERE d.node_uri = p.node_uri
-            AND d.principal IN (${principalList})
-            AND d.effect = 'deny'
-        )`;
+        AND ${readablePredicateSql(principalList)}`;
     const rows = this.#db.prepare(sql).all(...uris, ...principals, ...principals);
     return new Set(rows.map((row) => text(row['node_uri'])));
   }

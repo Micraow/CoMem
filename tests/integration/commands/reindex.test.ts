@@ -45,6 +45,7 @@ vi.mock('@ai-sdk/openai-compatible', () => ({
 }));
 
 const {
+  derivedEdgeKey,
   documentsMissingVectors,
   embedMissingNodes,
   hasDocumentsMissingVectors,
@@ -520,6 +521,42 @@ describe('links 重建（memory_link 的 derived_from）', () => {
     expect(result.failed).toBe(0);
     expect(result.links).toBe(1);
     expect(readLinks().map((row) => row.to)).toEqual([ARCHIVE_1]);
+  });
+
+  it('同一个归档在 sources 里重复出现：去重成一条边，不撞唯一键', async () => {
+    await writeConfig(false);
+    await writeMemory(MEMORY_A, [ARCHIVE_1, ARCHIVE_1]);
+    openDb().close();
+
+    // 重建是整批 INSERT（`replaceByLinkType` 先删空）：重复的三元组会撞
+    // `memory_link_unique` 让整批回滚，所以收集阶段必须去重。
+    const result = await runReindex({ dataDir, configPath, only: 'links' });
+
+    expect(result.failed).toBe(0);
+    expect(result.links).toBe(1);
+    expect(readLinks().map((row) => [row.from, row.to])).toEqual([[MEMORY_A, ARCHIVE_1]]);
+  });
+
+  /**
+   * 去重键必须覆盖 `memory_link_unique(from_uri, to_uri, match_text)` 的三列。
+   *
+   * **构造不出来的那一半**：生产路径写不出「同一 from→to、不同 match_text」的
+   * `derived_from` 边——`sources` 只给 URI，`MemoryLinkService.rebuildDerived` 固定
+   * `matchText: ''`。所以「两条都保留」只能在表和仓储层构造
+   * （`tests/integration/sqlite/memory-link-repository.test.ts` 的
+   * `replaceByLinkType` 用例）。这里钉的是重建侧的口径：键少一列，表允许共存的两条
+   * 边会被静默吞掉一条。
+   */
+  it('去重键是唯一索引的三列：同一 from→to、不同 match_text 是两个键', () => {
+    const from = Uri.parse(MEMORY_A);
+    const to = Uri.parse(ARCHIVE_1);
+
+    expect(derivedEdgeKey({ from, to, matchText: '' })).toBe(
+      derivedEdgeKey({ from, to, matchText: '' }),
+    );
+    expect(derivedEdgeKey({ from, to, matchText: '' })).not.toBe(
+      derivedEdgeKey({ from, to, matchText: 'see a' }),
+    );
   });
 });
 

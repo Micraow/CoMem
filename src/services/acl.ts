@@ -90,8 +90,10 @@ import type {
   PermissionRow,
 } from '../adapters/sqlite/permission-repository.js';
 import {
+  USER_WILDCARD,
   assertOwnerUserId,
   effectiveAcl,
+  entryMatches,
   groupPrincipal,
   isAclLevel,
   levelSatisfies,
@@ -113,9 +115,6 @@ const MANAGE_LEVEL: AclLevel = 7;
 
 /** §12.6：组根预置的默认级别是 write；§18 的 `acl.groupDefaultLevel` 可降为 read。 */
 const DEFAULT_GROUP_LEVEL: AclLevel = 3;
-
-/** §12.1：唯一的通配主体。`group:*` 不支持（`parsePrincipal` 拒绝）。 */
-const USER_WILDCARD = 'user:*';
 
 /**
  * `purgePrincipal` 扫描 `.acl.json` 的目录数上限。
@@ -286,19 +285,6 @@ function maxLevel(levels: ReadonlySet<AclLevel>): AclLevel {
     }
   }
   return max;
-}
-
-/**
- * 条目是否命中主体：精确相等，或 `user:*` 命中所有 user 主体（§12.1）。
- *
- * 与 `domain/acl.ts` 的 `entryMatches` 同一规则。domain 没有导出它，而本 wave
- * 不改 domain，所以服务层重复这三行——规则本身只有「精确匹配 + 唯一通配符」。
- */
-function entryMatches(entryPrincipal: string, subject: string): boolean {
-  if (entryPrincipal === subject) {
-    return true;
-  }
-  return entryPrincipal === USER_WILDCARD && subject.startsWith('user:');
 }
 
 /** 链上是否有命中主体的 deny 条目。命中即该主体在目标节点上被拒绝（§12.2）。 */
