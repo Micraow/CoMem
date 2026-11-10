@@ -56,6 +56,13 @@ function parseReport(body: Record<string, unknown>): HookOverheadReport {
   };
 }
 
+/** `POST /telemetry/hook` 的响应体：确认收到的是哪一份报告。 */
+interface HookOverheadResponse {
+  readonly recorded: true;
+  readonly event: string;
+  readonly sessionId: string | null;
+}
+
 export function createTelemetryRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { observability } = services;
 
@@ -67,7 +74,7 @@ export function createTelemetryRoutes(services: HttpRouteServices): HttpRouteGro
         const body = requireRecord(request.body, 'telemetry/hook');
         const report = parseReport(body);
         await observability.recordHookOverhead(report);
-        return ok({ recorded: true, event: report.event, sessionId: report.sessionId });
+        return ok<HookOverheadResponse>({ recorded: true, event: report.event, sessionId: report.sessionId });
       });
     },
   };

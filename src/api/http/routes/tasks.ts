@@ -113,6 +113,22 @@ function requireStatus(value: string | undefined): TaskStatus | undefined {
   return value;
 }
 
+/** `GET /tasks/{id}` 的响应体（单个任务；不存在走 404）。 */
+interface TaskResponse {
+  readonly task: TaskRecord;
+}
+
+/** `GET /tasks` 的响应体：只含可认领的任务（`pending` 或租约过期的 `running`）。 */
+interface TaskListResponse {
+  readonly tasks: readonly ClaimableTaskRecord[];
+  readonly total: number;
+}
+
+/** `POST /tasks/{id}/retry` 的响应体：重排后的任务行。 */
+interface TaskRetryResponse {
+  readonly task: TaskRecord | null;
+}
+
 export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { taskStore, adminUserIds } = services;
 
@@ -127,7 +143,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
             taskId: request.params.id,
           });
         }
-        return ok({ task });
+        return ok<TaskResponse>({ task });
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/', async (request) => {
@@ -137,7 +153,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
         const status = requireStatus(optionalString(query, 'status'));
         const claimable = taskStore.claimable(new Date(), limit);
         const tasks = status === undefined ? claimable : claimable.filter((task) => task.status === status);
-        return ok({ tasks, total: tasks.length });
+        return ok<TaskListResponse>({ tasks, total: tasks.length });
       });
 
       app.post<{ Params: { id: string } }>('/:id/retry', async (request) => {
@@ -156,7 +172,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
           );
         }
         taskStore.requeue(task.id, new Date());
-        return ok({ task: taskStore.get(task.id) });
+        return ok<TaskRetryResponse>({ task: taskStore.get(task.id) });
       });
     },
   };

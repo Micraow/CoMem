@@ -71,6 +71,24 @@ function scopeOfSubject(subject: string): Uri {
   return Uri.parse(`comem://user/${principal.id}`);
 }
 
+/** `GET /skills` 列表项：URI 与目录名（`SKILL.md` 的 description 暂缺，见路由注释）。 */
+interface SerializedSkill {
+  readonly uri: string;
+  readonly name: string;
+}
+
+/** `POST /skills` 的响应体。 */
+interface SkillAddResponse {
+  readonly skillUri: string;
+  readonly fileCount: number;
+}
+
+/** `GET /skills` 的响应体。 */
+interface SkillListResponse {
+  readonly scope: string;
+  readonly skills: readonly SerializedSkill[];
+}
+
 export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { skill, authorizer } = services;
 
@@ -96,7 +114,7 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
           principals: context.principals,
         });
 
-        return ok({
+        return ok<SkillAddResponse>({
           skillUri: result.skillUri.toString(),
           fileCount: result.fileCount,
         });
@@ -119,7 +137,7 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
         // `DocumentFrontmatter` 只建模摘要三字段，`ContentStore.readText` 不暴露任意
         // 键。要补得先扩领域类型（W9 处理）。目录降级成「只有名字」是 §15.2 允许
         // 的一档，不是静默丢失。
-        return ok({
+        return ok<SkillListResponse>({
           scope: scope.toString(),
           skills: skills.map((uri) => ({ uri: uri.toString(), name: uri.name })),
         });

@@ -95,6 +95,35 @@ function parseEntries(value: unknown): readonly AclEntry[] {
   });
 }
 
+/** `GET /acl` 的响应体：节点快照 + 求值后的有效权限。 */
+interface AclGetResponse {
+  readonly uri: string;
+  readonly mode: AclMode;
+  readonly entries: readonly AclEntry[];
+  /** 按 principal 分组的有效级别（升序）。 */
+  readonly effective: Readonly<Record<string, readonly AclLevel[]>>;
+}
+
+/** `PUT /acl` 的响应体：写入后的整份状态。 */
+interface AclSetResponse {
+  readonly uri: string;
+  readonly mode: AclMode;
+  readonly entries: readonly AclEntry[];
+}
+
+/** `POST /acl/grant` 的响应体：写入的那一条条目。 */
+interface AclGrantResponse {
+  readonly uri: string;
+  readonly entry: AclEntry;
+}
+
+/** `POST /acl/revoke` 的响应体。 */
+interface AclRevokeResponse {
+  readonly uri: string;
+  readonly principal: string;
+  readonly revoked: true;
+}
+
 function serializeEffective(
   effective: ReadonlyMap<string, ReadonlySet<AclLevel>>,
 ): Record<string, readonly AclLevel[]> {
@@ -117,7 +146,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const uri = requireUri(query, 'uri');
         await authorizer.assert(uri, MANAGE, context.principals);
         const snapshot = await acl.getAcl(uri, context.subject, context.principals);
-        return ok({
+        return ok<AclGetResponse>({
           uri: snapshot.uri.toString(),
           mode: snapshot.mode,
           entries: snapshot.entries,
@@ -133,7 +162,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
         const entries = parseEntries(body['entries']);
         await authorizer.assert(uri, MANAGE, context.principals);
         await acl.setAcl(uri, { mode, entries }, context.subject, context.principals);
-        return ok({ uri: uri.toString(), mode, entries });
+        return ok<AclSetResponse>({ uri: uri.toString(), mode, entries });
       });
 
       app.post<{ Body: unknown }>('/grant', async (request) => {
@@ -162,7 +191,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
           context.subject,
           context.principals,
         );
-        return ok({ uri: uri.toString(), entry });
+        return ok<AclGrantResponse>({ uri: uri.toString(), entry });
       });
 
       app.post<{ Body: unknown }>('/revoke', async (request) => {
@@ -188,7 +217,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
           context.subject,
           context.principals,
         );
-        return ok({ uri: uri.toString(), principal, revoked: true });
+        return ok<AclRevokeResponse>({ uri: uri.toString(), principal, revoked: true });
       });
     },
   };

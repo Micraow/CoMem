@@ -47,6 +47,50 @@ interface SerializedEntry {
   readonly size: number;
 }
 
+/** `GET /fs/tree` 的响应体：根 URI + 展平后的条目 + 是否被截断。 */
+interface SerializedTree {
+  readonly root: string;
+  readonly entries: readonly SerializedEntry[];
+  readonly truncated: boolean;
+}
+
+/** `GET /fs/stat` 的 stat 字段；目标不存在时整个字段是 `null`。 */
+interface FsStat {
+  readonly kind: 'file' | 'directory';
+  readonly size: number;
+  readonly updatedAt: string;
+}
+
+/** `GET /fs/ls` 的响应体。 */
+interface FsListResponse {
+  readonly uri: string;
+  readonly entries: readonly SerializedEntry[];
+}
+
+/** `GET /fs/stat` 的响应体。 */
+interface FsStatResponse {
+  readonly uri: string;
+  readonly stat: FsStat | null;
+}
+
+/** `POST /fs/mkdir` 的响应体。 */
+interface FsMkdirResponse {
+  readonly uri: string;
+  readonly created: true;
+}
+
+/** `POST /fs/mv`、`POST /fs/cp` 的响应体。 */
+interface FsTransferResponse {
+  readonly from: string;
+  readonly to: string;
+}
+
+/** `DELETE /fs` 的响应体。 */
+interface FsDeleteResponse {
+  readonly uri: string;
+  readonly removedFiles: number;
+}
+
 function serializeEntry(entry: TreeEntry): SerializedEntry {
   return {
     uri: entry.uri.toString(),
@@ -56,11 +100,7 @@ function serializeEntry(entry: TreeEntry): SerializedEntry {
   };
 }
 
-function serializeTree(result: TreeResult): {
-  readonly root: string;
-  readonly entries: readonly SerializedEntry[];
-  readonly truncated: boolean;
-} {
+function serializeTree(result: TreeResult): SerializedTree {
   return {
     root: result.root.toString(),
     entries: result.entries.map(serializeEntry),
@@ -116,7 +156,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const uri = requireUri(query, 'uri');
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, READ, principals);
-        return ok({
+        return ok<FsListResponse>({
           uri: uri.toString(),
           entries: (await filesystem.list(uri, principals)).map(serializeEntry),
         });
@@ -129,7 +169,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_TREE_LIMIT, { min: 1 });
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, READ, principals);
-        return ok(serializeTree(await filesystem.tree(uri, principals, { depth, limit })));
+        return ok<SerializedTree>(serializeTree(await filesystem.tree(uri, principals, { depth, limit })));
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/stat', async (request) => {
@@ -138,7 +178,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, READ, principals);
         const stat = await filesystem.stat(uri, principals);
-        return ok({
+        return ok<FsStatResponse>({
           uri: uri.toString(),
           stat:
             stat === null
@@ -153,7 +193,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, WRITE, principals);
         await filesystem.mkdir(uri, principals);
-        return ok({ uri: uri.toString(), created: true });
+        return ok<FsMkdirResponse>({ uri: uri.toString(), created: true });
       });
 
       app.post<{ Body: unknown }>('/mv', async (request) => {
@@ -164,7 +204,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         await authorizer.assert(from, MANAGE, principals);
         await authorizer.assert(to, MANAGE, principals);
         await filesystem.move(from, to, principals);
-        return ok({ from: from.toString(), to: to.toString() });
+        return ok<FsTransferResponse>({ from: from.toString(), to: to.toString() });
       });
 
       app.post<{ Body: unknown }>('/cp', async (request) => {
@@ -175,7 +215,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         await authorizer.assert(from, READ, principals);
         await authorizer.assert(to, WRITE, principals);
         await copyNode(services, from, to, principals);
-        return ok({ from: from.toString(), to: to.toString() });
+        return ok<FsTransferResponse>({ from: from.toString(), to: to.toString() });
       });
 
       app.delete<{ Querystring: Record<string, unknown> }>('/', async (request) => {
@@ -186,7 +226,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, MANAGE, principals);
         const removed = await filesystem.remove(uri, principals);
-        return ok({ uri: uri.toString(), removedFiles: removed.removedFiles });
+        return ok<FsDeleteResponse>({ uri: uri.toString(), removedFiles: removed.removedFiles });
       });
     },
   };

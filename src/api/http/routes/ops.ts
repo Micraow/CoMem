@@ -39,7 +39,9 @@ import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { AclService } from '../../../services/acl.js';
-import { healthStatus } from '../../health-status.js';
+import type { ProfileFormatHealth } from '../../../services/observability/profile-format.js';
+import type { RerankFailure } from '../../../services/retrieval/types.js';
+import { healthStatus, type HealthStatus } from '../../health-status.js';
 import { ok } from '../envelope.js';
 import { PROMETHEUS_CONTENT_TYPE, SERVICE_VERSION, type HttpRouteGroup } from '../server.js';
 
@@ -74,6 +76,49 @@ async function readableScopes(
   return scopes;
 }
 
+/** `GET /health` 的响应体（§17.9）。字段口径见各查询的注释。 */
+interface HealthResponse {
+  /** `degraded` = 摘要 / 重排走了降级路径；静默降级等于骗人。 */
+  readonly status: HealthStatus;
+  /** 服务图绑定的主体（`config.server.subject`）。 */
+  readonly subject: string;
+  /** 绑定主体可寻址且可读的根；组根读不到就跳过。 */
+  readonly scopes: readonly string[];
+  readonly index: {
+    /** **全库**条数（`node` 表全量），不是当前身份可见的条数。 */
+    readonly totalNodes: number;
+  };
+  readonly queue: {
+    readonly pending: number;
+    readonly processing: number;
+  };
+  readonly summary: {
+    readonly degraded: boolean;
+    readonly pendingDirs: number;
+    readonly degradedDirs: number;
+  };
+  /** 归档提交的记忆抽取是否被跳过（`providers.llm.default.type = disabled`）。 */
+  readonly memoryExtract: {
+    readonly skipped: boolean;
+    readonly reason: 'llm_disabled' | null;
+  };
+  /** 重排健康度。`failures` 是累计值，`lastFailure` 成功一次后清空。 */
+  readonly rerank: {
+    readonly configured: boolean;
+    readonly degraded: boolean;
+    readonly failures: number;
+    readonly lastFailure: RerankFailure | null;
+  };
+  /** §17.5 的记忆健康度。 */
+  readonly memory: {
+    readonly pendingReview: number;
+    readonly orphanTasks: number;
+    readonly oldestPendingAgeSeconds: number | null;
+    readonly profileFormat: ProfileFormatHealth;
+  };
+  readonly version: string;
+}
+
 export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { acl, observability, tasks, config, subject, groups, search } = services;
 
@@ -91,7 +136,7 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
         // 重排是「配了就必须能查」的质量增强：`degraded` 为真表示最近一次重排
         // 调用失败、这次检索用的是融合分。与 `summary.degraded` 同一个判定模式。
         const rerank = search.rerankHealth;
-        return ok({
+        return ok<HealthResponse>({
           status: healthStatus({
             ruleGenerator,
             degradedSummaries: health.degradedSummaries,

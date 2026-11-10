@@ -22,7 +22,10 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import { ComemError } from '../../../domain/errors.js';
-import { DEFAULT_MAX_FILE_BYTES } from '../../../services/resource.js';
+import {
+  DEFAULT_MAX_FILE_BYTES,
+  type AddResourceResult,
+} from '../../../services/resource.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import { optionalInteger, requireRecord, requireUri, type HttpRouteGroup } from '../server.js';
@@ -99,6 +102,17 @@ function fileNameOf(request: FastifyRequest): string | null {
   return null;
 }
 
+/** `POST /resources` 的响应体：落盘结果按「新建 / 更新 / 跳过 / 附件」分组。 */
+interface ResourceAddResponse {
+  readonly parentUri: string;
+  readonly created: readonly string[];
+  readonly updated: readonly string[];
+  /** 跳过的文件与原因（大小上限、文件名冲突之外的服务层判断）。 */
+  readonly skipped: AddResourceResult['skipped'];
+  readonly attachments: readonly string[];
+  readonly tokens: AddResourceResult['tokens'];
+}
+
 export function createResourceRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { resource, authorizer } = services;
 
@@ -159,7 +173,7 @@ export function createResourceRoutes(services: HttpRouteServices): HttpRouteGrou
           maxFiles,
         });
 
-        return ok({
+        return ok<ResourceAddResponse>({
           parentUri: parentUri.toString(),
           created: result.created.map((uri) => uri.toString()),
           updated: result.updated.map((uri) => uri.toString()),

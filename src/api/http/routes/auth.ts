@@ -45,6 +45,25 @@ function assertEnabled(config: HttpRouteServices['config']): void {
   }
 }
 
+/** `GET /auth/config` 的响应体：只回认证开关，不回任何密钥材料。 */
+interface AuthConfigResponse {
+  readonly enabled: boolean;
+}
+
+/** `POST /auth/login` 的响应体：session token 与认证后的身份。 */
+interface LoginResponse {
+  readonly token: string;
+  /** ISO 8601（UTC）。 */
+  readonly expiresAt: string;
+  readonly subject: string;
+  readonly principals: readonly string[];
+}
+
+/** `POST /auth/logout` 的响应体：服务端没有可失效的行，只回确认。 */
+interface LogoutResponse {
+  readonly loggedOut: true;
+}
+
 export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
   const { auth, config } = services;
 
@@ -53,7 +72,7 @@ export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
     register(app: FastifyInstance): void {
       // 只读探测：200 恒定，认证开关是一个布尔值，不是错误。控制台在拿到任何
       // 身份之前调它，因此不能要求凭据。
-      app.get('/config', async () => ok({ enabled: config.auth.enabled }));
+      app.get('/config', async () => ok<AuthConfigResponse>({ enabled: config.auth.enabled }));
 
       app.post<{ Body: unknown }>('/login', async (request) => {
         assertEnabled(config);
@@ -62,7 +81,7 @@ export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
         const password = requireString(body, 'password');
 
         const result = await auth.login(username, password);
-        return ok({
+        return ok<LoginResponse>({
           token: result.token,
           expiresAt: result.expiresAt,
           subject: result.context.subject,
@@ -73,7 +92,7 @@ export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
       // 客户端丢弃 token 即完成登出；服务端没有可失效的行。
       app.post('/logout', async () => {
         assertEnabled(config);
-        return ok({ loggedOut: true });
+        return ok<LogoutResponse>({ loggedOut: true });
       });
     },
   };
