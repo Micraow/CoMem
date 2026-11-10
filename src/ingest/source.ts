@@ -27,7 +27,8 @@ import { createReadStream } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { ComemError } from '../domain/errors.js';
+import { ComemError, errorMessage } from '../domain/errors.js';
+import { isRecord } from '../domain/guards.js';
 import type {
   CursorKind,
   IngestCursor,
@@ -115,10 +116,6 @@ export function parseJsonDocument(raw: string, locator: string): ParsedJsonDocum
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 const NEWLINE = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
 
@@ -161,10 +158,6 @@ export async function* readLines(path: string, start: number): AsyncGenerator<Li
     const content = hasCarriageReturn ? buffer.subarray(0, -1) : buffer;
     yield { text: content.toString('utf8'), end: offset + buffer.length };
   }
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** 文件系统错误的 `code` 判断（`ENOENT` 等）。各源共用，避免各写一份。 */

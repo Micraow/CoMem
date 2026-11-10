@@ -23,7 +23,8 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, errorMessage } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 import type {
   CursorKind,
   IngestCursor,
@@ -34,7 +35,6 @@ import type {
 import type { Logger } from '../../domain/log.js';
 
 import {
-  isRecord,
   parseJsonDocument,
   walkFiles,
   type LogSource,
@@ -391,8 +391,4 @@ export class QwenSource implements LogSource {
     this.#documents.set(locator, conversations);
     return conversations;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

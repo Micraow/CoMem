@@ -39,6 +39,7 @@ import type {
 } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
+import { OPENAI_DEFAULT_BASE_URL } from './provider-defaults.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -59,13 +60,6 @@ export interface AiSdkProviderOptions {
   };
   readonly logger: Logger;
 }
-
-/**
- * openai-compatible 的 SDK 设置要求 `baseURL` 非空字符串（`@ai-sdk/openai-compatible`
- * 的类型是必填）。`config.providers.llm.default.baseUrl` 有默认值，正常路径不会
- * 走到这里；兜底成 OpenAI 官方地址，避免把 `undefined` 拼进请求 URL。
- */
-const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * 契约里的 `finishReason` 只有三个值（`domain/llm.ts`）。

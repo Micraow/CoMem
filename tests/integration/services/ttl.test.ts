@@ -31,6 +31,7 @@ import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js'
 import type { Logger } from '../../../src/domain/log.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import type { IndexRecord } from '../../../src/domain/retrieval.js';
+import { MILLISECONDS_PER_DAY } from '../../../src/domain/time.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
 import { AclService } from '../../../src/services/acl.js';
@@ -43,9 +44,6 @@ import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js
 import { TtlService } from '../../../src/services/ttl.js';
 
 const NOW = new Date('2026-11-08T00:00:00.000Z');
-
-/** 一天，与 `TtlService` 的换算同一份来源。 */
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** 滑动窗口长度（`memory.ttl.defaultDays` 的测试取值）。 */
 const TTL_DAYS = 30;

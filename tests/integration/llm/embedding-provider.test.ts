@@ -99,6 +99,20 @@ describe('构造', () => {
     ).toThrowError(ComemError);
   });
 
+  it('没配 baseUrl 时兜底到 OpenAI 官方地址', () => {
+    new AiSdkEmbeddingProvider({
+      type: 'openai-compatible',
+      model: MODEL,
+      apiKey: 'sk-test',
+      dimension: DIMENSION,
+      logger: createLogger(),
+    });
+
+    expect(mocks.createOpenAICompatible).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+    );
+  });
+
   it('dimension 必须是正整数', () => {
     for (const dimension of [0, -1, 1.5]) {
       expect(() => createProvider({ dimension })).toThrowError(ComemError);

@@ -5,11 +5,10 @@ import {
   DEFAULT_HALF_LIFE_DAYS,
   hotnessScore,
 } from '../../../src/domain/hotness.js';
+import { MILLISECONDS_PER_DAY } from '../../../src/domain/time.js';
 
 /** 固定「现在」，让所有采样点的年龄是精确的整数天。 */
 const NOW = new Date('2026-11-08T12:00:00.000Z');
-
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 function daysAgo(days: number): string {
   return new Date(NOW.getTime() - days * MILLISECONDS_PER_DAY).toISOString();

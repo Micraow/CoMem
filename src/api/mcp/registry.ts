@@ -16,7 +16,7 @@
  * 用本文件的 helper 逐项校验并抛 `INVALID_ARGUMENT`，不把未校验的值传进服务层。
  */
 
-import { parsePrincipal } from '../../domain/acl.js';
+import { READ_LEVEL, parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 import { isLevel, LEVELS, type Level } from '../../domain/level.js';
 import { CONTEXT_TYPES, isContextType, type ContextType } from '../../domain/node.js';
@@ -31,9 +31,6 @@ import {
 } from '../deadline.js';
 
 import type { McpToolContext } from './context.js';
-
-/** §12.1：read = 1。 */
-const READ: AclAction = 1;
 
 /**
  * §13.2 的 16 个工具名，**按表格顺序**。
@@ -415,13 +412,13 @@ export async function readScopes(
 ): Promise<readonly string[]> {
   if (targetUri !== undefined) {
     const uri = Uri.parse(targetUri);
-    await context.acl.assert(uri, READ, context.principals);
+    await context.acl.assert(uri, READ_LEVEL, context.principals);
     return [uri.toString()];
   }
 
   // 个人根必须可读：读不到自己的空间是身份或装配错误，不是「范围为空」。
   const personal = subjectScope(context);
-  await context.acl.assert(personal, READ, context.principals);
+  await context.acl.assert(personal, READ_LEVEL, context.principals);
 
   // 组根按可读性过滤：退组后 `principals` 里没有这个组；组根尚未预置 ACL 时
   // 也不该让整次查询失败——那只是「这个组没有可查的内容」。
@@ -432,7 +429,7 @@ export async function readScopes(
       continue;
     }
     const uri = Uri.parse(`comem://group/${parsed.id}`);
-    if (await context.acl.check(uri, READ, context.principals)) {
+    if (await context.acl.check(uri, READ_LEVEL, context.principals)) {
       scopes.add(uri.toString());
     }
   }

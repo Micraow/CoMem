@@ -24,6 +24,7 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { WRITE_LEVEL } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { isMessageRole, MESSAGE_ROLES, type MessageRole } from '../../../domain/session.js';
 import type { Uri } from '../../../domain/uri.js';
@@ -37,10 +38,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-
-/** §12.1：write = 3。合成会话写在个人根下，需要写权限。 */
-const WRITE = 3;
 
 function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
   return new ComemError('INVALID_ARGUMENT', message, details);
@@ -203,7 +200,7 @@ export const rememberTool: McpToolDefinition = {
     const requestedSessionId = optionalSessionId(args);
     // 先校验整批：一条非法消息不应该留下前几条半成品。
     const parsed = parseMessages(messages, requestedSessionId !== undefined);
-    const scope = await assertSubjectScope(context, WRITE);
+    const scope = await assertSubjectScope(context, WRITE_LEVEL);
 
     const sessionUri =
       requestedSessionId === undefined

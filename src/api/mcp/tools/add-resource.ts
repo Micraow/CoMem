@@ -10,6 +10,7 @@
  * 只负责把一次调用的文件全部交给服务，不循环调用 `write`。
  */
 
+import { WRITE_LEVEL } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { ResourceFileInput } from '../../../services/resource.js';
@@ -23,9 +24,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-/** §12.1：write = 3。 */
-const WRITE = 3;
 
 function toFileInput(
   file: Record<string, unknown>,
@@ -86,7 +84,7 @@ export const addResourceTool: McpToolDefinition = {
     const files = recordArray(args, 'files', 'add_resource').map(toFileInput);
 
     // §12.4：摄取是 write 出口，服务层之外的授权在工具层先做。
-    await context.acl.assert(parentUri, WRITE, context.principals);
+    await context.acl.assert(parentUri, WRITE_LEVEL, context.principals);
 
     // 单个文件的大小上限由 `ResourceService` 统一执行（`DEFAULT_MAX_FILE_BYTES`，
     // `content` 的 UTF-8 字节数与附件原始字节走同一条判定）——这里不复制这个数字。

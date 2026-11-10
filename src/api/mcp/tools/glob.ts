@@ -5,6 +5,7 @@
  * `**`。
  */
 
+import { READ_LEVEL } from '../../../domain/acl.js';
 import { Uri } from '../../../domain/uri.js';
 import {
   asRecord,
@@ -38,7 +39,7 @@ export const globTool: McpToolDefinition = {
     const nodeLimit = positiveInteger(args, 'nodeLimit', DEFAULT_NODE_LIMIT, 'glob');
 
     // §12.4：`SearchService.glob` 只做 filterReadable，范围本身要先求权。
-    await context.acl.assert(uri, 1, context.principals);
+    await context.acl.assert(uri, READ_LEVEL, context.principals);
 
     const matched = await context.search.glob(pattern, {
       scopes: [uri.toString()],

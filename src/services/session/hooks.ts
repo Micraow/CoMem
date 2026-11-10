@@ -6,14 +6,12 @@
  */
 
 import type { PermissionRepository } from '../../adapters/sqlite/permission-repository.js';
+import { WRITE_LEVEL } from '../../domain/acl.js';
 import type { Logger } from '../../domain/log.js';
 import type { Uri } from '../../domain/uri.js';
 
-import type { AclAction, Authorizer } from '../authorizer.js';
+import type { Authorizer } from '../authorizer.js';
 import type { NodeWriteObserver } from '../filesystem.js';
-
-/** §12.1：write = 3（建会话是写操作）。 */
-const WRITE: AclAction = 3;
 
 export interface HookPorts {
   readonly logger: Logger;
@@ -41,7 +39,7 @@ export async function materializeSessionPermissions(
     return;
   }
   try {
-    await authorizer.assert(sessionUri, WRITE, principals);
+    await authorizer.assert(sessionUri, WRITE_LEVEL, principals);
   } catch (error) {
     ports.logger.error('会话目录权限物化失败，已忽略。', {
       uri: sessionUri.toString(),

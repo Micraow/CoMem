@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 
 import { ComemError } from '../domain/errors.js';
+import { isRecord } from '../domain/guards.js';
 
 import { resolveDataDir } from './data-dir.js';
 import { configSchema, type ComemConfig } from './schema.js';
@@ -36,10 +37,6 @@ type LeafKind = 'string' | 'number' | 'boolean' | 'array';
 interface LeafPath {
   readonly path: readonly string[];
   readonly kind: LeafKind;
-}
-
-function isRecord(value: unknown): value is ConfigRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function leafKindOf(value: unknown): LeafKind {

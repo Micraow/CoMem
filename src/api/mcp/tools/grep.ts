@@ -9,6 +9,7 @@
  * RegExp Modifiers 的运行时）。
  */
 
+import { READ_LEVEL } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
 import { Uri } from '../../../domain/uri.js';
@@ -58,7 +59,7 @@ export const grepTool: McpToolDefinition = {
 
     // 出口清单（§12.4）：`SearchService.glob` 只做 filterReadable，不抛
     // PERMISSION_DENIED，所以范围本身必须先求权。
-    await context.acl.assert(uri, 1, context.principals);
+    await context.acl.assert(uri, READ_LEVEL, context.principals);
 
     const effective = caseInsensitiveFlag ? caseInsensitive(pattern) : pattern;
     const hits = await context.search.grep(effective, {

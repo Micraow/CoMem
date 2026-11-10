@@ -23,14 +23,12 @@ import { createContainer, type Container } from '../../../src/bootstrap/containe
 import type { Logger } from '../../../src/domain/log.js';
 import type { SessionMessage } from '../../../src/domain/session.js';
 import { estimateTokens, renderMessageText } from '../../../src/domain/session.js';
+import { MILLISECONDS_PER_DAY } from '../../../src/domain/time.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
 
 const SCOPE = 'comem://user/local';
-
-/** 一天的毫秒数；`memory.ttl.defaultDays` 的换算来源。 */
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
  * 一条消息的正文：1500 个汉字。

@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { currentVersion, openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import type { AclLevel } from '../../../src/domain/acl.js';
 import type { Logger } from '../../../src/domain/log.js';
 import {
   PermissionRepository,
@@ -26,13 +27,13 @@ function createLogger(): Logger {
 function permission(
   nodeUri: string,
   principal: string,
-  level: 1 | 3 | 7,
+  level: AclLevel,
   effect: 'allow' | 'deny' = 'allow',
 ): PermissionRow {
   return { nodeUri, principal, level, effect };
 }
 
-function entry(uri: string, principal: string, level: 1 | 3 | 7, effect: 'allow' | 'deny'): AclEntryRow {
+function entry(uri: string, principal: string, level: AclLevel, effect: 'allow' | 'deny'): AclEntryRow {
   return { uri, principal, level, effect };
 }
 

@@ -21,6 +21,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { Logger } from '../../domain/log.js';
+import { MILLISECONDS_PER_DAY } from '../../domain/time.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
@@ -69,9 +70,6 @@ const REQUEST_LOG_COLUMN_NAMES = [
 ] as const;
 
 const REQUEST_LOG_COLUMNS = REQUEST_LOG_COLUMN_NAMES.join(', ');
-
-/** 1 天 = 86 400 000 毫秒；`retainDays` 是配置里的天数。 */
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export class RequestLogRepository {
   readonly #db: DatabaseSync;

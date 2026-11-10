@@ -62,6 +62,7 @@
 import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import { Uri } from '../domain/uri.js';
 import type { Logger } from '../domain/log.js';
+import { MILLISECONDS_PER_DAY } from '../domain/time.js';
 import type { FileSystemService } from './filesystem.js';
 
 export interface TtlServiceDeps {
@@ -100,9 +101,6 @@ export interface TtlServiceDeps {
  * 之外。来源不明的部分：没有实测「多少条会撞上 busy_timeout」，取 100 是保守下界。
  */
 const DEFAULT_SWEEP_BATCH_SIZE = 100;
-
-/** 一天。`defaultDays` / `retentionDays` 按「天」配置，换算成毫秒只此一处。 */
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export class TtlService {
   readonly #nodes: NodeRepository;

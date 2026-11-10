@@ -33,7 +33,8 @@ import type {
 } from '../../domain/ingest.js';
 import type { Logger } from '../../domain/log.js';
 
-import { isRecord, JsonlLogSource, readLines, walkFiles } from '../source.js';
+import { isRecord } from '../../domain/guards.js';
+import { JsonlLogSource, readLines, walkFiles } from '../source.js';
 
 const DEFAULT_ROOT = join(homedir(), '.codex', 'sessions');
 const JSONL_SUFFIX = '.jsonl';

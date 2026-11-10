@@ -25,6 +25,7 @@
  */
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
+import { READ_LEVEL } from '../domain/acl.js';
 import type { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import {
   assembleContext,
@@ -39,10 +40,7 @@ import { estimateTokens } from '../domain/session.js';
 import { skeletonOverview } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
-import type { AclAction, Authorizer } from './authorizer.js';
-
-/** §12.1：read = 1。概览与原文都只需要 read。 */
-const READ: AclAction = 1;
+import type { Authorizer } from './authorizer.js';
 
 /**
  * 并发读上限（`local/notes/comparison.md` 第 1 条）。
@@ -197,7 +195,7 @@ export class ContextAssembler {
       return null;
     }
 
-    const allowed = await this.#authorizer.check(uri, READ, principals);
+    const allowed = await this.#authorizer.check(uri, READ_LEVEL, principals);
     if (!allowed) {
       this.#logger.debug('概览读取无权限', {
         uri: value,
@@ -272,7 +270,7 @@ export class ContextAssembler {
       return null;
     }
 
-    const allowed = await this.#authorizer.check(uri, READ, principals);
+    const allowed = await this.#authorizer.check(uri, READ_LEVEL, principals);
     if (!allowed) {
       this.#logger.debug('原文读取无权限', {
         uri: value,

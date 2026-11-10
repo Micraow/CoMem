@@ -151,7 +151,7 @@ async function consolidateCapturingFailure(
     );
 }
 
-function errorMessage(failure: unknown): string {
+function failureMessage(failure: unknown): string {
   return failure instanceof Error ? failure.message : '';
 }
 
@@ -364,7 +364,7 @@ describe('ConsolidationService.consolidate', () => {
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
     // 关键断言：不是写盘循环里那句「已应用…没有回滚」，删除一次都没发生。
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).not.toBeNull();
     const kept = await container.services.memory.read(Uri.parse(PROFILE));
     expect(kept?.fields['content']).toBe('先给结论。');
@@ -391,7 +391,7 @@ describe('ConsolidationService.consolidate', () => {
     const failure = await consolidateCapturingFailure(llm);
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     expect(await container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).not.toBeNull();
     const kept = await container.services.memory.read(Uri.parse(PROFILE));
     expect(kept?.fields['content']).toBe('先给结论。');
@@ -450,8 +450,8 @@ describe('ConsolidationService.consolidate', () => {
 
     // 计划阶段整批失败：不是写盘循环里那句「已应用…没有回滚」。
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(errorMessage(failure)).toContain('非记忆文件');
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).toContain('非记忆文件');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     // 同批的 delete 一次都没生效。
     const kept = await container.services.memory.read(Uri.parse(CODE_STYLE));
     expect(kept?.fields['content']).toBe('缩进用 2 个空格。');
@@ -486,8 +486,8 @@ describe('ConsolidationService.consolidate', () => {
     const failure = await consolidateCapturingFailure(llm);
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(errorMessage(failure)).toContain('非记忆文件');
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).toContain('非记忆文件');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     expect(await container.services.memory.read(Uri.parse(CODE_STYLE))).not.toBeNull();
     expect(await readFile(plainPath)).toEqual(Buffer.from(plain, 'utf8'));
   });
@@ -582,8 +582,8 @@ describe('ConsolidationService.consolidate', () => {
     const failure = await consolidateCapturingFailure(llm);
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(errorMessage(failure)).toContain('非记忆文件');
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).toContain('非记忆文件');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     // 写盘会 `rename` 覆盖链接本身，所以链接还在、目标文件内容未变才算没丢数据。
     expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
     expect(await readFile(outsidePath)).toEqual(Buffer.from(outside, 'utf8'));
@@ -804,7 +804,7 @@ describe('ConsolidationService.consolidate', () => {
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
     // 关键断言：不是写盘循环里那句「已应用…没有回滚」，删除一次都没发生。
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     const kept = await container.services.memory.read(Uri.parse(CODE_STYLE));
     expect(kept?.fields['content']).toBe('缩进用 2 个空格。');
     expect(await container.services.memory.read(Uri.parse(badTopic))).toBeNull();
@@ -907,7 +907,7 @@ describe('ConsolidationService.consolidate', () => {
 
     expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
     // 整批在写盘之前失败：不是写盘循环里那句「已应用…没有回滚」。
-    expect(errorMessage(failure)).not.toContain('没有回滚');
+    expect(failureMessage(failure)).not.toContain('没有回滚');
     // 版本文件仍在磁盘上，且逐字节未变（删掉一份版本就掐断了 `supersedes` 链）。
     expect(await readFile(versionPath)).toEqual(versionBytes);
     // 同批的另一条 delete 一次都没生效。
@@ -935,8 +935,8 @@ describe('ConsolidationService.consolidate', () => {
     const addFailure = await consolidateCapturingFailure(addLlm);
 
     expect(addFailure).toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(errorMessage(addFailure)).toContain('版本文件');
-    expect(errorMessage(addFailure)).not.toContain('没有回滚');
+    expect(failureMessage(addFailure)).toContain('版本文件');
+    expect(failureMessage(addFailure)).not.toContain('没有回滚');
     expect(await readFile(versionPath)).toEqual(versionBytes);
     expect(await container.services.memory.read(Uri.parse(CODE_STYLE))).not.toBeNull();
   });

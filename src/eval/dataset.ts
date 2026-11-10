@@ -18,6 +18,7 @@
  */
 
 import { ComemError } from '../domain/errors.js';
+import { isRecord } from '../domain/guards.js';
 import { Uri } from '../domain/uri.js';
 
 /**
@@ -55,10 +56,6 @@ const MAX_GRADE = 3;
 
 function invalid(message: string, details: Record<string, unknown>): ComemError {
   return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function requireString(value: unknown, field: string): string {

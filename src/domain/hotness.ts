@@ -13,6 +13,7 @@
  */
 
 import { ComemError } from './errors.js';
+import { MILLISECONDS_PER_DAY } from './time.js';
 
 /**
  * 默认半衰期：7 天。
@@ -22,9 +23,6 @@ import { ComemError } from './errors.js';
  * 必须同时改。
  */
 export const DEFAULT_HALF_LIFE_DAYS = 7;
-
-/** 一天的毫秒数。时间差是毫秒，公式的输入是天，换算只有这一处。 */
-const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
  * 一条记忆的热度分，`[0, 1]`。

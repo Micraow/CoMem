@@ -27,6 +27,7 @@ import type {
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
+import { OPENAI_DEFAULT_BASE_URL } from './provider-defaults.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -72,12 +73,6 @@ const DEFAULT_MAX_BATCH_SIZE = 128;
  * 120 秒是按「生成长文本」定的，照搬到嵌入上只会让卡住的回填任务占着租约等两分钟。
  */
 const DEFAULT_TIMEOUT_SECONDS = 30;
-
-/**
- * openai-compatible 的 SDK 设置要求 `baseURL` 非空字符串。
- * 与 `ai-sdk-provider.ts` 同一个兜底值，正常路径不会走到。
- */
-const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * 嵌入链路的错误映射参数（架构文档 §19）。状态码、超时与网络错误的判定与生成 /

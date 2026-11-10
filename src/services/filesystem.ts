@@ -46,18 +46,14 @@ import type {
   WriteTextOptions,
 } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
+import { MANAGE_LEVEL, READ_LEVEL, WRITE_LEVEL } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest } from '../domain/node.js';
 import { applyPatch, type PatchBlock } from '../domain/patch.js';
 import type { Uri } from '../domain/uri.js';
 
-import type { AclAction, Authorizer } from './authorizer.js';
-
-/** 权限级别（架构文档 §12.1）：read = 1、write = 3、manage = 7。 */
-const READ: AclAction = 1;
-const WRITE: AclAction = 3;
-const MANAGE: AclAction = 7;
+import type { Authorizer } from './authorizer.js';
 
 /**
  * `tree` 的默认深度。来源：架构文档 §13.2 的 `tree` 工具契约 `levelLimit=3`。
@@ -173,7 +169,7 @@ export class FileSystemService {
 
   /** 读正文。**不拿路径锁**：写入是原子的，锁只会让读等后台写者（见文件头）。 */
   async read(uri: Uri, principals: readonly string[]): Promise<TextDocument> {
-    await this.#authorizer.assert(uri, READ, principals);
+    await this.#authorizer.assert(uri, READ_LEVEL, principals);
     const document = await this.#store.readText(uri);
     this.#touchAccess(uri);
     return document;
@@ -204,12 +200,12 @@ export class FileSystemService {
   }
 
   async readBytes(uri: Uri, principals: readonly string[]): Promise<Uint8Array> {
-    await this.#authorizer.assert(uri, READ, principals);
+    await this.#authorizer.assert(uri, READ_LEVEL, principals);
     return this.#store.readBytes(uri);
   }
 
   async stat(uri: Uri, principals: readonly string[]): Promise<StoredStat | null> {
-    await this.#authorizer.assert(uri, READ, principals);
+    await this.#authorizer.assert(uri, READ_LEVEL, principals);
     return this.#store.stat(uri);
   }
 
@@ -220,7 +216,7 @@ export class FileSystemService {
    * 等于泄露。
    */
   async list(uri: Uri, principals: readonly string[]): Promise<readonly TreeEntry[]> {
-    await this.#authorizer.assert(uri, READ, principals);
+    await this.#authorizer.assert(uri, READ_LEVEL, principals);
     return this.#listChildren(uri, principals);
   }
 
@@ -240,7 +236,7 @@ export class FileSystemService {
   ): Promise<TreeResult> {
     const depth = options.depth ?? DEFAULT_TREE_DEPTH;
     const limit = options.limit ?? DEFAULT_TREE_LIMIT;
-    await this.#authorizer.assert(uri, READ, principals);
+    await this.#authorizer.assert(uri, READ_LEVEL, principals);
 
     const entries: TreeEntry[] = [];
     let truncated = false;
@@ -304,7 +300,7 @@ export class FileSystemService {
     principals: readonly string[],
     options: WriteTextOptions = {},
   ): Promise<WriteResult> {
-    await this.#authorizer.assert(uri, WRITE, principals);
+    await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     // 写者建立父目录：目标父目录不存在时锁文件没有地方放，而写者会**创建**目标
     // ——不建目录的话「同一时刻只有一个写者」对新路径不成立
     // （见 `LockAcquireOptions.createParentDirectory`）。
@@ -337,7 +333,7 @@ export class FileSystemService {
     blocks: readonly PatchBlock[],
     principals: readonly string[],
   ): Promise<EditResult> {
-    await this.#authorizer.assert(uri, WRITE, principals);
+    await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     return this.#locks.withLock(uri, 'exact', async () => {
       const document = await this.#store.readText(uri);
       const result = applyPatch(document.text, blocks);
@@ -372,7 +368,7 @@ export class FileSystemService {
 
   /** 建目录，父目录不存在时一并建（`recursive`），已存在不报错。 */
   async mkdir(uri: Uri, principals: readonly string[]): Promise<void> {
-    await this.#authorizer.assert(uri, WRITE, principals);
+    await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
     await this.#locks.withLock(uri, 'tree', async () => {
       await this.#store.mkdir(uri, { recursive: true });
       await this.#notifyWritten(uri, 'directory');
@@ -381,7 +377,7 @@ export class FileSystemService {
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */
   async remove(uri: Uri, principals: readonly string[]): Promise<RemoveResult> {
-    await this.#authorizer.assert(uri, MANAGE, principals);
+    await this.#authorizer.assert(uri, MANAGE_LEVEL, principals);
     return this.#locks.withLock(uri, 'tree', async () => {
       const removedFiles = await this.#store.remove(uri, { recursive: true });
       await this.#notifyRemoved(uri);
@@ -397,8 +393,8 @@ export class FileSystemService {
    * 同一路径只拿一把锁，让 `ContentStore.move` 抛它自己的 `ALREADY_EXISTS`。
    */
   async move(from: Uri, to: Uri, principals: readonly string[]): Promise<void> {
-    await this.#authorizer.assert(from, MANAGE, principals);
-    await this.#authorizer.assert(to, MANAGE, principals);
+    await this.#authorizer.assert(from, MANAGE_LEVEL, principals);
+    await this.#authorizer.assert(to, MANAGE_LEVEL, principals);
 
     if (from.isAncestorOf(to) || to.isAncestorOf(from)) {
       throw new ComemError(

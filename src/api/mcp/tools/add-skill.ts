@@ -7,6 +7,7 @@
  * 与 `add_resource` 一样走批量入口：一次调用写完所有文件，索引只在结束时更新一次。
  */
 
+import { WRITE_LEVEL } from '../../../domain/acl.js';
 import { Uri } from '../../../domain/uri.js';
 import type { SkillFileInput } from '../../../services/skill.js';
 import {
@@ -18,9 +19,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-/** §12.1：write = 3。 */
-const WRITE = 3;
 
 /** 技能文件按 UTF-8 传输（见文件头）。 */
 const ENCODER = new TextEncoder();
@@ -64,7 +62,7 @@ export const addSkillTool: McpToolDefinition = {
     const files = recordArray(args, 'files', 'add_skill').map(toFileInput);
 
     // §12.4：安装技能是 write 出口。
-    await context.acl.assert(parentUri, WRITE, context.principals);
+    await context.acl.assert(parentUri, WRITE_LEVEL, context.principals);
 
     const result = await context.skill.addSkill({
       parentUri,

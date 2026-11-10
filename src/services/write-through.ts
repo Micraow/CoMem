@@ -23,15 +23,13 @@
  * 「目录数」条 UPSERT。
  */
 
+import { WRITE_LEVEL } from '../domain/acl.js';
 import { errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { Uri } from '../domain/uri.js';
 
-import type { AclAction, Authorizer } from './authorizer.js';
+import type { Authorizer } from './authorizer.js';
 import type { SummaryService } from './summary.js';
-
-/** §12.1：write = 3。 */
-const WRITE: AclAction = 3;
 
 export interface ParentSummaryDeps {
   readonly summary: Pick<SummaryService, 'markStale'>;
@@ -116,7 +114,7 @@ export async function materializeAncestorPermissions(
 
   for (const [key, uri] of nodes) {
     try {
-      await deps.authorizer.assert(uri, WRITE, principals);
+      await deps.authorizer.assert(uri, WRITE_LEVEL, principals);
     } catch (error) {
       const reason = errorMessage(error);
       deps.logger.error(`${deps.nodeLabel}权限物化失败，已忽略。`, { uri: key, reason });

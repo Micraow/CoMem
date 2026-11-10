@@ -120,6 +120,16 @@ describe('供应商选择', () => {
     expect(mocks.anthropicModel).not.toHaveBeenCalled();
   });
 
+  it('没配 baseUrl 时兜底到 OpenAI 官方地址', async () => {
+    const { provider } = createProvider('openai-compatible', { baseUrl: undefined });
+
+    await provider.complete(PROMPT);
+
+    expect(mocks.createOpenAICompatible).toHaveBeenCalledWith(
+      expect.objectContaining({ baseURL: 'https://api.openai.com/v1' }),
+    );
+  });
+
   it('type=anthropic 走 createAnthropic', async () => {
     const { provider } = createProvider('anthropic');
 
