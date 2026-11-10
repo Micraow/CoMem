@@ -193,17 +193,12 @@ describe('check-shape 判定', () => {
       }),
       base,
     );
-    expect(over.metricViolations.map((item) => item.key).sort()).toEqual([
-      'functionsOver120',
-      'srcLines',
-    ]);
+    // srcLines 只打印、不判失败：模块化会合法地增加 import 与签名的行数。
+    expect(over.metricViolations.map((item) => item.key)).toEqual(['functionsOver120']);
 
     const under = compareShape(actualOf({ srcLines: 49000 }), base);
     expect(under.metricViolations).toEqual([]);
-    expect(under.metricTightenings.map((item) => item.key).sort()).toEqual([
-      'functionsOver120',
-      'srcLines',
-    ]);
+    expect(under.metricTightenings.map((item) => item.key)).toEqual(['functionsOver120']);
     expect(under.next.srcLines).toBe(49000);
     expect(under.next.functionsOver120).toBe(0);
   });

@@ -403,7 +403,7 @@ function actualMetrics(actual: ShapeActual): Readonly<Record<MetricKey, number>>
 }
 
 /**
- * 判定：文件按「基线记录值，否则 250」，四个数字按「基线即上限」。
+ * 判定：文件按「基线记录值，否则 250」，三个数字按「基线即上限」（`srcLines` 只打印）。
  *
  * 只做比较，不读写磁盘——测试直接喂构造出来的 `actual` / `baseline`。
  */
@@ -461,6 +461,12 @@ export function compareShape(actual: ShapeActual, baseline: ShapeBaseline): Shap
   for (const key of METRIC_KEYS) {
     const current = metrics[key];
     const limit = baseline[key];
+    if (key === 'srcLines') {
+      // 总行数只打印、不判失败：模块化会合法地增加 import 与签名的行数，用总数当门禁等于
+      // 惩罚拆分。真正该守的是单文件上限与超长函数个数。基线跟着当前值走，读数仍然可见。
+      nextMetrics[key] = current;
+      continue;
+    }
     if (current > limit) {
       metricViolations.push({ key, actual: current, limit });
       nextMetrics[key] = limit;
