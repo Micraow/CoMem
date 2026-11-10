@@ -231,6 +231,34 @@ pnpm check:reachability
 分支、传空参数导致早退、只被另一个孤儿调用，以及「有调用方但返回值恒空」都抓不到。
 这些需要行为契约测试或调用图可达性分析。
 
+### 形状检查
+
+```bash
+pnpm check:shape
+```
+
+静态检查四类结构指标，全部是**上限 ratchet**（只能降，不能升）：
+
+| 项 | 口径 | 失败条件 |
+|---|---|---|
+| 单文件行数 | `wc -l`（含空行与注释），默认上限 250 | 不在基线里的文件 > 250；基线里的文件 > 记录值 |
+| 超长函数 | 函数体行数 > 120 的个数 | 个数 > 基线 `functionsOver120` |
+| src 总行数 | `src/` 下全部 `.ts` 的 `wc -l` 合计 | 合计 > 基线 `srcLines` |
+| 禁用指令 / any | `@ts-ignore`、`@ts-expect-error`、`eslint-disable` 必须为 0；`as any`、`: any` 记数 | 指令出现即失败；any 计数 > 基线 |
+
+基线在 `scripts/shape-baseline.json`：只记录当前超过 250 行的文件（路径 → 行数）与
+`functionsOver120` / `srcLines` / `asAny` / `typeAny` 四个数字。没有文件级白名单——例外
+只有基线里那一行数字，而它只能降。
+
+检查**只读**：文件被拆小或删除、数字下降时只打印「基线可收紧」，写文件要显式跑
+`pnpm check:shape --update-baseline`，而它拒绝任何让上限变大的写入（exit 2）。基线存在
+之后，新文件一律按 250 行判：一个 260 行的新文件不能靠更新基线进来，先拆到 250 以内。
+
+**残余**：文件行数不是职责划分（1500 行拆成 6 个 250 行的文件，检查全绿，耦合没变）；
+函数长度可以靠拆私有方法绕过，超长表达式、超长类、超长 `switch` 不统计；`any` 只认
+`as any` 与 `: any` 两种写法（`Array<any>`、`<any>x` 不算）；「注释掉的代码」刻意不检查
+——「看起来像代码」没有可执行的判据，高频误报的硬零项只会训练人绕过检查。
+
 ## 质量门禁
 
 `pnpm verify` 依次跑下面大部分命令。每一层保护什么、不保护什么：
@@ -242,6 +270,7 @@ pnpm check:reachability
 | `pnpm build:web` | `web/` 的类型检查（`nuxt typecheck`）+ 构建 | 没有 lint |
 | `pnpm check:config` | 配置项是否真的有消费方（L1–L3，加上 `pnpm test` 里的 L4） | 配置到达行为 |
 | `pnpm check:reachability` | `src/` 的生产引用图 | 字符串派发、默认关闭的分支、返回值恒空 |
+| `pnpm check:shape` | 文件行数、超长函数、`src/` 总行数、禁用指令与 `any` 计数的 ratchet | 职责划分、超长表达式 / 类 / `switch`、注释掉的代码 |
 | `pnpm test` | `tests/**/*.test.ts`（unit + integration） | `integrations/` |
 | `pnpm test:integrations` | `integrations/tests/*.test.mjs` | `src/` |
 | `pnpm test:e2e`（不在 `verify` 里） | `scripts/demo.sh` 用临时数据根走一遍六条核心链路（演示脚本，失败即非零退出） | 不是单元测试，没有断言库 |

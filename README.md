@@ -323,7 +323,7 @@ flowchart TB
 ## 🛠️ 开发
 
 ```bash
-pnpm verify     # typecheck + lint + check:config + 单元/集成测试 + Hook 测试
+pnpm verify     # typecheck + lint + check:config + check:reachability + check:shape + 构建控制台 + 单元/集成测试 + Hook 测试
 ```
 
 <details>
@@ -334,6 +334,8 @@ pnpm verify     # typecheck + lint + check:config + 单元/集成测试 + Hook �
 | `pnpm typecheck` | `tsc --noEmit`，`strict: true` + `noUncheckedIndexedAccess` |
 | `pnpm lint` | ESLint：分层依赖规则在这里生效 |
 | `pnpm check:config` | 每个配置项必须有消费方（L1–L3，见 `docs/operations.md`） |
+| `pnpm check:reachability` | 写了但没接线的模块 / 导出 / 成员方法（见 `docs/operations.md`） |
+| `pnpm check:shape` | 文件只能变短：行数、超长函数、禁用指令、`any` 计数（见 `docs/operations.md`） |
 | `pnpm test` | vitest：`tests/unit`（领域纯函数）+ `tests/integration`（临时目录 + 内存数据库） |
 | `pnpm test:integrations` | Hook 插件的去重、游标、锁、超时预算 |
 | `pnpm test:e2e` | 六条链路端到端（临时数据根，不碰真实数据） |

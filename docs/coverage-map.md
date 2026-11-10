@@ -123,7 +123,8 @@
 | 检索质量评估 | 改动检索要能量化前后 | `pnpm eval --dataset ...` | `commands/eval.ts:223` `runEval`；指标 `eval/metrics.ts` | 数据集跑 `find`，算 recall@k / MRR，输出报告 | `commands/eval.test.ts:25`「--config 坏 YAML 必须报错」；`unit/eval/metrics.test.ts:32` `recallAtK` |
 | 配置自检 | 加了配置项必须有人读 | `pnpm check:config` | `scripts/check-config.ts:272` `main` | L1 叶子被读 / L2 注入属性必填 / L3 与 `config.example.yaml` 双向一致；L4 变体差集在测试里 | `config-coverage.test.ts:132` |
 | 可达性检查 | 符号存在不等于有人调 | `pnpm check:reachability` | `scripts/check-reachability.ts` | 从 6 个进程入口沿值导入算模块与符号可达，再按成员方法调用点判 `method-no-caller` | `unit/scripts/check-reachability.test.ts` |
-| 门禁 | 本地跑完再提交 | `pnpm verify` | `package.json:20` `verify` | typecheck → lint → check:config → check:reachability → build:web → test → test:integrations | — |
+| 形状检查 | 文件只能变短，结构不能回涨 | `pnpm check:shape` | `scripts/check-shape.ts` | 单文件行数（基线内按记录值，其余 250）、函数体 > 120 行个数、`src/` 总行数、禁用指令硬零 + `as any` / `: any` 计数，全部上限 ratchet | `unit/scripts/check-shape.test.ts` |
+| 门禁 | 本地跑完再提交 | `pnpm verify` | `package.json:21` `verify` | typecheck → lint → check:config → check:reachability → check:shape → build:web → test → test:integrations | — |
 
 ### 7. 集成与控制台
 
