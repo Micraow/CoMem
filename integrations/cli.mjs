@@ -61,22 +61,77 @@ export const HOOK_EVENTS = Object.freeze({
 const MATCHERS = Object.freeze({ PreToolUse: 'Read|Write|Edit' });
 
 /**
- * 各宿主的默认 settings 路径。
+ * 各宿主的默认 settings 路径。两处都实测过宿主真的读——把 `hooks` 写成字符串，
+ * 看宿主拿哪个路径报类型错：
  *
- * - `claude-code`：`~/.claude/settings.json`，`hooks` 是 matcher 组数组。
- * - `dsh`：`~/.dsh/settings.json`（DSH 插件所依赖的 settings 形状）。
- * - `codex`：`~/.codex/hooks.json`。Codex 从 `~/.codex/hooks.json` 或
- *   `~/.codex/config.toml` 的内联 `[hooks]` 表加载生命周期 Hook，官方文档
- *   <https://developers.openai.com/codex/hooks>。`hooks.json` 的顶层是
- *   `{ "hooks": { Event: [ {matcher, hooks:[{type,command}]} ] } }`，与本节
- *   `install` 写入的形状一致，所以直接写 `hooks.json` 即可；它受
- *   `~/.codex/config.toml` 的 `[features].hooks`（默认开启）控制。
- *   **项目级**也可以是 `<repo>/.codex/hooks.json`，用 `--settings` 指定。
+ * | 宿主 | 路径 | 实测报错 |
+ * |---|---|---|
+ * | `claude-code` | `~/.claude/settings.json` | `<path> (hooks): "hooks" must be an object mapping event names to matcher arrays` |
+ * | `codex` | `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`） | `failed to parse hooks config <path>: … expected struct HookEventsToml` |
+ *
+ * 两个宿主的形状一致：顶层 `hooks` 是「事件名 → matcher 组数组」，与 `install`
+ * 写入的一致。`codex` 的 `hooks` 受 `config.toml` 的 `[features].hooks` 控制
+ * （Codex 0.167 的 `codex features list` 里 `hooks` 是 `stable true`，默认开启），
+ * 而且**首次运行前要在 `/hooks` 里信任一次**：信任状态记在
+ * `hooks.state."…".trusted_hash` 里，`install` 写不进去。
+ *
+ * **项目级 `<repo>/.codex/hooks.json` 未验证**：非交互的 `codex exec` 在 git 仓库
+ * 根目录里没有读它（可能要先经过交互式信任）。用 `--settings` 指到项目级路径前
+ * 先自己确认一次。
+ *
+ * `dsh` 不在这张表里——DSH 没有 settings 里的 hook 面，见 `UNSUPPORTED_HOSTS`。
  */
 const DEFAULT_SETTINGS = Object.freeze({
   'claude-code': join(homedir(), '.claude', 'settings.json'),
-  dsh: join(homedir(), '.dsh', 'settings.json'),
   codex: join(homedir(), '.codex', 'hooks.json'),
+});
+
+/**
+ * 不支持 `install` 的宿主，值是给人看的失败说明。
+ *
+ * **DSH 为什么不能装。** DSH 0.2.2-rc.1 读的配置是
+ * `$DSH_HOME/profiles/<name>/settings.yaml`，而它已经是遗留文件：启动时
+ * `@deepseek-ai/dsh-settings` 的 `importLegacyDocument` 把它一次性导入 profile 并
+ * 改名为 `settings.yaml.imported`（`lib/index.js:346-349`）。`~/.dsh/settings.json`
+ * 一个读者都没有——写它不报错，只是永远不生效。
+ *
+ * DSH 的 hook 面**完全由插件提供**：`@deepseek-ai/dsh-hooks-claude-code`（Claude
+ * Code 方言）或 `@deepseek-ai/dsh-hooks-codex`（Codex 方言），挂在
+ * `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里，用 `configPath` 指向一个
+ * `hooks.json`，或指向一个 `hooks` 键里放着配置的 settings 文件。字段名来自这两个
+ * 包 0.2.2-rc.1 的 README。
+ *
+ * `install` 完不成这条链路：它要往 profile 里装插件、改一份 YAML，两件都不做；
+ * 两个桥还各只实现 5 个事件（没有 `PreCompact` / `SessionEnd`），`Stop` 拿到的
+ * `transcript_path` 也永远是空值。写一个没人读的文件比报错更难发现——用户会以为
+ * 装好了。所以这里直接失败。
+ *
+ * **未验证**：本机没有装这两个桥包，`configPath` 能否真的让 CoMem 的 hook 跑起来
+ * 没有端到端验证；字段名来自包 README，不是实测。
+ */
+const UNSUPPORTED_HOSTS = Object.freeze({
+  dsh: [
+    'DSH 没有 settings 里的 hook 面，install 不会写 ~/.dsh/settings.json（那个文件没有读者）。',
+    '',
+    '  DSH 0.2.2-rc.1 读 $DSH_HOME/profiles/<name>/settings.yaml；它已是遗留文件，',
+    '  启动时被一次性导入并改名为 settings.yaml.imported。',
+    '',
+    '  DSH 的 hook 面由插件提供：@deepseek-ai/dsh-hooks-claude-code 或',
+    '  @deepseek-ai/dsh-hooks-codex，挂在 $DSH_HOME/profiles/<name>/cordis.patch.yml',
+    '  里，用 configPath 指向一个 hooks 文件。本仓库不安装这两个插件、也不改 profile',
+    '  的 YAML，所以 install 在这里无法完成。配置格式未端到端验证，两个桥各只实现',
+    '  5 个事件（PreCompact / SessionEnd 不会触发）。',
+    '',
+    '  代替做法：',
+    '    1. node integrations/cli.mjs install --host claude-code --settings <path>/hooks.json',
+    '    2. 在 cordis.patch.yml 里加：',
+    "         - name: '@deepseek-ai/dsh-hooks-claude-code'",
+    '           config:',
+    '             configPath: <path>/hooks.json',
+    '    3. 验证：启动 DSH 后看日志里的 hook/invoked，再跑一轮对话看游标是否前进。',
+    '',
+    '  细节见 integrations/README.md 的「DSH」一节。',
+  ].join('\n'),
 });
 
 /**
@@ -131,6 +186,20 @@ export function hookGroup(event, host, options = {}) {
     ...(matcher === undefined ? {} : { matcher }),
     hooks: [{ type: 'command', command: hookCommand(event, host, options) }],
   };
+}
+
+/**
+ * 宿主能不能被 `install` / `uninstall` 写配置。
+ *
+ * 必须在**写第一个字节之前**调用：静默写一个没人读的文件，用户会以为装好了。
+ * 显式传了 `--settings` 也不放行——`--host dsh` 选的是 DSH 适配器的载荷形状，
+ * 而 DSH 只通过两个桥插件发 Claude Code / Codex 方言的载荷。
+ */
+function assertInstallable(host) {
+  const explanation = UNSUPPORTED_HOSTS[host];
+  if (explanation !== undefined) {
+    throw new Error(explanation);
+  }
 }
 
 function settingsPathFor(host, explicit) {
@@ -192,11 +261,16 @@ function hooksOf(settings) {
  *
  * 幂等：重复 install 不会产生重复条目（先清后写）。
  *
+ * 不支持的宿主（`dsh`）在这里抛错，**一个字节都不写**。这是安装期失败：CLI 把
+ * 说明打到 stderr、退出码非 0。
+ *
  * @param {{ host?: string, settingsPath?: string, root?: string, execPath?: string }} [options]
  * @returns {Promise<{ settingsPath: string, backupPath: string | null, events: string[] }>}
+ * @throws 宿主没有可写的配置落点（见 `UNSUPPORTED_HOSTS`）
  */
 export async function install(options = {}) {
   const host = options.host ?? 'claude-code';
+  assertInstallable(host);
   const settingsPath = settingsPathFor(host, options.settingsPath);
   const settings = await readSettings(settingsPath);
   const backupPath = await backup(settingsPath);
@@ -221,11 +295,17 @@ export async function install(options = {}) {
 /**
  * 卸载：只删我们加的条目，空事件键一并清掉。
  *
+ * 与 `install` 对称：不支持的宿主同样在写之前失败。旧版本可能已经往
+ * `~/.dsh/settings.json` 写过东西，那个文件没有读者，删不删都不影响 DSH——这里
+ * 不替用户收拾，只在说明里点出它的存在。
+ *
  * @param {{ host?: string, settingsPath?: string }} [options]
  * @returns {Promise<{ settingsPath: string, backupPath: string | null, removed: number }>}
+ * @throws 宿主没有可写的配置落点（见 `UNSUPPORTED_HOSTS`）
  */
 export async function uninstall(options = {}) {
   const host = options.host ?? 'claude-code';
+  assertInstallable(host);
   const settingsPath = settingsPathFor(host, options.settingsPath);
   const settings = await readSettings(settingsPath);
   const backupPath = await backup(settingsPath);
@@ -369,15 +449,40 @@ function flag(argv, name) {
   return typeof value === 'string' && value !== '' && !value.startsWith('--') ? value : undefined;
 }
 
+/**
+ * 取一个「写了就必须带值」的 flag。
+ *
+ * `flag()` 在下一个 token 缺失或以 `--` 开头时返回 `undefined`，`install` 于是退回
+ * 默认宿主——`co-mem install --host` 会**静默写进 `~/.claude/settings.json`**，
+ * 看起来还成功了。忘记值比打错宿主更难发现，所以这里直接报用法。
+ */
+function requiredFlag(argv, name) {
+  if (!argv.includes(`--${name}`)) {
+    return undefined;
+  }
+  const value = flag(argv, name);
+  if (value === undefined) {
+    throw new Error(
+      `--${name} 缺值。用法：co-mem <install|uninstall> --host <claude-code|codex> [--settings <path>]`,
+    );
+  }
+  return value;
+}
+
 const USAGE = `用法：
-  co-mem install --host <claude-code|dsh|codex> [--settings <path>]
+  co-mem install --host <claude-code|codex> [--settings <path>]
   co-mem doctor
-  co-mem uninstall --host <claude-code|dsh|codex> [--settings <path>]`;
+  co-mem uninstall --host <claude-code|codex> [--settings <path>]
+
+--host dsh 不可用：DSH 没有 settings 里的 hook 面，见 integrations/README.md 的「DSH」一节。`;
 
 async function main(argv) {
   const command = argv[0];
   if (command === 'install') {
-    const result = await install({ host: flag(argv, 'host'), settingsPath: flag(argv, 'settings') });
+    const result = await install({
+      host: requiredFlag(argv, 'host'),
+      settingsPath: requiredFlag(argv, 'settings'),
+    });
     process.stdout.write(`已安装 ${result.events.length} 个 hook 到 ${result.settingsPath}\n`);
     if (result.backupPath !== null) {
       process.stdout.write(`备份：${result.backupPath}\n`);
@@ -389,7 +494,10 @@ async function main(argv) {
   }
 
   if (command === 'uninstall') {
-    const result = await uninstall({ host: flag(argv, 'host'), settingsPath: flag(argv, 'settings') });
+    const result = await uninstall({
+      host: requiredFlag(argv, 'host'),
+      settingsPath: requiredFlag(argv, 'settings'),
+    });
     process.stdout.write(`已从 ${result.settingsPath} 删除 ${result.removed} 条 CoMem hook\n`);
     if (result.backupPath !== null) {
       process.stdout.write(`备份：${result.backupPath}\n`);
@@ -433,5 +541,14 @@ function isEntryPoint() {
 
 const isMain = isEntryPoint();
 if (isMain) {
-  process.exitCode = await main(process.argv.slice(2));
+  try {
+    process.exitCode = await main(process.argv.slice(2));
+  } catch (error) {
+    // 失败必须是**安装期可见**的：一行 stderr + 非 0 退出码。未捕获的
+    // rejection 也会退 1，但它把说明埋进 stack trace，在 `| tail` 里看不见。
+    process.stderr.write(
+      `co-mem 失败：\n${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  }
 }

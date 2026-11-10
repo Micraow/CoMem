@@ -59,7 +59,7 @@ co-mem uninstall --host claude-code
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径
 匹配到的、我们自己加的条目，别人的 hook 一个不动。
 
-三个宿主都能用同一套命令，`--host` 取 `claude-code` / `dsh` / `codex`：
+**能装的是两个宿主**，`--host` 取 `claude-code` / `codex`：
 
 ```bash
 co-mem install --host codex      # 写进 ~/.codex/hooks.json
@@ -69,8 +69,56 @@ co-mem uninstall --host codex
 | 宿主 | 默认配置文件 | 备注 |
 |---|---|---|
 | `claude-code` | `~/.claude/settings.json` | `hooks` 是 matcher 组数组 |
-| `dsh` | `~/.dsh/settings.json` | DSH 插件所依赖的 settings 形状 |
 | `codex` | `~/.codex/hooks.json` | 见下节；**首次使用需在 Codex 里信任 Hook** |
+| `dsh` | —（`install` 直接失败） | 见「[DSH](#dsh)」：DSH 没有 settings 里的 hook 面 |
+
+### DSH
+
+**`co-mem install --host dsh` 会失败，这是刻意的。** DSH 0.2.2-rc.1 没有 settings
+里的 hook 面：
+
+- DSH 读的配置是 `$DSH_HOME/profiles/<name>/settings.yaml`，而它已经是遗留文件——
+  启动时 `@deepseek-ai/dsh-settings` 的 `importLegacyDocument` 把它一次性导入
+  profile、改名成 `settings.yaml.imported`（`lib/index.js:346-349`）。
+- `~/.dsh/settings.json` 一个读者都没有。写它不报错，只是永远不生效：用户会以为
+  装好了，实际一个 hook 都不会跑。
+- DSH 的 hook 面**完全由插件提供**：`@deepseek-ai/dsh-hooks-claude-code`（Claude
+  Code 方言）或 `@deepseek-ai/dsh-hooks-codex`（Codex 方言），挂在
+  `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里，用 `configPath` 指向一个
+  `hooks.json`，或指向一个 `hooks` 键里放着配置的 settings 文件。
+
+`install` 完不成这条链路：它要往 profile 里装插件、改一份 YAML，两件都不做。所以
+它选择失败，而不是写一个没人读的文件。
+
+**手动接**（这两步本仓库不替你做）：
+
+```bash
+# 1. 用 Claude Code 方言生成 hooks 文件（DSH 的桥读的就是这个形状）
+node integrations/cli.mjs install --host claude-code --settings ~/.dsh/comem/hooks.json
+```
+
+```yaml
+# 2. 在 $DSH_HOME/profiles/<name>/cordis.patch.yml 里挂上桥
+- name: '@deepseek-ai/dsh-hooks-claude-code'
+  config:
+    configPath: ~/.dsh/comem/hooks.json
+```
+
+**未验证。** 本仓库没有安装这两个桥包，`configPath` 能否真的让 CoMem 的 hook 跑
+起来没有做端到端验证；上面的字段名来自两个包 0.2.2-rc.1 的 README，不是实测。
+
+两个已知限制，接之前先知道：
+
+- **两个桥各只实现 5 个事件**，`PreCompact` 与 `SessionEnd` 的配置会被静默丢弃。
+  想要完整的七个事件，用 `--host claude-code` 或 `--host codex` 直连宿主。
+- **`Stop` 采集在 DSH 下采不到消息**：桥把 `transcript_path` 固定成空值（DSH 的
+  持久化层不暴露文件路径），也没有 Claude Code 的 transcript 可读。`hosts/dsh.mjs`
+  的 `parseTranscript` 本来就返回空数组并带一条 `note`，`Stop` 会把它写进
+  `comem-capture.log` 的 `reason: "no-messages"`，不是静默早退。
+
+**`--host dsh` 的适配器还在。** `hosts/dsh.mjs` 仍然可以通过 `COMEM_HOST=dsh`
+选中（测试也覆盖它），但 CoMem 自己没有「装进 DSH」这条路径。DSH 上跑的是桥，
+桥发的是 Claude Code 方言的载荷，所以用 `--host claude-code` 生成的命令。
 
 ### Codex
 
@@ -79,9 +127,14 @@ Codex 支持完整的生命周期 Hook（`config.toml` 的 `[features].hooks`，
 `transcript_path` / `cwd` / `hook_event_name`）。官方文档：
 <https://developers.openai.com/codex/hooks>。
 
-Codex 从 `~/.codex/hooks.json`（用户级）或 `<repo>/.codex/hooks.json`（项目级）读取
-Hook，也接受 `~/.codex/config.toml` 的内联 `[hooks]` 表。`co-mem install --host codex`
-写的是 `~/.codex/hooks.json`；装到项目级时用 `--settings <repo>/.codex/hooks.json`。
+Codex 从 `$CODEX_HOME/hooks.json`（默认 `~/.codex/hooks.json`）读取 Hook，也接受
+`~/.codex/config.toml` 的内联 `[hooks]` 表。`co-mem install --host codex` 写的是
+`~/.codex/hooks.json`。
+
+**项目级 `<repo>/.codex/hooks.json` 未验证**：Codex 0.167 在非交互的 `codex exec`
+里没有读它（git 仓库根目录、有效与无效配置都试过），可能要先经过交互式信任。用
+`--settings <repo>/.codex/hooks.json` 之前先自己确认一次——没读的话 hook 不会报错，
+只是不跑。
 
 **安装不等于信任。** Codex 要求每个非托管 Hook 在运行前经过审查和信任：首次启动时
 会弹确认，或打开 `/hooks` 逐条信任 `integrations/servers/*.mjs`。不信任就不运行
@@ -529,7 +582,10 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 
 ### DSH
 
-这一份是本插件定义并依赖的约定（DSH 的插件 hook 没有公开规范）：
+这一份是本插件定义并依赖的约定。**DSH 本身不派发 hook**——它没有 hook 面，hook
+由 `@deepseek-ai/dsh-hooks-claude-code` / `dsh-hooks-codex` 两个桥插件提供，桥发
+的是 Claude Code / Codex 方言的载荷（见上面的「[DSH](#dsh)」）。下面这个形状只有
+在手工用 `COMEM_HOST=dsh` 选中 `hosts/dsh.mjs` 时才会被用到：
 
 ```json
 {
@@ -554,7 +610,7 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 |---|---|---|
 | Claude Code | 载荷里的 `transcript_path` | 每行 `{uuid, type, message: {role, content: [{type: 'text', text}]}}`；`isSidechain`（子 agent）与工具调用跳过 |
 | Codex | `~/.codex/sessions/<日期>/rollout-*.jsonl` | 每行 `{timestamp, ordinal, type, payload}`；只取 `type: "response_item"` 且 `payload.type: "message"` 的行，`content[*].text`（`input_text` / `output_text`）按换行拼接；`developer`、空文本与 `function_call` / `reasoning` 跳过 |
-| DSH | 不读文件 | 会话累积列表在 hook 载荷的 `data.messages` 里；transcript 文件格式**未验证** |
+| DSH | 不读文件 | 会话累积列表在 hook 载荷的 `data.messages` 里；transcript 文件格式**未验证**。DSH 的桥插件把 `transcript_path` 固定成空值，也不填 `data.messages`，所以 **DSH 下 `Stop` 采不到消息**——`comem-capture.log` 会记 `reason: "no-messages"` |
 
 **Codex 的 rollout 没有顶层 `message` 字段**，与 Claude Code 的 transcript 不是一种
 格式。只实现其中一种时，另一种宿主的每一行都被跳过，`Stop` 拿到空数组后直接返回——

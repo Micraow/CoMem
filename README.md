@@ -330,9 +330,27 @@ node integrations/cli.mjs install --host codex          # 写入 ~/.codex/hooks.
 <details>
 <summary><strong>DSH</strong></summary>
 
+DSH 没有 settings 里的 hook 面，所以 **`install --host dsh` 会失败**（它不再写一个没人读的
+`~/.dsh/settings.json`）。DSH 的 hook 由 `@deepseek-ai/dsh-hooks-claude-code` /
+`dsh-hooks-codex` 两个桥插件提供，挂在 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的
+`configPath` 上：
+
 ```bash
-node integrations/cli.mjs install --host dsh            # 写入 ~/.dsh/settings.json
+# 1. 用 Claude Code 方言生成 hooks 文件
+node integrations/cli.mjs install --host claude-code --settings ~/.dsh/comem/hooks.json
 ```
+
+```yaml
+# 2. 在 cordis.patch.yml 里挂上桥
+- name: '@deepseek-ai/dsh-hooks-claude-code'
+  config:
+    configPath: ~/.dsh/comem/hooks.json
+```
+
+配置格式来自两个桥包 0.2.2-rc.1 的 README，**未端到端验证**；两个桥各只实现 5 个事件，
+`PreCompact` / `SessionEnd` 不会触发，`Stop` 也采不到 transcript。要完整的七个事件，用
+`--host claude-code` 或 `--host codex` 直连宿主。细节见
+[集成指南的 DSH 一节](integrations/README.md#dsh)。
 </details>
 
 <details>

@@ -6,8 +6,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -293,5 +294,59 @@ test('uninstall --host codex 只删 CoMem 条目，保留别人的 hook', async 
 
 test('未知宿主报错并列出可用宿主', async () => {
   // 不传 settingsPath，让 settingsPathFor 走默认表并因未知宿主抛错。
-  await assert.rejects(() => install({ host: 'cursor' }), /未知宿主/);
+  await assert.rejects(() => install({ host: 'cursor' }), (error) => {
+    assert.match(error.message, /未知宿主/);
+    // `dsh` 曾经在这张表里，但它指向的 `~/.dsh/settings.json` 没有读者（见下一个
+    // 用例）。它不能出现在「可用」里，否则用户会以为装得上。
+    assert.doesNotMatch(error.message, /dsh/);
+    return true;
+  });
+});
+
+test('install --host dsh 在写第一个字节之前失败', async () => {
+  // 原实现的落点是 `~/.dsh/settings.json`（`DEFAULT_SETTINGS.dsh`）。DSH 0.2.2-rc.1
+  // 读的是 `$DSH_HOME/profiles/<name>/settings.yaml`，而且那个文件启动时就被
+  // `importLegacyDocument` 改名成 `.imported`——`settings.json` 一个读者都没有。
+  // 写它不报错，只是永远不生效：用户以为装好了，实际零个 hook 会跑。
+  //
+  // 这里断言三件事：失败、说明可操作、**一个字节都没写**。
+  await withTempDir(async (dir) => {
+    const settingsPath = join(dir, 'settings.json');
+    await assert.rejects(
+      () => install({ host: 'dsh', settingsPath, root: ROOT }),
+      (error) => {
+        // 现状与「为什么」：文件没有读者。
+        assert.match(error.message, /没有读者/);
+        // 正解：hook 面由插件提供，用 configPath 挂载。
+        assert.match(error.message, /dsh-hooks-claude-code/);
+        assert.match(error.message, /cordis\.patch\.yml/);
+        assert.match(error.message, /configPath/);
+        // 不确定的部分必须说成不确定。
+        assert.match(error.message, /未端到端验证/);
+        // 两条桥都不支持的同样要点出来，否则用户接完发现少了两个事件。
+        assert.match(error.message, /PreCompact/);
+        assert.match(error.message, /SessionEnd/);
+        return true;
+      },
+    );
+    // 关键：没有「先写再报错」。给了 --settings 也不落盘。
+    await assert.rejects(() => access(settingsPath), { code: 'ENOENT' });
+  });
+});
+
+test('uninstall --host dsh 对称失败，不碰 home', async () => {
+  await assert.rejects(() => uninstall({ host: 'dsh' }), /没有 settings 里的 hook 面/);
+});
+
+test('CLI：--host 缺值时失败，不退回到默认宿主', () => {
+  // `flag()` 在缺值（没有下一个 token、或以 `--` 开头）时返回 `undefined`，`install`
+  // 于是退回 `claude-code`——`co-mem install --host` 会静默写进
+  // `~/.claude/settings.json`，看着还成功了。这是同一类「落点静默错位」：忘记值比
+  // 打错宿主更难发现。跑真入口，因为退回到默认宿主发生在 `main` 里。
+  const result = spawnSync(process.execPath, [join(ROOT, 'cli.mjs'), 'install', '--host'], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '', '失败时 stdout 不能出现「已安装」');
+  assert.match(result.stderr, /--host 缺值/);
 });
