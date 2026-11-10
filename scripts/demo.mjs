@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 演示脚本的辅助进程（`scripts/demo.sh` 调用）。
+ * 演示脚本的辅助进程（`scripts/e2e.mjs` 调用）。
  *
  * 这里只做两件 shell 不擅长的事：**等**（轮询 `/health` 直到服务就绪、轮询
  * `.abstract.md` 直到摘要落盘）和**断言**（失败时打印可读的原因并以非零码退出）。
@@ -8,7 +8,7 @@
  *
  * ## 为什么把「会话 ID / 任务 ID」写进 state.json
  *
- * 每一步是独立的 node 进程（`demo.sh` 一行一个命令，读起来就是一条时间线）。
+ * 每一步是独立的 node 进程（`e2e.mjs` 一个步骤一行命令，读起来就是一条时间线）。
  * 进程间唯一的共享状态是临时目录里的一个 JSON 文件，不用环境变量传参——环境变量
  * 在 `set -u` 下漏一个就是一句「未绑定变量」，而 JSON 能直接 `cat` 出来看。
  *
@@ -24,6 +24,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // ── 参数 ──────────────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ if (command === undefined) {
 
 const args = parseArgs(rest);
 const BASE_URL = String(args['base-url'] ?? process.env.COMEM_DEMO_BASE_URL ?? 'http://127.0.0.1:19330').replace(/\/+$/u, '');
-const DEMO_ROOT = String(args.root ?? process.env.COMEM_DEMO_ROOT ?? '/tmp/comem-demo');
+const DEMO_ROOT = String(args.root ?? process.env.COMEM_DEMO_ROOT ?? join(tmpdir(), 'comem-demo'));
 const DATA_DIR = join(DEMO_ROOT, 'data');
 const STATE_PATH = join(DEMO_ROOT, 'state.json');
 

@@ -280,7 +280,7 @@ pnpm check:shape
 | `pnpm check:shape` | 文件行数、超长函数、`src/` 总行数、禁用指令与 `any` 计数的 ratchet | 职责划分、超长表达式 / 类 / `switch`、注释掉的代码 |
 | `pnpm test` | `tests/**/*.test.ts`（unit + integration） | `integrations/` |
 | `pnpm test:integrations` | `integrations/tests/*.test.mjs` | `src/` |
-| `pnpm test:e2e`（不在 `verify` 里） | `scripts/demo.sh` 用临时数据根走一遍六条核心链路（演示脚本，失败即非零退出） | 不是单元测试，没有断言库 |
+| `pnpm test:e2e`（不在 `verify` 里） | `scripts/e2e.mjs` 用临时数据根走一遍六条核心链路（演示脚本，失败即非零退出） | 不是单元测试，没有断言库 |
 
 **`web/` 与 `integrations/` 没有 lint**，这是已知空洞。控制台的类型错误由 `build:web`
 抓，Hook 插件的正确性由 `test:integrations` 的 173 条断言抓。
@@ -496,7 +496,7 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" \
 pnpm dev                 # 后端 + 控制台一起起（端口跟着 COMEM_SERVER_PORT 走）
 pnpm dev:server          # 只起后端 127.0.0.1:1933，tsx 直接跑 TypeScript
 pnpm dev:web             # 只起控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
-bash scripts/demo.sh     # 一条命令跑完六条链路，用 /tmp/comem-demo 这个临时数据根
+pnpm test:e2e            # 一条命令跑完六条链路，用 os.tmpdir()/comem-demo 这个临时数据根
 ```
 
 ### 生产

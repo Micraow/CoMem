@@ -268,7 +268,9 @@ CoMem/
 │   ├── check-reachability.ts         # 写了但没接线
 │   ├── check-shape.ts                # 行数 ratchet：文件只能变短
 │   ├── shape-baseline.json           # 形状检查基线（只允许收紧）
-│   └── demo.sh                       # 六条链路端到端演示
+│   ├── e2e.mjs                       # 六条链路端到端演示（`pnpm test:e2e`）
+│   ├── demo.mjs                      # 演示辅助进程（等 /health、断言产物）
+│   └── dev.mjs                       # 后端 + 控制台一起起（`pnpm dev`）
 │
 ├── tests/
 │   ├── unit/                         # 领域层纯函数

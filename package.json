@@ -20,7 +20,7 @@
     "test:watch": "vitest",
     "test:integrations": "node --test integrations/tests/*.test.mjs",
     "verify": "pnpm typecheck && pnpm lint && pnpm check:config && pnpm check:reachability && pnpm check:shape && pnpm check:docs && pnpm build:web && pnpm test && pnpm test:integrations",
-    "dev": "bash scripts/dev.sh",
+    "dev": "node scripts/dev.mjs",
     "dev:server": "tsx src/bootstrap/main.ts",
     "start": "node dist/bootstrap/main.js",
     "dev:web": "pnpm --dir web dev",
@@ -28,7 +28,7 @@
     "password": "tsx src/commands/password.ts",
     "group:owner": "tsx src/commands/group-owner.ts",
     "eval": "tsx src/commands/eval.ts",
-    "test:e2e": "bash scripts/demo.sh",
+    "test:e2e": "node scripts/e2e.mjs",
     "ingest": "tsx src/commands/ingest.ts"
   },
   "dependencies": {

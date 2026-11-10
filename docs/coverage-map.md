@@ -121,7 +121,7 @@
 | 指定组 owner | 组 owner 丢失时的恢复入口 | `pnpm group:owner <gid> <uid>` | `commands/group-owner.ts:63` `setGroupOwner` | `app_group.owner_user_id` + 组根 `.acl.json` 预置 | `commands/group-owner.test.ts:79` |
 | 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:519` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
 | 检索质量评估 | 改动检索要能量化前后 | `pnpm eval --dataset ...` | `commands/eval.ts:219` `runEval`；指标 `eval/metrics.ts` | 数据集跑 `find`，算 recall@k / MRR，输出报告 | `commands/eval.test.ts:25`「--config 坏 YAML 必须报错」；`unit/eval/metrics.test.ts:32`「recallAtK」用例 |
-| 配置自检 | 加了配置项必须有人读 | `pnpm check:config` | `scripts/check-config.ts:278` `main` | L1 叶子被读 / L2 注入属性必填 / L3 与 `config.example.yaml` 双向一致；L4 变体差集在测试里 | `config-coverage.test.ts:132` |
+| 配置自检 | 加了配置项必须有人读 | `pnpm check:config` | `scripts/check-config.ts:287` `main` | L1 叶子被读 / L2 注入属性必填 / L3 与 `config.example.yaml` 双向一致；L4 变体差集在测试里 | `config-coverage.test.ts:132` |
 | 可达性检查 | 符号存在不等于有人调 | `pnpm check:reachability` | `scripts/check-reachability.ts` | 从 6 个进程入口沿值导入算模块与符号可达，再按成员方法调用点判 `method-no-caller` | `unit/scripts/check-reachability.test.ts` |
 | 形状检查 | 文件只能变短，结构不能回涨 | `pnpm check:shape` | `scripts/check-shape.ts` | 单文件行数（基线内按记录值，其余 250）、函数体 > 120 行个数、`src/` 总行数、禁用指令硬零 + `as any` / `: any` 计数，全部上限 ratchet | `unit/scripts/check-shape.test.ts` |
 | 门禁 | 本地跑完再提交 | `pnpm verify` | `package.json:21` `verify` | typecheck → lint → check:config → check:reachability → check:shape → build:web → test → test:integrations | — |
@@ -151,7 +151,7 @@
 |---|---|---|
 | 控制台十个页面 | 只有 `web` 的合成式单测（`tests/unit/web/console-identity.test.ts:49`「控制台身份引导」），页面本身无测试 | 页面只做「取数 + 渲染」，断言要拉浏览器；当前门禁不跑浏览器 |
 | `pnpm dev` / `dev:server` / `dev:web` | 无 | 开发入口靠人点；`test:e2e` 起的是独立进程与临时数据根 |
-| `pnpm test:e2e`（`scripts/demo.sh` + `scripts/demo.mjs`） | 有断言（每步失败即 throw），但**不在 `pnpm verify` 里**，需要活服务与模型 key | 依赖外部模型供应商；不在本地门禁内 |
+| `pnpm test:e2e`（`scripts/e2e.mjs` + `scripts/demo.mjs`） | 有断言（每步失败即 throw），但**不在 `pnpm verify` 里**，需要活服务与模型 key | 依赖外部模型供应商；不在本地门禁内 |
 | Hook 在真实宿主里的安装 | `integrations/tests/cli.test.mjs` 只对临时目录里的 fixtures 断言，不碰真实宿主配置 | 改真实 `~/.claude/settings.json` 不可在测试里做 |
 | `pnpm verify` 自身 | 无 | 它只是串起其它命令 |
 

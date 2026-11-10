@@ -126,7 +126,7 @@ export default defineNuxtConfig({
   nitro: {
     devProxy: {
       // 端口必须跟后端一致，否则控制台把请求转给别的服务，而界面看起来「有数据」。
-      // 后端用 `COMEM_SERVER_PORT` 改端口时这里跟着变（`scripts/dev.sh` 会传）。
+      // 后端用 `COMEM_SERVER_PORT` 改端口时这里跟着变（`scripts/dev.mjs` 会传）。
       '/api': {
         target: `http://127.0.0.1:${process.env['COMEM_SERVER_PORT'] ?? '1933'}/api`,
         changeOrigin: true,
