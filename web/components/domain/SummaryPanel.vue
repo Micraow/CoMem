@@ -10,6 +10,7 @@
  */
 import type { AclPayload, FsStatPayload, HealthPayload } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
+import { ACL_LEVEL_LABEL, type AclLevel } from '~/utils/aclLabels'
 
 const props = withDefaults(
   defineProps<{
@@ -34,14 +35,6 @@ const props = withDefaults(
     loading: false,
   },
 )
-
-type AclLevel = 1 | 3 | 7
-
-const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
-  1: '读取',
-  3: '写入',
-  7: '管理',
-}
 
 const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'purple'>> = {
   1: 'gray',
@@ -164,7 +157,7 @@ const updatedLabel = computed(() => {
         <div v-else class="acl-mini">
           <div v-for="row in effectiveRows" :key="row.principal" class="acl-mini__row">
             <span class="acl-mini__p">{{ row.principal }}</span>
-            <UiBadge :variant="LEVEL_VARIANT[row.level]">{{ LEVEL_LABEL[row.level] }}</UiBadge>
+            <UiBadge :variant="LEVEL_VARIANT[row.level]">{{ ACL_LEVEL_LABEL[row.level] }}</UiBadge>
           </div>
         </div>
       </template>

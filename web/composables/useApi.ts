@@ -18,6 +18,9 @@
  * 30 秒内没有响应基本等于后端挂了，继续等没有意义。
  */
 
+import type { AclEffect, AclLevel, AclMode } from '~/utils/aclLabels'
+import type { ClaimableTaskStatus, TaskType } from '~/utils/taskLabels'
+import type { McpToolKind } from '~/utils/toolLabels'
 import type { Ref } from 'vue'
 
 import { clearConsoleSession, readStoredScope, writeStoredScope } from './consoleAuth'
@@ -385,16 +388,22 @@ export interface ContentReadPayload {
   readonly truncated: boolean
 }
 
-/** `GET /acl`。`effective` 是主体 → 有效级别（read=1 / write=3 / manage=7）。 */
+/**
+ * `GET /acl`。`effective` 是主体 → 有效级别（read=1 / write=3 / manage=7）。
+ *
+ * `mode` / `level` / `effect` 用 `utils/aclLabels.ts` 派生的类型：服务端这三列
+ * 直接来自领域对象（`src/api/http/routes/acl.ts` 的 `snapshot.mode` /
+ * `snapshot.entries`），写成 `string` 只会让标签映射退回 `?? 原值` 兜底。
+ */
 export interface AclPayload {
   readonly uri: string
-  readonly mode: 'inherit' | 'restricted'
+  readonly mode: AclMode
   readonly entries: readonly {
     readonly principal: string
-    readonly level: 1 | 3 | 7
-    readonly effect: 'allow' | 'deny'
+    readonly level: AclLevel
+    readonly effect: AclEffect
   }[]
-  readonly effective: Readonly<Record<string, readonly (1 | 3 | 7)[]>>
+  readonly effective: Readonly<Record<string, readonly AclLevel[]>>
 }
 
 /**
@@ -403,11 +412,16 @@ export interface AclPayload {
  * 概览页与「会话与任务」页各读一部分字段：概览用 `updatedAt`，任务表还要
  * `createdAt` / `leaseUntil` / `error`。响应里还有 `payload` / `stepsDone`，
  * 控制台不读，不声明（`src/api/http/routes/tasks.ts` 的 `TaskRecord` 是完整形状）。
+ *
+ * `type` / `status` 用取值联合而不是 `string`：这个端点只列可认领的任务，状态是
+ * `ClaimableTaskStatus` 子集。写成 `string` 时标签映射只能靠 `?? 原值` 兜底，
+ * 一个新增的状态会以英文原值出现在界面上（`utils/taskLabels.ts` 的映射是穷举的，
+ * 加成员就会编译失败）。
  */
 export interface TaskPayload {
   readonly id: string
-  readonly type: string
-  readonly status: string
+  readonly type: TaskType
+  readonly status: ClaimableTaskStatus
   readonly attempts: number
   readonly leaseUntil: string | null
   readonly error: string | null
@@ -471,11 +485,17 @@ export interface MemoryLinksPayload {
   readonly links: readonly MemoryLinkPayload[]
 }
 
-/** `GET /mcp/tools` 的一个工具。说明文本来自服务端注册表，界面不重写。 */
+/**
+ * `GET /mcp/tools` 的一个工具。说明文本来自服务端注册表，界面不重写。
+ *
+ * `kind` 用 `utils/toolLabels.ts` 派生的类型：`serializeTool()`
+ * （`src/api/http/routes/mcp.ts`）原样输出注册表里的 `tool.kind`，而它的静态类型
+ * 就是 `'read' | 'write' | 'ingest'`。写成 `string` 时分组文案只能靠 `as` 断言或
+ * `?? kind` 兜底，注册表多加一类工具就会显示成英文原值。
+ */
 export interface McpToolPayload {
   readonly name: string
-  /** `read` / `write` / `ingest`。只用于分组展示，不参与权限判定。 */
-  readonly kind: string
+  readonly kind: McpToolKind
   readonly description: string
   /** JSON Schema；界面只读 `properties` 的键名与 `required`。 */
   readonly inputSchema: Record<string, unknown>

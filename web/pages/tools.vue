@@ -17,17 +17,9 @@ import {
   type McpToolPayload,
   type McpToolsPayload,
 } from '~/composables/useApi'
+import { mcpToolKindLabel, mcpToolKindRank, type McpToolKind } from '~/utils/toolLabels'
 
 useHead({ title: '工具 · CoMem 控制台' })
-
-/** 分组顺序与 §13.2 的「只读 / 写入 / 摄取」一致。 */
-const KIND_ORDER: readonly string[] = ['read', 'write', 'ingest']
-
-const KIND_LABEL: Readonly<Record<string, string>> = {
-  read: '只读',
-  write: '写入',
-  ingest: '摄取',
-}
 
 const api = useApi()
 
@@ -42,13 +34,11 @@ interface ToolGroup {
 }
 
 const groups = computed<readonly ToolGroup[]>(() => {
-  const ordered = [...tools.value].sort((left, right) => {
-    const leftIndex = KIND_ORDER.indexOf(left.kind)
-    const rightIndex = KIND_ORDER.indexOf(right.kind)
-    return (leftIndex < 0 ? KIND_ORDER.length : leftIndex) - (rightIndex < 0 ? KIND_ORDER.length : rightIndex)
-  })
+  const ordered = [...tools.value].sort(
+    (left, right) => mcpToolKindRank(left.kind) - mcpToolKindRank(right.kind),
+  )
 
-  const byKind = new Map<string, McpToolPayload[]>()
+  const byKind = new Map<McpToolKind, McpToolPayload[]>()
   for (const tool of ordered) {
     const bucket = byKind.get(tool.kind)
     if (bucket === undefined) {
@@ -60,7 +50,7 @@ const groups = computed<readonly ToolGroup[]>(() => {
 
   return [...byKind].map(([kind, items]) => ({
     kind,
-    label: KIND_LABEL[kind] ?? kind,
+    label: mcpToolKindLabel(kind),
     tools: items,
   }))
 })

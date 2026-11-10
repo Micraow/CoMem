@@ -5,6 +5,17 @@
  * `renderBody`：`## content\n\n` + 正文）。标题是存储细节，不是记忆内容，
  * 差异视图只比较正文。
  *
+ * ## 剥法与后端的 `extractContent()` 同一语义
+ *
+ * 服务端读回正文时（`src/services/memory.ts` 的 `extractContent`：先匹配
+ * `## content\n`，再剥掉紧随其后的**一个** `\n`）——第二个 `\n` 是 `renderBody`
+ * 写的空行；正文本身以空行开头时，额外的换行属于正文。这里逐字节照做。
+ *
+ * 旧实现用 `replace(/^\n+/, '')` 删掉全部前导换行：磁盘上
+ * `## content\n\n\n\n步骤…` 的正文是 `\n\n步骤…`，左栏却显示成 `步骤…`，而右栏
+ * （复核记录里的 `fields.content`）是 `\n\n步骤…`——复核页因此显示出一处并不存在
+ * 的差异。
+ *
  * ## 为什么这里不剥 frontmatter
  *
  * `GET /content/read` 返回的是 `ContentStore.readText` 的 `document.body`
@@ -18,13 +29,18 @@ const CONTENT_HEADING = '## content'
 /**
  * 去掉正文前的存储层标题。
  *
- * 行为与迁移前 `web/pages/review.vue` 里的局部实现逐字节一致：不命中 `## content`
- * 前缀时原样返回；命中时删掉前缀与紧随其后的换行。`\r\n` 不在 `^\n+` 的范围内，
- * CRLF 正文会保留分隔符后的 `\r\n`，本次不改这条语义。
+ * 与 `extractContent()` 的分支一一对应：
+ * - 正文不以 `## content\n` 开头时原样返回（服务端同样认为没有 `content` 字段）；
+ * - 命中时剥掉标题行，再剥掉紧随其后的一个 `\n`，其余字节原样保留。
+ *
+ * CRLF 的 `## content\r\n` 不命中前缀，整段原样返回：`renderBody` 只写 LF，而
+ * `extractContent()` 也只认 LF 标题行——这里不发明第三套换行语义。
  */
 export function memoryBodyText(text: string): string {
-  if (!text.startsWith(CONTENT_HEADING)) {
+  const prefix = `${CONTENT_HEADING}\n`
+  if (!text.startsWith(prefix)) {
     return text
   }
-  return text.slice(CONTENT_HEADING.length).replace(/^\n+/, '')
+  const rest = text.slice(prefix.length)
+  return rest.startsWith('\n') ? rest.slice(1) : rest
 }

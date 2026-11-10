@@ -17,8 +17,15 @@
  * ## 状态文案
  *
  * 领域层是 `open` / `archived`（`SessionStatus`），界面用「进行中 / 已归档」。
- * 归档是 CoMem 里的动作名，不是内部术语，可以直接出现在界面上。
+ * 归档是 CoMem 里的动作名，不是内部术语，可以直接出现在界面上。两张标签表
+ * （状态、角色）与取值清单都在 `utils/sessionLabels.ts`，这里只声明形状。
  */
+import {
+  messageRoleLabel,
+  sessionStatusLabel,
+  type MessageRole,
+  type SessionStatus,
+} from '~/utils/sessionLabels'
 
 /** 会话消息的 part（`src/domain/session.ts` 的 `ContentPart`）。 */
 export type SessionPartPayload =
@@ -40,7 +47,7 @@ export type SessionPartPayload =
 
 export interface SessionMessagePayload {
   readonly id: string
-  readonly role: string
+  readonly role: MessageRole
   readonly parts: readonly SessionPartPayload[]
   readonly createdAt: string
   readonly turn: number
@@ -55,7 +62,7 @@ export interface SessionMessagePayload {
 export interface SessionSummaryPayload {
   readonly id: string
   readonly uri: string
-  readonly status: string
+  readonly status: SessionStatus
   readonly messageCount: number
   readonly lastCommitAt: string | null
   readonly pendingTokens: number
@@ -65,18 +72,6 @@ export interface SessionSummaryPayload {
 export interface SessionListPayload {
   readonly scope: string
   readonly sessions: readonly SessionSummaryPayload[]
-}
-
-const SESSION_STATUS_LABEL: Readonly<Record<string, string>> = {
-  open: '进行中',
-  archived: '已归档',
-}
-
-const ROLE_LABEL: Readonly<Record<string, string>> = {
-  user: '用户',
-  assistant: '助手',
-  system: '系统',
-  tool: '工具',
 }
 
 /**
@@ -89,10 +84,6 @@ const ROLE_LABEL: Readonly<Record<string, string>> = {
  */
 export function sessionActivityAt(session: SessionSummaryPayload): string | null {
   return session.lastCommitAt ?? session.messages[0]?.createdAt ?? null
-}
-
-export function sessionStatusLabel(status: string): string {
-  return SESSION_STATUS_LABEL[status] ?? status
 }
 
 /** 一条 part 的展示形态：标签行 + 正文 + 是否原样等宽显示。 */
@@ -249,10 +240,6 @@ watch(
   },
 )
 
-function roleLabelOf(role: string): string {
-  return ROLE_LABEL[role] ?? role
-}
-
 function commitTitleOf(session: SessionSummaryPayload): string {
   if (props.committing.includes(session.id)) {
     return '正在提交。'
@@ -357,7 +344,7 @@ function commitTitleOf(session: SessionSummaryPayload): string {
               :data-role="message.role"
             >
               <div class="message__head">
-                <span class="message__role">{{ roleLabelOf(message.role) }}</span>
+                <span class="message__role">{{ messageRoleLabel(message.role) }}</span>
                 <time class="message__time mono" :title="formatAbsoluteTime(message.createdAt)">
                   {{ formatRelativeTime(message.createdAt) }}
                 </time>

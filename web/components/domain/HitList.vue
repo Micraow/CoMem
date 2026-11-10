@@ -9,15 +9,21 @@
  * `search` 比 `find` 多一个 `plan`（§8.4：`search` 先做意图分析再检索，返回实际
  * 执行的过滤条件）。用可辨识联合而不是 `plan?:`：`find` 永远不会带计划，
  * 可选字段会让「有没有计划」变成运行时才知道的事。
+ *
+ * 三个闭集字段（`level` / `contextType` / `intent`）的类型来自 `~/utils/`：清单在
+ * 那里声明、与领域层的导出对拍，这里只消费派生的类型。写成 `string` 时标签映射
+ * 只能靠 `as` 断言，服务端多一个取值会在界面上渲染出 `undefined` 而编译期不报。
  */
+import type { Level } from '~/utils/levelLabels'
+import type { ContextType, TypedQueryIntent } from '~/utils/searchLabels'
 
 export type SearchMode = 'find' | 'search'
 
-/** 架构文档 §9.1 的三层：L0 摘要 / L1 概览 / L2 原文。 */
-export type SearchLevel = 'L0' | 'L1' | 'L2'
+/** 架构文档 §9.1 的三层：L0 摘要 / L1 概览 / L2 原文（`utils/levelLabels.ts`）。 */
+export type SearchLevel = Level
 
-/** 架构文档 §8.3 的 `contextTypes`。 */
-export type SearchContextType = 'memory' | 'resource' | 'skill' | 'session'
+/** 架构文档 §8.3 的 `contextTypes`（`utils/searchLabels.ts`）。 */
+export type SearchContextType = ContextType
 
 export interface SearchHitPayload {
   readonly uri: string
@@ -47,7 +53,8 @@ export interface SearchHitPayload {
  */
 export interface SearchTypedQueryPayload {
   readonly text: string
-  readonly intent: string
+  /** 只可能是 `TYPED_QUERY_INTENTS` 里的六个之一（`utils/searchLabels.ts`）。 */
+  readonly intent: TypedQueryIntent
   readonly confidence: number
   readonly derivedFrom: string | null
 }
@@ -67,20 +74,6 @@ export interface SearchFindPayload {
 export interface SearchSearchPayload extends SearchFindPayload {
   readonly plan: SearchPlanPayload
 }
-
-/** 命中层级 → 界面文案。层级就是「为什么被召回」，不额外编造匹配原因。 */
-export const LEVEL_REASON: Readonly<Record<SearchLevel, string>> = {
-  L0: '摘要命中',
-  L1: '概览命中',
-  L2: '原文命中',
-}
-
-export const CONTEXT_LABEL: Readonly<Record<SearchContextType, string>> = {
-  memory: '记忆',
-  resource: '资源',
-  skill: '技能',
-  session: '会话',
-}
 </script>
 
 <script setup lang="ts">
@@ -94,6 +87,9 @@ export const CONTEXT_LABEL: Readonly<Record<SearchContextType, string>> = {
  * 分数右对齐 + 等宽 + 两位小数：它是用来横向比较的，位数不齐就没法扫。
  */
 import { ChevronRight, SearchX, Sparkles } from 'lucide-vue-next'
+
+import { LEVEL_REASON } from '~/utils/levelLabels'
+import { CONTEXT_LABEL } from '~/utils/searchLabels'
 
 const props = defineProps<{
   hits: readonly SearchHitPayload[] | null

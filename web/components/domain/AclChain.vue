@@ -31,6 +31,14 @@ export interface AclChainLevel {
  */
 import { AlertTriangle, Ban, CornerDownRight } from 'lucide-vue-next'
 
+import {
+  ACL_EFFECT_LABEL,
+  ACL_LEVEL_LABEL,
+  ACL_MODE_LABEL,
+  type AclLevel,
+  type AclMode,
+} from '~/utils/aclLabels'
+
 const props = defineProps<{
   levels: readonly AclChainLevel[]
   /** 当前身份，用来在 `effective` 里取最终权限。 */
@@ -38,31 +46,13 @@ const props = defineProps<{
   loading: boolean
 }>()
 
-type AclLevel = 1 | 3 | 7
-
-/** 级别与模式的中文名：界面上只出现用户能做的动作，不出现服务端枚举。 */
-const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
-  1: '读取',
-  3: '写入',
-  7: '管理',
-}
-
-const MODE_LABEL: Readonly<Record<AclPayload['mode'], string>> = {
-  inherit: '继承父级',
-  restricted: '仅本节点',
-}
-
-function levelLabelOf(level: number): string {
-  return level === 1 || level === 3 || level === 7 ? LEVEL_LABEL[level] : String(level)
-}
-
-function modeOf(level: AclChainLevel): 'inherit' | 'restricted' | null {
+function modeOf(level: AclChainLevel): AclMode | null {
   return level.snapshot?.mode ?? null
 }
 
 function modeLabelOf(level: AclChainLevel): string {
   const mode = modeOf(level)
-  return mode === null ? '' : MODE_LABEL[mode]
+  return mode === null ? '' : ACL_MODE_LABEL[mode]
 }
 
 function grantsOf(level: AclChainLevel): string {
@@ -75,7 +65,9 @@ function grantsOf(level: AclChainLevel): string {
   return level.snapshot.entries
     .map(
       (entry) =>
-        `${entry.principal} = ${levelLabelOf(entry.level)}${entry.effect === 'deny' ? ' · 拒绝' : ''}`,
+        `${entry.principal} = ${ACL_LEVEL_LABEL[entry.level]}${
+          entry.effect === 'deny' ? ` · ${ACL_EFFECT_LABEL.deny}` : ''
+        }`,
     )
     .join('，')
 }
@@ -102,7 +94,7 @@ const finalLabel = computed<string>(() => {
   if (finalSnapshot.value?.effective === undefined) {
     return '无法推导'
   }
-  return finalLevel.value === null ? '无' : levelLabelOf(finalLevel.value)
+  return finalLevel.value === null ? '无' : ACL_LEVEL_LABEL[finalLevel.value]
 })
 
 const hasGap = computed(() => props.levels.some((level) => level.error !== null))

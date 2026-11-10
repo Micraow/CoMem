@@ -22,6 +22,7 @@ import type {
   SearchPlanPayload,
   SearchSearchPayload,
 } from '~/components/domain/HitList.vue'
+import { typedQueryIntentLabel } from '~/utils/searchLabels'
 
 useHead({ title: '检索调试 · CoMem 控制台' })
 
@@ -144,20 +145,6 @@ async function runSearch(): Promise<void> {
   }
 }
 
-/** 意图 → 界面文案。不把 `preference` 这类内部枚举直接摆给用户。 */
-const INTENT_LABEL: Readonly<Record<string, string>> = {
-  preference: '偏好',
-  fact: '事实',
-  decision: '决定',
-  event: '事件',
-  procedure: '流程',
-  other: '其他',
-}
-
-function intentLabel(intent: string): string {
-  return INTENT_LABEL[intent] ?? '其他'
-}
-
 const resultCaption = computed(() =>
   hits.value === null ? '' : `共 ${hits.value.length} 条 · 按分数降序`,
 )
@@ -238,7 +225,7 @@ watch(scopeRoot, (root) => {
 
           <ul v-else class="plan__list">
             <li v-for="(query, index) in plan.queries" :key="index" class="plan__item">
-              <span class="plan__intent">{{ intentLabel(query.intent) }}</span>
+              <span class="plan__intent">{{ typedQueryIntentLabel(query.intent) }}</span>
               <span class="plan__text">{{ query.text }}</span>
               <span class="plan__confidence">{{ (query.confidence * 100).toFixed(0) }}%</span>
               <span v-if="query.derivedFrom !== null" class="plan__derived">

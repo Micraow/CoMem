@@ -16,10 +16,16 @@
 import { AlertTriangle, Plus, ShieldAlert, Trash2 } from 'lucide-vue-next'
 
 import type { AclPayload } from '~/composables/useApi'
-
-type AclMode = 'inherit' | 'restricted'
-type AclLevel = 1 | 3 | 7
-type AclEffect = 'allow' | 'deny'
+import {
+  ACL_EFFECTS,
+  ACL_EFFECT_LABEL,
+  ACL_LEVELS,
+  ACL_LEVEL_LABEL,
+  ACL_MODE_LABEL,
+  type AclEffect,
+  type AclLevel,
+  type AclMode,
+} from '~/utils/aclLabels'
 
 interface GrantEntry {
   readonly principal: string
@@ -52,28 +58,26 @@ const PREFIX_OPTIONS = [
   { value: 'group', label: 'group:' },
 ] as const
 
-const LEVEL_OPTIONS = [
-  { value: '1', label: '读取' },
-  { value: '3', label: '写入' },
-  { value: '7', label: '管理' },
-] as const
+/** `<option>` 的 value 恒为字符串，所以级别的下拉值是字符串形式。 */
+type LevelOption = `${AclLevel}`
 
-const EFFECT_OPTIONS = [
-  { value: 'allow', label: '允许' },
-  { value: 'deny', label: '拒绝' },
-] as const
-
-/** 级别与效果的中文名：界面上只出现用户能做的动作，不出现服务端枚举。 */
-const LEVEL_LABEL: Readonly<Record<AclLevel, string>> = {
-  1: '读取',
-  3: '写入',
-  7: '管理',
+/** 一个级别的下拉选项：字符串形式的值 + 与徽标同一份文案。 */
+function levelOption(level: AclLevel): { readonly value: LevelOption; readonly label: string } {
+  return { value: `${level}`, label: ACL_LEVEL_LABEL[level] }
 }
 
-const EFFECT_LABEL: Readonly<Record<AclEffect, string>> = {
-  allow: '允许',
-  deny: '拒绝',
-}
+/**
+ * 下拉选项由 `utils/aclLabels.ts` 的清单与文案生成。
+ *
+ * 手写一份选项数组时，「读取 / 写入 / 管理」的文案与映射表是两份，改一处忘另一处
+ * 就会出现「选项说管理、徽标说 manage」这种同一取值两种写法。
+ */
+const LEVEL_OPTIONS = ACL_LEVELS.map(levelOption)
+
+const EFFECT_OPTIONS = ACL_EFFECTS.map((effect) => ({
+  value: effect,
+  label: ACL_EFFECT_LABEL[effect],
+}))
 
 const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'blue'>> = {
   1: 'gray',
@@ -83,8 +87,8 @@ const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'blue'>> = {
 
 const principalKind = ref<'user' | 'group'>('user')
 const principalId = ref('')
-const grantLevel = ref<'1' | '3' | '7'>('1')
-const grantEffect = ref<'allow' | 'deny'>('allow')
+const grantLevel = ref<LevelOption>('1')
+const grantEffect = ref<AclEffect>('allow')
 const formError = ref<string | null>(null)
 
 const pendingAction = ref<PendingAction | null>(null)
@@ -97,20 +101,11 @@ const confirmOpen = computed({
   },
 })
 
-/**
- * 继承模式的中文标签。`inherit` / `restricted` 是服务端枚举，不直接进界面
- * （AGENTS §11）；界面上只出现「继承父级」与「仅本节点」。
- */
-const MODE_LABEL: Readonly<Record<AclMode, string>> = {
-  inherit: '继承父级',
-  restricted: '仅本节点',
-}
-
 const isRestricted = computed(() => props.acl?.mode === 'restricted')
 
 const modeLabel = computed(() => {
   const mode = props.acl?.mode
-  return mode === undefined ? '—' : MODE_LABEL[mode]
+  return mode === undefined ? '—' : ACL_MODE_LABEL[mode]
 })
 
 const entries = computed(() => props.acl?.entries ?? [])
@@ -139,17 +134,14 @@ const confirmMessage = computed(() => {
       : '切换为「继承父级」后，祖先链上的授权重新生效，这个节点会继承上游的全部权限。'
   }
   if (action.kind === 'grant') {
-    return `将给 ${action.entry.principal} 授予「${LEVEL_LABEL[action.entry.level]}」（${EFFECT_LABEL[action.entry.effect]}）。同一主体只能有一条授权，重复添加会覆盖原来的级别与效果。`
+    return `将给 ${action.entry.principal} 授予「${ACL_LEVEL_LABEL[action.entry.level]}」（${ACL_EFFECT_LABEL[action.entry.effect]}）。同一主体只能有一条授权，重复添加会覆盖原来的级别与效果。`
   }
   return `将撤销 ${action.principal} 在这个节点上的直接授权。如果上游也有授权，撤销后仍然继承上游的权限。`
 })
 
-function levelOf(value: string): AclLevel {
+/** 下拉值是字符串形式，这一步只做「字符串 → 领域级别」的转换，不猜默认值。 */
+function levelOf(value: LevelOption): AclLevel {
   return value === '7' ? 7 : value === '3' ? 3 : 1
-}
-
-function effectOf(value: string): AclEffect {
-  return value === 'deny' ? 'deny' : 'allow'
 }
 
 function nameOf(uri: string): string {
@@ -191,7 +183,7 @@ function requestGrant(): void {
     entry: {
       principal: `${principalKind.value}:${id}`,
       level: levelOf(grantLevel.value),
-      effect: effectOf(grantEffect.value),
+      effect: grantEffect.value,
     },
   }
 }
@@ -286,12 +278,12 @@ function confirm(): void {
               <td class="mono strong">{{ entry.principal }}</td>
               <td>
                 <UiBadge :variant="LEVEL_VARIANT[entry.level]">
-                  {{ LEVEL_LABEL[entry.level] }}
+                  {{ ACL_LEVEL_LABEL[entry.level] }}
                 </UiBadge>
               </td>
               <td>
                 <UiBadge :variant="entry.effect === 'deny' ? 'red' : 'green'">
-                  {{ EFFECT_LABEL[entry.effect] }}
+                  {{ ACL_EFFECT_LABEL[entry.effect] }}
                 </UiBadge>
               </td>
               <td class="num">

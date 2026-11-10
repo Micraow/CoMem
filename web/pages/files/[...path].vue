@@ -37,25 +37,25 @@ import {
   type TreeEntryPayload,
 } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
+import {
+  LEVEL_OF_TAB,
+  LEVEL_TABS,
+  LEVEL_TAB_LABEL,
+  LEVEL_TAB_NOTE,
+  type LevelTab,
+} from '~/utils/levelLabels'
 import { isMemoryUri, linkRowsOf, type LinkRow } from '~/utils/memoryLinks'
 
 useHead({ title: '文件树 · CoMem 控制台' })
 
-type Layer = 'l0' | 'l1' | 'l2'
-
 const URI_PREFIX = 'comem://'
 
-const layerTabs = [
-  { value: 'l0', lead: 'L0', label: '摘要' },
-  { value: 'l1', lead: 'L1', label: '概览' },
-  { value: 'l2', lead: 'L2', label: '原文' },
-] as const
-
-const LAYER_NOTE: Readonly<Record<Layer, string>> = {
-  l0: '一句话摘要，256 字符以内。',
-  l1: '目录级上下文，4000 字符以内。',
-  l2: '完整正文；目录列出直接子项。',
-}
+/** 三档页签由 `utils/levelLabels.ts` 的清单生成：少一档或加一档都是编译错误。 */
+const layerTabs = LEVEL_TABS.map((tab) => ({
+  value: tab,
+  lead: LEVEL_OF_TAB[tab],
+  label: LEVEL_TAB_LABEL[tab],
+}))
 
 const route = useRoute()
 const router = useRouter()
@@ -106,8 +106,8 @@ const aclInheritedFrom = computed(() =>
   aclScope.value !== null && aclScope.value !== selectedUri.value ? aclScope.value : null,
 )
 
-const layer = ref<Layer>('l0')
-const loadedLayers = ref<ReadonlySet<Layer>>(new Set())
+const layer = ref<LevelTab>('l0')
+const loadedLayers = ref<ReadonlySet<LevelTab>>(new Set())
 
 const loading = ref(false)
 const layerLoading = ref(false)
@@ -217,7 +217,7 @@ async function loadNode(uri: string): Promise<void> {
   linksError.value = null
   degraded.value = false
   layer.value = 'l0'
-  loadedLayers.value = new Set<Layer>(['l0'])
+  loadedLayers.value = new Set<LevelTab>(['l0'])
 
   try {
     const statPayload = await api.get<FsStatPayload>('/fs/stat', { uri })
@@ -286,7 +286,7 @@ async function loadLayer(): Promise<void> {
       }
     }
 
-    loadedLayers.value = new Set<Layer>([...loadedLayers.value, layer.value])
+    loadedLayers.value = new Set<LevelTab>([...loadedLayers.value, layer.value])
   } catch (caught) {
     layerError.value = errorMessageOf(caught)
   } finally {
@@ -401,7 +401,7 @@ onBeforeUnmount(() => {
 
                 <div class="layer-note">
                   <Info :size="15" :stroke-width="1.4" />
-                  <span>{{ LAYER_NOTE[layer] }}</span>
+                  <span>{{ LEVEL_TAB_NOTE[layer] }}</span>
                 </div>
 
                 <div v-if="layerError !== null" class="callout callout--danger">
