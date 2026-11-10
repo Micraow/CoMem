@@ -118,6 +118,59 @@ export class MemoryLinkRepository {
     return { inserted, merged };
   }
 
+  /**
+   * 用一批行**整体替换**某一类边（`reindex` 的 `derived_from` 重建入口）。
+   *
+   * 先删后写，在同一个事务里：重建要的是「表里的 `derived_from` 与磁盘上的 `sources`
+   * 一致」，增量补齐删不掉「`sources` 里已经没有、表里还留着」的边——而那正是手工
+   * 改过 `sources` 之后读端点与文件不一致的形态（§11.10）。
+   *
+   * 只动调用方指定的 `link_type`：其它类型的边没有 frontmatter 里的真相，推不出来，
+   * 也不能被这次重建误删。
+   *
+   * 不检查 `to_uri` 指向的文件是否存在：`sources` 是真相，归档被清理之后那条溯源
+   * 仍然成立（§11.10「悬空边写时不拦、读时容忍」）。查存在性还会让同一份输入因为
+   * 磁盘现状不同而得到不同的边，重建不再幂等。
+   *
+   * 与 `upsertMany` 不同，这里直接 INSERT：这一类边刚被删空，不会撞唯一键。重复的
+   * `(from_uri, to_uri, match_text)` 必须由调用方去掉，否则整批回滚。
+   */
+  replaceByLinkType(
+    linkType: string,
+    inputs: readonly MemoryLinkRowInput[],
+  ): { inserted: number; deleted: number } {
+    const now = new Date().toISOString();
+    let deleted = 0;
+    const insertStmt = this.#db.prepare(
+      `INSERT INTO memory_link (${LINK_COLUMNS}, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    withWriteTransaction(this.#db, () => {
+      deleted = Number(
+        this.#db.prepare('DELETE FROM memory_link WHERE link_type = ?').run(linkType).changes,
+      );
+      for (const input of inputs) {
+        insertStmt.run(
+          input.fromUri,
+          input.toUri,
+          input.linkType,
+          input.weight,
+          input.matchText,
+          input.description,
+          now,
+          now,
+        );
+      }
+    });
+
+    this.#logger.info('memory_link 已按类别整体替换', {
+      linkType,
+      inserted: inputs.length,
+      deleted,
+    });
+    return { inserted: inputs.length, deleted };
+  }
+
   /** 正向：一个起点指向的所有边，按权重降序。 */
   linksFrom(fromUri: string): readonly MemoryLink[] {
     const rows = this.#db

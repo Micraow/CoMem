@@ -13,7 +13,8 @@
  *
  * ## 范围
  *
- * 只重建**检索索引**（`node` / `node_fts`）与**向量**（`node_embedding`）。
+ * 重建**检索索引**（`node` / `node_fts`）、**向量**（`node_embedding`）与**记忆关联边**
+ * （`memory_link` 的 `derived_from` 部分，从每份记忆文件的 `sources` 重算，§11.10）。
  * 物化权限（`node_permission`）不在这里重算：它由 `.acl.json` 与所有者推导，
  * 归属 `AclService` 的写路径（§8.2「写时算，读时查」）。索引损坏（表被删、写坏）
  * 而权限表完好是常态；整库丢失时权限要另走 ACL 重建，不在本命令的职责里。
@@ -31,7 +32,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import { ContentStore } from '../adapters/fs/content-store.js';
-import { parseDocument } from '../adapters/fs/frontmatter.js';
+import { parseDocument, type ParsedDocument } from '../adapters/fs/frontmatter.js';
 import { MetadataFileStore } from '../adapters/fs/metadata-file.js';
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { AiSdkEmbeddingProvider } from '../adapters/llm/embedding-provider.js';
@@ -40,7 +41,9 @@ import { EmbeddingCacheRepository } from '../adapters/sqlite/embedding-cache.js'
 import {
   EmbeddingRepository,
   createEmbeddingTable,
+  type EmbeddingRow,
 } from '../adapters/sqlite/embedding-repository.js';
+import { MemoryLinkRepository } from '../adapters/sqlite/memory-link-repository.js';
 import { NodeRepository } from '../adapters/sqlite/node-repository.js';
 import type { NodeRow } from '../adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../adapters/sqlite/retrieval-index.js';
@@ -51,6 +54,7 @@ import { contextTypeOf, stableDigest } from '../domain/node.js';
 import { parseValidityInstant, type IndexRecord } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
 import { EmbeddingService } from '../services/embedding.js';
+import { MemoryLinkService } from '../services/memory-link.js';
 
 import { loadCommandConfig } from './config.js';
 
@@ -63,8 +67,8 @@ export interface ReindexOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** 进程参数；缺省取真实 `process.argv.slice(2)`，`--config` / `--data-dir` 靠它生效 */
   readonly argv?: readonly string[];
-  /** `--only=embeddings|index|all`，默认 all */
-  readonly only?: 'embeddings' | 'index' | 'all';
+  /** `--only=embeddings|index|links|all`，默认 all */
+  readonly only?: 'embeddings' | 'index' | 'links' | 'all';
   readonly dryRun?: boolean;
 }
 
@@ -81,6 +85,13 @@ export interface ReindexResult {
    * 「补齐了多少条向量」，只有这个字段能回答。
    */
   readonly vectors: number;
+  /**
+   * 本次按 `sources` 重建的 `derived_from` 边数（一条记忆可以有多条）。
+   *
+   * 与 `rewritten` 分开，理由同 `vectors`：一次重建既可能重写索引行，也可能顺带
+   * 重算关联边。手工改过 `sources` 之后要回答的是「边重算了几条」，只有这个字段能答。
+   */
+  readonly links: number;
   /** 嵌入没变而跳过的文件数 */
   readonly skipped: number;
   /** 解析失败或嵌入降级的节点数 */
@@ -116,6 +127,10 @@ const DOCUMENT_LEVEL = 'L2';
 const DIRECTORY_LEVEL = 'L0';
 /** 目录概览行的层级（§8.5）：概览正文作为一条独立的检索行重建。 */
 const OVERVIEW_LEVEL = 'L1';
+/** 记忆版本快照目录（§11.11）：`.history` 下的文件是旧值，不是当前记忆。 */
+const HISTORY_DIRECTORY = '.history';
+/** 记忆 frontmatter 的保留键 `sources`（§11.10）：每一条是一个归档 URI。 */
+const SOURCES_KEY = 'sources';
 const ACTIVE_STATUS: NodeStatus = 'active';
 
 interface DiskNode {
@@ -261,6 +276,13 @@ async function buildRecords(
   metadata: MetadataFileStore,
   node: DiskNode,
   existing: NodeRow | null,
+  /**
+   * 文件节点已经解析好的磁盘内容；目录节点传 `null`。
+   *
+   * 由调用方读一次再传进来，因为同一份字节这次还要喂给向量与 `sources` 两条重建
+   * 路径——三处各读一次会把「重扫一遍磁盘」变成随机读放大。
+   */
+  document: ParsedDocument | null,
 ): Promise<readonly IndexRecord[]> {
   const stat = await store.stat(node.uri);
   if (stat === null) {
@@ -303,8 +325,10 @@ async function buildRecords(
     ];
   }
 
-  const raw = Buffer.from(await store.readBytes(node.uri)).toString('utf8');
-  const document = parseDocument(raw);
+  if (document === null) {
+    // 调用方约束：文件节点必须先把磁盘内容读出来。
+    throw new ComemError('INTERNAL', '文件节点缺少磁盘解析结果。', { uri: node.uri.toString() });
+  }
   const fields = readFrontmatterFields(document.data);
   const summary = document.data['summary'];
 
@@ -331,6 +355,61 @@ async function buildRecords(
   ];
 }
 
+/**
+ * 从一份记忆文件的 `sources` 收集 `derived_from` 边（`from` = 记忆自身，`to` = 来源）。
+ *
+ * 语义与写路径一致（§11.10）：`sources` 里的每一条归档 URI 对应一条边，
+ * `link_type = 'derived_from'`、`weight = 1.0`、`match_text` / `description` 为空
+ * ——产生端（`MemoryMergeStep` / `ExperienceDistillStep`）从不给这三个字段填内容。
+ *
+ * **只收记忆文件。** `sources` 是记忆的保留键（§6.6）；资源 / 技能文件的 frontmatter
+ * 里出现同名键不是溯源，给它建边会让 `backlinks` 混进无关节点。
+ *
+ * **跳过 `.history` 下的版本文件。** 写路径只在归档时给当时的规范文件写边；版本
+ * 快照是覆盖写留下的旧值，从不产生边。把它们算进来，重建会造出写路径永远不会写出
+ * 的边（同一个 identity 的每一份历史都会多一条）。
+ *
+ * **不检查终点是否存在。** `sources` 是真相：归档被清理之后那条溯源仍然成立，反查
+ * 「哪些记忆来自这次归档」也仍然有意义。查存在性还会让同一份 `sources` 因为磁盘
+ * 现状不同而得到不同的边，重建不再幂等（§11.10「悬空边写时不拦、读时容忍」）。
+ *
+ * 不合法的来源值跳过并记 `warn`：反查时终点用 `Uri.parse` 还原，一个非法值会让整次
+ * 反查抛错。手改 `sources` 撞出重复值时按 `(from, to)` 去重——唯一索引会拒绝整批。
+ */
+function collectDerivedEdges(
+  uri: Uri,
+  rawSources: unknown,
+  target: { from: Uri; to: Uri }[],
+  seen: Set<string>,
+  logger: Logger,
+): void {
+  if (contextTypeOf(uri) !== 'memory' || uri.segments.includes(HISTORY_DIRECTORY)) {
+    return;
+  }
+  if (!Array.isArray(rawSources)) {
+    return;
+  }
+  for (const value of rawSources) {
+    if (typeof value !== 'string' || value === '') {
+      continue;
+    }
+    const to = Uri.tryParse(value);
+    if (to === null) {
+      logger.warn('记忆来源不是合法 URI，重建关联边时跳过。', {
+        uri: uri.toString(),
+        source: value,
+      });
+      continue;
+    }
+    const key = `${uri.toString()}\n${to.toString()}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    target.push({ from: uri, to });
+  }
+}
+
 function progress(
   scanned: number,
   total: number,
@@ -340,6 +419,24 @@ function progress(
 ): void {
   process.stderr.write(
     `reindex: ${scanned}/${total} 已扫描，重写 ${rewritten}，跳过 ${skipped}，失败 ${failed}\n`,
+  );
+}
+
+/**
+ * 向量阶段的进度行。
+ *
+ * 与索引阶段的 `progress()` 分开：`--only=all` 里两段各自从 0 数到总数，共用一个
+ * 分母会让「已扫描」在第二段开头倒退，读起来像是重跑了一遍。
+ */
+function progressVectors(
+  processed: number,
+  total: number,
+  embedded: number,
+  skipped: number,
+  failed: number,
+): void {
+  process.stderr.write(
+    `reindex: 向量 ${processed}/${total} 已处理，补齐 ${embedded}，跳过 ${skipped}，失败 ${failed}\n`,
   );
 }
 
@@ -386,31 +483,231 @@ function restoreEmbeddings(db: DatabaseSync, backup: EmbeddingBackup, logger: Lo
 }
 
 /**
- * 「库里有记忆但没有向量」的存在性判断（`LIMIT 1`）。
+ * 「这个节点缺向量」的 SQL 谓词，**唯一一处**。
  *
- * 启动提醒（`bootstrap/main.ts` 的 `warnIfVectorsMissing`）用它，**判定条件必须与
- * `runReindex` 的跳过规则同源**：只嵌 `kind = 'document'` 且正文非空的文件，向量
- * 行的 `model` 或 `content_digest` 对不上就重算。分两处写，迟早分叉成「启动说没缺、
- * reindex 还在干活」或者「启动永远在报、reindex 却无事可做」。
+ * 别名约定：`node` 表是 `n`，`node_embedding` 表是 `e`；绑定参数依次是
+ * 「空正文的摘要」与「当前模型」。两处生产调用方（启动提醒、启动回填的候选集）必须拼
+ * 同一份子句——分两处写，迟早分叉成「启动说没缺、回填还在干活」或者「启动永远在报、
+ * 回填却无事可做」。
  *
- * 只回答有没有，不回答多少条：条数是 `runReindex` 输出里的「补齐向量 N 条」。
- * 有缺失时第一条就返回；没有缺失时最坏扫一遍 `node`（1 万条实测约 90 毫秒）。
+ * 三条子句各挡一类行：
+ * - `kind = 'document'`：目录行（含 L1 概览行，它的 `body_digest` 非空）不参与语义检索；
+ * - `body_digest <> 空正文摘要`：空文件没有可嵌的正文，嵌了也搜不出东西；
+ * - `NOT EXISTS`：同 `model` 且同摘要的向量已经存在，说明这一条是最新的。
+ *
+ * **基准是索引里的 `node.body_digest`，不是磁盘正文。** 这是有意的：这条判定要能
+ * 在启动时一次 SQL 扫完（1 万行实测约 90 毫秒），读盘做不了。索引落后于磁盘时它
+ * 会漏报（`tests/integration/sqlite/embedding-freshness-consistency.test.ts` 记着
+ * 这个边界），修索引是 `pnpm reindex --only=index` 的职责。
  */
-export function hasDocumentsMissingVectors(db: DatabaseSync, model: string): boolean {
-  const missing = db
-    .prepare(
-      `SELECT 1 AS missing
-         FROM node n
-        WHERE n.kind = 'document'
+const MISSING_VECTOR_WHERE = `n.kind = 'document'
           AND n.body_digest <> ?
           AND NOT EXISTS (
             SELECT 1 FROM node_embedding e
              WHERE e.uri = n.uri AND e.model = ? AND e.content_digest = n.body_digest
-          )
-        LIMIT 1`,
-    )
+          )`;
+
+/**
+ * 「库里有记忆但没有向量」的存在性判断（`LIMIT 1`）。
+ *
+ * 启动提醒（`bootstrap/main.ts` 的 `warnIfVectorsMissing`）用它，与启动回填的候选集
+ * （`documentsMissingVectors`）共用 `MISSING_VECTOR_WHERE`。
+ *
+ * 只回答有没有，不回答多少条：条数是 `runReindex` 输出里的「补齐向量 N 条」。
+ * 有缺失时第一条就返回；没有缺失时最坏扫一遍 `node`。
+ */
+export function hasDocumentsMissingVectors(db: DatabaseSync, model: string): boolean {
+  const missing = db
+    .prepare(`SELECT 1 AS missing FROM node n WHERE ${MISSING_VECTOR_WHERE} LIMIT 1`)
     .get(stableDigest(''), model);
   return missing !== undefined;
+}
+
+/**
+ * 缺向量的文档 URI，按 URI 升序（`reindex` 的断点续跑顺序）。
+ *
+ * 启动回填（`bootstrap/main.ts` 的 `backfillMissingVectors`）用它拿候选集。它不读盘，
+ * 所以只认 `node` 行——磁盘上有文件而索引里没有行的节点不在这里，那是对账 / 重建
+ * 索引的职责（`reindex --only=index`）。
+ */
+export function documentsMissingVectors(db: DatabaseSync, model: string): readonly string[] {
+  const rows = db
+    .prepare(`SELECT n.uri AS uri FROM node n WHERE ${MISSING_VECTOR_WHERE} ORDER BY n.uri`)
+    .all(stableDigest(''), model);
+  return rows.map((row) => String(row['uri']));
+}
+
+/** 一批回填结束时的进度。`remaining` 是还没处理的候选数（不含本批）。 */
+export interface EmbedMissingNodesProgress {
+  readonly embedded: number;
+  readonly skipped: number;
+  readonly failed: number;
+  readonly remaining: number;
+}
+
+export interface EmbedMissingNodesResult {
+  /** 本次写了向量的 URI（升序）。调用方用它算「有东西被写回的节点数」。 */
+  readonly embeddedUris: readonly string[];
+  /** 磁盘正文摘要与库里那一行一致的节点数（没打供应商）。 */
+  readonly skipped: number;
+  /** 读盘 / 解析 / 嵌入 / 写入失败的 URI，同一个节点只出现一次。 */
+  readonly failedUris: readonly string[];
+  /** 是否被 `signal` 中止。已写入的批次不回滚。 */
+  readonly aborted: boolean;
+}
+
+export interface EmbedMissingNodesDeps {
+  readonly embeddings: EmbeddingRepository;
+  readonly embedding: EmbeddingService;
+  readonly store: ContentStore;
+  readonly logger: Logger;
+  /**
+   * 每批的节点数。
+   *
+   * 它同时决定一次 `embedding.embed()` 里最多几条正文（服务内部还会按供应商的
+   * `maxBatchSize` 再切片）。CLI 传 1：与抽取前的「一个节点一次调用」逐条一致，
+   * 降级只影响当前节点、断点续跑的进度也是按节点计的；启动回填传供应商的批大小。
+   */
+  readonly batchSize: number;
+  /** 中止信号。只在批与批之间检查，并透传给在途的供应商调用。 */
+  readonly signal?: AbortSignal;
+  /** 每批结束回调（启动回填用它记进度；CLI 用它打进度行）。 */
+  readonly onBatch?: (progress: EmbedMissingNodesProgress) => void;
+}
+
+/**
+ * 给一批节点补齐向量：**候选 URI → 读盘 → 解析正文 → 嵌入 → 写 `node_embedding`**。
+ *
+ * 两处调用方共用它：
+ * - `runReindex --only=embeddings`（以及 `--only=all` 的向量那一段）：候选集是磁盘
+ *   遍历出来的文件——`reindex` 的输入永远是磁盘，不能因为索引里没有这一行就漏掉；
+ * - 启动回填（`bootstrap/main.ts`）：候选集是 `documentsMissingVectors`。
+ *
+ * **摘要与正文都从磁盘读，不拿 `node.body_digest` 当输入。** `node` 行可能落后于
+ * 磁盘，用它的摘要配上刚读出的正文，会写出「digest 对得上索引、向量来自另一份正文」
+ * 的行——这种行最难查：检索命中的是旧内容，而启动探测与下一次 reindex 都认为它是最新的。
+ *
+ * 每个节点先拿刚算出的摘要与库里那一行比，一致就跳过（不打供应商）；不一致才嵌。
+ * 失败只记 warn 并继续：一个读不出来的文件、一次供应商抖动都不该让剩下的记忆永远
+ * 没有向量（`EmbeddingService` 的熔断会在连续失败后短路，继续下一批不会猛打供应商）。
+ */
+export async function embedMissingNodes(
+  uris: readonly string[],
+  deps: EmbedMissingNodesDeps,
+): Promise<EmbedMissingNodesResult> {
+  const { embeddings, embedding, store, logger, batchSize, signal } = deps;
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new ComemError('INVALID_ARGUMENT', '回填向量的批大小必须是正整数。', { batchSize });
+  }
+  const model = embedding.model;
+  if (model === null) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      '回填向量需要配置 providers.embedding（当前是 disabled）。',
+    );
+  }
+  const aborted = (): boolean => signal?.aborted === true;
+
+  const embeddedUris: string[] = [];
+  let skipped = 0;
+  const failed = new Set<string>();
+
+  for (let start = 0; start < uris.length; start += batchSize) {
+    if (aborted()) {
+      return { embeddedUris, skipped, failedUris: [...failed], aborted: true };
+    }
+    const batch = uris.slice(start, start + batchSize);
+
+    // 1) 读盘 + 跳过判定。摘要从磁盘正文算，与库里那一行比——不与 `node.body_digest`
+    // 比，也不拿它当写入的摘要（见文件头与上面的说明）。
+    const pending: { readonly uri: string; readonly body: string; readonly digest: string }[] =
+      [];
+    for (const uri of batch) {
+      try {
+        const bytes = await store.readBytes(Uri.parse(uri));
+        const document = parseDocument(Buffer.from(bytes).toString('utf8'));
+        if (document.body === '') {
+          continue;
+        }
+        const digest = stableDigest(document.body);
+        const current = embeddings.get(uri);
+        if (current !== null && current.model === model && current.contentDigest === digest) {
+          skipped += 1;
+          continue;
+        }
+        pending.push({ uri, body: document.body, digest });
+      } catch (error) {
+        failed.add(uri);
+        logger.warn('读取正文失败，跳过该节点的向量。', { uri, error: errorMessage(error) });
+      }
+    }
+
+    // 收到退出信号时不要再打供应商：已经补好的写入保留，剩下的下次启动再来。
+    if (aborted()) {
+      return { embeddedUris, skipped, failedUris: [...failed], aborted: true };
+    }
+
+    // 2) 一次调用嵌一批，再一次事务写一批。
+    if (pending.length > 0) {
+      const outcome = await embedding.embed(
+        pending.map((candidate) => candidate.body),
+        signal === undefined ? {} : { signal },
+      );
+      if (outcome.degraded) {
+        // 关闭信号打断的调用不算节点失败：它没有「失败」，只是下次再做。
+        if (aborted()) {
+          return { embeddedUris, skipped, failedUris: [...failed], aborted: true };
+        }
+        for (const candidate of pending) {
+          failed.add(candidate.uri);
+        }
+        logger.warn('嵌入降级，跳过这一批的向量写入。', {
+          count: pending.length,
+          reason: outcome.reason ?? '没有返回向量。',
+        });
+      } else {
+        const rows: EmbeddingRow[] = [];
+        for (const [index, candidate] of pending.entries()) {
+          const vector = outcome.vectors[index];
+          if (vector === undefined) {
+            failed.add(candidate.uri);
+            continue;
+          }
+          rows.push({
+            uri: candidate.uri,
+            model,
+            contentDigest: candidate.digest,
+            vector,
+          });
+        }
+        if (rows.length > 0) {
+          try {
+            embeddings.upsert(rows);
+            for (const row of rows) {
+              embeddedUris.push(row.uri);
+            }
+          } catch (error) {
+            for (const row of rows) {
+              failed.add(row.uri);
+            }
+            logger.warn('向量写入失败，跳过这一批。', {
+              count: rows.length,
+              error: errorMessage(error),
+            });
+          }
+        }
+      }
+    }
+
+    deps.onBatch?.({
+      embedded: embeddedUris.length,
+      skipped,
+      failed: failed.size,
+      remaining: uris.length - (start + batch.length),
+    });
+  }
+
+  return { embeddedUris, skipped, failedUris: [...failed], aborted: aborted() };
 }
 
 /**
@@ -444,11 +741,13 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
   const nodes = await walkDataDir(config.dataDir, logger);
   if (dryRun) {
     progress(0, nodes.length, 0, 0, 0);
-    return { scanned: nodes.length, rewritten: 0, vectors: 0, skipped: 0, failed: 0 };
+    return { scanned: nodes.length, rewritten: 0, vectors: 0, links: 0, skipped: 0, failed: 0 };
   }
 
   const embeddingConfig = config.providers.embedding;
   const needsEmbeddings = only === 'embeddings' || only === 'all';
+  const needsIndex = only === 'index' || only === 'all';
+  const needsLinks = only === 'links' || only === 'all';
   if (needsEmbeddings && embeddingConfig.type === 'disabled') {
     throw new ComemError(
       'INVALID_ARGUMENT',
@@ -475,6 +774,10 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     });
     const nodeRepository = new NodeRepository({ db, logger });
     const embeddings = new EmbeddingRepository({ db, logger });
+    const memoryLink = new MemoryLinkService({
+      repository: new MemoryLinkRepository({ db, logger }),
+      logger,
+    });
     const embedding = new EmbeddingService({
       // 回填同样走缓存：同一份正文在「回填」与「写路径」之间的结果必须一致，
       // 否则第二次重建会重复打供应商。
@@ -505,10 +808,16 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     });
 
     const model = embedding.model;
-    let rewritten = 0;
     let vectors = 0;
+    let links = 0;
     let skipped = 0;
-    let failed = 0;
+    /** 有东西被写回的节点（索引行或向量）。`rewritten` 是它的大小，一个节点算一次。 */
+    const rewrittenUris = new Set<string>();
+    /** 失败的节点。索引与向量两条路径可能都失败，同一个节点仍只算一次。 */
+    const failedUris = new Set<string>();
+    /** 按 `sources` 收集到的 `derived_from` 边；循环结束后一次整批替换。 */
+    const derivedEdges: { readonly from: Uri; readonly to: Uri }[] = [];
+    const seenEdges = new Set<string>();
 
     // 维度变了要整表重建：`vec0` 的维度固定在 `CREATE VIRTUAL TABLE` 时，旧表里的
     // 向量一条都用不了。先备份，回填成功后再删；中途抛错就回滚到旧维度。
@@ -530,69 +839,94 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
       embeddings.ensureSchema(embeddingConfig.dimension, embeddingConfig.model);
     }
 
-    for (const [indexInBatch, node] of nodes.entries()) {
-      const uri = node.uri.toString();
-      const existing = nodeRepository.get(uri);
-      let wrote = false;
+    // 检索索引与关联边共用一次读盘：两条重建路径都要正文与 frontmatter。
+    // 向量走 `embedMissingNodes`（它自己读盘，见下面的调用），不复用这里的解析结果：
+    // 回填要独立成一个函数给启动路径用，先读一份再传进去会把两边的批处理边界缠在一起。
+    if (needsIndex || needsLinks) {
+      for (const [indexInBatch, node] of nodes.entries()) {
+        const uri = node.uri.toString();
+        const existing = nodeRepository.get(uri);
 
-      try {
-        // 1) 检索索引：按磁盘内容重建 `node` + `node_fts`。
-        if (only === 'index' || only === 'all') {
-          await index.upsert(await buildRecords(store, metadata, node, existing));
-          wrote = true;
-        }
+        try {
+          const document =
+            node.kind === 'file'
+              ? parseDocument(Buffer.from(await store.readBytes(node.uri)).toString('utf8'))
+              : null;
 
-        // 2) 向量：只处理有正文的文件。目录的 L0 摘要不参与语义检索。
-        if (needsEmbeddings && node.kind === 'file' && model !== null) {
-          const raw = Buffer.from(await store.readBytes(node.uri)).toString('utf8');
-          const document = parseDocument(raw);
-          if (document.body !== '') {
-            const digest = stableDigest(document.body);
-            const current = embeddings.get(uri);
-            if (
-              current !== null &&
-              current.model === model &&
-              current.contentDigest === digest
-            ) {
-              skipped += 1;
-            } else {
-              const outcome = await embedding.embed([document.body]);
-              const vector = outcome.vectors[0];
-              if (outcome.degraded || vector === undefined) {
-                failed += 1;
-                logger.warn('嵌入降级，跳过写入', {
-                  uri,
-                  reason: outcome.reason ?? '没有返回向量。',
-                });
-              } else {
-                embeddings.upsert([{ uri, model, contentDigest: digest, vector }]);
-                vectors += 1;
-                wrote = true;
-              }
-            }
+          // 1) 检索索引：按磁盘内容重建 `node` + `node_fts`。
+          if (needsIndex) {
+            await index.upsert(await buildRecords(store, metadata, node, existing, document));
+            rewrittenUris.add(uri);
           }
-        }
-      } catch (error) {
-        // 坏文件（frontmatter 不合法、读盘失败）只影响自己：整批中断会让「一个
-        // 坏文件卡住全库重建」，而 reindex 的用途恰恰是修复。
-        failed += 1;
-        logger.warn('重建索引跳过节点', { uri, error: errorMessage(error) });
-        continue;
-      }
 
-      if (wrote) {
-        rewritten += 1;
-      }
-      if ((indexInBatch + 1) % PROGRESS_INTERVAL === 0) {
-        progress(indexInBatch + 1, nodes.length, rewritten, skipped, failed);
+          // 2) 关联边：只收集，结束前一次整批替换（见循环后的 `rebuildDerived`）。
+          if (needsLinks && document !== null) {
+            collectDerivedEdges(node.uri, document.data[SOURCES_KEY], derivedEdges, seenEdges, logger);
+          }
+        } catch (error) {
+          // 坏文件（frontmatter 不合法、读盘失败）只影响自己：整批中断会让「一个
+          // 坏文件卡住全库重建」，而 reindex 的用途恰恰是修复。
+          failedUris.add(uri);
+          logger.warn('重建索引跳过节点', { uri, error: errorMessage(error) });
+        }
+
+        if ((indexInBatch + 1) % PROGRESS_INTERVAL === 0) {
+          progress(indexInBatch + 1, nodes.length, rewrittenUris.size, skipped, failedUris.size);
+        }
       }
     }
 
-    progress(nodes.length, nodes.length, rewritten, skipped, failed);
+    // 3) 向量：候选集是磁盘上的文件。不从 `node` 表拿——`reindex` 的输入永远是磁盘，
+    // 「索引里没有这一行」正是它要修的状态之一（断点续跑用例覆盖了这种库）。
+    if (needsEmbeddings && model !== null) {
+      const candidates = nodes
+        .filter((node) => node.kind === 'file')
+        .map((node) => node.uri.toString());
+      const embedded = await embedMissingNodes(candidates, {
+        store,
+        embeddings,
+        embedding,
+        logger,
+        // 逐条：一次供应商调用只对应一个节点，降级只影响它；断点续跑按节点计。
+        batchSize: 1,
+        onBatch: ({ remaining, embedded: done, skipped: skippedCount, failed }) => {
+          const processed = candidates.length - remaining;
+          if (processed % PROGRESS_INTERVAL === 0) {
+            progressVectors(processed, candidates.length, done, skippedCount, failed);
+          }
+        },
+      });
+      vectors = embedded.embeddedUris.length;
+      skipped = embedded.skipped;
+      for (const uri of embedded.embeddedUris) {
+        rewrittenUris.add(uri);
+      }
+      for (const uri of embedded.failedUris) {
+        failedUris.add(uri);
+      }
+    }
+
+    // `sources` 是真相：整批替换 `derived_from`，把表里多出来的旧边一起清掉。
+    // 放在循环之后、一个短事务里：读盘与嵌入都不在事务内，重启后重跑得到同一份边。
+    // 读不出来的文件（frontmatter 坏了）不贡献边，它在表里的旧边会被这次替换清掉；
+    // 修好文件再跑一次就恢复——重建的输入永远只有磁盘，不拿旧边当兜底。
+    if (needsLinks) {
+      links = memoryLink.rebuildDerived(derivedEdges).inserted;
+      logger.info('记忆关联边已重建。', { edges: links, memories: nodes.length });
+    }
+
+    progress(nodes.length, nodes.length, rewrittenUris.size, skipped, failedUris.size);
     if (backup !== null) {
       db.exec(`DROP TABLE IF EXISTS ${EMBEDDING_BACKUP_TABLE}`);
     }
-    return { scanned: nodes.length, rewritten, vectors, skipped, failed };
+    return {
+      scanned: nodes.length,
+      rewritten: rewrittenUris.size,
+      vectors,
+      links,
+      skipped,
+      failed: failedUris.size,
+    };
   } catch (error) {
     // 单个节点的失败在循环里已经计入 `failed`，走到这里的只有全局故障（磁盘满、
     // 表结构被外部改坏）。旧表还在备份表里，先还原再往上抛。
@@ -616,12 +950,14 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
 
 /** 解析 `--only` 的取值。非法值直接抛 `INVALID_ARGUMENT`，不静默取默认。 */
 function parseOnly(raw: string): ReindexOptions['only'] {
-  if (raw === 'embeddings' || raw === 'index' || raw === 'all') {
+  if (raw === 'embeddings' || raw === 'index' || raw === 'links' || raw === 'all') {
     return raw;
   }
-  throw new ComemError('INVALID_ARGUMENT', `--only 只支持 embeddings | index | all：${raw}`, {
-    only: raw,
-  });
+  throw new ComemError(
+    'INVALID_ARGUMENT',
+    `--only 只支持 embeddings | index | links | all：${raw}`,
+    { only: raw },
+  );
 }
 
 function readFlag(argv: readonly string[], name: string): string | undefined {
@@ -655,7 +991,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   runReindex({ ...parseArgs(argv), argv }).then(
     (result) => {
       process.stdout.write(
-        `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，补齐向量 ${result.vectors} 条，跳过 ${result.skipped}，失败 ${result.failed}。\n`,
+        `reindex 完成：扫描 ${result.scanned}，重写 ${result.rewritten}，补齐向量 ${result.vectors} 条，重建关联边 ${result.links} 条，跳过 ${result.skipped}，失败 ${result.failed}。\n`,
       );
     },
     (error: unknown) => {

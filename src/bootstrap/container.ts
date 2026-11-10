@@ -204,6 +204,17 @@ export interface Container {
   readonly routes: readonly HttpRouteGroup[];
   /** 请求身份解析（`x-comem-subject`）。 */
   readonly resolveIdentity: IdentityResolver;
+  /**
+   * 存量向量回填的依赖（`main.ts` 的 `startVectorBackfill` 消费）。
+   *
+   * 放三样东西而不是让 `main` 自己 `new`：适配器只允许在这里构造（§4.4）。
+   * 候选集、分批与失败处理都不属于装配，留在 `main` / `commands/reindex.ts`。
+   */
+  readonly vectorBackfill: {
+    readonly store: ContentStore;
+    readonly embeddings: EmbeddingRepository;
+    readonly embedding: EmbeddingService;
+  };
   /** 关闭数据库连接。幂等。 */
   close(): Promise<void>;
 }
@@ -1351,6 +1362,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
     config,
     logger,
     db,
+    vectorBackfill: { store, embeddings, embedding },
     observability,
     commitRunner,
     scheduler,

@@ -19,19 +19,27 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
-import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
-import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
+import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { ReconcileLog } from '../../../src/adapters/fs/reconcile-log.js';
+import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
+import { NodeRepository, type NodeRow } from '../../../src/adapters/sqlite/node-repository.js';
+import { PermissionRepository } from '../../../src/adapters/sqlite/permission-repository.js';
+import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js';
 import type { Logger } from '../../../src/domain/log.js';
+import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import type { IndexRecord } from '../../../src/domain/retrieval.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
+import { AclService } from '../../../src/services/acl.js';
 import { ContextAssembler } from '../../../src/services/context-assembler.js';
 import { FileSystemService, type NodeWriteObserver } from '../../../src/services/filesystem.js';
+import { IndexObserver } from '../../../src/services/index-observer.js';
+import { MemoryService } from '../../../src/services/memory.js';
 import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
+import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TtlService } from '../../../src/services/ttl.js';
 
 const NOW = new Date('2026-11-08T00:00:00.000Z');
@@ -565,5 +573,275 @@ describe('sweep 第二段：归档超保留期物理删除', () => {
 
     expect(result.purged).toBe(0);
     await expect(fileExists(OLD)).resolves.toBe(true);
+  });
+});
+
+/**
+ * 版本快照（`.history`）与 TTL 的关系（架构文档 §11.11「版本文件与回退」）。
+ *
+ * 版本文件的 frontmatter 里 `status` 仍然是 `active`（设计如此：它是一条旧值，不是
+ * 归档项），检索面靠 `valid_until` 把它滤掉。TTL 不看有效区间，所以这里要证明的是
+ * 一件具体的事：**TTL 不能把版本文件当成一条过期记忆删掉**。删掉之后 `reject` 读到
+ * 「`supersedes` 指向的文件不存在」，会静默退化成「删文件」，用户以为回到了上一次
+ * 正确值。
+ *
+ * 这套装配照抄生产写路径：`MemoryService` 覆盖写 → `.history` 快照 →
+ * `IndexObserver.onNodeWritten`（`bootstrap/container.ts` 的 `rawFilesystem.write`
+ * 也是「写完字节 → `onNodeWritten`」）。版本文件的索引行由真实观察者建出来，不是
+ * 测试手填的一行；否则测的只是「我在测试里拼的行会不会被删」。
+ */
+const VERSION_SCOPE = 'comem://user/alice';
+const VERSION_CANONICAL = `${VERSION_SCOPE}/memories/preferences/code-style.md`;
+const VERSION_DIRECTORY = `${VERSION_SCOPE}/memories/preferences/.history`;
+/**
+ * 注入给 TTL 的「现在」。
+ *
+ * 版本文件是**刚写出来的**（真实时钟），而 `NOW` 在它之前；要让它落在滑动窗口之外，
+ * 只能把清扫时刻推到真实时刻之后一个窗口以上。`LATER` = 真实现在 + 60 天，
+ * 大于 `TTL_DAYS`（30）。
+ */
+const LATER = new Date(Date.now() + 60 * MILLISECONDS_PER_DAY);
+
+interface MemoryWorld {
+  readonly dataDir: string;
+  readonly db: DatabaseSync;
+  readonly store: ContentStore;
+  readonly nodes: NodeRepository;
+  readonly observer: IndexObserver;
+  readonly filesystem: FileSystemService;
+  readonly memory: MemoryService;
+  close(): Promise<void>;
+}
+
+async function createMemoryWorld(): Promise<MemoryWorld> {
+  const dataDir = await mkdtemp(join(tmpdir(), 'comem-ttl-version-'));
+  const db = openDatabase(':memory:');
+  runMigrations(db);
+  const worldLogger = createLogger();
+  const store = new ContentStore({ dataDir, logger: worldLogger });
+  const metadata = new MetadataFileStore({ dataDir, logger: worldLogger });
+  const permissions = new PermissionRepository({ db, logger: worldLogger });
+  const nodes = new NodeRepository({ db, logger: worldLogger });
+  const index = new SqliteFtsIndex({ db, logger: worldLogger });
+  const locks = createPathLockManager({ dataDir, logger: worldLogger, pollIntervalMs: 1 });
+  const acl = new AclService({
+    db,
+    aclFile: new AclFileStore({ dataDir, logger: worldLogger }),
+    permissions,
+    nodes,
+    logger: worldLogger,
+    locks,
+  });
+  await acl.ensureRootPreset(Uri.parse(VERSION_SCOPE));
+  const summary = new SummaryService({
+    nodes,
+    index,
+    metadata,
+    store,
+    db,
+    acl,
+    generator: new RuleSummarizer(),
+    logger: worldLogger,
+    config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
+    locks,
+  });
+  const observer = new IndexObserver({
+    store,
+    index,
+    acl,
+    summary,
+    nodes,
+    permissions,
+    logger: worldLogger,
+    reconcile: new ReconcileLog({ dataDir, logger: worldLogger }),
+  });
+  const filesystem = new FileSystemService({
+    store,
+    locks,
+    authorizer: new AllowAllAuthorizer(),
+    logger: worldLogger,
+    observers: [observer],
+  });
+  const memory = new MemoryService({
+    locks,
+    // 记忆文件的端口语义是「原样文档」：`writeBytes` 写字节，写完通知观察者建索引行
+    // （与 `container.ts` 的 `rawFilesystem` 同一形状）。
+    filesystem: {
+      read: async (uri) => ({ text: Buffer.from(await store.readBytes(uri)).toString('utf8') }),
+      write: async (uri, text) => {
+        const stat = await store.writeBytes(uri, Uint8Array.from(Buffer.from(text, 'utf8')));
+        await observer.onNodeWritten(uri, 'file');
+        return stat;
+      },
+      stat: (uri) => store.stat(uri),
+      remove: (uri) => store.remove(uri),
+      list: (uri) => store.list(uri),
+    },
+    search: { find: async () => [] },
+    logger: worldLogger,
+  });
+  return {
+    dataDir,
+    db,
+    store,
+    nodes,
+    observer,
+    filesystem,
+    memory,
+    close: async () => {
+      await observer.drain();
+      db.close();
+      await rm(dataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+describe('版本文件（.history）不参与 TTL', () => {
+  let world: MemoryWorld;
+
+  beforeEach(async () => {
+    world = await createMemoryWorld();
+  });
+
+  afterEach(async () => {
+    await world.close();
+  });
+
+  /** 真实写路径：写一版、再覆盖一版，返回产生的版本文件 URI。 */
+  async function overwriteOnce(): Promise<string> {
+    await world.memory.upsertMemory(Uri.parse(VERSION_SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '第一版：用问号。',
+    });
+    await world.memory.upsertMemory(Uri.parse(VERSION_SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '第二版：用句号。',
+    });
+    await world.observer.drain();
+
+    const versions = (await world.store.list(Uri.parse(VERSION_DIRECTORY))).filter(
+      (entry) => entry.kind === 'file',
+    );
+    expect(versions).toHaveLength(1);
+    const version = versions[0];
+    expect(version).toBeDefined();
+    return version?.uri.toString() ?? '';
+  }
+
+  function sweepTtl(options: {
+    readonly ttlDays: number;
+    readonly retentionDays: number;
+    readonly now?: Date;
+    readonly limit?: number;
+  }) {
+    return new TtlService({
+      nodes: world.nodes,
+      filesystem: world.filesystem,
+      principals: PRINCIPALS,
+      ttlDays: options.ttlDays,
+      retentionDays: options.retentionDays,
+      logger: createLogger(),
+      now: () => options.now ?? LATER,
+    }).sweep(options.limit === undefined ? {} : { limit: options.limit });
+  }
+
+  async function exists(uri: string): Promise<boolean> {
+    return (await world.store.stat(Uri.parse(uri))) !== null;
+  }
+
+  function backdateArchivedAt(uri: string, days: number): void {
+    world.db
+      .prepare('UPDATE node SET archived_at = ? WHERE uri = ?')
+      .run(new Date(LATER.getTime() - days * MILLISECONDS_PER_DAY).toISOString(), uri);
+  }
+
+  it('覆盖写产生的版本文件在索引里就是一条 active 记忆（TTL 会把它当普通记忆）', async () => {
+    const version = await overwriteOnce();
+
+    const row = world.nodes.get(version);
+    expect(row).not.toBeNull();
+    // 这两个字段决定了它会进入 `sweepExpired` 的候选集：context_type = memory、
+    // memory_type 不在四类豁免里、status 仍是 active。`valid_until` 非空只影响检索面。
+    expect(row?.contextType).toBe('memory');
+    expect(row?.memoryType).toBe('preferences');
+    expect(row?.status).toBe('active');
+    // `valid_until` 是版本文件的标记：非空表示「已失效」，检索面按它滤掉。
+    const validUntil = world.db
+      .prepare('SELECT valid_until FROM node WHERE uri = ?')
+      .get(version)?.['valid_until'];
+    expect(validUntil).not.toBeNull();
+  });
+
+  it('TTL 到期不归档、也不物理删除版本文件；规范文件照常被删', async () => {
+    const version = await overwriteOnce();
+
+    // 第一段：版本文件与规范文件都超出滑动窗口。规范文件归档；版本文件原样留着。
+    // 版本文件一旦被归档，`glob`（SQL 带 `status = 'active'`）就再也看不到它——
+    // 而路径工具的契约是磁盘，它必须能看到版本文件。
+    const first = await sweepTtl({ ttlDays: TTL_DAYS, retentionDays: TTL_DAYS });
+    expect(first.expired).toBeGreaterThanOrEqual(1);
+    expect(world.nodes.get(VERSION_CANONICAL)?.status).toBe('archived');
+    expect(world.nodes.get(version)?.status).toBe('active');
+
+    // 第二段：再过 40 天，规范文件的归档时长超过保留期。版本文件不在候选集里。
+    const laterStill = new Date(LATER.getTime() + 40 * MILLISECONDS_PER_DAY);
+    const second = await sweepTtl({
+      ttlDays: 0,
+      retentionDays: TTL_DAYS,
+      now: laterStill,
+    });
+    expect(second.purged).toBeGreaterThanOrEqual(1);
+
+    // 规范文件被物理删除——这证明清扫确实执行了删除动作，不是空转。
+    await expect(exists(VERSION_CANONICAL)).resolves.toBe(false);
+    // 版本文件还在：`reject` 还能把它写回规范 URI。
+    await expect(exists(version)).resolves.toBe(true);
+    expect(world.nodes.get(version)?.status).toBe('active');
+  });
+
+  it('存量库里已经被归档的版本文件不被清扫，也不堵住清扫队列', async () => {
+    const version = await overwriteOnce();
+    await world.memory.upsertMemory(Uri.parse(VERSION_SCOPE), preferencesMemoryType, {
+      topic: 'notes',
+      content: '另一条普通记忆。',
+    });
+    await world.observer.drain();
+    const notes = `${VERSION_SCOPE}/memories/preferences/notes.md`;
+
+    // 模拟「旧版本代码已经归档过版本文件」的存量库：两行都是 archived，版本文件的
+    // 归档时刻更早（它排在 `ORDER BY archived_at ASC` 的前面）。
+    const archiveRow = world.db.prepare(
+      `UPDATE node SET status = 'archived', archived_at = ? WHERE uri = ?`,
+    );
+    archiveRow.run(new Date(LATER.getTime() - 100 * MILLISECONDS_PER_DAY).toISOString(), version);
+    archiveRow.run(new Date(LATER.getTime() - 40 * MILLISECONDS_PER_DAY).toISOString(), notes);
+
+    // `limit = 1`：如果版本文件行参与候选，它会一直占住每轮的唯一名额。
+    const result = await sweepTtl({ ttlDays: 0, retentionDays: TTL_DAYS, limit: 1 });
+
+    expect(result.purged).toBe(1);
+    await expect(exists(notes)).resolves.toBe(false);
+    await expect(exists(version)).resolves.toBe(true);
+  });
+
+  it('文件名是 .history.md 的普通记忆照常过期删除（豁免按路径段，不看子串）', async () => {
+    await world.memory.upsertMemory(Uri.parse(VERSION_SCOPE), preferencesMemoryType, {
+      topic: '.history',
+      content: '这条记忆的 identity 恰好叫 .history。',
+    });
+    await world.observer.drain();
+    const ordinary = `${VERSION_SCOPE}/memories/preferences/.history.md`;
+    expect(world.nodes.get(ordinary)).not.toBeNull();
+
+    // `ttlDays = 1`：写出来的时刻（真实时钟）已经早于 LATER - 1 天，不用等更新时刻
+    // 变旧就能观测「它照常过期」。
+    const first = await sweepTtl({ ttlDays: 1, retentionDays: TTL_DAYS });
+    expect(first.expired).toBeGreaterThanOrEqual(1);
+    expect(world.nodes.get(ordinary)?.status).toBe('archived');
+
+    backdateArchivedAt(ordinary, 40);
+    const second = await sweepTtl({ ttlDays: 0, retentionDays: TTL_DAYS });
+    expect(second.purged).toBeGreaterThanOrEqual(1);
+    await expect(exists(ordinary)).resolves.toBe(false);
   });
 });

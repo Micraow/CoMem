@@ -27,6 +27,15 @@
  * 等于让 agent 忘掉自己是谁、忘掉用户是谁、忘掉约定。TTL 要清理的是 `events` /
  * `experiences` 这类时效性内容。
  *
+ * ## 版本文件不参与
+ *
+ * `memories/{type}/.history/` 下的版本快照**不进两段的任何一个候选集**：它的
+ * frontmatter 里 `status` 仍是 `active`（§11.11），只看最后使用时刻的话它就是一条
+ * 普通记忆，到期会被归档、再被物理删除——`reject` 随后找不到 `supersedes` 指向的
+ * 文件，静默退化成删记忆。判据是**路径段**（`.history`）而不是子串，`xxx/.history.md`
+ * 是普通记忆，照常过期。谓词在 `NodeRepository` 的两条 SQL 里
+ * （`NOT_VERSION_FILE_SQL`）：本服务只做编排，候选集由仓储选。
+ *
  * ## 两段式
  *
  * TTL 分两段，中间隔一个「保留期」：

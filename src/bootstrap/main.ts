@@ -1,9 +1,10 @@
 /**
  * 进程入口（架构文档 §18、§17.7、§10.4）。
  *
- * 这里只做四件事：装配容器、跑启动自检、起 HTTP、接退出信号。**没有业务逻辑**——
- * 一旦入口里出现「顺便做点什么」，它就成了第二个编排层，而测试永远只覆盖得到
- * 容器里的那一份。
+ * 这里只做五件事：装配容器、跑启动自检、起 HTTP、接退出信号、在监听之后启动存量
+ * 向量回填。**没有业务逻辑**——一旦入口里出现「顺便做点什么」，它就成了第二个编排层，
+ * 而测试永远只覆盖得到容器里的那一份。回填是这条规则的唯一例外，理由见
+ * `startVectorBackfill`：它的触发点是「进程就绪」与「收到退出信号」，两者都只在这里。
  *
  * ## 启动自检
  *
@@ -13,7 +14,7 @@
  *    用户请求了。
  * 3. `task.recover()`：回收租约过期的 `running` 任务（§10.4 的启动扫描）。
  * 4. `warnIfVectorsMissing()`：`retrieval.engine` 含向量时，存量记忆没有向量就提醒
- *    一次（处置是跑 `pnpm reindex`，见该函数的注释）。
+ *    一次（监听之后由后台回填补齐，见 `startVectorBackfill`；`pnpm reindex` 是手工入口）。
  *
  * ## 优雅退出为什么需要超时兜底
  *
@@ -25,7 +26,11 @@
 import { pathToFileURL } from 'node:url';
 
 import { startHttpServer } from '../api/http/server.js';
-import { hasDocumentsMissingVectors } from '../commands/reindex.js';
+import {
+  documentsMissingVectors,
+  embedMissingNodes,
+  hasDocumentsMissingVectors,
+} from '../commands/reindex.js';
 import type { Logger } from '../domain/log.js';
 
 import { assertDataDirWritable, createContainer, type Container } from './container.js';
@@ -45,13 +50,20 @@ const MILLISECONDS_PER_SECOND = 1000;
 export interface ShutdownTargets {
   readonly server: { close(): Promise<void> };
   readonly commitRunner: { stop(): Promise<void> };
+  /**
+   * 后台的存量向量回填；没有启动时省略。
+   *
+   * 它写 `node_embedding`，所以必须在 `container.close()` 关数据库之前停下。
+   * `stop()` 先发中止信号（在途的供应商请求会被取消）再等当前批次收尾。
+   */
+  readonly backfill?: { stop(): Promise<void> };
   readonly container: { close(): Promise<void> };
   readonly logger: Logger;
 }
 
 /**
- * 关闭序列：停收新请求 → 停在途任务 → 关容器（调度器 / 执行器 / 数据库）→
- * 记最后一行 → 等日志队列落盘。
+ * 关闭序列：停收新请求 → 停在途任务 → 停后台回填 → 关容器（调度器 / 执行器 /
+ * 数据库）→ 记最后一行 → 等日志队列落盘。
  *
  * **顺序不能换**：
  * - 先关 HTTP 再关数据库：反过来的话在途请求会撞上已关闭的连接，错误从「服务
@@ -69,6 +81,8 @@ export async function shutdownGracefully(
 ): Promise<void> {
   await targets.server.close();
   await targets.commitRunner.stop();
+  // 回填在 `container.close()` 之前停：`db.close()` 之后它再写 `node_embedding` 会抛。
+  await targets.backfill?.stop();
   await targets.container.close();
   targets.logger.info('CoMem 已退出。', { signal });
   await targets.logger.flush?.();
@@ -79,13 +93,13 @@ export async function shutdownGracefully(
  *
  * 把 `retrieval.engine` 从 `fts5` 改成 `vector` / `hybrid`（或第一次配好嵌入供应商）
  * 之后，旧记忆的正文没有嵌过，向量检索对它们一条都命中不了——用户看到的现象是
- * 「切了引擎之后老记忆全搜不到了」，而配置、启动日志、健康检查都没有任何提示。
- * 补齐靠 `pnpm reindex`，所以这里只提醒，**不回填**：启动时自动回填会在用户不知情
- * 时持续消耗供应商配额。
+ * 「切了引擎之后老记忆全搜不到了」。补齐由监听之后的后台回填（`startVectorBackfill`）
+ * 自动做，这一行 warn 让人知道「补齐之前搜不全」；`pnpm reindex` 是手工入口。
  *
  * 「什么算缺向量」的查询在 `commands/reindex.ts` 的 `hasDocumentsMissingVectors`，
- * 与补齐入口共用同一份判定（目录行、空正文、`content_digest` 对不上的旧向量）——
- * 写在这里会让 `main` 出现业务逻辑与第二份口径。
+ * 与后台回填的候选集（`documentsMissingVectors`）共用同一份 SQL 谓词（目录行、
+ * 空正文、`model` / `content_digest` 对不上的旧向量）——写在这里会让 `main` 出现
+ * 第二份口径。
  *
  * 只在 `retrieval.engine` 含向量且配了嵌入供应商时查；`fts5` 部署一次都不查。
  */
@@ -106,13 +120,148 @@ export function warnIfVectorsMissing(
     return;
   }
   logger.warn(
-    '向量检索已启用，但存量记忆里还有节点没有向量：这些记忆用向量检索搜不到。跑 `pnpm reindex` 从磁盘补齐。',
+    '向量检索已启用，但存量记忆里还有节点没有向量：补齐之前这些记忆用向量检索搜不到。服务会在后台自动补齐（进度见日志），也可以跑 `pnpm reindex` 手工重建。',
     {
       engine: config.retrieval.engine,
       model: embeddingConfig.model,
       dimension: embeddingConfig.dimension,
     },
   );
+}
+
+/** 后台回填的句柄。`runMain` 把它交给关闭序列，测试用它等一个确定的完成点。 */
+export interface VectorBackfillHandle {
+  /** 回填结束（完成 / 中止 / 出错都算）后 resolve。从不 reject。 */
+  readonly done: Promise<void>;
+  /** 中止并等它真的停下；重复调用安全。 */
+  stop(): Promise<void>;
+}
+
+/**
+ * 每个容器最多一个在跑的回填。
+ *
+ * 键是容器而不是模块级单值：一个进程只有一个容器，所以效果就是进程内互斥（第二次
+ * 启动没有意义，回填是幂等的，重复跑只是白扫一遍）；而测试里每个用例一份容器，
+ * 不会被上一个用例已经在跑的 Promise 挡住。
+ */
+const backfills = new WeakMap<Container, VectorBackfillHandle>();
+
+/**
+ * 在监听之后启动存量向量回填（**不 await**）。
+ *
+ * 触发点只能在这里：`createContainer` 不知道 HTTP 什么时候就绪，而回填要读盘、打
+ * 供应商，放到监听之前等于让「服务可用」等存量的大小。
+ *
+ * 关闭走 `ShutdownTargets.backfill`：`stop()` 中止在途的供应商调用并等当前批次收尾，
+ * 之后 `container.close()` 才关数据库。
+ *
+ * ## 跨进程并发：不加锁，靠「单进程部署」这个既有假设
+ *
+ * 同一个 `dataDir` 起两个服务端进程本来就不在支持范围内（`docs/operations.md` 的已知
+ * 限制「同一个 `dataDir` 只支持一个服务端进程」：会话轮次时钟、幂等索引、对账队列都是
+ * 进程内状态）。仓库里唯一的跨进程锁是内容路径锁（`adapters/fs/lock.ts`，按 URI 保护
+ * 文件写），它保护的是「谁在写这个节点」，覆盖不了「谁在给这个节点写向量」；任务租约
+ * 只用于阶段二任务，也不提供数据根级的互斥。
+ *
+ * 所以这里**不新增**跨进程锁。两个进程同时回填的后果：`vec0` 没有 compare-and-set，
+ * 两个进程各用自己读到的正文各自 `DELETE + INSERT`，最后写入者赢。不会写坏行（行里的
+ * 摘要与向量由同一次读盘产出），但两次写入之间可能出现「向量对应 A、摘要对应 B」的
+ * 短暂状态——前提是同一份文件在两次读盘之间被改了；下一次回填 / `pnpm reindex` 按磁盘
+ * 重算会修正它，因为两者的输入都是磁盘正文，不是旧向量。
+ */
+export function startVectorBackfill(container: Container): VectorBackfillHandle {
+  const running = backfills.get(container);
+  if (running !== undefined) {
+    return running;
+  }
+  const abort = new AbortController();
+  // 回填自己处理每个节点的失败；走到这里的是全局故障（磁盘满、表被外部改坏）。
+  // 记 error 后照常 resolve：启动不应该因为回填失败而挂掉，`done` 也从不对调用方抛。
+  const done = backfillMissingVectors(container, abort.signal).catch((error: unknown) => {
+    container.logger.error('存量向量回填中断：已补齐的保留，剩下的下次启动再补。', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  const handle: VectorBackfillHandle = {
+    done,
+    stop: async () => {
+      abort.abort();
+      await done;
+    },
+  };
+  backfills.set(container, handle);
+  return handle;
+}
+
+/**
+ * 把「切到 `vector` / `hybrid` 之前就存在、从来没有嵌过」的记忆补上向量。
+ *
+ * 候选集是 `documentsMissingVectors` 的 SQL 存在性判定（与 `warnIfVectorsMissing`
+ * 共用同一份谓词），所以「没事可做」的启动只多一次 `NOT EXISTS` 扫描；正文与摘要
+ * 仍然由 `embedMissingNodes` 从磁盘读。
+ *
+ * **失败处理是「记 warn、跳过、继续下一批」。** 理由：
+ * 1. `EmbeddingService` 已经有熔断（连续 5 次失败后短路 30 秒）。供应商真挂了，
+ *    继续下一批只是让每个批次立即降级，不会猛打请求；停下来反而让「恢复之后要
+ *    重启一次才继续补」变成新的运维动作。
+ * 2. 证书 / 坏文件这类单节点故障是终局的：一旦「第一个失败就停」，一个读不出来的
+ *    文件会让它后面所有记忆永远没有向量，而每次启动都从它开始从头失败。
+ * 3. 进度是批级的、幂等的：下一次启动重新查一遍，只补还没补上的那些。
+ *
+ * `fts5` 部署与未配置嵌入时一次都不查库：没有 `node_embedding` 表的库查它会报
+ * no such table（与 `warnIfVectorsMissing` 同一约定）。
+ */
+async function backfillMissingVectors(container: Container, signal: AbortSignal): Promise<void> {
+  const { config, logger, db } = container;
+  if (config.retrieval.engine === 'fts5') {
+    return;
+  }
+  const embeddingConfig = config.providers.embedding;
+  if (embeddingConfig.type === 'disabled') {
+    return;
+  }
+
+  const { store, embeddings, embedding } = container.vectorBackfill;
+  const model = embedding.model;
+  if (model === null) {
+    return;
+  }
+
+  const uris = documentsMissingVectors(db, model);
+  if (uris.length === 0) {
+    return;
+  }
+  logger.info('存量节点没有向量，开始在后台补齐。', {
+    engine: config.retrieval.engine,
+    model,
+    missing: uris.length,
+  });
+
+  const result = await embedMissingNodes(uris, {
+    store,
+    embeddings,
+    embedding,
+    logger,
+    signal,
+    // 一批 = 供应商的一次调用（服务内部还会按同一上限再切片，见 `EmbeddingService`）。
+    batchSize: embedding.maxBatchSize,
+    onBatch: (progress) => {
+      logger.info('向量回填进度。', {
+        embedded: progress.embedded,
+        skipped: progress.skipped,
+        failed: progress.failed,
+        remaining: progress.remaining,
+        total: uris.length,
+      });
+    },
+  });
+
+  logger.info(result.aborted ? '存量向量回填已中止（进程正在退出）。' : '存量向量回填完成。', {
+    embedded: result.embeddedUris.length,
+    skipped: result.skipped,
+    failed: result.failedUris.length,
+    aborted: result.aborted,
+  });
 }
 
 /**
@@ -162,6 +311,10 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
   });
   logger.info('CoMem 已启动', { url: server.url, dataDir: config.dataDir });
 
+  // 存量向量回填：监听之后启动，不等它。`fts5` / 未配置嵌入时它立即返回（一次库都
+  // 不查），所以这里不需要再判一遍引擎。
+  const backfill = startVectorBackfill(container);
+
   let shuttingDown = false;
 
   const shutdown = (signal: NodeJS.Signals): void => {
@@ -190,7 +343,13 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
         // 最后一行日志与 `flush` 在 `shutdownGracefully` 里：flush 之后不再打日志，
         // 否则那一行会留在写队列里随进程退出丢掉。
         await shutdownGracefully(
-          { server, commitRunner: container.commitRunner, container, logger },
+          {
+            server,
+            commitRunner: container.commitRunner,
+            backfill,
+            container,
+            logger,
+          },
           signal,
         );
         process.exit(0);
