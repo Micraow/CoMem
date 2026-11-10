@@ -2739,7 +2739,7 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 **`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
 覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
 的内容。`SummaryService` 对路径里含 `.history` 的目录直接返回 `unchanged`，摘要传播在
-那里停（`src/services/summary.ts:499`）。
+那里停（`src/services/summary/invalidate.ts:167`）。
 
 **`reconcile` 重放必须带上 `valid_*`。** 从磁盘重建索引行时，有效期从 frontmatter 重新
 解析（`src/services/reconcile.ts:372`），不取旧行。漏掉这一步（或退回只重放 status 与
