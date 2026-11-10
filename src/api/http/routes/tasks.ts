@@ -37,6 +37,7 @@ import {
   TASK_STATUSES,
   type ClaimableTaskStatus,
   type TaskStatus,
+  type TaskType,
 } from '../../../domain/task.js';
 import { ok } from '../envelope.js';
 import { assertSystemAdmin } from '../middleware.js';
@@ -47,7 +48,14 @@ import type { HttpRouteServices } from './index.js';
 /** 任务行的只读视图。字段与 `adapters/sqlite/task-repository.ts` 的 `TaskRow` 一致。 */
 export interface TaskRecord {
   readonly id: string;
-  readonly type: string;
+  /**
+   * `TaskType`，不是 `string`：`task` 表的 `type` 列读出来是字符串，但
+   * `task-repository.ts` 的行映射已经用 `requireTaskType` 校验过值域（非法值抛
+   * `INTERNAL`），`TaskRow` 的字段就是收窄后的类型。写宽成 `string` 时，`type` 与
+   * 同一行里已经收窄的 `status` 不对称，消费方按任务类型分支既没有穷举保护、
+   * 也拿不到「加一个任务类型要改哪里」的编译提示。
+   */
+  readonly type: TaskType;
   readonly status: TaskStatus;
   readonly payload: unknown;
   readonly stepsDone: readonly string[];

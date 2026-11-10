@@ -89,6 +89,7 @@ export interface SearchSearchPayload extends SearchFindPayload {
 import { ChevronRight, SearchX, Sparkles } from 'lucide-vue-next'
 
 import { LEVEL_REASON } from '~/utils/levelLabels'
+import { memoryTypeLabelOf } from '~/utils/memoryTypeLabels'
 import { CONTEXT_LABEL } from '~/utils/searchLabels'
 
 const props = defineProps<{
@@ -166,7 +167,7 @@ function filePathOf(uri: string): string {
           <div class="hit__meta">
             <UiBadge variant="outline">{{ CONTEXT_LABEL[hit.contextType] }}</UiBadge>
             <UiBadge v-if="hit.memoryType !== null" variant="gray">
-              {{ hit.memoryType }}
+              {{ memoryTypeLabelOf(hit.memoryType) }}
             </UiBadge>
             <span class="hit__reason">{{ LEVEL_REASON[hit.level] }}</span>
           </div>

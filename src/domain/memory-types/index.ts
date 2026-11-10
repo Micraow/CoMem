@@ -33,8 +33,12 @@ export {
  * 的成员、`MemoryRecord.memoryType` 的取值都从它来。往数组加一个类型时下面是
  * `Record<MemoryType, MemoryTypeSchema>`，漏写实现即编译错误；反过来（先写联合、
  * 再手抄一份键）漏抄一个键是静默的，`getMemoryType` 会返回 `undefined`。
+ *
+ * 导出是给控制台的取值对拍用（`tests/unit/web/memory-type-labels.test.ts`）：
+ * `web/` 不能 import 领域层，两边的清单必须各声明一份，那份重复只有测试能钉住。
+ * 类型名仍从数组派生，所以这里是**一个**运行期清单，不额外维护一份名字常量。
  */
-const BUILTIN_MEMORY_TYPE_NAMES = [
+export const BUILTIN_MEMORY_TYPE_NAMES = [
   'profile',
   'preferences',
   'entities',

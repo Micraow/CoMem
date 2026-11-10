@@ -22,6 +22,8 @@ export type { PendingListPayload, PendingMemoryPayload }
  */
 import { ClipboardCheck, RefreshCw } from 'lucide-vue-next'
 
+import { memoryTypeLabelOf, memoryTypeVariantOf } from '~/utils/memoryTypeLabels'
+
 const props = defineProps<{
   memories: readonly PendingMemoryPayload[]
   loading: boolean
@@ -75,16 +77,6 @@ function relativeTime(value: string): string {
     return `${Math.floor(elapsed / DAY_MS)} 天前`
   }
   return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
-}
-
-function typeVariantOf(memoryType: string): 'blue' | 'purple' | 'gray' {
-  if (memoryType === 'experiences') {
-    return 'blue'
-  }
-  if (memoryType === 'rules') {
-    return 'purple'
-  }
-  return 'gray'
 }
 
 function isChecked(uri: string): boolean {
@@ -164,7 +156,9 @@ const hasChecked = computed(() => checked.value.length > 0)
             @click="emit('select', memory.uri)"
           >
             <span class="rrow__top">
-              <UiBadge :variant="typeVariantOf(memory.memoryType)">{{ memory.memoryType }}</UiBadge>
+              <UiBadge :variant="memoryTypeVariantOf(memory.memoryType)">
+                {{ memoryTypeLabelOf(memory.memoryType) }}
+              </UiBadge>
               <span class="rrow__name">{{ nameOf(memory.uri) }}</span>
             </span>
             <span

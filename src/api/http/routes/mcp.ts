@@ -15,7 +15,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import type { ToolRegistry } from '../../mcp/registry.js';
+import type { McpToolDefinition, ToolRegistry } from '../../mcp/registry.js';
 import { ok } from '../envelope.js';
 import type { HttpRouteGroup } from '../server.js';
 
@@ -23,8 +23,12 @@ import type { HttpRouteServices } from './index.js';
 
 export interface SerializedTool {
   readonly name: string;
-  /** `read` / `write` / `ingest`：界面上用来分组，不参与权限判定。 */
-  readonly kind: string;
+  /**
+   * `McpToolDefinition['kind']`（`read` / `write` / `ingest`），不是 `string`：
+   * 展示值就是注册表里的值，界面按它分组（`web/utils/toolLabels.ts`）。
+   * 写宽成 `string` 时，注册表多一类工具、控制台没跟上这件事在编译期不可见。
+   */
+  readonly kind: McpToolDefinition['kind'];
   readonly description: string;
   /** JSON Schema。界面只取 `properties` 的键名，不渲染完整 schema。 */
   readonly inputSchema: Record<string, unknown>;
