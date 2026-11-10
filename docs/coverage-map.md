@@ -11,9 +11,9 @@
 
 | 能力 | 需求（为什么存在） | 入口 | 实现（file:line） | 数据流 | 测试证据（file:行） |
 |---|---|---|---|---|---|
-| 会话消息落盘 | 对话要先进 live，才能被提交 | `POST /sessions/{id}/messages`；MCP `remember` | `services/session.ts:539` `addMessage` | 追加 `sessions/{sid}/messages.jsonl` 一行；`.meta.json` 的 `turn` / `pendingTokens`；按消息 `id` 在 live + 已归档范围内判等 | `tests/integration/services/session.test.ts:253`「追加 JSONL 并累加 turn 与 pendingTokens」；幂等 `:301` |
-| 自动提交 | 攒够量就归档，不指望模型记得调 | 调度器职责（30 秒一轮） | `bootstrap/scheduler.ts:503` `#processSession`；判定 `services/session.ts:611` | 扫 `{user,group}/{id}/sessions/*` 读 `.meta.json` + live，命中阈值走阶段一 | `tests/integration/services/session-scheduler.test.ts:98`「写够 5000 token → tick → archive_001 出现」；空闲触发 `:187` |
-| 阶段一归档 | live 固化进 `history/`，建后台任务 | `POST /sessions/{id}/commit`；MCP `remember`；自动提交 | `services/session.ts:680` `#commitPhase1` | 写 `history/archive_NNN/messages.jsonl`（原子）→ `.meta.json` `phase1: preparing→ready` + `taskId` → 重写 live → `task` 表插 `type=archive`；**不写 `.done`** | `tests/integration/services/session.test.ts:468`「六步落盘…不写 .done」 |
+| 会话消息落盘 | 对话要先进 live，才能被提交 | `POST /sessions/{id}/messages`；MCP `remember` | `services/session/append.ts:57` `appendMessage` | 追加 `sessions/{sid}/messages.jsonl` 一行；`.meta.json` 的 `turn` / `pendingTokens`；按消息 `id` 在 live + 已归档范围内判等 | `tests/integration/services/session.test.ts:253`「追加 JSONL 并累加 turn 与 pendingTokens」；幂等 `:301` |
+| 自动提交 | 攒够量就归档，不指望模型记得调 | 调度器职责（30 秒一轮） | `bootstrap/scheduler.ts:503` `#processSession`；判定 `services/session/service.ts:175` | 扫 `{user,group}/{id}/sessions/*` 读 `.meta.json` + live，命中阈值走阶段一 | `tests/integration/services/session-scheduler.test.ts:98`「写够 5000 token → tick → archive_001 出现」；空闲触发 `:187` |
+| 阶段一归档 | live 固化进 `history/`，建后台任务 | `POST /sessions/{id}/commit`；MCP `remember`；自动提交 | `services/session/archive.ts:37` `commitPhase1` | 写 `history/archive_NNN/messages.jsonl`（原子）→ `.meta.json` `phase1: preparing→ready` + `taskId` → 重写 live → `task` 表插 `type=archive`；**不写 `.done`** | `tests/integration/services/session.test.ts:468`「六步落盘…不写 .done」 |
 | 阶段二执行 | 流水线要有人跑，否则任务永远 pending | 常驻轮询（1 秒，`bootstrap/commit-runner.ts`） | `bootstrap/commit-runner.ts:179` `#runOne`；骨架 `services/commit/pipeline.ts:185`；步骤注册 `bootstrap/container/commit.ts:75`–`:97` | `task` 表租约认领 → 逐步执行并写 `steps_done` → 全成功写 `archive_NNN/.done`。**注册五步**：归档摘要 → 记忆抽取 → 补丁合并 → 摘要失效 → 经验归纳（`ExperienceDistillStep`） | `tests/integration/services/commit-pipeline.test.ts:124`「五步按顺序执行」；`tests/integration/bootstrap/commit-runner.test.ts:397`「建会话 → 写消息 → 提交 → tick 跑完 → .done + pending 记忆」 |
 | 归档摘要 / 工作记忆 | 归档目录要有 L1 概览给下次抽取看 | 阶段二第 1 步 | `services/commit/steps/archive-summary.ts:97` | 归档目录 `.overview.md`（`memory.workingMemory.enabled` 时 7 段）+ 目录 L1 | `tests/integration/services/commit-steps.test.ts:257`「开启工作记忆时生成 7 段并写归档目录的 .overview.md」 |
 | 记忆抽取 | 从对话产出可执行的操作列表 | 阶段二第 2 步 | `memory-extract.ts:425` | 预取记忆编号成 `page_id` → 落 `archive_NNN/memory_operations.json`；重放由 `rehydrate` 读回 | `commit-steps.test.ts:353`「把预取记忆编号成 page_id，并把输出解析回 URI」；重放 `:949` |
@@ -55,17 +55,17 @@
 |---|---|---|---|---|---|
 | 登录与凭据解析 | 多用户部署要知道每个请求是谁 | `POST /auth/login`、`POST /auth/logout`、`GET /auth/config` | `services/auth.ts:69` / `:97`；`services/identity.ts:399` | 密码比对 → HMAC session token（载荷 `userId` + `session_epoch`）→ `Authorization: Bearer`；三种凭据同一条出口 | `tests/integration/api/auth.test.ts:79`「正确密码换到可用的 session token」；`:148` 删账号重建后旧 token 401 |
 | API Key | 不进浏览器的长期凭据 | `GET|POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}` | `services/api-key.ts:60` / `:77`；`services/identity.ts:508` | `comem_<prefix8>_<secret>`，`api_key` 表存 prefix 明文 + scrypt 哈希 + `expires_at` / `revoked_at` | `tests/integration/api/auth.test.ts:232`「创建、使用、撤销一条链路；列表不返回明文」 |
-| ACL 求值 | 一个节点某人能不能读 / 写 / 管 | 所有服务的 `authorizer` 出口 | `services/acl.ts:393` → `:943` → `:962`；规则 `domain/acl.ts:189` | 查 `node_permission` 的级别位并集（`maxLevel` 逐行 `|=`，不是 `MAX(level)`），存在 deny 即拒；`InheritingAuthorizer`（`bootstrap/container/ports.ts:180`）遇缺行先物化再求权 | `tests/integration/services/acl.test.ts:393`「求值不变量」 |
-| 权限物化 | 检索时不能逐节点穿 ACL | 写盘后的观察者；`PUT /acl` | `services/acl.ts:1061` `materializeNode`、`:1023` `#materializeSubtree` 子树重算；`services/observer/permissions.ts:25` `materializePermission` | `.acl.json`（真相）→ `node_permission`（求权用）+ `acl_entry`（反查用） | `services/acl.test.ts:460`「物化」；`tests/integration/sqlite/permission-repository.test.ts:155`「只返回主体命中且 level >= read 的 URI」 |
+| ACL 求值 | 一个节点某人能不能读 / 写 / 管 | 所有服务的 `authorizer` 出口 | `services/acl/service.ts:70` `check` → `:86` `assert` → 求值走 `services/acl/evaluate.ts`；规则 `domain/acl.ts:189` | 查 `node_permission` 的级别位并集（`maxLevel` 逐行 `|=`，不是 `MAX(level)`），存在 deny 即拒；`InheritingAuthorizer`（`bootstrap/container/ports.ts:180`）遇缺行先物化再求权 | `tests/integration/services/acl.test.ts:393`「求值不变量」 |
+| 权限物化 | 检索时不能逐节点穿 ACL | 写盘后的观察者；`PUT /acl` | `services/acl/service.ts:204` `materializeNode`、`services/acl/materialize.ts:118` `materializeSubtree` 子树重算；`services/observer/permissions.ts:25` `materializePermission` | `.acl.json`（真相）→ `node_permission`（求权用）+ `acl_entry`（反查用） | `services/acl.test.ts:460`「物化」；`tests/integration/sqlite/permission-repository.test.ts:155`「只返回主体命中且 level >= read 的 URI」 |
 | 用户与组管理 | 身份目录 | `/admin/users*`、`/admin/groups*` | `routes/admin.ts:276`–`:608`；`services/identity.ts:166`–`:377` | `app_user` / `app_group` / `group_member` / `api_key`；`role` 读取时由 `app_group.owner_user_id` 派生（`services/identity.ts:144`） | `api/admin.test.ts:161`「创建 → 列表 → 更新 → 删除」；`admin-access-control.test.ts:387` |
 | 管理员名单 | 没有目标资源的操作只能认显式名单 | 用户 / 组目录、`/tasks`、提示词写 | `routes/admin.ts:247`；`api/http/middleware.ts:275`；`config/schema.ts:411` | `auth.adminUserIds`，默认 `[]` → 这些端点对所有人 403 | `admin-access-control.test.ts:260`「auth.enabled: true 且 adminUserIds 为空：已登录用户调用户 / 组目录都 403」 |
-| 根预置 | 新建的 user / group 根要有 owner | 首次访问、`pnpm group:owner` | `services/acl.ts:572`；规则 `domain/acl.ts:257` | 写 `.acl.json` 预置条目并物化：user 根 owner 恒 manage；group 根 owner manage + 组员 write | `unit/domain/acl.test.ts:275`「user 根预置 owner = manage」；`services/acl.test.ts:227`「根预置」 |
+| 根预置 | 新建的 user / group 根要有 owner | 首次访问、`pnpm group:owner` | `services/acl/preset.ts:54` `ensureRootPreset`；规则 `domain/acl.ts:257` | 写 `.acl.json` 预置条目并物化：user 根 owner 恒 manage；group 根 owner manage + 组员 write | `unit/domain/acl.test.ts:275`「user 根预置 owner = manage」；`services/acl.test.ts:227`「根预置」 |
 
 ### 5. 会话与调度
 
 | 能力 | 需求（为什么存在） | 入口 | 实现（file:line） | 数据流 | 测试证据（file:行） |
 |---|---|---|---|---|---|
-| 会话生命周期 | 会话是提交的单位 | `POST /sessions`、`GET /sessions`、`GET /sessions/{id}` | `services/session.ts:351` / `:412` / `:440` / `:631` / `:660` | `sessions/{sid}/.meta.json` + `messages.jsonl` + `history/`；**不建 `session` 表**，磁盘是真相 | `tests/integration/services/session.test.ts:145`「建完之后 list(sessions) 能看到会话目录，且它有自己的物化权限行」 |
+| 会话生命周期 | 会话是提交的单位 | `POST /sessions`、`GET /sessions`、`GET /sessions/{id}` | `services/session/lifecycle.ts:45` / `services/session/lifecycle.ts:107` / `services/session/service.ts:109` / `services/session/lifecycle.ts:146` / `services/session/lifecycle.ts:178` | `sessions/{sid}/.meta.json` + `messages.jsonl` + `history/`；**不建 `session` 表**，磁盘是真相 | `tests/integration/services/session.test.ts:145`「建完之后 list(sessions) 能看到会话目录，且它有自己的物化权限行」 |
 | 调度器六职责 | 维护性动作要有人定期做 | `bootstrap/scheduler.ts`（30 秒） | `scheduler.ts:414` `#runOnce` | 自动提交 `:503`、会话过期 `:552`、TTL `:648`、临时上传 `:666`、请求记录裁剪 `:736`、对账重放 `:755` | `bootstrap/scheduler.test.ts:268`/`:398`/`:487`/`:538`/`:593`/`:773` 各一条；容器级 `session-scheduler.test.ts:98` |
 | 任务队列与重试 | 阶段二要能重放、能恢复僵尸 | `GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry` | `services/task.ts:102` / `:128` / `:196`；`task-repository.ts:262` `tryClaim` | `task` 表（`status` / `steps_done` / `attempts` / `lease_until` / `error`）；租约即认领；僵尸由 `bootstrap/main.ts:134` `recover()` 回收 | `services/task.test.ts:82`「认领并执行成功」；`:95`「已被别人认领（租约未过期）返回 false」；`task-attempts.test.ts:52`「必然失败的任务配 maxAttempts = 3」 |
 | 本机会话导入 | 把宿主历史对话变成归档 | `pnpm ingest` | `services/ingest.ts:415`；源装配 `ingest/registry.ts:20` | 四源（claude-code / codex / deepseek / qwen）读宿主日志 → 建或复用会话 → 阶段一 → 抽取；游标在 `ingest_cursor` 表 | `commands/ingest.test.ts:44`；`unit/ingest/claude-code.test.ts:43` |
@@ -116,7 +116,7 @@
 
 | 能力 | 需求（为什么存在） | 入口 | 实现（file:line） | 数据流 | 测试证据（file:行） |
 |---|---|---|---|---|---|
-| 重建索引 | 索引坏了要能从磁盘重建 | `pnpm reindex` | `commands/reindex.ts:768` `runReindex` | 只读磁盘 → 重写 `node` / `node_fts` / `node_embedding`，`--only=links` / `all` 时按 `sources` 整批替换 `memory_link` 的 `derived_from`；`--only` 分段、断点续跑 | `commands/reindex.test.ts:146`「磁盘有文件、索引为空 → reindex 后能检索到」 |
+| 重建索引 | 索引坏了要能从磁盘重建 | `pnpm reindex` | `commands/reindex/command.ts:58` `runReindex` | 只读磁盘 → 重写 `node` / `node_fts` / `node_embedding`，`--only=links` / `all` 时按 `sources` 整批替换 `memory_link` 的 `derived_from`；`--only` 分段、断点续跑 | `commands/reindex.test.ts:146`「磁盘有文件、索引为空 → reindex 后能检索到」 |
 | 设密码 | 没有注册页，账号靠命令行引导 | `pnpm password <uid>`（密码走 stdin） | `commands/password.ts:45` `setPassword` | `app_user.password_hash` + 轮换 `session_epoch`（旧 token 全失效） | `commands/password.test.ts:81`「--data-dir 覆盖 COMEM_DATA_DIR：密码写到 --data-dir 指向的数据根」 |
 | 指定组 owner | 组 owner 丢失时的恢复入口 | `pnpm group:owner <gid> <uid>` | `commands/group-owner.ts:63` `setGroupOwner` | `app_group.owner_user_id` + 组根 `.acl.json` 预置 | `commands/group-owner.test.ts:79` |
 | 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:534` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
@@ -170,7 +170,7 @@
 ✓ 没有清单外的孤儿
 ```
 
-这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex.ts:567` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:106` 的 `warnIfVectorsMissing` 与启动后台回填 `bootstrap/main.ts:172` `startVectorBackfill` 复用它，补齐入口（自动回填与 `pnpm reindex`）因此只有一份口径。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
+这一节上一轮只列过一条候选：`EmbeddingRepository` 上一个「按游标列未嵌入 URI」的方法，当时只有测试在调，属于「有生产者没消费者」。判断后按重复实现删除。理由是同一判定在生产侧已经有一份主：`commands/reindex/missing-vectors.ts:46` 的 `hasDocumentsMissingVectors`，启动自检 `bootstrap/main.ts:106` 的 `warnIfVectorsMissing` 与启动后台回填 `bootstrap/main.ts:172` `startVectorBackfill` 复用它，补齐入口（自动回填与 `pnpm reindex`）因此只有一份口径。留第二份口径不会有新消费者，只会让「什么算缺向量」有两个答案。
 
 **关于 `check:reachability` 自身的限制**（判断上面结论时要扣除）：它只认 AST 层面的导入与 `.m(` 调用表达式，不认字符串派发、动态注册、默认关闭的分支，也不认「调用存在但执行无效」；它读的是磁盘上的源码文件，不是某个提交的树。
 
@@ -194,7 +194,7 @@
 | `comem_hook_async_seconds{event}` 的 `event` 标签 | 假维度：进程级快照被贴到每个事件上，同一份数据被复制成七份 | `services/observability.ts:755` 起按 `phase` 输出 |
 | `comem_llm_cost_usd_total` 的 `?? 0` | 「没配单价」被渲染成「确实花了 0 美元」 | 未配单价时整条序列不存在，另在 `observability.ts:830` 输出 `comem_llm_pricing_configured` |
 | 控制台的四样展示 | 读不到或永远默认：`/memories/pending` 预取改读 `/health`；任务重试按钮（列表只返回可认领任务）；文档节点的 L1 概览档；置信度徽章（字段不存在）；API Key「最后使用」列（从未记录） | `web/pages/monitor.vue:226` 起说明请求明细无端点；`web/pages/review.vue:12` 起说明复核页改读内容 |
-| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex.ts:567`），启动自检 `warnIfVectorsMissing` 与启动后台回填 `startVectorBackfill` 都转调它（`bootstrap/main.ts:106`、`:172`），补齐入口（自动回填与 `pnpm reindex`）共用这一份；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后，当时的孤儿检查（现已由 `check:reachability` 取代）从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
+| `EmbeddingRepository.iterMissingUris`（按游标列未嵌入 URI） | 「什么算缺向量」的第二份实现：它按 `model` 判「这个模型没有向量」，而生产侧的主 `hasDocumentsMissingVectors` 按 `content_digest` 判过期（`commands/reindex/missing-vectors.ts:46`），启动自检 `warnIfVectorsMissing` 与启动后台回填 `startVectorBackfill` 都转调它（`bootstrap/main.ts:106`、`:172`），补齐入口（自动回填与 `pnpm reindex`）共用这一份；两份口径并存会让启动告警说缺 X 条、补齐时补 Y 条 | `18526c5` 删除后，当时的孤儿检查（现已由 `check:reachability` 取代）从「1 个孤儿、1 条清单」变成「孤儿 0 个、清单 0 条」；用例数 2326 → 2322（少 4 条，全在被删的 describe 里） |
 | 向量补全阶段的 `status !== 'active'` 复检 | 候选集来自 `#readableUris` → `index.glob`，而 glob 的 SQL 已经带 `ACTIVE_STATUS_PREDICATE`（与 FTS 臂同一条谓词，`adapters/sqlite/retrieval-index.ts:72`、`:537`）；`NodeRepository.get` 读的是同一行，`NodeStatus` 只有 `active` / `pending` / `archived` 三个成员（`domain/node.ts:19`），所以 SQL 的 `= 'active'` 与 TS 的 `!== 'active'` 对同一行等价，第二次判断不改变结果；`glob` 到 `nodes.get` 之间隔着一次 `vectors.search` 的 await，这期间状态被 TTL 清扫改掉时向量臂比 FTS 臂多挡一次，那是竞态窗口，不是第二份状态过滤的职责 | `5369219` 删前删后检索测试都是 57 passed、全量 2322 passed——「删了测试还绿」正是这处是兜底的证据（与接线类改动相反，接线类要求「删了测试变红」） |
 | 死类型 `PendingMemoriesPayload` | 控制台声明过「待复核列表响应」的整套形状，但页面改成读 `/content/read` 的正文后就没人用了；留着它等于给一条不存在的响应继续做类型承诺 | `web/composables/useApi.ts` 无该类型；复核页从 `MemoryRecordPayload` 取字段（`web/pages/review.vue`） |
 | 两份任务类型标签映射里的 `extract` / `merge` / `summary` / `index` | `TaskType` 只有 `archive`：抽取、合并、摘要失效都是归档任务内部的步骤（`stepsDone`），重建索引走命令不入队。四个键没有生产者，`/tasks` 的类型列却看起来像还存在别的任务 | `src/domain/task.ts:23`；剩下的收进 `web/utils/taskLabels.ts:17`，未知值原样显示 |
@@ -219,7 +219,7 @@
 | 配置项只能手工核对 | `check:config` 四层都只证明「配置到达了代码」；3 处歧义匹配需人工看，17 处 `LEGACY_OPTIONAL_CONFIG_DEPS` 仍是可选属性 | `scripts/check-config.ts:278`、`docs/operations.md`「配置自检」 |
 | 控制台与 Hook 插件没有静态检查 | 根 `eslint` 不覆盖 `web/` 与 `integrations/`；控制台十个页面无自动化测试（只有身份合成 composable 的单测） | `eslint.config.js`、`tests/unit/web/console-identity.test.ts:49` |
 | 已生效记忆的结构化元数据在控制台仍无出口 | 待复核列表带出 `validFrom` / `validUntil` / `supersedes` / `sources`，但已生效（`active`）的记忆没有单条 GET，控制台只能读 `/content/read` 的正文；一条记忆被通过之后，字段、有效期与来源就从界面上消失了。要补得先加单条记忆读取端点（MCP 仍是 16 个工具，这属于 HTTP 面） | `src/api/http/routes/memories.ts:85`（只有 `/pending`）、`adapters/fs/content-store.ts:183`（`/content/read` 只回 `document.body`） |
-| 多进程写同一 `dataDir` 会漏计已归档消息 | `totalMessageCount` 与消息幂等索引共用「单进程持有全量缓存」的假设 | `services/session.ts:499`；覆盖用例 `tests/integration/services/session.test.ts:452`「keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3」 |
+| 多进程写同一 `dataDir` 会漏计已归档消息 | `totalMessageCount` 与消息幂等索引共用「单进程持有全量缓存」的假设 | `services/session/service.ts:148`；覆盖用例 `tests/integration/services/session.test.ts:452`「keepRecentCount: 0 全归档后仍是 3；换新实例懒加载后仍是 3」 |
 | 阶段二终态失败不写 `ArchivePhaseStatus.failed` | 归档停在 `ready`，只能从 `task.status=failed` 看出失败 | `services/commit/pipeline.ts:185`、`domain/archive.ts:20` |
 
 ## 快照与漂移
