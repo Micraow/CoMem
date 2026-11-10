@@ -168,6 +168,7 @@ function record(uri: string, memoryType: string, fields: Record<string, unknown>
     sources: [],
     validFrom: null,
     validUntil: null,
+    supersedes: null,
   };
 }
 

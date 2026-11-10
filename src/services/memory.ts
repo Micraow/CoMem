@@ -130,6 +130,14 @@ export interface MemoryRecord {
    */
   readonly validFrom: string | null;
   readonly validUntil: string | null;
+  /**
+   * 这条记忆顶替掉的版本文件 URI（frontmatter 的保留键 `supersedes`）；没有顶替
+   * 过任何版本时是 `null`。
+   *
+   * 只用于回答「拒绝一次覆盖写会回到哪一版」；它指向的文件在 `.history` 下，版本
+   * 内容不在这里。
+   */
+  readonly supersedes: string | null;
 }
 
 export interface MemoryWriteResult {
@@ -145,6 +153,23 @@ export interface MemoryWriteResult {
   readonly before: string | null;
   readonly after: string;
 }
+
+/**
+ * 一次复核拒绝的终态（§11.11「`reject` 先回退，回退不了才删」）。
+ *
+ * 两个分支互斥，各自说清发生了什么，调用方不需要再用另一个布尔字段推断：
+ *
+ * - `restored`：把 `supersedes` 指向的版本写回了规范 URI，`restoredFrom` 就是
+ *   那份版本文件的 URI。**没有删除任何东西。**
+ * - `removed`：没有可回退的版本（首条写入、`supersedes` 缺失或指向的文件不在了），
+ *   规范文件被删掉。
+ *
+ * 不做成 `{ removed: boolean, restoredFrom: Uri | null }`：那样「恢复了」与
+ * 「删除了」在类型上无法区分，恰好是这次要修的那类说谎。
+ */
+export type MemoryRejectResult =
+  | { readonly outcome: 'restored'; readonly restoredFrom: Uri }
+  | { readonly outcome: 'removed' };
 
 /** 记忆的字段集（字段名 → 值）。 */
 export type MemoryFields = Readonly<Record<string, unknown>>;
@@ -902,6 +927,7 @@ export class MemoryService {
       sources: document.sources,
       validFrom: document.validFrom,
       validUntil: document.validUntil,
+      supersedes: document.supersedes,
     };
   }
 
@@ -1223,35 +1249,45 @@ export class MemoryService {
    *
    * 拒绝的是一次**覆盖写**时，规范文件里现在是不该留下的新值、旧值在版本文件里。
    * 所以这里把 `supersedes` 指向的版本写回规范 URI 并清掉 `valid_until`（它现在
-   * 又有效了），调用方不需要知道版本文件的位置。这样拒绝一次错误写入的终态是
-   * 「写入前的数据」，不是「这条记忆消失了」。
+   * 又有效了），调用方不需要为拒绝指定版本文件的位置。`MemoryRecord.supersedes`
+   * 会带出这个 URI，供复核界面说明「拒绝会回到哪一版」；它不是读取版本文件内容的
+   * 入口。这样拒绝一次错误写入的终态是「写入前的数据」，不是「这条记忆消失了」。
    *
    * 没有版本可回（首条写入、`supersedes` 指向的文件已被 TTL 清理或截断）时维持
    * 原来的行为：删掉 pending 文件。已经不在了是空操作。
+   *
+   * 返回值如实说明这两种终态（`MemoryRejectResult`）：恢复时没有删除任何东西，
+   * 调用方不能把它当成「删掉了一条记忆」。
    */
-  async reject(uri: Uri, reason: string): Promise<void> {
-    await this.#locks.withLock(uri, 'exact', async () => {
-      const document = await this.#readDocument(uri);
-      if (document === null) {
-        return;
-      }
-      const restoredFrom = await this.#restoreSuperseded(uri, document);
-      if (restoredFrom === null) {
-        await this.#filesystem.remove(uri);
-        this.#logger.info('记忆复核拒绝，已删除', {
+  async reject(uri: Uri, reason: string): Promise<MemoryRejectResult> {
+    return await this.#locks.withLock(
+      uri,
+      'exact',
+      async (): Promise<MemoryRejectResult> => {
+        const document = await this.#readDocument(uri);
+        if (document === null) {
+          // 文件已经不在了：终态与「删掉」相同（`rm -f` 语义），也没有可回退的版本。
+          return { outcome: 'removed' };
+        }
+        const restoredFrom = await this.#restoreSuperseded(uri, document);
+        if (restoredFrom === null) {
+          await this.#filesystem.remove(uri);
+          this.#logger.info('记忆复核拒绝，已删除', {
+            uri: uri.toString(),
+            memoryType: document.memoryType,
+            reason,
+          });
+          return { outcome: 'removed' };
+        }
+        this.#logger.info('记忆复核拒绝，已恢复到上一个有效版本', {
           uri: uri.toString(),
           memoryType: document.memoryType,
           reason,
+          restoredFrom: restoredFrom.toString(),
         });
-        return;
-      }
-      this.#logger.info('记忆复核拒绝，已恢复到上一个有效版本', {
-        uri: uri.toString(),
-        memoryType: document.memoryType,
-        reason,
-        restoredFrom: restoredFrom.toString(),
-      });
-    });
+        return { outcome: 'restored', restoredFrom };
+      },
+    );
   }
 
   /**

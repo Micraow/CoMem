@@ -55,6 +55,13 @@ function serializeRecord(record: MemoryRecord): Record<string, unknown> {
     memoryType: record.memoryType,
     status: record.status,
     updatedAt: record.updatedAt,
+    // 有效区间与被顶替的版本（W98）。三个键**始终输出**：`null` 表示「这条记忆没有
+    // 这个值」，省略键则让「旧数据缺字段」与「无有效期」在控制台里变成同一种状态。
+    // 时间串原样带出：它们与 `updatedAt` 同为 frontmatter 里的 ISO 8601 UTC 形态，
+    // 不在序列化层换一种格式。
+    validFrom: record.validFrom,
+    validUntil: record.validUntil,
+    supersedes: record.supersedes,
     fields: record.fields,
     // 溯源（W97）：复核页要能回答「这条经验从哪来」。缺键的旧记忆是空数组。
     sources: record.sources,
@@ -146,8 +153,20 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const uri = parseMemoryUri(request.params.uri);
         const reason = requireRecordReason(body);
         await authorizer.assert(uri, WRITE, context.principals);
-        await memory.reject(uri, reason);
-        return ok({ uri: uri.toString(), removed: true, reason });
+        // 拒绝有两种终态（§11.11）：把被顶替的版本写回规范 URI，或者删掉文件。
+        // 响应如实说哪一种——恢复时**没有删除任何东西**，不能回 `removed: true`。
+        // `restoredFrom` 只在恢复时出现，值是那份版本文件的 URI。
+        const rejected = await memory.reject(uri, reason);
+        return ok(
+          rejected.outcome === 'restored'
+            ? {
+                uri: uri.toString(),
+                outcome: rejected.outcome,
+                restoredFrom: rejected.restoredFrom.toString(),
+                reason,
+              }
+            : { uri: uri.toString(), outcome: rejected.outcome, reason },
+        );
       });
 
       // 记忆关联边（§11.10）。**只读**：`links` 是派生/关联数据，产生端在写入路径上。

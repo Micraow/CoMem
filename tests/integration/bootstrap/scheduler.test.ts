@@ -209,6 +209,7 @@ function memoryRecord(uri: string, status: MemoryStatus): MemoryRecord {
     sources: [],
     validFrom: null,
     validUntil: null,
+    supersedes: null,
   };
 }
 
