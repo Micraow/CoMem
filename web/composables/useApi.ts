@@ -280,6 +280,34 @@ export function errorMessageOf(error: unknown): string {
   return '发生了未知错误，请重试。'
 }
 
+/**
+ * 权限不足（403）判定。
+ *
+ * 服务端把 `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`），两个条件都算。
+ * 取文案（`forbiddenMessageOf`）与取状态（概览页、会话页、用户与组页在 403 时显示
+ * 「需要管理员权限」的空态，而不是把原文放进错误条）共用这一个判定：同一个事实在
+ * 全仓只判断一次，改判定条件不用逐页去找。
+ */
+export function isForbidden(caught: unknown): boolean {
+  return (
+    caught instanceof ApiClientError &&
+    (caught.statusCode === 403 || caught.code === 'PERMISSION_DENIED')
+  )
+}
+
+/**
+ * 权限不足（403）换成调用方给的那句话，其它失败仍显示服务端消息。
+ *
+ * 403 的服务端原文是「没有权限：<uri> 需要 write（3）级别。」——动作名与级别数字
+ * 都是内部术语（§11），进界面只会让人去搜文档。判定在 `isForbidden` 里，句子由
+ * 调用方按页面语义给（「复核」与「查看」不是同一件事）。
+ *
+ * 其它失败照旧显示服务端消息：那段是排查用的诊断信息，不是给用户的操作指引。
+ */
+export function forbiddenMessageOf(caught: unknown, message: string): string {
+  return isForbidden(caught) ? message : errorMessageOf(caught)
+}
+
 // ── 线上响应形状 ─────────────────────────────────────────────────────────
 // 与服务端序列化后的字段一一对应（src/api/http/routes/*.ts）。只声明控制台
 // 用到的字段；多声明一份没读过的字段，等于给「服务端改字段」制造静默兼容。
@@ -369,25 +397,78 @@ export interface AclPayload {
   readonly effective: Readonly<Record<string, readonly (1 | 3 | 7)[]>>
 }
 
-/** `GET /tasks` 的任务行。 */
+/**
+ * `GET /tasks` 的任务行。
+ *
+ * 概览页与「会话与任务」页各读一部分字段：概览用 `updatedAt`，任务表还要
+ * `createdAt` / `leaseUntil` / `error`。响应里还有 `payload` / `stepsDone`，
+ * 控制台不读，不声明（`src/api/http/routes/tasks.ts` 的 `TaskRecord` 是完整形状）。
+ */
 export interface TaskPayload {
   readonly id: string
   readonly type: string
   readonly status: string
   readonly attempts: number
-  readonly updatedAt: string
+  readonly leaseUntil: string | null
   readonly error: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/**
+ * `GET /memories/pending` 的待复核记录。
+ *
+ * 与 `src/api/http/routes/memories.ts` 的 `serializeRecord` 一一对应：`fields` 是
+ * 记忆字段（正文在 `content` 键下），`sources` 是这条记忆由哪几次归档产生。
+ * 复核页的列表与差异视图共用这一份，不在组件里各写一遍。
+ *
+ * `validFrom` / `validUntil` / `supersedes` 在响应里**始终存在**，`null` 表示没有
+ * 这个值（旧数据缺字段与「没有有效期」在界面上是同一种状态，不留占位）。
+ * 两个时间串与 `updatedAt` 同形（ISO 8601 UTC 毫秒），展示时才换成本地时区。
+ */
+export interface PendingMemoryPayload {
+  readonly uri: string
+  readonly memoryType: string
+  readonly status: string
+  readonly updatedAt: string
+  /** 这条版本从何时开始生效；`null` 表示没有记录起始时刻。 */
+  readonly validFrom: string | null
+  /** 有效期截止；规范记忆常态是 `null`。 */
+  readonly validUntil: string | null
+  /** 覆盖写产生的上一版本快照（`.history/` 下）；`null` 表示它没顶替任何东西。 */
+  readonly supersedes: string | null
+  readonly fields: Readonly<Record<string, unknown>>
+  readonly sources: readonly string[]
 }
 
 /** `GET /memories/pending`。 */
-export interface PendingMemoriesPayload {
+export interface PendingListPayload {
   readonly scope: string
-  readonly memories: readonly {
-    readonly uri: string
-    readonly memoryType: string
-    readonly status: string
-    readonly updatedAt: string
-  }[]
+  readonly memories: readonly PendingMemoryPayload[]
+}
+
+/**
+ * `GET /memories/{uri}/links` 的一条关联边。
+ *
+ * `linkType` 是开放字符串（`src/domain/memory-link.ts`），界面按已知值翻译、
+ * 未知值显示原值。`description` / `matchText` 空串表示没有；`weight` 是关联强度，
+ * 不展示。无权限的边由后端整条滤掉（`src/api/http/routes/memories.ts`），
+ * 前端拿到的每一条都指向可读节点。
+ */
+export interface MemoryLinkPayload {
+  readonly from: string
+  readonly to: string
+  readonly linkType: string
+  readonly weight: number
+  readonly matchText: string
+  readonly description: string
+}
+
+/** `GET /memories/{uri}/links?direction=links|backlinks`。 */
+export interface MemoryLinksPayload {
+  readonly uri: string
+  readonly direction: 'links' | 'backlinks'
+  readonly links: readonly MemoryLinkPayload[]
 }
 
 /** `GET /mcp/tools` 的一个工具。说明文本来自服务端注册表，界面不重写。 */

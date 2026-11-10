@@ -18,7 +18,7 @@
  */
 import { FileText, RefreshCw } from 'lucide-vue-next'
 
-import { errorMessageOf, useApi } from '~/composables/useApi'
+import { errorMessageOf, forbiddenMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import type {
   PromptDetailPayload,
@@ -129,6 +129,12 @@ function select(id: string): void {
   void loadDetail(id)
 }
 
+/**
+ * 改提示词只给系统管理员（`auth.adminUserIds`，普通用户 403）。403 的服务端原文
+ * 里写着配置项名，进界面只会让用户去搜文档（§11）；这里与用户与组页一致，只说
+ * 「需要管理员权限」。判定在 `forbiddenMessageOf` 里，与权限页、复核页同一份。
+ * 其它失败仍显示服务端消息——那是排查用的诊断信息。
+ */
 async function save(body: string): Promise<void> {
   const id = selectedId.value
   if (id === null || busy.value) {
@@ -141,7 +147,7 @@ async function save(body: string): Promise<void> {
     await refreshList()
     toast.show('success', '已保存')
   } catch (caught) {
-    toast.show('error', errorMessageOf(caught))
+    toast.show('error', forbiddenMessageOf(caught, '需要管理员权限'))
   } finally {
     busy.value = false
   }
@@ -159,7 +165,7 @@ async function reset(): Promise<void> {
     await refreshList()
     toast.show('success', '已恢复默认')
   } catch (caught) {
-    toast.show('error', errorMessageOf(caught))
+    toast.show('error', forbiddenMessageOf(caught, '需要管理员权限'))
   } finally {
     busy.value = false
   }
@@ -179,7 +185,7 @@ async function preview(): Promise<void> {
     previewText.value = payload.text
   } catch (caught) {
     previewText.value = null
-    toast.show('error', errorMessageOf(caught))
+    toast.show('error', forbiddenMessageOf(caught, '需要管理员权限'))
   } finally {
     previewLoading.value = false
   }

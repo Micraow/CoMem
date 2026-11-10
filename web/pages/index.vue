@@ -23,12 +23,13 @@
 import { AlertTriangle, CheckCircle2, RefreshCw, ShieldAlert } from 'lucide-vue-next'
 
 import {
-  ApiClientError,
   errorMessageOf,
+  isForbidden,
   useApi,
   type HealthPayload,
   type TaskPayload,
 } from '~/composables/useApi'
+import { taskStatusLabelOf, taskTypeLabelOf } from '~/utils/taskLabels'
 
 useHead({ title: '概览 · CoMem 控制台' })
 
@@ -47,23 +48,10 @@ const tasksError = ref<string | null>(null)
 /** 任务列表要系统管理员；这个状态与「取失败了」分开表达。 */
 const tasksForbidden = ref(false)
 
-const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
-  archive: '归档',
-  extract: '抽取',
-  merge: '合并',
-  summary: '摘要',
-  index: '索引',
-}
-
 /**
- * `/tasks` 只返回可认领的任务（`pending` 或租约过期的 `running`），
- * `done` / `failed` 不会出现在这里，因此不声明这两个状态的文案。
+ * 状态的文案在 `taskLabels.ts`（与任务表共用一份）。这里只留徽章的档位，那是这一页
+ * 的外观选择，不是标签。
  */
-const TASK_STATUS_LABEL: Readonly<Record<string, string>> = {
-  pending: '排队中',
-  running: '运行中',
-}
-
 type BadgeVariant = 'blue' | 'green' | 'red' | 'orange' | 'purple' | 'teal' | 'gray' | 'outline'
 
 const TASK_STATUS_VARIANT: Readonly<Record<string, BadgeVariant>> = {
@@ -137,8 +125,9 @@ async function loadTasks(): Promise<void> {
   } catch (caught) {
     tasks.value = null
     // `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`）。这不是故障，是
-    // 「当前账号不是系统管理员」，重试不会改变结果，所以不显示成错误。
-    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+    // 「当前账号不是系统管理员」，重试不会改变结果，所以不显示成错误。判定与取文案
+    // 走同一个 `isForbidden`，403 只说一次。
+    if (isForbidden(caught)) {
       tasksForbidden.value = true
     } else {
       tasksError.value = errorMessageOf(caught)
@@ -232,10 +221,10 @@ onMounted(load)
           <tbody>
             <tr v-for="task in tasks" :key="task.id">
               <td class="mono strong">{{ task.id }}</td>
-              <td>{{ TASK_TYPE_LABEL[task.type] ?? task.type }}</td>
+              <td>{{ taskTypeLabelOf(task.type) }}</td>
               <td>
                 <UiBadge :variant="TASK_STATUS_VARIANT[task.status] ?? 'gray'">
-                  {{ TASK_STATUS_LABEL[task.status] ?? task.status }}
+                  {{ taskStatusLabelOf(task.status) }}
                 </UiBadge>
               </td>
               <td class="num">{{ task.attempts }}</td>

@@ -12,7 +12,7 @@
  * 拒绝必须填原因：服务端 `POST /memories/:uri/reject` 收 `reason` 且要求非空。
  * 服务端目前只把原因写进日志，不落盘——界面上如实说明，不假装它被保存了。
  */
-import { Check, GitCompare, X } from 'lucide-vue-next'
+import { Check, GitCompare, History, X } from 'lucide-vue-next'
 
 import type { PendingMemoryPayload } from './ReviewList.vue'
 
@@ -122,6 +122,57 @@ const removedCount = computed(() => rows.value.filter((row) => row.kind === 'rem
 
 const hasDifference = computed(() => addedCount.value > 0 || removedCount.value > 0)
 
+/**
+ * 本地时区的绝对时刻，格式与概览页的任务表一致（月/日 时:分）。
+ *
+ * 有效期是「截止到哪一刻」，相对时间（「3 天后」）会随打开页面的时刻变化，复核者
+ * 需要的是一个可以直接和记忆内容里的日期对比的值；服务端给的是 UTC 串，这里只做
+ * 本地化，不改时刻。
+ */
+function momentOf(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) {
+    return iso
+  }
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/**
+ * 有效期一行，三个来源值都为 null 时整行不渲染。
+ *
+ * `validFrom` 与 `updatedAt` 相同表示这就是最近一次写入产生的版本，「自 X 起生效」
+ * 不携带额外信息，省掉。两个时间串都由同一个序列化函数产出（ISO 8601 UTC 毫秒），
+ * 同形态下直接比串即可。
+ *
+ * 放在详情头部而不是左侧队列行：队列行的 `rrow__meta` 已经有「相对更新时间 · 待复核」，
+ * 再塞两个时间会变成三个时间挤在一行，读不出哪个是哪个。
+ */
+const validityText = computed<string | null>(() => {
+  const memory = props.memory
+  if (memory === null) {
+    return null
+  }
+
+  const parts: string[] = []
+  if (memory.validFrom !== null && memory.validFrom !== memory.updatedAt) {
+    parts.push(`自 ${momentOf(memory.validFrom)} 起生效`)
+  }
+  if (memory.validUntil !== null) {
+    parts.push(`有效期截止 ${momentOf(memory.validUntil)}`)
+  }
+  return parts.length === 0 ? null : parts.join('，')
+})
+
+/** 这条记忆顶替了上一版本：通过就是替换，拒绝才是回退。 */
+const replacesPrevious = computed(
+  () => props.memory !== null && props.memory.supersedes !== null,
+)
+
 function openReject(): void {
   rejectReason.value = ''
   rejectOpen.value = true
@@ -159,12 +210,18 @@ function nameOf(uri: string): string {
             <div class="doc-head__main">
               <h1 class="doc-title">{{ nameOf(props.memory.uri) }}</h1>
               <div class="uri">{{ props.memory.uri }}</div>
+              <div v-if="validityText !== null" class="doc-meta">{{ validityText }}</div>
             </div>
             <div class="rowflex">
               <UiBadge variant="orange">待复核</UiBadge>
               <UiBadge variant="gray">{{ props.memory.memoryType }}</UiBadge>
             </div>
           </header>
+
+          <div v-if="replacesPrevious" class="callout callout--warn">
+            <History :size="15" :stroke-width="1.4" />
+            <div>通过后会替换掉上一版本，拒绝则恢复到覆盖前的值。</div>
+          </div>
 
           <div v-if="props.baselineError !== null" class="callout callout--warn">
             <GitCompare :size="15" :stroke-width="1.4" />
@@ -228,7 +285,7 @@ function nameOf(uri: string): string {
       </div>
 
       <div class="review__foot">
-        <span class="caption">通过后进入检索；拒绝会删除这条记录。</span>
+        <span class="caption">通过后进入检索；拒绝会回到上一次的值，没有可回退的版本时才删除。</span>
         <span class="spacer" />
         <UiButton variant="secondary" :disabled="props.busy" @click="openReject">拒绝</UiButton>
         <UiButton variant="primary" :disabled="props.busy" @click="emit('approve')">通过</UiButton>
@@ -238,7 +295,7 @@ function nameOf(uri: string): string {
     <UiDialog v-model="rejectOpen" title="拒绝这条记忆">
       <div class="stack-16">
         <p class="body-sm muted">
-          拒绝会删除这条待复核记录。原因会记入服务端日志，不会保存在记忆文件里。
+          拒绝会把这条记忆恢复到上一次被覆盖前的值，没有可回退的版本时才删除。原因会记入服务端日志，不会保存在记忆文件里。
         </p>
         <UiTextarea v-model="rejectReason" aria-label="拒绝原因" :rows="3" />
         <div class="rowflex">
@@ -255,6 +312,12 @@ function nameOf(uri: string): string {
 </template>
 
 <style scoped>
+.doc-meta {
+  font-size: 13px;
+  color: var(--label-3);
+  font-variant-numeric: tabular-nums;
+}
+
 .sec-head {
   display: flex;
   align-items: baseline;

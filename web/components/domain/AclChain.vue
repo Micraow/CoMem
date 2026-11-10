@@ -4,8 +4,9 @@ import type { AclPayload } from '~/composables/useApi'
 /**
  * 推导链的一级：从根到当前节点的某一个目录。
  *
- * `snapshot` 为 null 表示这一级读不到 ACL（权限不足或服务端拒绝）；`error` 带
- * 服务端给的中文原因。链上有洞时不能假装「没有直接授权」——那会让人以为这一级
+ * `snapshot` 为 null 表示这一级读不到 ACL（权限不足或服务端拒绝）；`error` 带可
+ * 展示的原因——403 在页面层已归一成「你没有权限查看这个节点」，服务端的动作名与
+ * 级别数字不进界面。链上有洞时不能假装「没有直接授权」——那会让人以为这一级
  * 真的没有授权。
  */
 export interface AclChainLevel {

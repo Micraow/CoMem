@@ -19,8 +19,8 @@
 import { AlertTriangle, ShieldX } from 'lucide-vue-next'
 
 import {
-  ApiClientError,
   errorMessageOf,
+  forbiddenMessageOf,
   useApi,
   type AclPayload,
   type FsStatPayload,
@@ -102,16 +102,6 @@ function chainUrisOf(uri: string): readonly string[] {
   return uris
 }
 
-function permissionMessageOf(caught: unknown): string {
-  if (
-    caught instanceof ApiClientError &&
-    (caught.code === 'PERMISSION_DENIED' || caught.statusCode === 403)
-  ) {
-    return '你没有权限查看这个节点'
-  }
-  return errorMessageOf(caught)
-}
-
 async function loadChain(uri: string): Promise<void> {
   const chain: AclChainLevel[] = []
   let selected: AclPayload | null = null
@@ -124,9 +114,12 @@ async function loadChain(uri: string): Promise<void> {
         selected = payload
       }
     } catch (caught) {
-      chain.push({ uri: chainUri, snapshot: null, error: errorMessageOf(caught) })
+      // 推导链的每一级各自求权：403 的原文带服务端动作名与级别数字（`read（1）`），
+      // 不进界面（§11）。判定在 `forbiddenMessageOf` 里，与编辑器顶部的错误同一句。
+      const message = forbiddenMessageOf(caught, '你没有权限查看这个节点')
+      chain.push({ uri: chainUri, snapshot: null, error: message })
       if (chainUri === uri) {
-        error.value = permissionMessageOf(caught)
+        error.value = message
       }
     }
   }
@@ -163,7 +156,7 @@ async function selectNode(uri: string): Promise<void> {
     const target = payload.stat.kind === 'directory' ? uri : parentOf(uri)
     await loadChain(target)
   } catch (caught) {
-    error.value = permissionMessageOf(caught)
+    error.value = forbiddenMessageOf(caught, '你没有权限查看这个节点')
   } finally {
     loading.value = false
   }

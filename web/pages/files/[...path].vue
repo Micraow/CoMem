@@ -31,10 +31,13 @@ import {
   type ContentReadPayload,
   type FsStatPayload,
   type HealthPayload,
+  type MemoryLinkPayload,
+  type MemoryLinksPayload,
   type SummaryLayerPayload,
   type TreeEntryPayload,
 } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
+import { isMemoryUri, linkRowsOf, type LinkRow } from '~/utils/memoryLinks'
 
 useHead({ title: '文件树 · CoMem 控制台' })
 
@@ -88,6 +91,16 @@ const aclError = ref<string | null>(null)
 /** 权限读自哪个目录：文件本身不能设 ACL（§12.1），读父目录。 */
 const aclScope = ref<string | null>(null)
 
+/**
+ * 关联边（仅 `memories/` 下的节点）。
+ *
+ * 两个方向分开存、共用一条错误：取反向边失败时正向边仍然要显示，但失败本身要
+ * 看得出来——静默空区块会让人把「读不到」当成「没有关联」。
+ */
+const memoryLinks = ref<readonly MemoryLinkPayload[]>([])
+const memoryBacklinks = ref<readonly MemoryLinkPayload[]>([])
+const linksError = ref<string | null>(null)
+
 /** 文件的有效权限来自父目录；等于当前节点时不显示「继承自」。 */
 const aclInheritedFrom = computed(() =>
   aclScope.value !== null && aclScope.value !== selectedUri.value ? aclScope.value : null,
@@ -115,6 +128,17 @@ const visibleLayerTabs = computed(() =>
   isDirectory.value ? layerTabs : layerTabs.filter((tab) => tab.value !== 'l1'),
 )
 
+/**
+ * 只有 `memories/` 下的节点有关联边（判据见 `~/utils/memoryLinks`）：普通文件
+ * 不请求，也不显示一个「不适用」的空区块。
+ */
+const isMemoryNode = computed(() => selectedUri.value !== null && isMemoryUri(selectedUri.value))
+
+const outgoingRows = computed<readonly LinkRow[]>(() => linkRowsOf(memoryLinks.value, 'links'))
+const backlinkRows = computed<readonly LinkRow[]>(() =>
+  linkRowsOf(memoryBacklinks.value, 'backlinks'),
+)
+
 async function loadHealth(): Promise<void> {
   try {
     health.value = await api.get<HealthPayload>('/health')
@@ -131,6 +155,50 @@ async function loadAcl(uri: string): Promise<void> {
   }
 }
 
+/**
+ * 关联边两个方向一起取。
+ *
+ * 与摘要/正文完全独立的失败域：这里失败只置 `linksError`，不碰 `error` /
+ * `abstractFailed` / `layerError`。两个请求各自结算，一条成功一条失败时成功的
+ * 那半仍然显示，同时把失败说出来。
+ */
+async function loadLinks(uri: string): Promise<void> {
+  memoryLinks.value = []
+  memoryBacklinks.value = []
+  linksError.value = null
+
+  if (!isMemoryUri(uri)) {
+    return
+  }
+
+  const path = `/memories/${encodeURIComponent(uri)}/links`
+  const [outgoing, incoming] = await Promise.allSettled([
+    api.get<MemoryLinksPayload>(path, { direction: 'links' }),
+    api.get<MemoryLinksPayload>(path, { direction: 'backlinks' }),
+  ])
+
+  // 切换节点后迟到的响应属于上一个节点，丢弃。
+  if (selectedUri.value !== uri) {
+    return
+  }
+
+  if (outgoing.status === 'fulfilled') {
+    memoryLinks.value = outgoing.value.links
+  }
+  if (incoming.status === 'fulfilled') {
+    memoryBacklinks.value = incoming.value.links
+  }
+  const failure =
+    outgoing.status === 'rejected'
+      ? outgoing
+      : incoming.status === 'rejected'
+        ? incoming
+        : null
+  if (failure !== null) {
+    linksError.value = errorMessageOf(failure.reason)
+  }
+}
+
 async function loadNode(uri: string): Promise<void> {
   loading.value = true
   error.value = null
@@ -144,6 +212,9 @@ async function loadNode(uri: string): Promise<void> {
   acl.value = null
   aclError.value = null
   aclScope.value = null
+  memoryLinks.value = []
+  memoryBacklinks.value = []
+  linksError.value = null
   degraded.value = false
   layer.value = 'l0'
   loadedLayers.value = new Set<Layer>(['l0'])
@@ -166,6 +237,9 @@ async function loadNode(uri: string): Promise<void> {
       statPayload.stat.kind === 'directory' ? uri : uri.slice(0, uri.lastIndexOf('/'))
     aclScope.value = aclUri
     void loadAcl(aclUri)
+
+    // 关联边也是独立请求：失败只影响关联区块。
+    void loadLinks(uri)
 
     // 摘要单独取、单独报错：失败时 `abstractFailed` 置位，`error` 保持 null。
     await loadAbstract(uri)
@@ -407,6 +481,60 @@ onBeforeUnmount(() => {
                     </div>
                   </template>
                 </template>
+
+                <section
+                  v-if="
+                    isMemoryNode &&
+                    (outgoingRows.length > 0 || backlinkRows.length > 0 || linksError !== null)
+                  "
+                  class="links"
+                  aria-label="关联记忆"
+                >
+                  <div class="links__title">关联</div>
+
+                  <div v-if="linksError !== null" class="callout callout--warn">
+                    <AlertTriangle :size="15" :stroke-width="1.4" />
+                    <div>关联没有取到：{{ linksError }}</div>
+                  </div>
+
+                  <section v-if="outgoingRows.length > 0" class="links__group">
+                    <div class="links__group-title">这条记忆指向</div>
+                    <ul class="links__list">
+                      <li
+                        v-for="(row, index) in outgoingRows"
+                        :key="`out-${index}-${row.uri}`"
+                        class="links__item"
+                      >
+                        <div class="links__row">
+                          <span class="links__type">{{ row.label }}</span>
+                          <button type="button" class="links__uri" @click="selectNode(row.uri)">
+                            {{ row.uri }}
+                          </button>
+                        </div>
+                        <p v-if="row.description !== ''" class="caption">{{ row.description }}</p>
+                      </li>
+                    </ul>
+                  </section>
+
+                  <section v-if="backlinkRows.length > 0" class="links__group">
+                    <div class="links__group-title">指向这条记忆</div>
+                    <ul class="links__list">
+                      <li
+                        v-for="(row, index) in backlinkRows"
+                        :key="`in-${index}-${row.uri}`"
+                        class="links__item"
+                      >
+                        <div class="links__row">
+                          <span class="links__type">{{ row.label }}</span>
+                          <button type="button" class="links__uri" @click="selectNode(row.uri)">
+                            {{ row.uri }}
+                          </button>
+                        </div>
+                        <p v-if="row.description !== ''" class="caption">{{ row.description }}</p>
+                      </li>
+                    </ul>
+                  </section>
+                </section>
               </div>
 
               <DomainSummaryPanel
@@ -426,3 +554,83 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 关联边：与正文/摘要并列的一块，失败时只在这一块里说明。 */
+.links {
+  display: grid;
+  gap: 16px;
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 0.5px solid var(--separator);
+}
+
+.links__title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--label-3);
+  text-transform: uppercase;
+}
+
+.links__group {
+  display: grid;
+  gap: 10px;
+}
+
+.links__group-title {
+  font-size: 13px;
+  color: var(--label-3);
+}
+
+.links__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.links__item {
+  display: grid;
+  gap: 3px;
+}
+
+.links__row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.links__type {
+  flex: none;
+  font-size: 13px;
+  color: var(--label-3);
+}
+
+.links__uri {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--label-2);
+  text-align: left;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.links__uri:hover {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
+
+.links__uri:focus-visible {
+  border-radius: var(--r-xs);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+  outline: none;
+}
+</style>

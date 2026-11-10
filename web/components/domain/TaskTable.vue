@@ -26,17 +26,14 @@
  * 其它错误仍然显示服务端消息——那是排查用的诊断信息。
  */
 
-/** `GET /tasks` 的任务行。只声明控制台读到的字段（`payload` / `stepsDone` 不读）。 */
-export interface TaskRowPayload {
-  readonly id: string
-  readonly type: string
-  readonly status: string
-  readonly attempts: number
-  readonly leaseUntil: string | null
-  readonly error: string | null
-  readonly createdAt: string
-  readonly updatedAt: string
-}
+/**
+ * 任务行的形状定义在 `web/composables/useApi.ts`（`TaskPayload`）：概览页与本组件
+ * 读的是同一个 `GET /tasks`，两份声明会漂移。`TaskRowPayload` 保留为别名，因为
+ * 「会话与任务」页从这个组件导入它。
+ */
+import type { TaskPayload } from '~/composables/useApi'
+
+export type TaskRowPayload = TaskPayload
 
 export interface TaskListPayload {
   readonly tasks: readonly TaskRowPayload[]
@@ -111,6 +108,8 @@ export function isLeaseExpired(task: TaskRowPayload, now: number = Date.now()): 
 <script setup lang="ts">
 import { AlertTriangle, RotateCcw, ShieldAlert } from 'lucide-vue-next'
 
+import { taskStatusLabelOf, taskTypeLabelOf } from '~/utils/taskLabels'
+
 const props = withDefaults(
   defineProps<{
     tasks: readonly TaskRowPayload[]
@@ -124,16 +123,7 @@ const props = withDefaults(
   { forbidden: false, highlightId: null },
 )
 
-const TASK_TYPE_LABEL: Readonly<Record<string, string>> = {
-  archive: '归档',
-}
-
-const TASK_STATUS_LABEL: Readonly<Record<string, string>> = {
-  pending: '排队中',
-  running: '运行中',
-}
-
-/** 状态徽章的深浅档位；未知名回落到中性底，不发明第三档。 */
+/** 状态徽章的深浅档位；未知名回落到中性底，不发明第三档。文案在 `taskLabels.ts`。 */
 const STATUS_DEPTH: Readonly<Record<string, string>> = {
   pending: 'pending',
   running: 'running',
@@ -154,14 +144,6 @@ watch(
   },
   { immediate: true },
 )
-
-function typeLabelOf(type: string): string {
-  return TASK_TYPE_LABEL[type] ?? type
-}
-
-function statusLabelOf(status: string): string {
-  return TASK_STATUS_LABEL[status] ?? status
-}
 
 function depthOf(status: string): string {
   return STATUS_DEPTH[status] ?? 'pending'
@@ -226,10 +208,10 @@ function depthOf(status: string): string {
               {{ task.id }}
               <span v-if="task.error !== null" class="task-error" :title="task.error">有错误记录</span>
             </td>
-            <td>{{ typeLabelOf(task.type) }}</td>
+            <td>{{ taskTypeLabelOf(task.type) }}</td>
             <td>
               <span class="depth" :data-depth="depthOf(task.status)">
-                {{ statusLabelOf(task.status) }}
+                {{ taskStatusLabelOf(task.status) }}
               </span>
             </td>
             <td>

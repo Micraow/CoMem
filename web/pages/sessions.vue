@@ -3,7 +3,7 @@
  * 会话与任务（架构文档 §16 的第六页、§10 的提交管线、§10.4 的任务恢复）。
  *
  * 两个 tab 共用一份页面：会话是**输入**（消息攒够后提交），任务是提交后的**后台
- * 工作**（归档 → 抽取 → 合并 → 摘要）。提交成功就把用户送到任务 tab 并高亮新行
+ * 工作**（归档 → 抽取 → 合并 → 摘要 → 经验归纳）。提交成功就把用户送到任务 tab 并高亮新行
  * ——这是「提交之后发生了什么」唯一自然的回答方式，比弹一个 toast 更完整。
  *
  * ## 轮询只在需要时开
@@ -23,7 +23,7 @@ import { useIntervalFn } from '@vueuse/core'
 
 import type { SessionListPayload, SessionSummaryPayload } from '~/components/domain/SessionList.vue'
 import type { TaskListPayload, TaskRowPayload } from '~/components/domain/TaskTable.vue'
-import { ApiClientError, errorMessageOf, useApi } from '~/composables/useApi'
+import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 
 useHead({ title: '会话与任务 · CoMem 控制台' })
 
@@ -86,7 +86,8 @@ async function loadTasks(silent = false): Promise<void> {
   } catch (caught) {
     // `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`）。这不是故障，是
     // 「当前账号不是系统管理员」，服务端消息里的配置项名不进界面（§11）。
-    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+    // 判定与取文案共用 `isForbidden`，与概览页、用户与组页同一份。
+    if (isForbidden(caught)) {
       tasksForbidden.value = true
       tasksError.value = null
       tasks.value = []

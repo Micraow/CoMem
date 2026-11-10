@@ -1,24 +1,13 @@
 <script lang="ts">
 /**
- * 待复核记忆的线上形状（`GET /memories/pending`）。
+ * 待复核记忆的线上形状定义在 `web/composables/useApi.ts`（线上响应的单一出口）。
  *
- * 服务端 `serializeRecord` 多返回一个 `fields`：拒绝原因之外，复核页真正要看的是
- * `fields.content`（待生效的正文）。类型放在页面组件里而不是公共客户端文件，
- * 因为 Wave 8b 只新增页面与页面组件。
+ * 这里只做转出：差异视图（`MemoryDiff.vue`）从本组件导入这两个类型，保持那条
+ * 导入不变，避免同一份响应形状出现第二份声明。
  */
-export interface PendingMemoryPayload {
-  readonly uri: string
-  readonly memoryType: string
-  readonly status: string
-  readonly updatedAt: string
-  /** 记忆字段；正文在 `content` 键下。 */
-  readonly fields: Readonly<Record<string, unknown>>
-}
+import type { PendingListPayload, PendingMemoryPayload } from '~/composables/useApi'
 
-export interface PendingListPayload {
-  readonly scope: string
-  readonly memories: readonly PendingMemoryPayload[]
-}
+export type { PendingListPayload, PendingMemoryPayload }
 </script>
 
 <script setup lang="ts">
@@ -59,6 +48,11 @@ function nameOf(uri: string): string {
   const trimmed = uri.endsWith('/') ? uri.slice(0, -1) : uri
   const index = trimmed.lastIndexOf('/')
   return index < 0 ? trimmed : trimmed.slice(index + 1)
+}
+
+/** 来源是归档 URI：列表里只留末段目录名，完整 URI 放在 `title` 里。 */
+function sourceNamesOf(sources: readonly string[]): string {
+  return sources.map(nameOf).join('、')
 }
 
 function relativeTime(value: string): string {
@@ -173,6 +167,13 @@ const hasChecked = computed(() => checked.value.length > 0)
               <UiBadge :variant="typeVariantOf(memory.memoryType)">{{ memory.memoryType }}</UiBadge>
               <span class="rrow__name">{{ nameOf(memory.uri) }}</span>
             </span>
+            <span
+              v-if="memory.sources.length > 0"
+              class="rrow__sources"
+              :title="memory.sources.join('\n')"
+            >
+              来源 {{ sourceNamesOf(memory.sources) }}
+            </span>
             <span class="rrow__meta">
               <span>{{ relativeTime(memory.updatedAt) }}</span>
               <span class="rrow__dot" aria-hidden="true">·</span>
@@ -274,6 +275,15 @@ const hasChecked = computed(() => checked.value.length > 0)
   font-size: 13px;
   font-weight: 590;
   color: var(--label);
+}
+
+.rrow__sources {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--label-3);
 }
 
 .rrow__meta {

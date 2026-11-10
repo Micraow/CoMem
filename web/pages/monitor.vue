@@ -269,7 +269,7 @@ const hookEvents = computed<readonly HookEventBreakdown[]>(() => hookBreakdownOf
 /**
  * 后台处理耗时（毫秒）。**取最近一次最慢的后台阶段。**
  *
- * 服务端的 `#asyncPhases` 按阶段（归档 / 抽取 / 合并 / 摘要）记录「最近一次」的
+ * 服务端的 `#asyncPhases` 按阶段（归档 / 抽取 / 合并 / 摘要 / 经验归纳）记录「最近一次」的
  * 耗时，`renderMetrics` 以 `comem_hook_async_seconds{phase="..."}` 输出。这些值来自
  * 各自的阶段，不属于任何一个 hook 事件；其中一个阶段可能由不同事件触发，逐事件
  * 展示会读出「每个事件各自的后台耗时」。这里取所有阶段样本里的最大值，含义是

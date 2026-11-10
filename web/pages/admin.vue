@@ -29,7 +29,7 @@
  */
 import { AlertTriangle, Copy, Plus, ShieldAlert } from 'lucide-vue-next'
 
-import { ApiClientError, errorMessageOf, useApi } from '~/composables/useApi'
+import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
 import type { UserRowPayload } from '~/components/domain/UserTable.vue'
@@ -204,7 +204,7 @@ async function loadUsers(): Promise<void> {
   } catch (caught) {
     users.value = []
     usersTotal.value = 0
-    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+    if (isForbidden(caught)) {
       forbidden.value = true
     } else {
       usersError.value = errorMessageOf(caught)
@@ -228,7 +228,7 @@ async function loadGroups(): Promise<void> {
   } catch (caught) {
     groups.value = []
     groupsTotal.value = 0
-    if (caught instanceof ApiClientError && caught.statusCode === 403) {
+    if (isForbidden(caught)) {
       forbidden.value = true
     } else {
       groupsError.value = errorMessageOf(caught)
