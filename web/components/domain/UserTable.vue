@@ -8,13 +8,15 @@
  * 删除按钮的确认文案由页面负责：它需要同时知道用户的授权节点数，而那个数字是
  * 列表响应的一部分（`permissionCount`），表格只负责把动作抛上去。
  */
+import type { UserStatus } from '~/utils/userLabels'
 
 /** `GET /admin/users` 的行。`permissionCount` 是删除确认要用的后果说明。 */
 export interface UserRowPayload {
   readonly id: string
   readonly displayName: string
   readonly email: string | null
-  readonly status: 'active' | 'disabled'
+  /** 取值与领域层一致（`utils/userLabels.ts` 的 `UserStatus`）。 */
+  readonly status: UserStatus
   readonly createdAt: string
   readonly updatedAt: string
   readonly permissionCount: number
@@ -39,6 +41,8 @@ export function formatUserTime(iso: string): string {
 
 <script setup lang="ts">
 import { Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
+
+import { userStatusLabel } from '~/utils/userLabels'
 
 const props = defineProps<{
   users: readonly UserRowPayload[]
@@ -99,7 +103,7 @@ const canNext = computed(() => props.offset + props.limit < props.total)
             </td>
             <td>
               <UiBadge :variant="user.status === 'active' ? 'green' : 'gray'">
-                {{ user.status === 'active' ? '启用' : '已禁用' }}
+                {{ userStatusLabel(user.status) }}
               </UiBadge>
             </td>
             <td>

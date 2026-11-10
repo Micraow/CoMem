@@ -37,6 +37,7 @@ import {
   type TreeEntryPayload,
 } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
+import { fsEntryDisplayName, fsEntryKindLabel } from '~/utils/fsLabels'
 import {
   LEVEL_OF_TAB,
   LEVEL_TABS,
@@ -460,9 +461,9 @@ onBeforeUnmount(() => {
                       <tbody>
                         <tr v-for="child in children" :key="child.uri">
                           <td class="mono strong">
-                            {{ child.kind === 'directory' ? `${child.name}/` : child.name }}
+                            {{ fsEntryDisplayName(child.kind, child.name) }}
                           </td>
-                          <td>{{ child.kind === 'directory' ? '目录' : '文档' }}</td>
+                          <td>{{ fsEntryKindLabel(child.kind) }}</td>
                           <td class="num mono">
                             {{ child.kind === 'directory' ? child.size : formatBytes(child.size) }}
                           </td>

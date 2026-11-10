@@ -19,6 +19,9 @@
  */
 
 import type { AclEffect, AclLevel, AclMode } from '~/utils/aclLabels'
+import type { FsEntryKind } from '~/utils/fsLabels'
+import type { HealthStatus } from '~/utils/healthLabels'
+import type { NodeStatus } from '~/utils/nodeStatus'
 import type { ClaimableTaskStatus, TaskType } from '~/utils/taskLabels'
 import type { McpToolKind } from '~/utils/toolLabels'
 import type { Ref } from 'vue'
@@ -315,11 +318,17 @@ export function forbiddenMessageOf(caught: unknown, message: string): string {
 // 与服务端序列化后的字段一一对应（src/api/http/routes/*.ts）。只声明控制台
 // 用到的字段；多声明一份没读过的字段，等于给「服务端改字段」制造静默兼容。
 
-/** `GET /fs/tree` 的条目。 */
+/**
+ * `GET /fs/tree` 的条目。
+ *
+ * `kind` 用 `utils/fsLabels.ts` 派生的类型：服务端从 `fs.stat()` 推出来的只是
+ * `'file' | 'directory'`（`src/adapters/fs/content-store.ts`），`routes/fs.ts` 原样
+ * 带出。写成字面量联合也能编译，但界面那三处标签就会各写一份内联三元。
+ */
 export interface TreeEntryPayload {
   readonly uri: string
   readonly name: string
-  readonly kind: 'file' | 'directory'
+  readonly kind: FsEntryKind
   readonly size: number
 }
 
@@ -339,7 +348,7 @@ export interface FsListPayload {
 export interface FsStatPayload {
   readonly uri: string
   readonly stat: {
-    readonly kind: 'file' | 'directory'
+    readonly kind: FsEntryKind
     readonly size: number
     readonly updatedAt: string
   } | null
@@ -347,7 +356,11 @@ export interface FsStatPayload {
 
 /** `GET /health`（架构文档 §17.9）。 */
 export interface HealthPayload {
-  readonly status: 'ok' | 'degraded'
+  /**
+   * `utils/healthLabels.ts` 派生的 `HealthStatus`：服务端只有 `ok` / `degraded`
+   * 两档（`src/api/health-status.ts` 的 `healthStatus()` 只有两个返回值）。
+   */
+  readonly status: HealthStatus
   /** 服务图绑定的主体；控制台的身份引导也读它（`consoleIdentity.ts`）。 */
   readonly subject: string
   /** 该主体可寻址且可读的根。为空表示没有任何可访问的命名空间。 */
@@ -442,8 +455,17 @@ export interface TaskPayload {
  */
 export interface PendingMemoryPayload {
   readonly uri: string
+  /**
+   * 记忆类型是开放字符串（自定义类型没注册进内置表也要能读出来），界面按已知
+   * 内置类型翻译、未知值显示原值，见 `utils/memoryTypeLabels.ts`。
+   */
   readonly memoryType: string
-  readonly status: string
+  /**
+   * `utils/nodeStatus.ts` 派生的 `NodeStatus`：`serializeRecord()`
+   * （`src/api/http/routes/memories.ts`）原样输出 `record.status`，而它是
+   * `MemoryStatus = NodeStatus` 的三值。
+   */
+  readonly status: NodeStatus
   readonly updatedAt: string
   /** 这条版本从何时开始生效；`null` 表示没有记录起始时刻。 */
   readonly validFrom: string | null

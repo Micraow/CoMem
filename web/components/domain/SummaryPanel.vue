@@ -10,7 +10,8 @@
  */
 import type { AclPayload, FsStatPayload, HealthPayload } from '~/composables/useApi'
 import { formatBytes } from '~/composables/useTree'
-import { ACL_LEVEL_LABEL, type AclLevel } from '~/utils/aclLabels'
+import { ACL_LEVEL_LABEL, ACL_MODE_LABEL, type AclLevel } from '~/utils/aclLabels'
+import { fsEntryKindLabel, fsEntryLevelsLabel } from '~/utils/fsLabels'
 
 const props = withDefaults(
   defineProps<{
@@ -73,7 +74,7 @@ const kindLabel = computed(() => {
   if (props.stat === null) {
     return '未知'
   }
-  return props.stat.kind === 'directory' ? '目录' : '文档'
+  return fsEntryKindLabel(props.stat.kind)
 })
 
 const updatedLabel = computed(() => {
@@ -110,7 +111,7 @@ const updatedLabel = computed(() => {
         <div class="meta-list__row">
           <span class="meta-list__k">层级</span>
           <span class="meta-list__v">
-            {{ stat?.kind === 'directory' ? 'L0 摘要 · L1 概览' : 'L0 摘要' }}
+            {{ stat === null ? 'L0 摘要' : fsEntryLevelsLabel(stat.kind) }}
           </span>
         </div>
       </div>
@@ -147,7 +148,7 @@ const updatedLabel = computed(() => {
       <template v-else-if="props.acl !== null">
         <div class="rowflex" style="gap: 6px">
           <UiBadge :variant="props.acl.mode === 'restricted' ? 'purple' : 'gray'">
-            {{ props.acl.mode === 'restricted' ? '独立授权' : '继承父目录' }}
+            {{ ACL_MODE_LABEL[props.acl.mode] }}
           </UiBadge>
         </div>
         <p v-if="props.aclInheritedFrom !== null" class="caption">

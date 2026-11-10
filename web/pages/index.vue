@@ -29,6 +29,7 @@ import {
   type HealthPayload,
   type TaskPayload,
 } from '~/composables/useApi'
+import { healthStatusLabel } from '~/utils/healthLabels'
 import { taskStatusLabelOf, taskTypeLabelOf } from '~/utils/taskLabels'
 
 useHead({ title: '概览 · CoMem 控制台' })
@@ -150,7 +151,7 @@ onMounted(load)
       <DomainPageHeader title="概览">
         <template #actions>
           <UiBadge v-if="health !== null" :variant="health.status === 'degraded' ? 'orange' : 'green'">
-            {{ health.status === 'degraded' ? '降级运行' : '运行正常' }}
+            {{ healthStatusLabel(health.status) }}
           </UiBadge>
           <UiButton
             variant="secondary"

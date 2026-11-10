@@ -14,6 +14,8 @@
  */
 import { Check, GitCompare, History, X } from 'lucide-vue-next'
 
+import { memoryTypeLabelOf } from '~/utils/memoryTypeLabels'
+
 import type { PendingMemoryPayload } from './ReviewList.vue'
 
 const props = defineProps<{
@@ -214,7 +216,7 @@ function nameOf(uri: string): string {
             </div>
             <div class="rowflex">
               <UiBadge variant="orange">待复核</UiBadge>
-              <UiBadge variant="gray">{{ props.memory.memoryType }}</UiBadge>
+              <UiBadge variant="gray">{{ memoryTypeLabelOf(props.memory.memoryType) }}</UiBadge>
             </div>
           </header>
 

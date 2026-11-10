@@ -23,6 +23,7 @@ import {
 } from 'lucide-vue-next'
 
 import { formatBytes, useTree, type TreeNode } from '~/composables/useTree'
+import { fsEntryDisplayName } from '~/utils/fsLabels'
 
 const props = defineProps<{
   selected: string | null
@@ -192,7 +193,7 @@ watch([() => props.selected, state], () => {
           </span>
 
           <span class="trow__name" :class="{ 'is-dir': node.kind === 'directory' }">
-            {{ node.kind === 'directory' ? `${node.name}/` : node.name }}
+            {{ fsEntryDisplayName(node.kind, node.name) }}
           </span>
 
           <span class="trow__meta">{{ metaOf(node) }}</span>

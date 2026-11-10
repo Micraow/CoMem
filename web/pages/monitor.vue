@@ -244,6 +244,7 @@ import {
   useApi,
   type HealthPayload,
 } from '~/composables/useApi'
+import { healthStatusLabel } from '~/utils/healthLabels'
 
 useHead({ title: '监控 · CoMem 控制台' })
 
@@ -294,9 +295,10 @@ const healthBadge = computed<{ variant: 'green' | 'orange'; label: string } | nu
   if (status === undefined) {
     return null
   }
-  return status === 'degraded'
-    ? { variant: 'orange', label: '降级运行' }
-    : { variant: 'green', label: '运行正常' }
+  return {
+    variant: status === 'degraded' ? 'orange' : 'green',
+    label: healthStatusLabel(status),
+  }
 })
 
 /**

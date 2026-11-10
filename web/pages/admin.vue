@@ -33,11 +33,17 @@ import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
 import type { UserRowPayload } from '~/components/domain/UserTable.vue'
+import {
+  USER_STATUSES,
+  groupMemberRoleLabel,
+  userStatusLabel,
+  type GroupMemberRole,
+  type UserStatus,
+} from '~/utils/userLabels'
 
 useHead({ title: '用户与组 · CoMem 控制台' })
 
 type Tab = 'users' | 'groups'
-type UserStatus = 'active' | 'disabled'
 
 interface UserListPayload {
   readonly users: readonly UserRowPayload[]
@@ -56,7 +62,8 @@ interface GroupListPayload {
 interface GroupMemberPayload {
   readonly groupId: string
   readonly userId: string
-  readonly role: 'owner' | 'member'
+  /** 取值与领域层一致（`utils/userLabels.ts` 的 `GroupMemberRole`）。 */
+  readonly role: GroupMemberRole
   readonly addedAt: string
 }
 
@@ -75,10 +82,11 @@ const TABS = [
   { value: 'groups', label: '组' },
 ] as const
 
-const STATUS_OPTIONS = [
-  { value: 'active', label: '启用' },
-  { value: 'disabled', label: '已禁用' },
-] as const
+/** 状态下拉框的选项：值与文案都来自同一张表，加一档时不会漏掉选项。 */
+const STATUS_OPTIONS = USER_STATUSES.map((status) => ({
+  value: status,
+  label: userStatusLabel(status),
+}))
 
 /** 单页条数。与 API 的默认值一致：控制台一页 100 个用户已经要滚动。 */
 const PAGE_SIZE = 100
@@ -657,7 +665,7 @@ onMounted(() => {
           <tbody>
             <tr v-for="member in members" :key="member.userId">
               <td class="mono strong">{{ member.userId }}</td>
-              <td>{{ member.role === 'owner' ? '所有者' : '成员' }}</td>
+              <td>{{ groupMemberRoleLabel(member.role) }}</td>
               <td class="num">
                 <UiButton
                   variant="plain"
