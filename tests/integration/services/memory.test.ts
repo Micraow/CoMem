@@ -938,7 +938,7 @@ describe('有效区间与版本快照（W98）', () => {
     );
   });
 
-  it('supersedes 指向的版本文件已被清理时，reject 退回删除而不是抛错', async () => {
+  it('supersedes 指向的版本文件已被截断时，reject 退回删除而不是抛错', async () => {
     const uri = Uri.parse(`${SCOPE}/memories/experiences/monorepo-migration.md`);
     await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
       topic: 'monorepo-migration',
@@ -951,7 +951,7 @@ describe('有效区间与版本快照（W98）', () => {
       content: '第二版。',
     });
 
-    // 模拟 TTL / 截断把版本文件物理删掉：指向还在、文件没了。
+    // 模拟截断把版本文件物理删掉：指向还在、文件没了。
     const names = await historyNames('memories/experiences/.history');
     await store.remove(versionUri('experiences', names[0] ?? ''));
 
