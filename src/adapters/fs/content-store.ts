@@ -20,13 +20,13 @@ import type { FileHandle } from 'node:fs/promises';
 import { cp, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, fsErrorCode } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import type { DocumentFrontmatter } from '../../domain/node.js';
 import { stableDigest } from '../../domain/node.js';
 import type { Uri } from '../../domain/uri.js';
 
-import { createFsErrorMapper, fsErrorCode } from './error-map.js';
+import { createFsErrorMapper } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
 import { TEMP_FILE_PREFIX, isArtifactName, isReservedName, toDiskPath } from './path.js';
 

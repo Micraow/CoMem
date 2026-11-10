@@ -30,7 +30,9 @@ import type { NodeWriteObserver } from '../filesystem.js';
 import { embedRecords, type PendingEmbedding } from './embedding.js';
 import { moveNodeDerived, removeNodeDerived } from './events.js';
 import { materializeAncestors, materializePermission } from './permissions.js';
-import { errorMessage, type IndexObserverDeps } from './ports.js';
+import { errorMessage } from '../../domain/errors.js';
+
+import type { IndexObserverDeps } from './ports.js';
 import { markSummaryStale } from './summary.js';
 import { writeNodeIndex } from './write.js';
 

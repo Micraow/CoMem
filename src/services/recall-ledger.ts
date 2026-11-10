@@ -37,6 +37,7 @@
 import { join } from 'node:path';
 
 import { ComemError } from '../domain/errors.js';
+import { isRecord } from '../domain/guards.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextDetail } from '../domain/render.js';
 import type { Uri } from '../domain/uri.js';
@@ -157,10 +158,6 @@ function assertScopeKey(scopeKey: string): string {
  */
 export function scopeKeyOf(uri: Uri): string {
   return assertScopeKey(`${uri.scope}_${uri.rootId}`);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isContextDetail(value: unknown): value is ContextDetail {

@@ -17,7 +17,7 @@ import type { MemoryStack } from './memory.js';
 import type { Models } from './models.js';
 import type { Retrieval } from './retrieval.js';
 import type { CommitRunner } from '../commit-runner.js';
-import { MILLISECONDS_PER_SECOND } from './support.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 
 /** 后台产物。`close()` 要停 `scheduler` 与 `commitRunner`。 */
 export interface Background {

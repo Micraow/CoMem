@@ -22,7 +22,9 @@ import type {
   StagedUpload,
   StagedUploadInfo,
 } from '../../services/resource.js';
-import { fsErrorCode, isRecord, metaPath } from './support.js';
+import { fsErrorCode } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
+import { metaPath } from './support.js';
 
 /** 临时上传的位置（`ResourceStorage` 的端口注释）。 */
 const TEMP_UPLOAD_DIRECTORY = 'tmp';

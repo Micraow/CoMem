@@ -8,13 +8,12 @@
 import { parseDocument } from '../../adapters/fs/frontmatter.js';
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { EmbeddingRepository, EmbeddingRow } from '../../adapters/sqlite/embedding-repository.js';
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, errorMessage } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { stableDigest } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
 import type { EmbeddingService } from '../../services/embedding.js';
 
-import { errorMessage } from './report.js';
 
 /** 一批回填结束时的进度。`remaining` 是还没处理的候选数（不含本批）。 */
 export interface EmbedMissingNodesProgress {

@@ -11,9 +11,9 @@ import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
 import type { ObservabilityDatabase } from './contracts.js';
-import { MILLISECONDS_PER_SECOND } from './format.js';
+import { errorMessage } from '../../domain/errors.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import {
-  errorMessage,
   profileFormatHealth,
   type ProfileBodyReader,
   type ProfileFormatHealth,

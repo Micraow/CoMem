@@ -23,6 +23,7 @@
  * 「目录数」条 UPSERT。
  */
 
+import { errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { Uri } from '../domain/uri.js';
 
@@ -124,8 +125,4 @@ export async function materializeAncestorPermissions(
       }
     }
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

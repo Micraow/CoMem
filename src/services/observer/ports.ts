@@ -5,8 +5,8 @@
  * `Pick<IndexObserverDeps, ...>` 声明自己的端口，而不必 import 类模块——类模块反过来
  * import 这些实现，放在一起会形成类型依赖的环。
  *
- * `errorMessage` 是这一层唯一的共用小工具：失败路径分布在写行、权限物化、摘要排期与
- * 嵌入批次里，每处都要把 `unknown` 变成一行能检索的文本。
+ * 观察者自身没有共用实现：失败路径分布在写行、权限物化、摘要排期与嵌入批次里，
+ * 但错误文本统一取 `domain/errors.ts` 的 `errorMessage`。
  */
 
 import type { ContentStore } from '../../adapters/fs/content-store.js';
@@ -64,8 +64,4 @@ export interface IndexObserverDeps {
    * 仓储只会让每次删除都记一条 `no such table`。
    */
   readonly embeddings?: EmbeddingRepository;
-}
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

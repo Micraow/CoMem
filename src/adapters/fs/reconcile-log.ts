@@ -21,6 +21,7 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+import { fsErrorCode } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import {
   parseReconcileEntry,
@@ -154,12 +155,4 @@ export class ReconcileLog {
     }
     return { entries, corrupt };
   }
-}
-
-function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
 }

@@ -14,14 +14,12 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type { ComemConfig } from '../../../config/index.js';
 import { ComemError } from '../../../domain/errors.js';
+import { MILLISECONDS_PER_SECOND } from '../../../domain/time.js';
 import { Uri } from '../../../domain/uri.js';
 import { asRecord, requiredString, textResult, type McpToolDefinition } from '../registry.js';
 
 /** 10 分钟（§13.2）。 */
 const DOWNLOAD_TTL_MS = 10 * 60 * 1000;
-
-/** 1 秒 = 1000 毫秒；`expires` 以秒为粒度，减少 URL 长度。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /** 进程级签名密钥。见文件头：重启作废是刻意的。 */
 const DOWNLOAD_SECRET = randomBytes(32);

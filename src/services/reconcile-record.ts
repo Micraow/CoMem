@@ -36,6 +36,7 @@
  * `reconcile ⇄ skill` 的循环依赖；拆成独立模块后依赖方向仍然只有「→ domain」。
  */
 
+import { errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
 
@@ -102,8 +103,4 @@ export async function recordPermissionFailure(
   at: string,
 ): Promise<void> {
   await recordReconcileFailure(log, logger, 'permission', uri, error, at);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

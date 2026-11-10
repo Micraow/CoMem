@@ -26,6 +26,7 @@ import type {
 } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -71,9 +72,6 @@ const DEFAULT_MAX_BATCH_SIZE = 128;
  * 120 秒是按「生成长文本」定的，照搬到嵌入上只会让卡住的回填任务占着租约等两分钟。
  */
 const DEFAULT_TIMEOUT_SECONDS = 30;
-
-/** 毫秒与秒的换算。`timeoutSeconds` 的单位是秒，`setTimeout` 的单位是毫秒。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /**
  * openai-compatible 的 SDK 设置要求 `baseURL` 非空字符串。

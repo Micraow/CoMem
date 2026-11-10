@@ -6,10 +6,6 @@
 
 import type { ReindexResult } from './options.js';
 
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function progress(
   scanned: number,
   total: number,

@@ -47,9 +47,12 @@ import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
 import type { ComemConfig } from '../config/index.js';
 import { USER_WILDCARD } from '../domain/acl.js';
-import { ComemError } from '../domain/errors.js';
+import { ComemError, comemErrorMessage } from '../domain/errors.js';
+import { fsErrorCode } from '../domain/errors.js';
+import { isRecord } from '../domain/guards.js';
 import type { IngestHarness } from '../domain/ingest.js';
 import type { Logger } from '../domain/log.js';
+import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 import { Uri } from '../domain/uri.js';
 import { createSources, INGEST_HARNESSES, isIngestHarness } from '../ingest/registry.js';
 import {
@@ -66,9 +69,6 @@ import { loadCommandConfig } from './config.js';
 const META_DIRECTORY = '_meta';
 const DATABASE_FILE = 'comem.sqlite';
 const MEMORY_DIFF_FILE_NAME = 'memory_diff.json';
-
-/** 秒 → 毫秒。`--timeout` 的单位是秒（`--timeout 600` = 10 分钟）。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /**
  * 另一个执行器（服务端调度器）占着任务时的轮询间隔。
@@ -109,22 +109,6 @@ export interface IngestCommandOptions {
 interface MemoryDiffEntry {
   readonly uri: string;
   readonly memoryType: string;
-}
-
-function errorMessage(error: unknown): string {
-  return ComemError.from(error).message;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function fsErrorCode(error: unknown): string | null {
-  if (!isRecord(error) || !('code' in error)) {
-    return null;
-  }
-  const code = error.code;
-  return typeof code === 'string' ? code : null;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -410,7 +394,7 @@ class ExtractionRunnerImpl implements ExtractionRunner {
       if (fsErrorCode(error) !== 'ENOENT') {
         this.#logger.warn('读取 memory_diff.json 失败，报告里的抽取条数可能偏少。', {
           archive: archiveUri.toString(),
-          reason: errorMessage(error),
+          reason: comemErrorMessage(error),
         });
       }
       return [];
@@ -420,7 +404,7 @@ class ExtractionRunnerImpl implements ExtractionRunner {
     } catch (error) {
       this.#logger.warn('memory_diff.json 不是合法 JSON，报告里的抽取条数可能偏少。', {
         archive: archiveUri.toString(),
-        reason: errorMessage(error),
+        reason: comemErrorMessage(error),
       });
       return [];
     }
@@ -668,7 +652,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
       }
     },
     (error: unknown) => {
-      process.stderr.write(`ingest 失败：${errorMessage(error)}\n`);
+      process.stderr.write(`ingest 失败：${comemErrorMessage(error)}\n`);
       process.exitCode = 1;
     },
   );

@@ -30,7 +30,7 @@ import { parse as parseYaml } from 'yaml';
 
 import { ConsoleLogger } from '../adapters/log/console.js';
 import { createContainer } from '../bootstrap/container.js';
-import { ComemError } from '../domain/errors.js';
+import { ComemError, errorMessage } from '../domain/errors.js';
 import type { RetrievalEngine } from '../domain/retrieval.js';
 import { parseDataset } from '../eval/dataset.js';
 import {
@@ -63,10 +63,6 @@ const ENGINES: readonly RetrievalEngine[] = ['fts5', 'vector', 'hybrid'];
 
 function isRetrievalEngine(value: string): value is RetrievalEngine {
   return (ENGINES as readonly string[]).includes(value);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function readFlag(argv: readonly string[], name: string): string | undefined {

@@ -14,7 +14,9 @@ import type { IndexRecord } from '../../domain/retrieval.js';
 import { Uri } from '../../domain/uri.js';
 
 import { materializeAncestors, materializePermission } from './permissions.js';
-import { errorMessage, type IndexObserverDeps } from './ports.js';
+import { errorMessage } from '../../domain/errors.js';
+
+import type { IndexObserverDeps } from './ports.js';
 import { subtreeRecords } from './record.js';
 import { writeMovedRecords } from './write.js';
 

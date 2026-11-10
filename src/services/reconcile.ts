@@ -35,6 +35,7 @@
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { NodeRepository } from '../adapters/sqlite/node-repository.js';
+import { errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { contextTypeOf, stableDigest } from '../domain/node.js';
 import {
@@ -384,8 +385,4 @@ function decodeText(bytes: Uint8Array): string | null {
   } catch {
     return null;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { parseDocument } from '../../adapters/fs/frontmatter.js';
 import { ConsoleLogger } from '../../adapters/log/console.js';
 import { openDatabase, runMigrations } from '../../adapters/sqlite/database.js';
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, errorMessage } from '../../domain/errors.js';
 import { loadCommandConfig } from '../config.js';
 import {
   EMBEDDING_BACKUP_TABLE,
@@ -29,7 +29,7 @@ import { collectDerivedEdges } from './derived.js';
 import type { DerivedEdge } from './edge-key.js';
 import type { ReindexOptions, ReindexResult } from './options.js';
 import { buildRecords } from './records.js';
-import { errorMessage, progress, progressVectors } from './report.js';
+import { progress, progressVectors } from './report.js';
 import { embedMissingNodes } from './vectors.js';
 import { walkDataDir } from './walk.js';
 

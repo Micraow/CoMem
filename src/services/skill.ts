@@ -16,7 +16,7 @@
 import type { ContentStore, StoredStat } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
-import { ComemError } from '../domain/errors.js';
+import { ComemError, errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest, type NodeStatus } from '../domain/node.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
@@ -425,10 +425,6 @@ export class SkillService {
     });
     return candidates.filter((uri) => readable.has(uri.toString()));
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /** 逐段校验技能内路径；同一路径重复出现时后者覆盖前者。 */

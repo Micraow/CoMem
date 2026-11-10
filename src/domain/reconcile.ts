@@ -12,6 +12,8 @@
  * 而不是猜一个空内容写回去：后者会把一次失败变成一条空文件。
  */
 
+import { isRecord } from './guards.js';
+
 /** `_meta/reconcile.log` 的一行。 */
 export interface ReconcileEntry {
   readonly op: string;
@@ -34,10 +36,6 @@ export interface CorruptReconcileLine {
 export interface ReconcileLogSnapshot {
   readonly entries: readonly ReconcileEntry[];
   readonly corrupt: readonly CorruptReconcileLine[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

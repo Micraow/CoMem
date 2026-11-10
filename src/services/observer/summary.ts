@@ -27,7 +27,9 @@
 
 import type { Uri } from '../../domain/uri.js';
 
-import { errorMessage, type IndexObserverDeps } from './ports.js';
+import { errorMessage } from '../../domain/errors.js';
+
+import type { IndexObserverDeps } from './ports.js';
 
 export type SummaryPorts = Pick<IndexObserverDeps, 'summary' | 'logger'>;
 

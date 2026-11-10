@@ -17,12 +17,16 @@ import { requireWriter } from './ports.js';
 import type { MutableReport } from './stats.js';
 import { normalizeTimestamp, parseUri } from './support.js';
 
+/**
+ * `writeCursors` 同时表达写入模式：`null` 是 dry-run（不写会话、不写游标），
+ * 非空是游标仓储，由 `run()` 的 `requireCursors` 保证。
+ */
 export async function ingestSessionAsync(
   ports: IngestPorts,
   source: LogSource,
   ref: SessionRef,
   report: MutableReport,
-  dryRun: boolean,
+  writeCursors: NonNullable<IngestPorts['cursors']> | null,
   batchSize: number,
 ): Promise<string | null> {
   const existing = ports.cursors?.get(source.harness, ref.nativeSessionId) ?? null;
@@ -57,7 +61,7 @@ export async function ingestSessionAsync(
     }
 
     if (result.messages.length > 0) {
-      if (!dryRun) {
+      if (writeCursors !== null) {
         sessionUri = await ensureSession(ports, sessionUri, () => {
           created = true;
         });
@@ -84,24 +88,24 @@ export async function ingestSessionAsync(
         // 游标照常前进：这批消息已经在磁盘上了（要么这次写的，要么上次写的）。
         // 不前进会让下一次重跑再读一遍同一段，虽然去重后不会重复，但白读一遍
         // 整个文件。
-        writeCursor(ports.cursors, source, ref, sessionUri, result.cursor, existing, written);
+        writeCursor(writeCursors, source, ref, sessionUri, result.cursor, existing, written);
       } else {
         written += result.messages.length;
         if (sessionUri === null) {
           created = true;
         }
       }
-    } else if (!dryRun && sessionUri !== null) {
+    } else if (writeCursors !== null && sessionUri !== null) {
       // 只消费到空行 / 坏行：游标也要前进，否则下一次从同一位置开始，永远读不到
       // 后面的内容。
-      writeCursor(ports.cursors, source, ref, sessionUri, result.cursor, existing, written);
+      writeCursor(writeCursors, source, ref, sessionUri, result.cursor, existing, written);
     }
 
     cursor = result.cursor;
 
     // dry-run 只需要回答「这个会话有没有新消息」，不需要把整个文件读完。
     // 真跑时循环到游标不再前进为止。
-    if (dryRun) {
+    if (writeCursors === null) {
       break;
     }
   }
@@ -116,7 +120,7 @@ export async function ingestSessionAsync(
     return null;
   }
 
-  if (!dryRun) {
+  if (writeCursors !== null) {
     if (sessionUri !== null) {
       // 一条会话导入完立刻提交：阶段一只落归档、建任务，记忆要等阶段二。
       const commit = await requireWriter(ports.sessions).commitPhase1(sessionUri);
@@ -196,7 +200,7 @@ async function ensureSession(
 }
 
 function writeCursor(
-  cursors: IngestPorts['cursors'],
+  cursors: NonNullable<IngestPorts['cursors']>,
   source: LogSource,
   ref: SessionRef,
   sessionUri: Uri,
@@ -204,13 +208,6 @@ function writeCursor(
   existing: { readonly messageCount: number } | null,
   written: number,
 ): void {
-  if (cursors === undefined) {
-    throw new ComemError(
-      'INTERNAL',
-      '导入游标仓储未注入，无法在非 dry-run 下前进游标。',
-      { harness: source.harness, nativeSessionId: ref.nativeSessionId },
-    );
-  }
   cursors.upsert({
     harness: source.harness,
     nativeSessionId: ref.nativeSessionId,

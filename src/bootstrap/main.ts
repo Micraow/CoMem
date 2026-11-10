@@ -32,6 +32,7 @@ import {
   hasDocumentsMissingVectors,
 } from '../commands/reindex.js';
 import type { Logger } from '../domain/log.js';
+import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 
 import { assertDataDirWritable, createContainer, type Container } from './container.js';
 
@@ -42,9 +43,6 @@ import { assertDataDirWritable, createContainer, type Container } from './contai
  * 的默认 grace period（K8s 30 秒）之前能结束」。超过它的请求本来就会被客户端放弃。
  */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-
-/** 1 秒 = 1000 毫秒；日志里换算成秒更直观。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /** 优雅退出时要按序关闭的组件。生产传容器里的实例，测试传替身。 */
 export interface ShutdownTargets {

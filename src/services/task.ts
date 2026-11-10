@@ -45,6 +45,7 @@ import { isTerminalStepError } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { shouldRetry, type TaskStatus, type TaskType } from '../domain/task.js';
+import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 
 /** §18 的 `task.leaseSeconds` 默认值：60 秒。 */
 const DEFAULT_LEASE_SECONDS = 60;
@@ -62,7 +63,6 @@ const DEFAULT_HEARTBEAT_SECONDS = 20;
 const DEFAULT_CLAIMABLE_LIMIT = 100;
 
 /** 1 秒 = 1000 毫秒；配置里的三个时长都是秒。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 export interface TaskServiceOptions {
   readonly tasks: TaskRepository;

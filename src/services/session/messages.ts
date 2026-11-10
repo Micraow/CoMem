@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import { ComemError } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 import type { ContentPart, MessageRole, SessionMessage } from '../../domain/session.js';
 import { estimateTokens, renderMessageText } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
@@ -19,10 +20,6 @@ import type { Uri } from '../../domain/uri.js';
  * `("ab", "c")` 与 `("a", "bc")` 拼出同一个摘要。
  */
 const MESSAGE_ID_SEPARATOR = '\u0000';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isMessageRole(value: unknown): value is SessionMessage['role'] {
   return value === 'user' || value === 'assistant' || value === 'system' || value === 'tool';

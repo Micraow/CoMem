@@ -5,6 +5,7 @@
  * 说明不了它是否符合格式契约。唯一出口是 `health()`，没有单独的分析端点。
  */
 
+import { errorMessage } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { validateProfileBody } from '../../domain/profile-format.js';
 import { Uri } from '../../domain/uri.js';
@@ -50,10 +51,6 @@ export interface ProfileBodyReader {
  * `warn`，**不静默截断**。
  */
 const PROFILE_CHECK_LIMIT = 200;
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 export interface ProfileFormatPorts {
   readonly db: ObservabilityDatabase;

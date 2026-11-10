@@ -42,3 +42,19 @@ export function requireWriter(
   }
   return sessions;
 }
+
+/**
+ * 游标仓储的「必须注入」判定。`run()` 在进入来源循环前调用它，失败比等到第一条
+ * 消息落盘后才抛更早；返回非空值，写路径不必在每个调用点重复判空。
+ */
+export function requireCursors(
+  cursors: IngestPorts['cursors'],
+): NonNullable<IngestPorts['cursors']> {
+  if (cursors === undefined) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      '导入需要游标仓储；`dryRun` 之外必须注入 IngestCursorRepository。',
+    );
+  }
+  return cursors;
+}

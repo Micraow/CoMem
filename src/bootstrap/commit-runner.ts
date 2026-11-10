@@ -36,6 +36,7 @@
 import type { TaskRow } from '../adapters/sqlite/task-repository.js';
 import type { ArchiveTaskPayload, CommitStepName } from '../domain/archive.js';
 import type { Logger } from '../domain/log.js';
+import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 import { Uri } from '../domain/uri.js';
 
 import type { CommitPipeline } from '../services/commit/pipeline.js';
@@ -61,8 +62,6 @@ const DEFAULT_CONCURRENCY = 4;
  * 去掉最后两段就是归档所在的**作用域根**——记忆写在它下面，不是写在会话目录下。
  */
 const SESSIONS_DIRECTORY_NAME = 'sessions';
-
-const MILLISECONDS_PER_SECOND = 1000;
 
 export interface CommitRunnerOptions {
   readonly tasks: Pick<TaskService, 'claimable' | 'run'>;

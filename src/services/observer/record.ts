@@ -31,7 +31,9 @@ import {
   parseFrontmatterFields,
   type FrontmatterFields,
 } from './frontmatter.js';
-import { errorMessage, type IndexObserverDeps } from './ports.js';
+import { errorMessage } from '../../domain/errors.js';
+
+import type { IndexObserverDeps } from './ports.js';
 
 /** 文件是可检索的原文（§8.5 的 L2）；目录是它的 L0 摘要（见文件头）。 */
 const DOCUMENT_LEVEL = 'L2';

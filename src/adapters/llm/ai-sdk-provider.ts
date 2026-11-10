@@ -38,6 +38,7 @@ import type {
   LlmUsage,
 } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -65,9 +66,6 @@ export interface AiSdkProviderOptions {
  * 走到这里；兜底成 OpenAI 官方地址，避免把 `undefined` 拼进请求 URL。
  */
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-
-/** 毫秒与秒的换算。`timeoutSeconds` 的单位是秒，`setTimeout` 的单位是毫秒。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /**
  * 契约里的 `finishReason` 只有三个值（`domain/llm.ts`）。

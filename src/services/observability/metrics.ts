@@ -8,7 +8,9 @@
 import type { LlmCallStats } from '../llm.js';
 
 import type { ObservabilityDatabase, RequestLogEntry } from './contracts.js';
-import { escapeLabel, MILLISECONDS_PER_SECOND, metricValue } from './format.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
+
+import { escapeLabel, metricValue } from './format.js';
 import type { HookOverheadState } from './hook-overhead.js';
 import { llmUsageLines } from './llm-usage.js';
 import { countRows, NODE_SELF_ROW } from './queries.js';

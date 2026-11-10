@@ -20,6 +20,7 @@
 
 import type { ComemErrorCode } from '../../domain/errors.js';
 import { ComemError } from '../../domain/errors.js';
+import { fsErrorCode } from '../../domain/errors.js';
 import type { Uri } from '../../domain/uri.js';
 
 /**
@@ -76,15 +77,6 @@ export type AdapterMessageCode = Exclude<ComemErrorCode, keyof typeof SHARED_MES
 export type AdapterMessages = Readonly<Record<AdapterMessageCode, string>>;
 
 export type FsErrorMapper = (error: unknown, uri: Uri) => ComemError;
-
-/** 从 `unknown` 里取 `code`，不用类型断言。 */
-export function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
-}
 
 /**
  * 合并公共 errno 表与适配器的覆盖项，结果按 errno 字符串索引。

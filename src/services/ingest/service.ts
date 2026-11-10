@@ -13,7 +13,7 @@
  * 可变状态，`#ports` 构造后只读。
  */
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, comemErrorMessage } from '../../domain/errors.js';
 
 import { drainExtraction } from './extraction.js';
 import {
@@ -24,11 +24,11 @@ import {
   selectSources,
 } from './options.js';
 import type { IngestPorts } from './ports.js';
-import { requireWriter } from './ports.js';
+import { requireCursors, requireWriter } from './ports.js';
 import { ingestSessionAsync } from './session-ingest.js';
 import type { MutableReport } from './stats.js';
 import { createExtraction, freezeExtraction } from './stats.js';
-import { errorMessage, isBefore, locatorOf } from './support.js';
+import { isBefore, locatorOf } from './support.js';
 import type {
   IngestHarnessReport,
   IngestOptions,
@@ -86,14 +86,11 @@ export class IngestService {
     // 没有可用模型时跳过阶段二，而不是让每个会话各失败一次。阶段一（归档）不依赖
     // 模型，先导进来本身就是价值；但报告必须说明记忆没被抽取。
     const skipReason = extractionRequested ? ports.extractionSkip : undefined;
+    // dry-run 不写游标（可以传只读连接），真跑时在来源循环前失败。
+    let writeCursors: NonNullable<IngestPorts['cursors']> | null = null;
     if (!dryRun) {
       requireWriter(ports.sessions);
-      if (ports.cursors === undefined) {
-        throw new ComemError(
-          'INVALID_ARGUMENT',
-          '导入需要游标仓储；`dryRun` 之外必须注入 IngestCursorRepository。',
-        );
-      }
+      writeCursors = requireCursors(ports.cursors);
       if (
         extractionRequested &&
         skipReason === undefined &&
@@ -143,7 +140,14 @@ export class IngestService {
             continue;
           }
           try {
-            const taskId = await ingestSessionAsync(ports, source, ref, report, dryRun, batchSize);
+            const taskId = await ingestSessionAsync(
+              ports,
+              source,
+              ref,
+              report,
+              writeCursors,
+              batchSize,
+            );
             if (taskId !== null) {
               batchTaskIds.push(taskId);
               if (extraction !== null && batchTaskIds.length >= ports.extractionBatchSize) {
@@ -158,12 +162,12 @@ export class IngestService {
             }
           } catch (error) {
             report.failed += 1;
-            report.errors.push({ locator: ref.locator, message: errorMessage(error) });
+            report.errors.push({ locator: ref.locator, message: comemErrorMessage(error) });
             ports.logger.error('导入会话失败', {
               harness: source.harness,
               locator: ref.locator,
               nativeSessionId: ref.nativeSessionId,
-              reason: errorMessage(error),
+              reason: comemErrorMessage(error),
             });
           }
         }
@@ -173,11 +177,11 @@ export class IngestService {
         report.failed += 1;
         report.errors.push({
           locator: locatorOf(error) ?? `<${source.harness}>`,
-          message: errorMessage(error),
+          message: comemErrorMessage(error),
         });
         ports.logger.error('导入源发现失败', {
           harness: source.harness,
-          reason: errorMessage(error),
+          reason: comemErrorMessage(error),
         });
       }
 

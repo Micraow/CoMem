@@ -29,7 +29,7 @@ import type { Access } from './access.js';
 import type { Foundation } from './foundation.js';
 import type { Models } from './models.js';
 import { InheritingAuthorizer } from './ports.js';
-import { fsErrorCode } from './support.js';
+import { fsErrorCode } from '../../domain/errors.js';
 
 /**
  * 召回账本的文件存储。`write` 必须原子（临时文件 + `rename`）：账本损坏时

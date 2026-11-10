@@ -109,3 +109,33 @@ export class ComemError extends Error {
 export function isRetryable(error: ComemError): boolean {
   return RETRYABLE_CODES.has(error.code);
 }
+
+/**
+ * 日志与报告里的 `error` 字段：`Error` 取 `message`，其它值按字符串。
+ *
+ * 不经过 `ComemError.from`：日志要的是原始失败原因，套上「发生未预期的内部错误」
+ * 只会让每一行都从同一句废话开始。需要收敛成业务错误码的地方用
+ * {@link comemErrorMessage}。
+ */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 把任意抛出物收敛成 `ComemError` 后的 `message`（未知异常带「发生未预期的内部错误」前缀）。
+ *
+ * 导入链路用它而不是 {@link errorMessage}：那里的报告要展示「这条错误算哪个
+ * `ComemErrorCode`」，泄漏原始字符串会让调用方按错的 code 分支处理。
+ */
+export function comemErrorMessage(error: unknown): string {
+  return ComemError.from(error).message;
+}
+
+/** `error.code`，只认字符串形式（`NodeJS.ErrnoException` 的 `code` 在类型上是 `string`）；拿不到返回 `null`。 */
+export function fsErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return null;
+  }
+  const code: unknown = error.code;
+  return typeof code === 'string' ? code : null;
+}

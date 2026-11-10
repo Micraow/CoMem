@@ -37,7 +37,9 @@ import { pathToFileURL } from 'node:url';
 
 import { runReindex } from './reindex/command.js';
 import { parseArgs } from './reindex/options.js';
-import { errorMessage, formatReindexSummary } from './reindex/report.js';
+import { errorMessage } from '../domain/errors.js';
+
+import { formatReindexSummary } from './reindex/report.js';
 
 export type { ReindexOptions, ReindexResult } from './reindex/options.js';
 export type {

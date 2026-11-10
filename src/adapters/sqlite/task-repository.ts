@@ -31,6 +31,7 @@ import {
   type TaskStatus,
   type TaskType,
 } from '../../domain/task.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
@@ -80,9 +81,6 @@ const TASK_COLUMN_NAMES = [
 ] as const;
 
 const TASK_COLUMNS = TASK_COLUMN_NAMES.join(', ');
-
-/** 1 秒 = 1000 毫秒；租约时长按秒配置（§18 的 `task.leaseSeconds`）。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 /**
  * 「租约已过期」：`running` 行的租约时间早于给定时刻。

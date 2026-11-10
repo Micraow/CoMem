@@ -1,15 +1,11 @@
 /**
- * 导入过程中共用的小函数：错误文本、源文件定位、时间戳兜底与游标 URI 解析。
+ * 导入过程中共用的小函数：源文件定位、时间戳兜底与游标 URI 解析。
  *
  * 它们不持有状态，也不碰端口，只把「同一件事在多处各写一遍」收成一份。
  */
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, comemErrorMessage } from '../../domain/errors.js';
 import { Uri } from '../../domain/uri.js';
-
-export function errorMessage(error: unknown): string {
-  return ComemError.from(error).message;
-}
 
 /** 错误里带的源文件路径；发现阶段的失败（如整份 Qwen 导出损坏）要靠它定位。 */
 export function locatorOf(error: unknown): string | null {
@@ -46,7 +42,7 @@ export function parseUri(value: string, locator: string): Uri {
     throw new ComemError('INTERNAL', `游标里的会话 URI 不合法：${locator}`, {
       locator,
       uri: value,
-      reason: errorMessage(error),
+      reason: comemErrorMessage(error),
     });
   }
 }

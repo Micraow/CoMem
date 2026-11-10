@@ -15,8 +15,10 @@
  */
 
 import { ComemError } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 import type { Logger } from '../../domain/log.js';
 import { isFiniteScore, type RerankOptions, type RerankProvider } from '../../domain/rerank.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import {
   mapProviderError,
   type ProviderErrorContext,
@@ -43,9 +45,6 @@ export interface HttpRerankProviderOptions {
   readonly fetchImpl?: typeof fetch;
 }
 
-/** 毫秒与秒的换算。`timeoutSeconds` 的单位是秒，`setTimeout` 的单位是毫秒。 */
-const MILLISECONDS_PER_SECOND = 1000;
-
 /**
  * Cohere 兼容的重排路径（相对 `baseUrl`）。
  *
@@ -71,10 +70,6 @@ const ERROR_MAP_OPTIONS: ProviderErrorMapOptions = {
 /** 保留本地名字：`services/search.ts` 的注释按这个名字指路。 */
 function mapRerankError(error: unknown, context: ProviderErrorContext): ComemError {
   return mapProviderError(error, context, ERROR_MAP_OPTIONS);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

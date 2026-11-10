@@ -13,6 +13,7 @@
  * 于是两个无关文件互相阻塞——正确性没坏，但并发度白丢。用 `Uri.isAncestorOf`。
  */
 
+import { MILLISECONDS_PER_SECOND } from './time.js';
 import { Uri } from './uri.js';
 
 export type LockMode = 'exact' | 'tree';
@@ -47,9 +48,6 @@ export const DEFAULT_LOCK_OPTIONS: LockOptions = Object.freeze({
   leaseSeconds: 30,
   renewSeconds: 10,
 });
-
-/** 毫秒与秒的换算。单独取名，避免 `1000` 散落在判定里。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 function expiresAtMillis(record: LockRecord): number {
   return Date.parse(record.expiresAt);

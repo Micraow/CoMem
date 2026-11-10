@@ -10,6 +10,7 @@ import { join } from 'node:path';
 
 import { ContentStore } from '../../adapters/fs/content-store.js';
 import { ComemError } from '../../domain/errors.js';
+import { fsErrorCode } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
@@ -17,14 +18,6 @@ import { Uri } from '../../domain/uri.js';
 export interface DiskNode {
   readonly uri: Uri;
   readonly kind: 'file' | 'directory';
-}
-
-function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
 }
 
 /** 数据根下的两个 scope 目录（`user` / `group`）。不存在不是错误。 */

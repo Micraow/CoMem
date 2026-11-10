@@ -5,9 +5,6 @@
  * 这三处工具被指标渲染、请求耗时累加与健康度共用，改一处就会同时改变三处的输出。
  */
 
-/** 1 秒 = 1000 毫秒。`durationMs` 换成 Prometheus 的秒。 */
-export const MILLISECONDS_PER_SECOND = 1000;
-
 /** Prometheus 文本里的数值。非有限值（NaN / ±Infinity）写 0，否则抓取会整段失败。 */
 export function metricValue(value: number): string {
   return Number.isFinite(value) ? String(value) : '0';

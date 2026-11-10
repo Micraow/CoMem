@@ -5,12 +5,11 @@
  * 缺失时的抛出点仍在 try 之内，与搬移前一致：一批跑失败不该让整次导入变成异常。
  */
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, comemErrorMessage } from '../../domain/errors.js';
 import type { IngestHarness } from '../../domain/ingest.js';
 
 import type { IngestPorts } from './ports.js';
 import type { MutableExtraction } from './stats.js';
-import { errorMessage } from './support.js';
 import type { ExtractionRunner, IngestExtractionBatch } from './types.js';
 
 export async function drainExtraction(
@@ -38,13 +37,13 @@ export async function drainExtraction(
       memoriesPendingReview: 0,
       durationMs,
       timedOut: false,
-      error: errorMessage(error),
+      error: comemErrorMessage(error),
     });
     ports.logger.error('阶段二执行失败', {
       harness,
       batch: index,
       sessions,
-      reason: errorMessage(error),
+      reason: comemErrorMessage(error),
     });
     return;
   }

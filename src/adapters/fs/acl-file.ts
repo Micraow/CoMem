@@ -32,10 +32,12 @@ import { dirname, join } from 'node:path';
 
 import { parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
+import { fsErrorCode } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
-import { createFsErrorMapper, fsErrorCode } from './error-map.js';
+import { createFsErrorMapper } from './error-map.js';
 import { TEMP_FILE_PREFIX, isArtifactName, toDiskPath } from './path.js';
 
 /** 目录几何文件的名字（架构文档 §6.2 规则 6 的保留名之一）。 */
@@ -120,10 +122,6 @@ export const mapFsError = createFsErrorMapper(
     INTERNAL: 'ACL 文件系统操作失败',
   },
 );
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * 磁盘上的级别名（`.acl.json` 的 `level`）。

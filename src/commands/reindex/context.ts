@@ -20,6 +20,7 @@ import { NodeRepository } from '../../adapters/sqlite/node-repository.js';
 import { SqliteFtsIndex } from '../../adapters/sqlite/retrieval-index.js';
 import type { ComemConfig } from '../../config/index.js';
 import { ComemError } from '../../domain/errors.js';
+import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import type { Logger } from '../../domain/log.js';
 import { EmbeddingService } from '../../services/embedding.js';
 import { MemoryLinkService } from '../../services/memory-link.js';
@@ -32,9 +33,6 @@ import { MemoryLinkService } from '../../services/memory-link.js';
  * `table "node_embedding_info" already exists`。复制成普通表是唯一能保留旧向量的做法。
  */
 export const EMBEDDING_BACKUP_TABLE = 'node_embedding_backup';
-
-/** 秒 → 毫秒。`providers.embedding.timeoutSeconds` 是秒。 */
-const MILLISECONDS_PER_SECOND = 1000;
 
 export interface EmbeddingBackup {
   readonly model: string;

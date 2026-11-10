@@ -21,7 +21,9 @@ import type { IndexRecord } from '../../domain/retrieval.js';
 import { contextTypeOf } from '../../domain/node.js';
 import type { Uri } from '../../domain/uri.js';
 
-import { errorMessage, type IndexObserverDeps } from './ports.js';
+import { errorMessage } from '../../domain/errors.js';
+
+import type { IndexObserverDeps } from './ports.js';
 import { directoryRecord, documentRecord } from './record.js';
 import { recordIndexRowFailure, recordMovedIndexFailure } from './replay.js';
 

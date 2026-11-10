@@ -37,7 +37,7 @@ import { basename } from 'node:path';
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
-import { ComemError } from '../domain/errors.js';
+import { ComemError, errorMessage } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest } from '../domain/node.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
@@ -660,8 +660,4 @@ function toIndexRecord(
     updatedAt,
     status: 'active',
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

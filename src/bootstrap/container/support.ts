@@ -9,13 +9,11 @@ import { constants as fsConstants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, errorMessage } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 export const META_DIRECTORY = '_meta';
-
-/** 秒 → 毫秒。`providers.embedding.timeoutSeconds` 是秒，`EmbeddingService` 收毫秒。 */
-export const MILLISECONDS_PER_SECOND = 1000;
 
 /**
  * 模板里的占位地址。`api.example.com` 是 IANA 保留域名（RFC 2606），永远不可达。
@@ -26,25 +24,9 @@ export const MILLISECONDS_PER_SECOND = 1000;
  */
 const PLACEHOLDER_LLM_BASE_URL_HOST = 'api.example.com';
 
-export function fsErrorCode(error: unknown): string | null {
-  if (typeof error !== 'object' || error === null || !('code' in error)) {
-    return null;
-  }
-  const code: unknown = error.code;
-  return typeof code === 'string' ? code : null;
-}
-
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** 数据根下 `_meta` 的绝对路径。 */
 export function metaPath(dataDir: string, ...segments: readonly string[]): string {
   return join(dataDir, META_DIRECTORY, ...segments);
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** `MemoryService.prefetch` 传的是 `{scopes, limit}`；身份由装配方补。 */

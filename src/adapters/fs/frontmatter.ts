@@ -17,6 +17,7 @@
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import { ComemError } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 
 /** frontmatter 分隔符：行首的 `---`。 */
 const DELIMITER = '---';
@@ -46,10 +47,6 @@ export interface ParsedDocument {
   readonly data: Readonly<Record<string, unknown>>;
   /** 是否真的存在 frontmatter 块 */
   readonly hasFrontmatter: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

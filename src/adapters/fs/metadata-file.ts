@@ -43,12 +43,14 @@ import type {
 } from '../../domain/archive.js';
 import { isArchivePhaseStatus, isCommitStepName } from '../../domain/archive.js';
 import { ComemError } from '../../domain/errors.js';
+import { fsErrorCode } from '../../domain/errors.js';
+import { isRecord } from '../../domain/guards.js';
 import type { Logger } from '../../domain/log.js';
 import type { SessionMeta } from '../../domain/session.js';
 import { isSessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
-import { createFsErrorMapper, fsErrorCode } from './error-map.js';
+import { createFsErrorMapper } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
 import { TEMP_FILE_PREFIX, toDiskPath } from './path.js';
 
@@ -189,10 +191,6 @@ function corruptMetadata(uri: Uri, reason: string): ComemError {
     uri: uri.toString(),
     reason,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isStringArray(value: unknown): value is readonly string[] {
