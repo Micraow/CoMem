@@ -68,7 +68,7 @@
 import type { ApiKeyRecord, ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
 import type { GroupRepository } from '../adapters/sqlite/group-repository.js';
 import type { UserRepository } from '../adapters/sqlite/user-repository.js';
-import { parsePrincipal, userPrincipal } from '../domain/acl.js';
+import { USER_WILDCARD, parsePrincipal, userPrincipal } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { Group, GroupMember, Identity, User } from '../domain/identity.js';
 import { assertValidGroupId, assertValidUserId, buildIdentity } from '../domain/identity.js';
@@ -566,7 +566,7 @@ export class IdentityService {
     const identity = buildIdentity(userId, this.#groups.listGroupIdsOfUser(userId));
     return {
       subject: userPrincipal(userId),
-      principals: [...identity.principals, 'user:*'],
+      principals: [...identity.principals, USER_WILDCARD],
       apiKeyId,
     };
   }

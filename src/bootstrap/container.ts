@@ -96,7 +96,7 @@ import type { HttpRouteGroup } from '../api/http/server.js';
 import { createHttpRouteGroups } from '../api/http/routes/index.js';
 import type { Identity, IdentityHeaders, IdentityResolver } from '../api/http/middleware.js';
 import { loadConfig, type ComemConfig } from '../config/index.js';
-import { groupPrincipal, parsePrincipal } from '../domain/acl.js';
+import { USER_WILDCARD, groupPrincipal, parsePrincipal } from '../domain/acl.js';
 import { COMMIT_STEP_NAMES, type CommitStepName, type CommitStepSkipReason } from '../domain/archive.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
@@ -973,7 +973,7 @@ async function ensureUserNamespace(userId: string): Promise<void> {
   };
 
   const subjectScope = Uri.parse(`comem://user/${boundPrincipal.id}`);
-  const principals = [subject, ...groups, 'user:*'];
+  const principals = [subject, ...groups, USER_WILDCARD];
 
   const memory = new MemoryService({
     // 配置项必须真的生效：写死的复核列表让 `memory.reviewRequired` 变成假配置。
@@ -1442,7 +1442,7 @@ async function resolveIdentityOf(
 
   return {
     subject,
-    principals: [...new Set([...identity.principals, 'user:*'])],
+    principals: [...new Set([...identity.principals, USER_WILDCARD])],
   };
 }
 

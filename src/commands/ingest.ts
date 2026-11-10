@@ -46,6 +46,7 @@ import type { TaskRow } from '../adapters/sqlite/task-repository.js';
 import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
 import type { ComemConfig } from '../config/index.js';
+import { USER_WILDCARD } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { IngestHarness } from '../domain/ingest.js';
 import type { Logger } from '../domain/log.js';
@@ -621,7 +622,7 @@ async function runWithConfig(
     const service = new IngestService({
       sources: createSources(config, logger),
       scopeUri: scopeUriOf(config.server.subject),
-      principals: [config.server.subject, 'user:*'],
+      principals: [config.server.subject, USER_WILDCARD],
       logger,
       batchSize: config.ingest.batchSize,
       extractionBatchSize: config.ingest.extractionBatchSize,

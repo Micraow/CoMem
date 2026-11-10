@@ -19,7 +19,7 @@
 
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 
-import type { AclEffect, AclLevel } from '../../domain/acl.js';
+import { READ_LEVEL, type AclEffect, type AclLevel } from '../../domain/acl.js';
 import type { Logger } from '../../domain/log.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, placeholders } from './node-repository.js';
@@ -50,21 +50,37 @@ export interface PermissionRepositoryDeps {
   readonly logger: Logger;
 }
 
-/** §12.1：read = 1。检索只需要 read，写操作在服务层用更高位求权。 */
-const READ_LEVEL = 1;
-
 const ACL_COLUMNS = 'uri, principal, level, effect';
+
+/**
+ * 「主体集合里没有任何人在该节点被 deny」的谓词（§12.2 不变量 2）。**这是唯一一份。**
+ *
+ * 单独成函数是因为 deny 优先的判定被两条查询共用：可读谓词（`readablePredicateSql`，
+ * `search` / `glob` / `readableUris`）与单节点级别查询（`maxLevel`）。各拼一份时，
+ * 改一处会让其中一条路径漏掉 deny——被 deny 的主体在检索里消失、在 `check` 里放行。
+ *
+ * `principalList` 是主体集合的占位符片段（`placeholders(n)`）；调用方按出现顺序
+ * 绑定。调用方必须把 `node_permission` 别名为 `p`。
+ */
+function deniedPredicateSql(principalList: string): string {
+  return `NOT EXISTS (
+        SELECT 1 FROM node_permission d
+        WHERE d.node_uri = p.node_uri
+          AND d.principal IN (${principalList})
+          AND d.effect = 'deny'
+      )`;
+}
 
 /**
  * 「这个节点对主体集合可读」的谓词（§12.2 不变量 2）。**这是唯一一份。**
  *
  * 三个条件缺一不可：命中主体集合的 allow 行带读位、没有任何主体在该节点的链上被
- * deny。deny 优先，所以不能合并成 `MAX(level)`——被 deny 的主体集合没有 allow 行
- * 但仍然必须被 deny 行压掉。
+ * deny。deny 优先，所以不能合并成单行级别聚合——被 deny 的主体集合可能还有 allow
+ * 行，必须由 deny 行整体压掉。
  *
  * 读位用位测试而不是 `>=`：规范级别 1 / 3 / 7 上两者等价，但 `level = 2` / `6` 这类
  * 只带高位、读位为 0 的非规范行会被 `>=` 判成可读，与单节点读路径
- * （`services/acl.ts` 的 `MAX(level)` + `levelSatisfies` 位测试）分叉。
+ * （`maxLevel` 的级别并集 + `levelSatisfies` 位测试）分叉。
  *
  * `principalList` 是主体集合的占位符片段（`placeholders(n)`）；它在 SQL 里出现两次
  * （外层 allow、内层 deny），调用方按出现顺序绑定两遍。调用方必须把 `node_permission`
@@ -77,12 +93,7 @@ const ACL_COLUMNS = 'uri, principal, level, effect';
 export function readablePredicateSql(principalList: string): string {
   return `(p.level & ${READ_LEVEL}) = ${READ_LEVEL}
       AND p.effect = 'allow'
-      AND NOT EXISTS (
-        SELECT 1 FROM node_permission d
-        WHERE d.node_uri = p.node_uri
-          AND d.principal IN (${principalList})
-          AND d.effect = 'deny'
-      )`;
+      AND ${deniedPredicateSql(principalList)}`;
 }
 
 function text(value: SQLOutputValue | undefined): string {
@@ -150,7 +161,7 @@ export class PermissionRepository {
    *
    * 语义是「有 allow 且没有 deny」（§12.2 不变量 2）：主体集合里任一主体拿到
    * 带读位的 allow，且没有任何主体在同一个节点上有 deny 行。deny 优先于 allow，
-   * 所以这两个条件不能合并成 `MAX(level)`。谓词本体在 `readablePredicateSql()`：
+   * 所以这两个条件不能合并成单个级别聚合。谓词本体在 `readablePredicateSql()`：
    * `search` / `glob` 的 `EXISTS` 子查询用的是同一份。
    *
    * 一次 `IN (...)` 查询拿完，不按 URI 逐条查：`search` 一次要过滤 40 条候选，
@@ -173,6 +184,47 @@ export class PermissionRepository {
         AND ${readablePredicateSql(principalList)}`;
     const rows = this.#db.prepare(sql).all(...uris, ...principals, ...principals);
     return new Set(rows.map((row) => text(row['node_uri'])));
+  }
+
+  /**
+   * 单节点：主体集合在物化表里拿到的级别（§12.2）。没有命中行时返回 `null`。
+   *
+   * 与 `readableUris` 共用同一份 deny 谓词，allow 半边按主体集合的**位并集**求：
+   * 每个主体的授权是一个位掩码，`user:bob = 1` 与 `group:eng = 4` 的并集是 5。
+   * 逐行取 `MAX(level)` 只在规范级别 1 / 3 / 7 上等价于并集；同一节点出现
+   * `level = 1` 与 `level = 4` 这类非规范行时 `MAX` 取 4、读位为 0，而
+   * `readableUris` 会因为那条读位为真的行放行——`check` 与检索的可见集合分叉。
+   * `permission-visibility-consistency.test.ts` 的多行对拍用例钉住这一点。
+   *
+   * 返回的级别交给 `domain/acl.ts` 的 `levelSatisfies` 做位测试，所以保留
+   * `number` 到 `AclLevel` 的断言：并集可以是非规范级别（1 | 4 = 5），而 5 含
+   * 读位必须可读。换成 `isAclLevel` 过滤会把 5 / 6 都判成非法，5 因此失去权限。
+   *
+   * 用一次查询取回命中的行再在 JS 里合并，而不是 `SELECT MAX(level)`：SQLite 没有
+   * 位或聚合函数，`MAX` 也不是位并集。
+   */
+  maxLevel(uri: string, principals: readonly string[]): AclLevel | null {
+    if (principals.length === 0) {
+      return null;
+    }
+    const principalList = placeholders(principals.length);
+    const rows = this.#db
+      .prepare(
+        `SELECT p.level FROM node_permission p
+         WHERE p.node_uri = ?
+           AND p.principal IN (${principalList})
+           AND p.effect = 'allow'
+           AND ${deniedPredicateSql(principalList)}`,
+      )
+      .all(uri, ...principals, ...principals);
+    if (rows.length === 0) {
+      return null;
+    }
+    let granted = 0;
+    for (const row of rows) {
+      granted |= integer(row['level']);
+    }
+    return granted as AclLevel;
   }
 
   /** 授权反查：某个主体被授权过哪些节点，按 uri 升序。 */

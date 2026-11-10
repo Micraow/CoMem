@@ -45,6 +45,17 @@ export const ACL_LEVELS = [1, 3, 7] as const;
 
 export type AclLevel = (typeof ACL_LEVELS)[number];
 
+/**
+ * 级别数值的三个名字。**数值来源是 `ACL_LEVELS`**：按下标取元组元素，
+ * `satisfies` 保证取到的仍在闭集内，类型同时收窄成字面量 1 / 3 / 7。
+ *
+ * 检索谓词、单节点求权、组根预置都引用这里，不再各自写一遍数字——副本漂移时
+ * 症状不是编译失败，而是「同一份授权在读路径与写路径上给出不同答案」。
+ */
+export const READ_LEVEL = ACL_LEVELS[0] satisfies AclLevel;
+export const WRITE_LEVEL = ACL_LEVELS[1] satisfies AclLevel;
+export const MANAGE_LEVEL = ACL_LEVELS[2] satisfies AclLevel;
+
 /** 继承模式。数组是唯一来源，类型从它派生（HTTP 的 `mode` 参数校验从它取）。 */
 export const ACL_MODES = ['inherit', 'restricted'] as const;
 
@@ -78,12 +89,6 @@ export interface AclNode {
   readonly mode: AclMode;
   readonly entries: readonly AclEntry[];
 }
-
-/** 架构文档 §12.1：manage 的位值；用常量避免规则里散落魔法数字。 */
-const MANAGE_LEVEL: AclLevel = 7;
-
-/** 架构文档 §12.6：组根预置的级别是 write。 */
-const WRITE_LEVEL: AclLevel = 3;
 
 /**
  * 架构文档 §12.1：唯一的通配主体。`group:*` 不支持。

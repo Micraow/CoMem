@@ -90,7 +90,10 @@ import type {
   PermissionRow,
 } from '../adapters/sqlite/permission-repository.js';
 import {
+  MANAGE_LEVEL,
+  READ_LEVEL,
   USER_WILDCARD,
+  WRITE_LEVEL,
   assertOwnerUserId,
   effectiveAcl,
   entryMatches,
@@ -109,13 +112,6 @@ import { Uri } from '../domain/uri.js';
 
 import { permissionDenied, type AclAction, type Authorizer } from './authorizer.js';
 
-/** §12.1：read = 1、write = 3、manage = 7，高位包含低位。 */
-const READ_LEVEL: AclLevel = 1;
-const MANAGE_LEVEL: AclLevel = 7;
-
-/** §12.6：组根预置的默认级别是 write；§18 的 `acl.groupDefaultLevel` 可降为 read。 */
-const DEFAULT_GROUP_LEVEL: AclLevel = 3;
-
 /**
  * `purgePrincipal` 扫描 `.acl.json` 的目录数上限。
  *
@@ -133,17 +129,13 @@ const MAX_PURGE_SCAN_DIRECTORIES = 10_000;
 /**
  * `services/` 不能 import `node:sqlite`（§4.2，连类型导入都算依赖）。
  *
- * 这里只声明用到的形状：`node_permission` 的级别查询要按 `action` 过滤，而
- * `PermissionRepository.readableUris` 固定只判 read 位（`(level & 1) = 1`，与
- * `domain/acl.ts` 的 `levelSatisfies` 同义）；
- * `purgePrincipal` 按主体删两张表的行，仓储没有这个方法，只能写在这里。
- * `DatabaseSync` 结构上可赋值。
+ * 这里只声明用到的形状：`purgePrincipal` 按主体删两张表的行，仓储没有这个方法，
+ * 只能写在这里。`DatabaseSync` 结构上可赋值。
  */
 export interface AclDatabase {
   readonly isTransaction: boolean;
   exec(sql: string): void;
   prepare(sql: string): {
-    get(...params: unknown[]): Record<string, unknown> | undefined;
     run(...params: unknown[]): { readonly changes: number | bigint };
   };
 }
@@ -382,7 +374,8 @@ export class AclService implements Authorizer {
     this.#nodes = options.nodes;
     this.#logger = options.logger;
     this.#locks = options.locks;
-    this.#groupDefaultLevel = options.groupDefaultLevel ?? DEFAULT_GROUP_LEVEL;
+    // §12.6：组根预置默认 write；§18 的 `acl.groupDefaultLevel` 可降为 read。
+    this.#groupDefaultLevel = options.groupDefaultLevel ?? WRITE_LEVEL;
   }
 
   // ── Authorizer ──
@@ -937,46 +930,20 @@ export class AclService implements Authorizer {
 
   // ── 内部 ──
 
+  /**
+   * 单节点求权：物化表里该主体集合拿到的级别 → `levelSatisfies` 位测试。
+   *
+   * 查询在 `PermissionRepository.maxLevel`，与 `readableUris` 共用同一份 deny
+   * 谓词；这一层只保留「级别 → 是否满足 action」的规则。直接查表而不是走
+   * `readableUris`：后者固定只判读位，回答不了 `write` / `manage` 的检查。
+   */
   async #checkPrincipals(
     uri: Uri,
     action: AclAction,
     principals: readonly string[],
   ): Promise<boolean> {
-    const level = this.#maxLevel(uri.toString(), principals);
+    const level = this.#permissions.maxLevel(uri.toString(), principals);
     return level !== null && levelSatisfies(level, action);
-  }
-
-  /**
-   * 物化表里该主体集合拿到的最高级别。
-   *
-   * 直接查 `node_permission` 而不是 `readableUris`：后者固定只判读位
-   * （`(level & 1) = 1`），回答不了 `write` / `manage` 的检查。
-   *
-   * deny 优先（§12.2 不变量 2）：主体集合里有人被 deny 时 allow 一律作废。这与
-   * `PermissionRepository.readableUris` 是同一套谓词，只把读位测试换成 `MAX(level)`
-   * 再交给 `levelSatisfies`（同一处位测试，规范级别 1 / 3 / 7 上同结论）。
-   */
-  #maxLevel(uri: string, principals: readonly string[]): AclLevel | null {
-    if (principals.length === 0) {
-      return null;
-    }
-    const principalList = principals.map(() => '?').join(', ');
-    const sql = `SELECT MAX(level) AS level FROM node_permission
-      WHERE node_uri = ?
-        AND principal IN (${principalList})
-        AND effect = 'allow'
-        AND NOT EXISTS (
-          SELECT 1 FROM node_permission d
-          WHERE d.node_uri = node_permission.node_uri
-            AND d.principal IN (${principalList})
-            AND d.effect = 'deny'
-        )`;
-    const row = this.#db.prepare(sql).get(uri, ...principals, ...principals);
-    const value = row?.['level'];
-    // 这里**不能**换成 `isAclLevel(value) ? value : null`：级别是位掩码（read=1、
-    // write=3、manage=7），非规范值 5 / 6 仍然含 read 位，必须可读。
-    // `permission-visibility-consistency.test.ts` 钉住了这条语义。
-    return typeof value === 'number' ? (value as AclLevel) : null;
   }
 
   /**

@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Container, createContainer } from '../bootstrap/container.js';
+import { USER_WILDCARD } from '../domain/acl.js';
 import { ComemError } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { RetrievalEngine } from '../domain/retrieval.js';
@@ -408,7 +409,7 @@ export class EvalRunner {
         subject,
       });
 
-      await seedCorpus(container, dataset, scope, [subject, 'user:*']);
+      await seedCorpus(container, dataset, scope, [subject, USER_WILDCARD]);
 
       const perQuery: QueryMetrics[] = [];
       const medians: number[] = [];
@@ -424,7 +425,7 @@ export class EvalRunner {
           const hits = await container.services.search.find(evalCase.query, {
             scopes: [scope],
             subject,
-            principals: [subject, 'user:*'],
+            principals: [subject, USER_WILDCARD],
             limit: k,
           });
           latencies.push(

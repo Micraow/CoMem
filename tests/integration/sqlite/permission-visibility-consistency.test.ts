@@ -21,9 +21,6 @@
  * **比较集合，不比较 SQL 字符串**：谓词换个写法不该让测试变红，判定结果变了才该红。
  *
  * 不在本用例要求范围内的口径（只报告，不改）：
- * - `services/acl.ts` 的 `#maxLevel` 取 `MAX(level)` 服务 `write` / `manage` 检查。
- *   单行节点上它与读位测试同结论；多行节点的数值最大不等于位包含（`{1, 2}` 会取
- *   2，读位反而为 0），本用例只对拍单行节点；
  * - `glob` 还有 `status = 'active'` 与「节点自身那一行」的过滤，`readableUris` 只
  *   回答「入参列表里哪些可读」——所以对拍的口径是「同一个节点集合里哪些可读」，
  *   见 `universe()`。
@@ -67,6 +64,17 @@ const LEGACY_ZERO = `${ROOT}/legacy-zero.md`;
 const LEGACY_LEVEL_TWO = `${ROOT}/legacy-level-2.md`;
 const LEGACY_LEVEL_SIX = `${ROOT}/legacy-level-6.md`;
 const LEGACY_LEVEL_FIVE = `${ROOT}/legacy-level-5.md`;
+
+/**
+ * 同一节点上的多条 allow 行。`node_permission` 的主键是
+ * `(node_uri, principal)`，所以「多条」只能来自不同主体：`user:bob` 与
+ * `group:eng` 都在查询主体集合里，两条授权的并集才是 bob 的级别。
+ *
+ * - `multi-read`：1 与 4，并集 5 含读位；`MAX(level)` 会取 4、读位为 0。
+ * - `multi-no-read`：2 与 4，并集 6 不含读位；三条路径都必须不可读。
+ */
+const MULTI_READ = `${ROOT}/multi-read.md`;
+const MULTI_NO_READ = `${ROOT}/multi-no-read.md`;
 
 /** §12.1 的 read 位。单节点读路径的 `AclAction` 只要求 read。 */
 const READ: AclLevel = 1;
@@ -112,6 +120,13 @@ const NODES: readonly SeedNode[] = [
   { uri: LEGACY_LEVEL_TWO, kind: 'document', level: 'L2', cell: '手工 level 2：只有 WRITE 位' },
   { uri: LEGACY_LEVEL_SIX, kind: 'document', level: 'L2', cell: '手工 level 6：WRITE + MANAGE 位' },
   { uri: LEGACY_LEVEL_FIVE, kind: 'document', level: 'L2', cell: '手工 level 5：READ + MANAGE 位' },
+  { uri: MULTI_READ, kind: 'document', level: 'L2', cell: '多行 allow：1 与 4，并集 5 含读位' },
+  {
+    uri: MULTI_NO_READ,
+    kind: 'document',
+    level: 'L2',
+    cell: '多行 allow：2 与 4，并集 6 不含读位',
+  },
 ];
 
 /** 三个主体。`user:*` 与 `AclService.resolvePrincipals` 的输出同形；fixture 没有通配条目。 */
@@ -209,6 +224,7 @@ async function materializeAcl(): Promise<void> {
  * - level 0 / 2 / 6 / 5 的 allow 行：`isAclLevel` 只认 1 / 3 / 7，物化永远写
  *   `maxLevel()`，所以这些级别只可能来自旧数据或手工 SQL。没有这些行，去掉任一侧
  *   的读位判定都不会改变结果，测试就没有区分力。
+ * - 多行 allow：`node_permission` 同一主体只能有一行，构造多行只能换主体。
  * - 物化之后才出现的节点：插在 `materializeAcl()` 之后，保证它真的一行都没有。
  *
  * 先物化再插行：这几行必须在 `alice` 的继承行写完之后落地，否则物化会按目录链
@@ -222,6 +238,10 @@ async function seedRawStates(): Promise<void> {
   insert.run(LEGACY_LEVEL_TWO, 'user:bob', 2, 'allow');
   insert.run(LEGACY_LEVEL_SIX, 'user:bob', 6, 'allow');
   insert.run(LEGACY_LEVEL_FIVE, 'user:bob', 5, 'allow');
+  insert.run(MULTI_READ, 'user:bob', 1, 'allow');
+  insert.run(MULTI_READ, 'group:eng', 4, 'allow');
+  insert.run(MULTI_NO_READ, 'user:bob', 2, 'allow');
+  insert.run(MULTI_NO_READ, 'group:eng', 4, 'allow');
   await index.upsert([record(LATE, 'document', 'L2')]);
 }
 
@@ -274,11 +294,12 @@ async function globVisible(principals: readonly string[]): Promise<string[]> {
   );
 }
 
-/** bob：只有三条 allow 子树的节点可读。 */
+/** bob：只有三条 allow 子树的节点可读，加上多行 allow 里并集含读位的那个。 */
 const BOB_VISIBLE = [
   `${ROOT}/legacy-level-5.md`,
   `${ROOT}/manage-dir`,
   `${ROOT}/manage-dir/note.md`,
+  `${ROOT}/multi-read.md`,
   `${ROOT}/read-dir`,
   `${ROOT}/read-dir/note.md`,
   `${ROOT}/write-dir`,
@@ -382,5 +403,39 @@ describe('ACL 可读谓词：readableUris 与 glob', () => {
     expect(viaBatch).toContain(LEGACY_LEVEL_FIVE);
     expect(viaGlob).toContain(LEGACY_LEVEL_FIVE);
     expect(await acl.check(Uri.parse(LEGACY_LEVEL_FIVE), READ, bob)).toBe(true);
+  });
+
+  it('多行 allow：级别并集的读位与 readableUris 同结论', async () => {
+    const bob = SUBJECTS[0].principals;
+
+    // 同一节点两条 allow 行，分别来自 user:bob 与 group:eng（主键是
+    // `(node_uri, principal)`，同一主体只能有一行）。1 与 4 的 max 是 4、并集是 5：
+    // 只有并集保留了 user:bob 那行的读位。
+    expect(
+      db
+        .prepare(
+          `SELECT principal, level FROM node_permission
+            WHERE node_uri = ? AND effect = 'allow' ORDER BY principal ASC`,
+        )
+        .all(MULTI_READ)
+        .map((row) => [String(row['principal']), Number(row['level'])]),
+    ).toEqual([
+      ['group:eng', 4],
+      ['user:alice', 7],
+      ['user:bob', 1],
+    ]);
+
+    const viaBatch = readableVisible(bob);
+    const viaGlob = await globVisible(bob);
+    expect(viaBatch).toContain(MULTI_READ);
+    expect(viaGlob).toContain(MULTI_READ);
+    // 单节点读路径：`maxLevel` + `levelSatisfies(level, READ)`。
+    expect(await acl.check(Uri.parse(MULTI_READ), READ, bob)).toBe(true);
+
+    // 反向：2 与 4 的并集是 6，读位为 0；两条路径都不能放行，证明上面的断言不是
+    // 「多行一律可读」。
+    expect(viaBatch).not.toContain(MULTI_NO_READ);
+    expect(viaGlob).not.toContain(MULTI_NO_READ);
+    expect(await acl.check(Uri.parse(MULTI_NO_READ), READ, bob)).toBe(false);
   });
 });
