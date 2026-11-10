@@ -15,12 +15,14 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
-import { Uri } from '../../../domain/uri.js';
-import type { Authorizer } from '../../../services/authorizer.js';
-import type { ConsolidationResult } from '../../../services/consolidation.js';
 import type { MemoryLink } from '../../../domain/memory-link.js';
+import type { NodeStatus } from '../../../domain/node.js';
+import { Uri } from '../../../domain/uri.js';
+import type {
+  ConsolidationResult,
+  ConsolidationTraceEntry,
+} from '../../../services/consolidation.js';
 import type { MemoryRecord } from '../../../services/memory.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -33,6 +35,9 @@ import {
 } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
+import {
+  optionalBoolean, parseLinkDirection, parseMemoryUri, readableLinks, requireRecordReason, scopeOfSubject,
+} from './memories-request.js';
 
 /** §12.1：read = 1、write = 3、manage = 7。 */
 const READ = 1;
@@ -42,14 +47,63 @@ const MANAGE = 7;
 /** 复核列表的默认条数。经验值：一页 100 条已经够滚动。 */
 const DEFAULT_PENDING_LIMIT = 100;
 
-function parseMemoryUri(raw: string): Uri {
-  if (raw === '') {
-    throw new ComemError('INVALID_URI', '记忆 URI 不能为空。', { uri: raw });
-  }
-  return Uri.parse(raw);
+/** 复核队列里的一条记忆（§11.6、§11.11）。 */
+interface SerializedMemoryRecord {
+  readonly uri: string;
+  /**
+   * 记忆类型。读路径是开放字符串：类型由配置声明，收窄成字面量联合会让自定义
+   * 类型写成 `pending` 之后在响应里「不存在」。
+   */
+  readonly memoryType: string;
+  readonly status: NodeStatus;
+  readonly updatedAt: string;
+  /** 有效区间下界；`null` = 不知道从何时开始有效。键始终输出。 */
+  readonly validFrom: string | null;
+  /** 有效区间上界；`null` = 仍然有效。键始终输出。 */
+  readonly validUntil: string | null;
+  /** 顶替掉的版本文件 URI；没顶替过任何版本时是 `null`。 */
+  readonly supersedes: string | null;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly sources: readonly string[];
 }
 
-function serializeRecord(record: MemoryRecord): Record<string, unknown> {
+/** `GET /memories/pending` 的响应体。 */
+interface MemoryPendingResponse {
+  readonly scope: string;
+  readonly memories: readonly SerializedMemoryRecord[];
+}
+
+/** `POST /memories/{uri}/approve` 的响应体：通过后的状态。 */
+interface MemoryApproveResponse {
+  readonly uri: string;
+  readonly status: NodeStatus;
+  readonly subject: string;
+}
+
+/**
+ * `POST /memories/{uri}/reject` 的响应体。
+ *
+ * 两个分支互斥：`restored` 带 `restoredFrom`（没有删除任何东西），`removed` 没有
+ * 这个字段。与 `MemoryRejectResult` 同形，避免「恢复了」与「删除了」在响应上
+ * 无法区分。
+ */
+type MemoryRejectResponse =
+  | {
+      readonly uri: string;
+      readonly outcome: 'restored';
+      readonly restoredFrom: string;
+      readonly reason: string;
+    }
+  | { readonly uri: string; readonly outcome: 'removed'; readonly reason: string };
+
+/** `GET /memories/{uri}/links` 的响应体。 */
+interface MemoryLinksResponse {
+  readonly uri: string;
+  readonly direction: 'links' | 'backlinks';
+  readonly links: readonly SerializedLink[];
+}
+
+function serializeRecord(record: MemoryRecord): SerializedMemoryRecord {
   return {
     uri: record.uri.toString(),
     memoryType: record.memoryType,
@@ -66,14 +120,6 @@ function serializeRecord(record: MemoryRecord): Record<string, unknown> {
     // 溯源（W97）：复核页要能回答「这条经验从哪来」。缺键的旧记忆是空数组。
     sources: record.sources,
   };
-}
-
-function scopeOfSubject(subject: string): string {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw new ComemError('INVALID_ARGUMENT', `记忆身份必须是 user 主体：${subject}`, { subject });
-  }
-  return `comem://user/${principal.id}`;
 }
 
 export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup {
@@ -104,7 +150,7 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
           records.map((record) => record.uri),
           context.principals,
         );
-        return ok({
+        return ok<MemoryPendingResponse>({
           scope: scope.toString(),
           memories: records
             .filter((record) => readable.has(record.uri.toString()))
@@ -144,7 +190,11 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const uri = parseMemoryUri(request.params.uri);
         await authorizer.assert(uri, WRITE, context.principals);
         await memory.approve(uri);
-        return ok({ uri: uri.toString(), status: 'active', subject: context.subject });
+        return ok<MemoryApproveResponse>({
+          uri: uri.toString(),
+          status: 'active',
+          subject: context.subject,
+        });
       });
 
       app.post<{ Params: { uri: string }; Body: unknown }>('/:uri/reject', async (request) => {
@@ -157,7 +207,7 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         // 响应如实说哪一种——恢复时**没有删除任何东西**，不能回 `removed: true`。
         // `restoredFrom` 只在恢复时出现，值是那份版本文件的 URI。
         const rejected = await memory.reject(uri, reason);
-        return ok(
+        return ok<MemoryRejectResponse>(
           rejected.outcome === 'restored'
             ? {
                 uri: uri.toString(),
@@ -191,32 +241,28 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
             direction,
             context.principals,
           );
-          return ok({ uri: uri.toString(), direction, links: readable.map(serializeLink) });
+          return ok<MemoryLinksResponse>({
+            uri: uri.toString(),
+            direction,
+            links: readable.map(serializeLink),
+          });
         },
       );
     },
   };
 }
 
-/**
- * `direction`：`links`（默认，正向）或 `backlinks`（派生）。
- *
- * 缺省正向：调用方通常先说「这条记忆关联了哪些东西」，反查是第二问。
- */
-function parseLinkDirection(raw: unknown): 'links' | 'backlinks' {
-  if (raw === undefined) {
-    return 'links';
-  }
-  if (raw === 'links' || raw === 'backlinks') {
-    return raw;
-  }
-  throw new ComemError('INVALID_ARGUMENT', 'links 的 direction 只能是 links 或 backlinks。', {
-    field: 'direction',
-    value: raw,
-  });
+/** 一条关联边的响应形状（§11.10）。 */
+interface SerializedLink {
+  readonly from: string;
+  readonly to: string;
+  readonly linkType: string;
+  readonly weight: number;
+  readonly matchText: string;
+  readonly description: string;
 }
 
-function serializeLink(link: MemoryLink): Record<string, unknown> {
+function serializeLink(link: MemoryLink): SerializedLink {
   return {
     from: link.fromUri.toString(),
     to: link.toUri.toString(),
@@ -228,67 +274,17 @@ function serializeLink(link: MemoryLink): Record<string, unknown> {
 }
 
 /**
- * 只保留「另一端也可读」的边（§12.4）。
- *
- * 查询的 URI 已经在路由里 `assert` 过；边的另一端是一个独立资源，要单独求 read：
- * `links` 查 `to`、`backlinks` 查 `from`。不查的后果是 `backlinks` 会把「哪些记忆
- * 来自这次归档」列给一个读不到那些记忆的调用方，而 URI 自己就是内容。
- *
- * 无权限的边**整条不返回**。占位（`to: null`）或打码（`comem://***`）仍在回答「这里
- * 有一条边」，而边的存在与否也是信息；安静地少一条不构成侧面提示。
- *
- * 用 `Authorizer` 已有的 `filterReadable`：它的语义正是 §12.4 的「无权限节点完全
- * 不出现」，一次查询拿到可读集合。不用逐条 `assert` 吞 `PERMISSION_DENIED`——那样
- * 还得区分权限错误与真实的存储故障，而把故障当成无权限会静默隐藏问题。
- */
-async function readableLinks(
-  authorizer: Authorizer,
-  links: readonly MemoryLink[],
-  direction: 'links' | 'backlinks',
-  principals: readonly string[],
-): Promise<readonly MemoryLink[]> {
-  if (links.length === 0) {
-    return links;
-  }
-  const otherEndOf = (link: MemoryLink): Uri =>
-    direction === 'backlinks' ? link.fromUri : link.toUri;
-  // 按字符串去重：同一个另一端在多条边上重复出现时只求一次权。
-  const otherEnds = new Map<string, Uri>();
-  for (const link of links) {
-    const otherEnd = otherEndOf(link);
-    otherEnds.set(otherEnd.toString(), otherEnd);
-  }
-  const readable = await authorizer.filterReadable([...otherEnds.values()], principals);
-  return links.filter((link) => readable.has(otherEndOf(link).toString()));
-}
-
-function requireRecordReason(body: Record<string, unknown>): string {
-  const reason = body['reason'];
-  if (typeof reason !== 'string' || reason.trim() === '') {
-    throw new ComemError('INVALID_ARGUMENT', 'reject 的 reason 必须是非空字符串。', {
-      field: 'reason',
-    });
-  }
-  return reason;
-}
-
-/** 可选的布尔参数。缺省返回 `undefined`（由服务端的默认值决定）。 */
-function optionalBoolean(body: Record<string, unknown>, field: string): boolean | undefined {
-  const value = body[field];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'boolean') {
-    throw new ComemError('INVALID_ARGUMENT', `参数 ${field} 必须是布尔值。`, { field });
-  }
-  return value;
-}
-
-/**
  * 合并结果就是响应体：`adds` / `updates` / `deletes` 是 URI 列表，`trace` 是每一轮
  * 模型输出的摘要。**不返回正文**：正文在 `read` 里拿，响应体只说明「谁被改了」。
  */
-function serializeConsolidation(result: ConsolidationResult): Record<string, unknown> {
+interface SerializedConsolidation {
+  readonly adds: readonly string[];
+  readonly updates: readonly string[];
+  readonly deletes: readonly string[];
+  readonly trace: readonly ConsolidationTraceEntry[];
+}
+
+function serializeConsolidation(result: ConsolidationResult): SerializedConsolidation {
   return {
     adds: result.adds,
     updates: result.updates,

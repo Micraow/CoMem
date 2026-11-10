@@ -13,17 +13,8 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { parsePrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
-import {
-  isMessageRole,
-  MESSAGE_ROLES,
-  type ContentPart,
-  type MessageRole,
-  type Session,
-  type SessionMessage,
-} from '../../../domain/session.js';
-import { Uri } from '../../../domain/uri.js';
+import type { Session, SessionMessage, SessionStatus } from '../../../domain/session.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import {
@@ -34,6 +25,7 @@ import {
 } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
+import { invalid, parseMessage, scopeFrom, sessionUriOf } from './sessions-request.js';
 
 /** §12.1：read = 1、write = 3。 */
 const READ = 1;
@@ -43,127 +35,44 @@ const WRITE = 3;
 /** `GET /sessions` 的默认条数。经验值：控制台一页展示 100 条已经要滚动。 */
 const DEFAULT_LIST_LIMIT = 100;
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
+/** `GET /sessions` 列表项与 `GET /sessions/{id}` 的响应形状。 */
+interface SerializedSession {
+  readonly id: string;
+  readonly uri: string;
+  readonly status: SessionStatus;
+  readonly messageCount: number;
+  readonly pendingTokens: number;
+  readonly lastCommitAt: string | null;
+  readonly messages: readonly SessionMessage[];
 }
 
-/** `user:alice` → `comem://user/alice`。 */
-function scopeOfSubject(subject: string): Uri {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw invalid(`会话身份必须是 user 主体：${subject}`, { subject });
-  }
-  return Uri.parse(`comem://user/${principal.id}`);
+/** `POST /sessions` 的响应体：只回新建会话的 URI。 */
+interface SessionCreateResponse {
+  readonly uri: string;
 }
 
-/** 作用域根 + 会话 ID。ID 走 `Uri.child` 校验（保留名、空段、控制字符都会被拒）。 */
-function sessionUriOf(scope: Uri, id: string): Uri {
-  if (id === '') {
-    throw invalid('会话 ID 不能为空。', { field: 'id' });
-  }
-  return scope.child('sessions', id);
+/** `POST /sessions/{id}/messages` 的响应体：追加后的消息与条数。 */
+interface SessionMessagesResponse {
+  readonly uri: string;
+  readonly messages: readonly SessionMessage[];
+  readonly count: number;
 }
 
-/** body 里可选的 `scopeUri` 覆盖；缺省用当前身份的个人根。 */
-function scopeFrom(body: Record<string, unknown>, subject: string): Uri {
-  const scopeUri = optionalString(body, 'scopeUri');
-  return scopeUri === undefined ? scopeOfSubject(subject) : Uri.parse(scopeUri);
+/** `POST /sessions/{id}/commit` 的响应体：阶段一归档的产物。 */
+interface SessionCommitResponse {
+  readonly sessionUri: string;
+  readonly taskId: string;
+  readonly archiveUri: string;
+  readonly archivedCount: number;
 }
 
-function requireStringField(record: Record<string, unknown>, field: string, where: string): string {
-  const value = record[field];
-  if (typeof value !== 'string') {
-    throw invalid(`${where}.${field} 必须是字符串。`, { field });
-  }
-  return value;
+/** `GET /sessions` 的响应体：作用域根 + 列表。 */
+interface SessionListResponse {
+  readonly scope: string;
+  readonly sessions: readonly SerializedSession[];
 }
 
-function parseRole(value: unknown): MessageRole {
-  if (typeof value !== 'string') {
-    throw invalid('role 必须是字符串。', { field: 'role' });
-  }
-  if (!isMessageRole(value)) {
-    throw invalid(`role 只能是 ${MESSAGE_ROLES.join(' / ')}。`, { field: 'role' });
-  }
-  return value;
-}
-
-/** 一条 `ContentPart`。五种 kind 各自校验字段，不接受未校验的值进服务层。 */
-function parsePart(value: unknown, index: number): ContentPart {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw invalid(`parts[${index}] 必须是对象。`, { index });
-  }
-  const record = requireRecord(value, `parts[${index}]`);
-  const where = `parts[${index}]`;
-  switch (record['kind']) {
-    case 'text':
-      return { kind: 'text', text: requireStringField(record, 'text', where) };
-    case 'image': {
-      const alt = record['alt'];
-      if (alt !== undefined && alt !== null && typeof alt !== 'string') {
-        throw invalid(`${where}.alt 必须是字符串或 null。`, { index });
-      }
-      return {
-        kind: 'image',
-        url: requireStringField(record, 'url', where),
-        alt: typeof alt === 'string' ? alt : null,
-      };
-    }
-    case 'context':
-      return {
-        kind: 'context',
-        uri: requireStringField(record, 'uri', where),
-        abstract: requireStringField(record, 'abstract', where),
-      };
-    case 'tool_use':
-      return {
-        kind: 'tool_use',
-        toolUseId: requireStringField(record, 'toolUseId', where),
-        name: requireStringField(record, 'name', where),
-        input: record['input'],
-      };
-    case 'tool_result': {
-      const isError = record['isError'];
-      if (typeof isError !== 'boolean') {
-        throw invalid(`${where}.isError 必须是布尔值。`, { index });
-      }
-      return {
-        kind: 'tool_result',
-        toolUseId: requireStringField(record, 'toolUseId', where),
-        output: requireStringField(record, 'output', where),
-        isError,
-      };
-    }
-    default:
-      throw invalid(`${where}.kind 只能是 text / image / context / tool_use / tool_result。`, {
-        index,
-      });
-  }
-}
-
-/** 一条待追加的消息。`turn` 由服务层按消息总数分配，不接受调用方传（§8.7）。 */
-function parseMessage(body: Record<string, unknown>): Omit<SessionMessage, 'turn'> {
-  const id = body['id'];
-  const createdAt = body['createdAt'];
-  const parts = body['parts'];
-  if (id !== undefined && typeof id !== 'string') {
-    throw invalid('id 必须是字符串。', { field: 'id' });
-  }
-  if (createdAt !== undefined && typeof createdAt !== 'string') {
-    throw invalid('createdAt 必须是字符串。', { field: 'createdAt' });
-  }
-  if (!Array.isArray(parts)) {
-    throw invalid('parts 必须是数组。', { field: 'parts' });
-  }
-  return {
-    id: typeof id === 'string' ? id : crypto.randomUUID(),
-    role: parseRole(body['role']),
-    parts: parts.map((part, index) => parsePart(part, index)),
-    createdAt: typeof createdAt === 'string' ? createdAt : new Date().toISOString(),
-  };
-}
-
-function serializeSession(session: Session): Record<string, unknown> {
+function serializeSession(session: Session): SerializedSession {
   return {
     id: session.id,
     uri: session.uri.toString(),
@@ -195,7 +104,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
           context.principals,
           sessionId === undefined ? {} : { sessionId },
         );
-        return ok({ uri: uri.toString() });
+        return ok<SessionCreateResponse>({ uri: uri.toString() });
       });
 
       app.post<{ Params: { id: string }; Body: unknown }>('/:id/messages', async (request) => {
@@ -227,7 +136,11 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
           }
           return messages;
         });
-        return ok({ uri: sessionUri.toString(), messages: appended, count: appended.length });
+        return ok<SessionMessagesResponse>({
+          uri: sessionUri.toString(),
+          messages: appended,
+          count: appended.length,
+        });
       });
 
       app.post<{ Params: { id: string }; Body: unknown }>('/:id/commit', async (request) => {
@@ -237,7 +150,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const sessionUri = sessionUriOf(scope, request.params.id);
         await authorizer.assert(sessionUri, WRITE, context.principals);
         const result = await session.commitPhase1(sessionUri);
-        return ok({
+        return ok<SessionCommitResponse>({
           sessionUri: sessionUri.toString(),
           taskId: result.taskId,
           archiveUri: result.archiveUri.toString(),
@@ -252,7 +165,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_LIST_LIMIT, { min: 1 });
         await authorizer.assert(scope, READ, context.principals);
 
-        const sessions: Record<string, unknown>[] = [];
+        const sessions: SerializedSession[] = [];
         for (const child of await filesystem.list(
           scope.child('sessions'),
           context.principals,
@@ -270,7 +183,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
             throw error;
           }
         }
-        return ok({ scope: scope.toString(), sessions });
+        return ok<SessionListResponse>({ scope: scope.toString(), sessions });
       });
 
       app.get<{ Params: { id: string }; Querystring: Record<string, unknown> }>(

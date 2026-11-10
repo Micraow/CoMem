@@ -50,11 +50,44 @@ function requirePromptId(raw: string): PromptId {
   return raw;
 }
 
-function serializeVariable(variable: PromptVariable): Record<string, unknown> {
+/** 一个模板变量的响应形状（§9.2）。 */
+interface SerializedPromptVariable {
+  readonly name: string;
+  readonly description: string;
+}
+
+/** 提示词列表项的响应形状（§11.3、§11.4）。 */
+interface SerializedPromptSummary {
+  readonly id: PromptId;
+  readonly description: string;
+  readonly variables: readonly SerializedPromptVariable[];
+  readonly overridden: boolean;
+  readonly stale: boolean;
+  /** 覆盖的最后修改时间；没有覆盖时为 `null`。 */
+  readonly updatedAt: string | null;
+}
+
+/** 提示词详情的响应形状：列表行 + 当前生效正文 + 仓库默认正文。 */
+interface SerializedPromptDetail extends SerializedPromptSummary {
+  readonly body: string;
+  readonly defaultBody: string;
+}
+
+/** `GET /prompts` 的响应体。 */
+interface PromptListResponse {
+  readonly prompts: readonly SerializedPromptSummary[];
+}
+
+/** `POST /prompts/{id}/preview` 的响应体。 */
+interface PromptPreviewResponse {
+  readonly text: string;
+}
+
+function serializeVariable(variable: PromptVariable): SerializedPromptVariable {
   return { name: variable.name, description: variable.description };
 }
 
-function serializeSummary(summary: PromptSummary): Record<string, unknown> {
+function serializeSummary(summary: PromptSummary): SerializedPromptSummary {
   return {
     id: summary.id,
     description: summary.description,
@@ -65,7 +98,7 @@ function serializeSummary(summary: PromptSummary): Record<string, unknown> {
   };
 }
 
-function serializeDetail(detail: PromptDetail): Record<string, unknown> {
+function serializeDetail(detail: PromptDetail): SerializedPromptDetail {
   return {
     ...serializeSummary(detail),
     body: detail.body,
@@ -104,7 +137,9 @@ export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup 
   return {
     prefix: '/prompts',
     register(app: FastifyInstance): void {
-      app.get('/', async () => ok({ prompts: prompts.list().map(serializeSummary) }));
+      app.get('/', async () =>
+        ok<PromptListResponse>({ prompts: prompts.list().map(serializeSummary) }),
+      );
 
       app.get<{ Params: { id: string } }>('/:id', async (request) =>
         ok(serializeDetail(prompts.get(requirePromptId(request.params.id)))),
@@ -128,7 +163,7 @@ export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup 
         assertSystemAdmin(request, adminUserIds);
         const id = requirePromptId(request.params.id);
         const body = request.body === undefined ? {} : requireRecord(request.body, 'prompts/:id/preview');
-        return ok({ text: prompts.preview(id, parseVariables(body)) });
+        return ok<PromptPreviewResponse>({ text: prompts.preview(id, parseVariables(body)) });
       });
     },
   };
