@@ -24,6 +24,13 @@
  * 服务端不可达、超时、返回错误时不注入：这一轮没有记忆，对话照常进行。把错误
  * 文本注入进去只会污染上下文。**但 stderr 要留一行诊断**——静默失败是「功能看
  * 起来正常、其实从未工作过」的来源（`<comem-preferences>` 就踩过这个坑）。
+ *
+ * ## 跨轮去重与正文转义
+ *
+ * 这一轮真的注入过的 URI 记进 hook 侧的账本（`lib/recall.mjs`），下一轮检索时
+ * 排除，避免同一段记忆被反复投喂；一条都没注入时不记账（§15.10）。记忆正文渲染
+ * 前先过 `escapeInjectionText`：正文里自带 `</comem-recall>` 时，它会在我们的块
+ * 里伪造出一层新的注入边界。
  */
 
 import { pathToFileURL } from 'node:url';
@@ -31,7 +38,9 @@ import { pathToFileURL } from 'node:url';
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { applyQueryFilters } from '../lib/filter.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
+import { escapeInjectionText } from '../lib/injection.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
+import { readDeliveredUris, recordDeliveredUris } from '../lib/recall.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 /** §14 的检索端点。 */
@@ -70,15 +79,13 @@ function readHits(result) {
 }
 
 /**
- * 渲染注入块（§8.6 的展示格式与 §13.2 的 `find` 返回值同构）。
- *
- * ## 为什么阈值是相对的
+ * 按**相对阈值**从命中里挑出这一轮真正要投喂的条目（§15.9 的「三条前提」之二）。
  *
  * 服务端 `find` 在默认的 `retrieval.engine: hybrid` 下返回的是 RRF 融合分
  * （`Σ levelWeight / (60 + rank)`，量级 `1/61 ≈ 0.016` 到 `2/61 ≈ 0.033`），
- * 不是相关度分。把 `0.5` 当绝对下限，`hybrid` 下**一条都留不下**：这里返回
- * `undefined`，hook 静默不注入，功能看起来「正常」但从未工作过——不报错、
- * 不打日志、无法归因。
+ * 不是相关度分。把 `0.5` 当绝对下限，`hybrid` 下**一条都留不下**：调用方拿到空
+ * 数组，hook 静默不注入，功能看起来「正常」但从未工作过——不报错、不打日志、
+ * 无法归因。
  *
  * 阈值因此按**本次最高分**的比例计算：`score >= topScore × threshold`。语义
  * 变成「只保留与最佳命中差距不到 `1 - threshold` 的」，与引擎无关：`fts5` 取
@@ -90,6 +97,26 @@ function readHits(result) {
  * - `topScore <= 0`（bm25 取负后为 0、余弦为负）时相对阈值没有意义，**全部保
  *   留**。这是正确的降级——分数不可用时不要静默丢数据。
  *
+ * 调用方先按跨轮账本排除已投喂的 URI，再调这里：阈值比较的是「本轮可交付的
+ * 最高分」，被排除的条目不参与——否则一条刚投过的记忆会把阈值拉到它自己的分数，
+ * 把真正的新命中一起裁掉。
+ *
+ * @param {readonly { uri: string, score: number, memoryType: string | null, contextType: string | null, abstract: string | null }[]} hits
+ * @param {number} threshold 相对于本次最高分的比例；`0.5` 表示「只保留与最佳命中差距不到一半的」
+ * @returns {{ uri: string, score: number, memoryType: string | null, contextType: string | null, abstract: string | null }[]}
+ */
+export function selectRecallHits(hits, threshold) {
+  if (hits.length === 0) {
+    return [];
+  }
+  const topScore = Math.max(...hits.map((hit) => hit.score));
+  const cutoff = topScore > 0 ? topScore * threshold : Number.NEGATIVE_INFINITY;
+  return hits.filter((hit) => hit.score >= cutoff);
+}
+
+/**
+ * 把选中的命中渲染成 `<comem-recall>` 块。
+ *
  * ## 为什么行首是编号而不是分数
  *
  * 分数只在**同一次检索的同一个引擎内**可比（§13.2）。RRF 下 rank 1 与 rank 5
@@ -100,26 +127,19 @@ function readHits(result) {
  *
  * 摘要按行缩进，模型才能把「一行 URI + 若干行摘要」当一条记录读。
  *
- * @param {readonly { uri: string, score: number, memoryType: string | null, contextType: string | null, abstract: string | null }[]} hits
- * @param {number} threshold 相对于本次最高分的比例；`0.5` 表示「只保留与最佳命中差距不到一半的」
- * @returns {string | undefined}
+ * **正文必须先转义**（`escapeInjectionText`）：记忆正文里若含
+ * `</comem-recall><comem-recall>`，原样拼接会让这个块多出一层边界，模型会把
+ * 后面的正文当成第二层注入。
+ *
+ * @param {readonly { uri: string, memoryType: string | null, contextType: string | null, abstract: string | null }[]} kept 已经过阈值筛选、且非空
+ * @returns {string}
  */
-export function formatRecallBlock(hits, threshold) {
-  if (hits.length === 0) {
-    return undefined;
-  }
-  const topScore = Math.max(...hits.map((hit) => hit.score));
-  const cutoff = topScore > 0 ? topScore * threshold : Number.NEGATIVE_INFINITY;
-  const kept = hits.filter((hit) => hit.score >= cutoff);
-  if (kept.length === 0) {
-    // 阈值配到 1 以上时一条都留不下。保留这条分支：调用方仍然拿到「没有记忆」。
-    return undefined;
-  }
+export function renderRecallBlock(kept) {
   const lines = [RECALL_OPEN];
   for (const [index, hit] of kept.entries()) {
     const type = hit.memoryType ?? hit.contextType ?? 'memory';
     lines.push(`${index + 1}. [${type}] ${hit.uri}`);
-    const abstract = hit.abstract?.trim() ?? '';
+    const abstract = escapeInjectionText(hit.abstract?.trim() ?? '');
     if (abstract !== '') {
       lines.push(`  ${abstract.replaceAll('\n', '\n  ')}`);
     }
@@ -127,6 +147,22 @@ export function formatRecallBlock(hits, threshold) {
   lines.push(RECALL_CLOSE);
   return lines.join('\n');
 }
+
+/**
+ * 渲染注入块（§8.6 的展示格式与 §13.2 的 `find` 返回值同构）。
+ *
+ * 是 `selectRecallHits` + `renderRecallBlock` 的组合：只做渲染时（测试、离线脚本）
+ * 用这个入口，需要知道「投喂了哪些 URI」时分开调（跨轮账本要记账）。
+ *
+ * @param {readonly { uri: string, score: number, memoryType: string | null, contextType: string | null, abstract: string | null }[]} hits
+ * @param {number} threshold 相对于本次最高分的比例
+ * @returns {string | undefined} 没有可投喂的条目时 `undefined`
+ */
+export function formatRecallBlock(hits, threshold) {
+  const kept = selectRecallHits(hits, threshold);
+  return kept.length === 0 ? undefined : renderRecallBlock(kept);
+}
+
 
 /**
  * @param {{ event: string, sessionId: string, cwd: string, prompt: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
@@ -149,12 +185,28 @@ export async function handleUserPromptSubmit(event, deps) {
     return undefined;
   }
 
+  // 跨轮账本（§15.10）：上一轮已经注入过的 URI 这一轮不再注入。读失败降级成
+  // 「本轮不去重」——账本是去重辅助，不是真相来源。
+  const dir = deps.config.tmpDir;
+  let delivered = [];
+  try {
+    delivered = await readDeliveredUris(event.sessionId, { dir });
+  } catch (error) {
+    (deps.warn ?? warn)('召回账本读取失败，本轮不做跨轮去重。', {
+      code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
   const recallStartedAt = process.hrtime.bigint();
   let hits;
   try {
     const result = await deps.http.post(FIND_PATH, {
       query,
-      limit: deps.config.recallLimit,
+      // 客户端过滤会欠额（被排除的条目不补位），多要几条补偿。上限是
+      // `recallLimit` 而不是账本上限：服务端按 `limit` 的倍数取候选，跟着 200
+      // 走会把它放大一个数量级（见 `lib/recall.mjs` 的文件头）。
+      limit: deps.config.recallLimit + Math.min(delivered.length, deps.config.recallLimit),
     });
     hits = readHits(result);
   } catch (error) {
@@ -169,8 +221,29 @@ export async function handleUserPromptSubmit(event, deps) {
   const recallMs = elapsedMs(recallStartedAt);
 
   const serializeStartedAt = process.hrtime.bigint();
-  const context = formatRecallBlock(hits, deps.config.recallScoreThreshold);
+  const deliveredSet = new Set(delivered);
+  const kept = selectRecallHits(
+    hits.filter((hit) => !deliveredSet.has(hit.uri)),
+    deps.config.recallScoreThreshold,
+  );
+  const context = kept.length === 0 ? undefined : renderRecallBlock(kept);
   const serializeMs = elapsedMs(serializeStartedAt);
+
+  // **只有真的注入了才记账。** 「本轮一条都没给」不等于「已经给过」：写进去会让
+  // 这些记忆在去重窗口内被静默压制，下一轮真相关时召不回来。空列表由
+  // `recordDeliveredUris` 自己挡掉（不建目录、不写文件），调用方不重复判断。
+  try {
+    await recordDeliveredUris(
+      event.sessionId,
+      kept.map((hit) => hit.uri),
+      { dir },
+    );
+  } catch (error) {
+    (deps.warn ?? warn)('召回账本写入失败，下一轮可能重复注入。', {
+      code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   await reportOverhead(
     {

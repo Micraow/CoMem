@@ -36,6 +36,14 @@
  *
  * 解析出 0 条消息时写一行诊断到 `{tmpdir}/comem-capture.log`（**不能只写 stderr**：
  * `Stop` 的 worker 是 `stdio: 'ignore'` 的分离进程，stderr 被丢弃）。
+ *
+ * ## 上报前先剥自己注入的块
+ *
+ * 会话里带着 CoMem 自己注入的 `<comem-recall>` / `<comem-profile>` /
+ * `<comem-preferences>`（以及宿主的 `<system-reminder>`）。原样上报会让「上一轮
+ * 注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读
+ * 自己。剥离在 `captureSession` 里做——两种消息来源（载荷里的累积列表、transcript
+ * 解析结果）在那里合流，发 HTTP 之前只剥一次（§15.10、`lib/sanitize.mjs`）。
  */
 
 import { spawn } from 'node:child_process';
@@ -50,6 +58,7 @@ import { createHttpClient } from '../lib/http.mjs';
 import { withSessionLock } from '../lib/lock.mjs';
 import { advanceCursor, readCursor } from '../lib/cursor.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
+import { sanitizeCapturedMessages } from '../lib/sanitize.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -235,12 +244,22 @@ export async function captureSession(event, deps) {
         provided === null && typeof event.transcriptPath === 'string'
           ? await readTranscript(event)
           : null;
-      const messages = provided ?? transcript?.messages ?? [];
+      const rawMessages = provided ?? transcript?.messages ?? [];
+      // 会话里带着 CoMem 自己注入的块（`<comem-recall>` 等）。原样上报会让上一轮的
+      // 注入以「用户这轮说的话」的身份被重新抽取，记忆库开始复读自己（§15.10）。
+      // **剥在发 HTTP 之前、且只剥这一处**——三个宿主适配器都经过这条路径。
+      //
+      // 游标按剥离后的条数推进：下一轮同一份 transcript 会剥出同样的前缀，两个
+      // 计数不会漂移。
+      const messages = sanitizeCapturedMessages(rawMessages);
       const pending = messages.slice(cursor);
       if (pending.length === 0) {
         // 「0 条」不是正常返回：整条阶段二（建会话 → 写消息 → 提交 → 建任务）
         // 都没有启动。留一行能定位的诊断，不打印消息正文。
-        if (messages.length === 0) {
+        //
+        // 判据用**剥离前**的条数：一轮对话只由注入块组成（用户只回了 `SessionStart`
+        // 的注入内容）时，剥完是 0 条，但这不是格式不匹配，不该报诊断。
+        if (rawMessages.length === 0) {
           await reportEmptyCapture(dir, event, transcript, provided);
         }
         return { captured: 0, committed: false, bypassed: false };

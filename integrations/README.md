@@ -21,6 +21,8 @@ integrations/
 │   ├── dedup.mjs         # 事件去重（500ms 窗口）
 │   ├── lock.mjs          # 跨进程会话锁
 │   ├── cursor.mjs        # 消息游标
+│   ├── recall.mjs        # 跨轮召回账本（已注入的 URI，防重复投喂）
+│   ├── sanitize.mjs      # 捕获侧剥离（去掉自己注入的块）
 │   ├── filter.mjs        # sed 风格查询过滤
 │   └── telemetry.mjs     # 四阶段开销上报
 ├── servers/              # 七个可执行入口
@@ -575,9 +577,10 @@ queryFilters:
 `servers/` 里一行都不用改。
 
 **临时文件**：锁 `{tmpdir}/comem-{sessionId}.lock`、游标 `{tmpdir}/comem-cursors.json`、
-事件去重 `{tmpdir}/comem-events.json`、worker 载荷 `{tmpdir}/comem-stop-*.json`、
-采集诊断 `{tmpdir}/comem-capture.log`（超过 256 KiB 整份重写）。
-`COMEM_HOOK_TMPDIR` 可以整体换一个目录（测试与多实例隔离用）。
+事件去重 `{tmpdir}/comem-events.json`、召回账本 `{tmpdir}/comem-recall-ledger.json`、
+worker 载荷 `{tmpdir}/comem-stop-*.json`、采集诊断 `{tmpdir}/comem-capture.log`
+（超过 256 KiB 整份重写）。`COMEM_HOOK_TMPDIR` 可以整体换一个目录（测试与多实例
+隔离用）。
 
 ## 宿主载荷
 
@@ -676,6 +679,109 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 /sessions/{id}/messages` 在缺 `id` 时补一个随机 UUID，重投会变成两条——自己写客户端
 时不要省这个字段。
 
+## 注入与捕获的去重
+
+上面那四层解决的是「同一条消息别提交两次」。这里解决的是**另一个方向**：CoMem
+往宿主上下文里注入的三个块（`<comem-recall>` / `<comem-profile>` /
+`<comem-preferences>`）会留在会话里，下一轮 `Stop` 读 transcript 时，它们与用户
+真的说过的话长得一模一样。原样处理有两个后果：
+
+- **捕获侧**：上一轮注入的记忆被当成「用户这轮说的话」重新抽取一遍，跑几轮之后
+  记忆库开始复读自己；
+- **注入侧**：一条记忆的正文里若含 `</comem-recall>`，模型会把它当成第二层注入，
+  后面跟着的正文就成了伪造的指令。
+
+三个机制各管一段，代码分别在 `lib/sanitize.mjs`、`lib/injection.mjs` 的
+`escapeInjectionText`、`lib/recall.mjs`。
+
+### 1. 捕获侧剥离（`lib/sanitize.mjs`）
+
+在**发 HTTP 之前**对每条消息的文本做一次剥离，三种规则按固定顺序作用：
+
+| 规则 | 匹配 | 为什么 |
+|---|---|---|
+| 块级 | `<comem-recall>…</comem-recall>`、`<comem-profile>`、`<comem-preferences>`、`<system-reminder>` | 这些是 CoMem 与宿主写给模型看的，不是对话 |
+| 行级 | 行首 `[2024-01-01T00:00:00Z]` | 宿主给消息加的时间戳，进抽取器是纯噪声 |
+| 兜底 | 裸 epoch `\b1[6-9]\d{8}\b`、`\b1[6-9]\d{11}\b` | 同上；**只在整条消息剥完块之后**做，否则会吃掉正常数字 |
+
+**块用「开标签 → 最近的闭标签」剥，不是贪婪正则。** `<comem-recall>[\s\S]*</comem-recall>`
+会从第一个开标签吃到最后一个闭标签：同一段文本里有两个块时，中间用户真正写的
+内容被一起删掉。开标签找不到闭标签时吃到消息末尾——留半截注入块比多删更糟。
+嵌套剥离留下的孤立标签也会清掉。
+
+剥完变空（或只剩空白）的消息**整条丢弃**，不发空串给服务端。游标按剥离后的
+条数推进：下一轮同一份 transcript 会剥出同样的前缀，两个计数不会漂移。
+
+接入点在 `servers/stop.mjs` 的 `captureSession`：两种消息来源（载荷里的累积列表、
+transcript 解析结果）在那里合流。**不在三个宿主适配器里各剥一次**——宿主适配器
+只回答「怎么解析」，剥离是「发出去之前」的一件事。
+
+### 2. 注入侧转义（`lib/injection.mjs` 的 `escapeInjectionText`）
+
+渲染块之前把记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）。
+换完仍然可读（`‹/comem-recall>` 像引用了一段标签名），但不再是标签，块的边界
+只有一个。用例钉住这条性质：正文含 `</comem-recall><comem-recall>` 时，渲染结果
+里开标签与闭标签各只有一个。
+
+为什么不是反斜杠、也不是删掉标签：反斜杠会把「转义链」引进来（Markdown 一层、
+JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉标签则改变了记忆本身。
+
+**转义只覆盖 `comem-` 前缀**。`<available-skills>` / `</available-skills>` 是第四
+个块，见下面的「误伤与残余」。
+
+### 3. 跨轮账本（`lib/recall.mjs`）
+
+`UserPromptSubmit` 每轮检索 top-k 并注入；账本记「这个会话已经投喂过哪些 URI」，
+下一轮检索后按 URI 排除。用户连续问三个相关问题时，同一段记忆不会被完整注入
+三次。
+
+- **位置**：`{tmpdir}/comem-recall-ledger.json`，与游标、事件去重同一个目录
+  （`COMEM_HOOK_TMPDIR` 可整体替换）。hook 是短命进程，跨轮状态只能靠文件；
+  hook 也拿不到服务端的 `dataDir`（插件可能装在另一台机器上）。账本丢了只影响
+  去重强度，不影响正确性——放 `/tmp` 正好。
+- **形状**：`{"sessionId": "cc-…", "uris": [...]}`。**只存一个会话**：`sessionId`
+  变了就整份替换，这就是「会话切换 → 账本重置」，也把文件大小钉死在 200 条。
+- **上限**：200 条，超出按 FIFO 淘汰（重复 URI 先删再追加，所以淘汰的是最早
+  投喂的）。
+- **关键规则：本轮一条都没注入时不写账本。** 「没给过」不等于「给过了」——写了
+  会让这些记忆在去重窗口内被静默压制，下一轮真相关时召不回来。
+- **欠额补偿**：客户端过滤不会让服务端补位，所以检索时多要
+  `min(已投喂条数, recallLimit)` 条（最多多要一倍）。不能跟着账本上限 200 走：
+  服务端按 `limit × candidateMultiplier` 取候选，210 条会把它放大到 840 条，把
+  每轮按回车的延迟绑在检索上。
+
+**服务端的「排除 URI」参数：`POST /search/find` 没有。** 服务端有召回账本
+（`docs/architecture.md` §8.7），但它的去重入口只在 `POST /search/search` 的
+`mode=context` 上；hook 走的 `find` 不接受排除列表。让 hook 改走 `mode=context`
+是换一条出口（组装、预算、渲染全变），不是加一个参数。所以 v1 在 hook 侧记一份、
+客户端过滤；服务端加参数属于 API 变更，另行决定。
+
+### 误伤与残余
+
+剥离规则认的是字符串，不是「这是不是真的注入」。以下正常文本会被吃掉：
+
+| 文本 | 结果 |
+|---|---|
+| 讨论 CoMem 时贴出的 `<comem-recall>…</comem-recall>` 示例 | 整段消失 |
+| 行首的 `[2024-01-01T00:00:00Z]` 日志片段 | 时间戳消失，其余保留 |
+| 恰好是 `16…`–`19…` 开头的 10 / 13 位数字（部分订单号、`1700000000000` 这类 epoch 毫秒） | 数字消失，两边的空格留下 |
+| 只有开标签、没有闭标签的一段（用户手写了一半） | 从开标签吃到消息末尾 |
+
+剥离失败的方向是「少吃」，不是「多吃」——多吃的代价是把用户的话当成注入。
+反方向的残余（**只报不改**）：
+
+- **`<available-skills>` 两侧都不处理。** 它是第四个注入块，但不在 `comem-*`
+  的口径里：捕获侧不剥它（它以消息形式进了 transcript 时会被重新抽取），注入侧
+  不转义它（一条记忆作为技能描述时若含 `</available-skills>`，能提前关掉那个块）。
+- **`SessionStart` 注入的块不记账。** 画像与偏好每局只注入一次，不参与跨轮去重；
+  它们若命中后续的 `find`，仍会被 `find` 结果再注入一遍。
+- **`PostToolUse` 采集的工具输出不剥离。** 工具输出里的注入块（比如 `cat` 了一个
+  transcript）会原样上报。
+
+用例在 `tests/sanitize.test.mjs`（纯函数，含 1MB 输入耗时）、
+`tests/recall.test.mjs`（真落盘的账本）、`tests/user-prompt-submit.test.mjs`
+（转义与跨轮去重的接入）与 `tests/stop.test.mjs`（发 HTTP 前剥离）。
+
 ## 故障排查
 
 **`doctor` 报「服务端可达」失败**：`curl $COMEM_BASE_URL/health` 确认服务端起了；
@@ -707,8 +813,15 @@ SQLite 的写锁。
 选错了宿主；`reason: "no-transcript-path"` 说明宿主没给 `transcript_path`；`reason:
 "transcript-read-failed"` 说明文件读不到（`error` 是 errno）。
 
-**同一段记忆被注入两次**：召回账本由服务端维护（§8.7），hook 侧只负责发请求。
-检查 `dedupTurns` 配置。
+**同一段记忆被注入两次**：hook 侧的账本是
+`${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-recall-ledger.json`（见上面的「注入与
+捕获的去重」）。目录不可写时去重静默失效，stderr 有一行 `召回账本写入失败`。服务端
+的召回账本（§8.7）只作用于 `POST /search/search` 的 `mode=context`，hook 走的是
+`find`，`dedupTurns` 对它无效。
+
+**记忆库开始复读自己**：上一轮的注入块被当成用户的话重新抽取了。检查
+`lib/sanitize.mjs` 的块标签表是否覆盖了宿主实际写的标签——宿主新增一种带外提示
+（像 `<system-reminder>` 那样）时，采集侧要一起加。
 
 **消息重复**：游标文件被删或目录不可写（`COMEM_HOOK_TMPDIR`）。重复会被服务端按
 消息 ID 去重，不影响正确性，但会多一次抽取。

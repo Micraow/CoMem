@@ -3333,6 +3333,8 @@ integrations/
 │   ├── dedup.mjs              # 事件去重（500ms 窗口）
 │   ├── lock.mjs               # 跨进程会话锁
 │   ├── cursor.mjs             # 消息游标
+│   ├── recall.mjs             # 跨轮召回账本（已注入的 URI，防重复投喂）
+│   ├── sanitize.mjs           # 捕获侧剥离（去掉自己注入的块）
 │   ├── filter.mjs             # sed 风格查询过滤
 │   └── telemetry.mjs          # 四阶段开销上报
 ├── skills/                    # 提示词：装进宿主的技能目录
@@ -3442,6 +3444,19 @@ integrations/
 | 缓存同 prompt 结果 | 有限 | 重复 prompt 很少 |
 
 v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再上 Unix socket 守护进程。
+
+### 15.10 注入与捕获的去重
+
+§15.9 保证「注入什么」，这一节保证**注入物不会反过来污染记忆**。三个机制，细节与用例在 `integrations/README.md` 的「注入与捕获的去重」：
+
+1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级（`<comem-recall>` / `<comem-profile>` / `<comem-preferences>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则）、行首时间戳前缀、裸 epoch（只在块剥完之后做）。剥空的消息整条丢弃，游标按剥离后的条数推进。三个宿主适配器不各剥一次——它们只回答「怎么解析」。
+2. **注入侧转义**（`integrations/lib/injection.mjs` 的 `escapeInjectionText`）。记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）：正文含 `</comem-recall><comem-recall>` 时，渲染后的块里开标签与闭标签各只有一个，结构没被破坏，内容仍然可读。反斜杠会把转义链引进来，删标签会改变记忆本身。
+3. **跨轮账本**（`integrations/lib/recall.mjs`）。账本是 `{tmpDir}/comem-recall-ledger.json`（与游标、事件去重同一个目录——hook 是短命进程，跨轮只能靠文件，且它拿不到服务端的 `dataDir`），记「本会话已投喂的 URI」，下一轮检索后排除。**本轮一条都没注入时不记账**：「没给过」不等于「给过了」，写了会让这些记忆在去重窗口内被静默压制。上限 200 条、FIFO；`sessionId` 变了整份替换（会话切换即重置）。客户端过滤不补位，所以检索时多要 `min(已投喂条数, recallLimit)` 条。
+
+**服务端的「排除 URI」参数不存在。** 服务端的召回账本（§8.7）只在 `POST /search/search` 的 `mode=context` 上生效；hook 走的 `POST /search/find` 不接受排除列表。让 hook 改走 `mode=context` 是换一条出口（组装、预算、渲染全变），不是加一个参数，所以 v1 在 hook 侧记账、客户端过滤。在 `/search/find` 上加排除参数属于 API 变更，另行决定。
+
+**剥离会误伤。** 规则认的是字符串，不是「这是不是真的注入」：讨论 CoMem 时贴出的 `<comem-recall>…</comem-recall>` 示例、行首的日志时间戳、恰好落在 `16…`–`19…` 的 10 / 13 位数字都会被吃掉。反方向也有残余（`<available-skills>` 两侧都不处理、`SessionStart` 的块不记账、`PostToolUse` 的工具输出不剥离），清单在 README 同一节。
+
 
 ## 16. Web 控制台
 

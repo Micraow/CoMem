@@ -273,6 +273,48 @@ export function elideToBudget(text, budgetTokens, uri) {
   )}`;
 }
 
+/**
+ * 注入块的标签名。渲染前要把记忆正文里的同名标签转义掉（见 `escapeInjectionText`）。
+ *
+ * 只有 `comem-` 前缀：注入块的边界就是它，`<system-reminder>` 之类宿主自己的标签
+ * 不在这里处理——把宿主标签也转义会让记忆正文里正常的引用变形，而伪造宿主标签的
+ * 收益远低于伪造召回块（模型按 `<comem-recall>` 判断「这是记忆」）。
+ */
+const INJECTION_TAG_PREFIX = 'comem-';
+
+/**
+ * 把记忆正文里的注入标签转义成纯文本（架构文档 §15.10）。
+ *
+ * 一条记忆的正文里若含 `</comem-recall><comem-recall>`，原样渲染会让块**多出一层
+ * 边界**：模型看到的是「这里结束了一条记忆，又开始了另一条」，于是把后面的正文
+ * 当成注入协议的一部分——伪造注入。转义之后正文里只剩 `‹/comem-recall>‹comem-recall>`，
+ * 它仍然可读（像引用了一段标签名），但不再是标签。
+ *
+ * ## 为什么是 `<` → `‹`（U+2039）
+ *
+ * - **反斜杠会把转义链引进来。** `\<comem-recall>` 在 Markdown 里是转义，在 JSON
+ *   串里又是一层；模型对「反斜杠是字面量还是转义」的判断不稳定，而且正文里原本
+ *   就有的反斜杠会和它混起来。
+ * - **删掉标签会改变事实。** 把标签整段删掉，模型读到的是一句被改过的记忆；换成
+ *   `‹` 只改一个字符，句子的其余部分原样保留。
+ * - **`‹` 不会与任何标签语法混淆。** 它不是 `<`，宿主与模型都不会把它当块边界；
+ *   它也不是 Markdown 元字符，不会引入第二套解析规则。
+ *
+ * 转义是幂等的：`‹comem-` 里已经没有 `<comem-`，再转一次不变。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function escapeInjectionText(text) {
+  const open = `<${INJECTION_TAG_PREFIX}`;
+  // `</comem-` 以 `<` + `/` 开头，不是 `open` 的前缀，单独换。
+  const close = `</${INJECTION_TAG_PREFIX}`;
+  if (!text.includes(open) && !text.includes(close)) {
+    return text;
+  }
+  return text.replaceAll(open, `‹${INJECTION_TAG_PREFIX}`).replaceAll(close, `‹/${INJECTION_TAG_PREFIX}`);
+}
+
 /** 块之间的分隔：空行（与原来的 `blocks.join('\n\n')` 一致）。 */
 const BLOCK_SEPARATOR = '\n\n';
 

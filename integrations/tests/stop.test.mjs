@@ -288,3 +288,116 @@ test('worker 真正跑起来时会把消息写进服务端并清掉载荷', asyn
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * §15.10 捕获侧剥离：宿主会话里带着 CoMem 自己注入的块，原样上报会让「上一轮
+ * 注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮后记忆库开始复读自己。
+ *
+ * 剥离在 `captureSession` 里、发 `POST /messages` 之前做一次，三个宿主适配器都
+ * 经过这条路径。
+ */
+test('上报前剥掉注入块：只由块组成的消息整条丢弃，游标按剥离后的条数前进', async () => {
+  const server = await startServer();
+  const dir = await mkdtemp(join(tmpdir(), 'comem-stop-'));
+  try {
+    const transcript = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcript,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          message: {
+            role: 'user',
+            content: '<comem-recall>\n1. [profile] comem://user/alice/memories/a.md\n   后端工程师\n</comem-recall>',
+          },
+        }),
+        JSON.stringify({ uuid: 'u2', message: { role: 'user', content: '真正的问题' } }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const payloadFile = await writeWorkerPayload(dir, {
+      event: {
+        sessionId: 'cc-1',
+        cwd: dir,
+        eventId: null,
+        transcriptPath: transcript,
+        messages: null,
+      },
+      processStartMs: 1,
+    });
+
+    const child = spawn(process.execPath, [SERVER_SCRIPT], {
+      env: {
+        ...process.env,
+        COMEM_BASE_URL: server.baseUrl,
+        COMEM_USER_ID: 'alice',
+        COMEM_HOOK_TMPDIR: dir,
+        COMEM_WORKER: '1',
+        COMEM_WORKER_PAYLOAD: payloadFile,
+      },
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+    await new Promise((resolve) => child.on('close', resolve));
+
+    const request = server.requests.find((entry) => entry.url?.endsWith('/messages'));
+    assert.equal(request.body.messages.length, 1);
+    assert.equal(request.body.messages[0].id, 'u2');
+    assert.deepEqual(request.body.messages[0].parts, [{ kind: 'text', text: '真正的问题' }]);
+
+    // 游标是**剥离后**的条数（1），不是 transcript 的行数（2）。两个计数一致，
+    // 下一轮才不会重投或漏投。
+    const cursor = JSON.parse(await readFile(join(dir, 'comem-cursors.json'), 'utf8'));
+    assert.deepEqual(cursor, { 'cc-1': 1 });
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('上报前剥掉注入块：消息里的块被删掉，正文保留', async () => {
+  const server = await startServer();
+  const dir = await mkdtemp(join(tmpdir(), 'comem-stop-'));
+  try {
+    const transcript = join(dir, 'transcript.jsonl');
+    await writeFile(
+      transcript,
+      `${JSON.stringify({
+        uuid: 'u1',
+        message: {
+          role: 'user',
+          content: '真正的问题\n<comem-recall>1. [profile] comem://x</comem-recall>',
+        },
+      })}\n`,
+      'utf8',
+    );
+
+    const payloadFile = await writeWorkerPayload(dir, {
+      event: { sessionId: 'cc-1', cwd: dir, eventId: null, transcriptPath: transcript, messages: null },
+      processStartMs: 1,
+    });
+
+    const child = spawn(process.execPath, [SERVER_SCRIPT], {
+      env: {
+        ...process.env,
+        COMEM_BASE_URL: server.baseUrl,
+        COMEM_USER_ID: 'alice',
+        COMEM_HOOK_TMPDIR: dir,
+        COMEM_WORKER: '1',
+        COMEM_WORKER_PAYLOAD: payloadFile,
+      },
+      stdio: 'ignore',
+      detached: true,
+    });
+    child.unref();
+    await new Promise((resolve) => child.on('close', resolve));
+
+    const request = server.requests.find((entry) => entry.url?.endsWith('/messages'));
+    assert.deepEqual(request.body.messages[0].parts, [{ kind: 'text', text: '真正的问题' }]);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

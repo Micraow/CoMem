@@ -55,7 +55,7 @@ import { pathToFileURL } from 'node:url';
 import { DEFAULT_PROFILE_BUDGET_TOKENS, isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
-import { elideToBudget, estimateTokens, fitContext, stripFrontmatter } from '../lib/injection.mjs';
+import { elideToBudget, escapeInjectionText, estimateTokens, fitContext, stripFrontmatter } from '../lib/injection.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const CONTENT_READ_PATH = '/api/v1/content/read';
@@ -102,6 +102,9 @@ export { estimateTokens };
  * 按预算渲染技能目录，三档降级（见文件头）。没有技能时返回 `undefined`——
  * 空的 `<available-skills>` 块只会让模型困惑。
  *
+ * 技能的名字与描述来自服务端（可以是任意记忆），渲染前先转义 `<comem-` 标签：
+ * 描述里自带 `<comem-recall>` 时，它会在块里伪造出一层召回边界（§15.10）。
+ *
  * @param {readonly { name: string, description: string | null }[]} skills
  * @param {number} budgetTokens
  * @returns {string | undefined}
@@ -114,15 +117,15 @@ export function renderSkillCatalog(skills, budgetTokens) {
   const detailed = skills
     .map((skill) =>
       skill.description === null || skill.description === ''
-        ? `- ${skill.name}`
-        : `- ${skill.name}: ${skill.description}`,
+        ? `- ${escapeInjectionText(skill.name)}`
+        : `- ${escapeInjectionText(skill.name)}: ${escapeInjectionText(skill.description)}`,
     )
     .join('\n');
   if (estimateTokens(detailed) <= budgetTokens) {
     return `${SKILLS_OPEN}\n${detailed}\n</available-skills>`;
   }
 
-  const namesOnly = skills.map((skill) => `- ${skill.name}`).join('\n');
+  const namesOnly = skills.map((skill) => `- ${escapeInjectionText(skill.name)}`).join('\n');
   if (estimateTokens(namesOnly) <= budgetTokens) {
     return `${SKILLS_OPEN}\n${namesOnly}\n</available-skills>`;
   }
@@ -289,7 +292,10 @@ export async function handleSessionStart(event, deps) {
   if (profile !== null) {
     // frontmatter 里的 `memory_type` / `created_at` / `uri` 对模型是噪声，`summary`
     // 又是正文前 256 字的副本（§9.1 的 L0 预算按正文首行截断）。只注入正文。
-    const body = elideToBudget(stripFrontmatter(profile), profileBudgetTokens, profileUri).trim();
+    // 正文是记忆，可能含 `<comem-recall>`：转义发生在拼块之前（§15.10）。
+    const body = escapeInjectionText(
+      elideToBudget(stripFrontmatter(profile), profileBudgetTokens, profileUri).trim(),
+    );
     if (body !== '') {
       blocks.push({ id: 'profile', text: `${PROFILE_OPEN}\n${body}\n</comem-profile>` });
     }
@@ -297,7 +303,7 @@ export async function handleSessionStart(event, deps) {
   if (preferences !== null) {
     // 偏好与画像一样是正文：超预算时同样按「前 N 行 + 尾部 + 省略标记」截断。
     const budget = Math.floor(profileBudgetTokens / PREFERENCES_BUDGET_DIVISOR);
-    const body = elideToBudget(preferences.trim(), budget, preferencesUri).trim();
+    const body = escapeInjectionText(elideToBudget(preferences.trim(), budget, preferencesUri).trim());
     if (body !== '') {
       blocks.push({ id: 'preferences', text: `${PREFERENCES_OPEN}\n${body}\n</comem-preferences>` });
     }
