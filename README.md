@@ -83,17 +83,21 @@ flowchart LR
 ```bash
 git clone https://github.com/Micraow/CoMem.git
 cd CoMem
-cp config.example.yaml config.yaml     # 可选；模板里没有必填的密钥，复制完直接能启动
+cp config.example.yaml config.yaml     # compose 部署必需；不用配置文件时改用下面的 docker run
 docker compose build
 docker compose up -d
 curl http://127.0.0.1:18080/health     # {"status":"ok",...}
 ```
 
-**不需要任何密钥就能起服务。** `config.yaml` 是本地文件、不进版本控制；没有它也能启动
-（全部走默认值，会 warn 一条占位的 `baseUrl`）。模板里 `providers.llm.default.apiKey` 与
-`providers.embedding.apiKey` 都是空串——摘要、记忆抽取、合并与检索改写要接真实模型才工作，
-接的时候在 `config.yaml` 里填 key，或用环境变量 `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` /
-`COMEM_PROVIDERS_EMBEDDING_API_KEY` 覆盖。
+**不需要任何密钥就能起服务。** `config.yaml` 是本地文件、不进版本控制。模板里
+`providers.llm.default.apiKey` 与 `providers.embedding.apiKey` 都是空串——摘要、记忆抽取、
+合并与检索改写要接真实模型才工作，接的时候在 `config.yaml` 里填 key，或用环境变量
+`COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` / `COMEM_PROVIDERS_EMBEDDING_API_KEY` 覆盖。
+
+**`docker compose` 部署要先有 `config.yaml`。** compose 会把 `./config.yaml` 挂进容器；
+文件不存在时 Docker 会在宿主建一个同名目录，启动报 `EISDIR: illegal operation on a directory, read`。
+上面那条 `cp config.example.yaml config.yaml` 不是可选的。完全不用配置文件时，改用
+`docker run` 且不挂载它（全部走默认值，会 warn 一条占位的 `baseUrl`）。
 
 **「留空」与「不设置」不是一回事。** 空串是「没有密钥」，能启动；`${VAR}` 引用的环境变量
 **没设置**时启动直接失败（`配置文件引用了未设置的环境变量 ...`），即使那个 provider 是
@@ -152,6 +156,48 @@ pnpm test:e2e
 
 它起服务、写记忆、检索、归档会话、跑完阶段二、过复核、生成摘要、演示 ACL，跑完自动停。用临时数据根，不碰你的真实数据。
 </details>
+
+### 第一个账号从哪来
+
+**本地开发（`pnpm dev`，默认单用户模式）**：`auth.enabled` 默认是 `false`，没有登录，也没有账号要建。打开控制台（http://127.0.0.1:3081 ）就是 `user:local`，服务启动时会自动建好这个账号；顶部有一条常驻横幅说明当前是单用户模式。
+
+**Docker（`docker compose`）**：镜像默认打开多用户登录（容器必须绑 `0.0.0.0`），第一次启动要创建管理员：
+
+```bash
+docker compose build
+docker compose up -d
+docker compose logs comem | grep 初始化令牌
+```
+
+日志里有一行 `初始化令牌：<token>（用于首次创建管理员账号；创建完成后失效）`，`<token>` 待会儿要填。打开 http://127.0.0.1:18080/setup ，填用户名（默认 `local`）、密码、初始化令牌，提交后去 `/login` 登录。这个账号通过引导管理员标记直接获得系统管理员权限，不用再配 `adminUserIds`。
+
+**本地开发要多个用户**：在 `config.yaml` 里加
+
+```yaml
+auth:
+  enabled: true
+  sessionSecret: ""
+  sessionTtlSeconds: 86400
+  adminUserIds: []
+```
+
+重启 `pnpm dev`，打开 http://127.0.0.1:3081/setup （回环地址不需要令牌）创建管理员，再去 `/login` 登录。
+
+**之后加账号**：控制台「用户与组」页的「新建用户」。新账号建出来没有密码，要在该用户的详情抽屉里打开「密码」页签设一次；不设的话，登录会得到「用户名或密码错误」。要让某个账号能管用户与组，把它的 ID 写进 `auth.adminUserIds` 并重启。
+
+**忘记密码 / 没有浏览器**：账号已经存在时用命令改密码（数据根必须先由服务初始化过一次；用户不存在时命令只报错，不建账号）：
+
+```bash
+# 宿主机（在仓库根目录执行）
+printf '%s' '新密码' | pnpm password local
+
+# 容器（docker compose 部署）
+printf '%s' '新密码' | docker compose exec -T comem node dist/commands/password.js local
+```
+
+**单用户模式没有认证。** 服务端把不带凭据的请求当成 `server.subject`（默认 `user:local`），**任何能访问这个端口的人都是同一个用户**，所有操作记在同一个身份上，也没有审计。默认只监听 `127.0.0.1`；`server.host` 改成非回环地址而 `auth.enabled` 还是 `false` 时，服务**拒绝启动**。TLS 只加密传输，不区分身份。
+
+完整说明（`adminUserIds`、登录凭据、恢复组 owner）见 [docs/operations.md 的「多用户部署」](docs/operations.md#多用户部署)。
 
 ---
 

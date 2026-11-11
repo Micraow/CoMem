@@ -98,10 +98,10 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
-| `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户）；打开后要求 `Authorization: Bearer`，见「多用户部署」 |
+| `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户，`server.host` 必须是回环地址）；打开后要求 `Authorization: Bearer`，第一次启动进 `/setup` 建管理员，见「多用户部署」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
 | `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码会轮换身份版本，旧 token 立即失效 |
-| `auth.adminUserIds` | `[]` | 系统管理员名单（`app_user.id`）。列全部用户 / 组、建用户、建组、`/tasks` 三个端点只认这份名单（§12.4）。**默认空 = 没有系统管理员**，那些端点对所有人 403，没有「第一个用户自动成为管理员」这类隐式规则。**存量部署升级必须显式配一个 ID**，单用户部署也要写自己的 ID |
+| `auth.adminUserIds` | `[]` | 额外的系统管理员名单（`app_user.id`）。跨主体端点（列全部用户 / 组、建用户、建组、`/tasks`）只认这份名单与引导管理员（`app_user.bootstrap_admin = 1`）。默认空 = 只有 `/setup` 创建的第一个管理员；其它账号要管这些页面就显式列进来 |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
 | `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
 | `logging.level` | `info` | `debug` / `info` / `warn` / `error` / `fatal`（没有 `trace`：`Logger` 上不存在 `trace()`，留着会是一个不产生行为的配置值） |
@@ -287,8 +287,8 @@ pnpm check:shape
 
 ## 多用户部署
 
-默认配置是单用户：身份来自反向代理注入的 `x-comem-subject`，且必须等于
-`server.subject`。要让多个用户各自登录，打开 `auth`：
+默认配置是单用户：不带凭据的请求都当成 `server.subject`（默认 `user:local`），且
+`server.host` 必须是回环地址。要让多个用户各自登录，打开 `auth`：
 
 ```yaml
 auth:
@@ -297,12 +297,14 @@ auth:
   # 足够长的随机串（`openssl rand -base64 48`），并保证它不泄露。
   sessionSecret: ""
   sessionTtlSeconds: 86400
-  # 系统管理员（app_user.id）。跨主体端点只认这份名单，默认空 = 没有系统管理员。
-  adminUserIds: [alice]
+  # 额外的系统管理员（app_user.id）。第一个管理员由 /setup 的引导流程自动获得管理权；
+  # 这份名单是给第二个及以后的管理员用的。默认空 = 只有引导管理员。
+  adminUserIds: []
 ```
 
 打开之后：
 
+- 还没有任何账号设过密码时，控制台整页进 `/setup` 创建第一个管理员（见「建第一个账号」）。
 - 所有非公开端点要求 `Authorization: Bearer <凭据>`，缺失或无效一律 401
   `UNAUTHENTICATED`。
 - 凭据有两种：登录拿到的 session token，或 `POST /api/v1/admin/users/{id}/api-keys`
@@ -320,30 +322,132 @@ auth:
   `GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`。这些端点没有目标资源可求权
   （`task` 表没有 scope 或 uri 列），按 `auth.adminUserIds` 判定。
 
-**`auth.adminUserIds` 默认是空数组 = 没有系统管理员。** 名单为空时上面那些端点对所有人
-403，包括单用户部署里的绑定主体。没有「第一个用户自动成为管理员」或「绑定主体即管理员」
-这类隐式规则：默认值站在安全的一侧，要开放就显式写一个 ID。
+系统管理员有两个来源：`POST /api/v1/bootstrap/admin` 创建的第一个管理员
+（`app_user.bootstrap_admin = 1`，端点随后永久关闭），以及 `auth.adminUserIds` 里显式
+列出的用户 ID。两者都不是隐式规则：引导管理员只写一次，名单默认空。
+
+**单用户部署里的绑定主体不是管理员。** 要把管理面开放给其它账号，把它的 ID 写进
+`auth.adminUserIds` 并重启；否则控制台的「用户与组」页、概览页的待处理任务卡与会话页的
+任务表都会一直报 403。
 
 **升级时必须补这份名单（破坏性变更）。** 早期版本的用户与组管理对任何已认证身份开放；
-现在名单默认为空，也就是全 403。从旧配置升上来时补 `adminUserIds: [<uid>]`，否则控制台的
-「用户与组」页、概览页的待处理任务卡与会话页的任务表都会一直报 403。
+现在只有引导管理员和名单里的人能管。从旧配置升上来、且已经初始化过（`/setup` 返回
+`BOOTSTRAP_CLOSED`）时补 `adminUserIds: [<uid>]`，否则这些页面一直 403。
+
+**单用户模式下用 `pnpm password` 设过密码，再切多用户时最容易踩。** 那个账号有密码，
+所以 `/setup` 认为初始化已经完成（返回 `BOOTSTRAP_CLOSED`），但它**不是**引导管理员。切换
+时把它的 ID 写进 `auth.adminUserIds` 再重启，否则登录成功却管不了任何人。
 
 ### 建第一个账号
 
-**以下步骤只在 `auth.enabled: true` 时适用。** 默认 `auth.enabled: false`（单用户形态）下
-身份由 `x-comem-subject`（不带这个头就回落到 `server.subject`）决定，`POST /api/v1/auth/login`
-直接返回 404「认证未启用（auth.enabled = false）。」——不是密码设错了。要建可登录的账号，先
-在 `config.yaml` 里把 `auth.enabled` 改成 `true`，再重启。
+两条路径，选一条走完就能用。本地开发默认是路径 A，Docker 部署走路径 B。
 
-`user:local`（或 `server.subject` 指定的主体）在启动时自动创建，但没有密码。
-管理面设密码的端点自己也要认证，全新实例没有任何凭据，所以第一次用命令：
+#### 路径 A：单用户本地模式（默认，零配置）
+
+`auth.enabled` 默认是 `false`，没有登录这一步，也没有账号要建：
 
 ```bash
-# 密码从 stdin 读，不进 shell history / ps。
-printf '%s' '新密码' | pnpm password local
+pnpm install
+cd web && pnpm install && cd ..
+pnpm dev
 ```
 
-设好之后用登录端点换 token：
+打开 http://127.0.0.1:3081 ，里面的身份固定是 `user:local`。服务启动时会自动建好这个
+账号和它的命名空间，顶部有一条常驻横幅说明当前是单用户模式。
+
+**这条路径没有认证。** 服务端把不带凭据的请求当成 `server.subject`（默认
+`user:local`）：任何能访问这个端口的人都是同一个用户，所有操作记在同一个身份上，也没有
+审计。默认只监听 `127.0.0.1` 正是为此；把 `server.host` 改成非回环地址而 `auth.enabled`
+还是 `false` 时，服务**拒绝启动**。
+
+**Docker 部署不是这条路径。** 容器必须绑 `0.0.0.0` 才能被端口转发，所以镜像默认打开
+多用户登录（`COMEM_AUTH_ENABLED=true`），首跑走路径 B。
+
+#### 路径 B：多用户登录
+
+**Docker（docker compose）**
+
+```bash
+docker compose build                  # 镜像里要带当前代码；换过代码就必须重新构建
+docker compose up -d
+docker compose logs comem | grep 初始化令牌
+```
+
+首次启动的日志里会有一行（令牌每次进程启动重新生成，只存在内存里）：
+
+```
+初始化令牌：xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx（用于首次创建管理员账号；创建完成后失效）
+```
+
+打开 http://127.0.0.1:18080/setup ，填三个字段：
+
+| 字段 | 填什么 |
+|---|---|
+| 用户名 | 默认 `local`（取自 `server.subject`），也可以改成别的合法用户 ID |
+| 密码 | 至少满足服务端的弱口令规则 |
+| 初始化令牌 | 上面日志里那一串 |
+
+提交后页面直接去 `/login`，用刚才的用户名和密码登录。这个管理员通过
+`app_user.bootstrap_admin` 标记直接获得系统管理员权限，不用再配 `adminUserIds`。
+
+**本地开发（`pnpm dev`）**
+
+1. 在 `config.yaml` 里打开多用户登录：
+
+```yaml
+auth:
+  enabled: true
+  sessionSecret: ""
+  sessionTtlSeconds: 86400
+  adminUserIds: []
+```
+
+2. 重启 `pnpm dev`。
+3. 打开 http://127.0.0.1:3081/setup 。从回环地址打开时**不需要令牌**（令牌是给经
+   nginx 转发的 Docker 请求用的），填用户名与密码创建。
+4. 打开 http://127.0.0.1:3081/login 登录。
+
+**没有浏览器（纯 SSH）时**，用同一个端点创建第一个管理员：
+
+```bash
+curl -sS -X POST http://127.0.0.1:1933/api/v1/bootstrap/admin \
+  -H 'content-type: application/json' \
+  -d '{"userId":"local","password":"你的密码","setupToken":"日志里的令牌"}'
+```
+
+回环请求可以省略 `setupToken`；容器部署把端口换成 compose 映射的 `18081`（直连后端）。
+
+**之后加账号。** 在控制台「用户与组」页的「新建用户」建账号。**新账号建出来没有密码，
+要打开该用户的详情抽屉，在「密码」页签里设一次**——不设的话，用它登录会得到「用户名或
+密码错误」。`POST /admin/users` 只收 `id` / `displayName` / `email`，密码走
+`POST /admin/users/{id}/password`。新账号不是系统管理员；要给它管理面权限，把它的 ID
+写进 `auth.adminUserIds` 并重启。
+
+#### 忘记密码 / 没有浏览器：`pnpm password`
+
+管理面设密码的端点自己也要认证，所以「已经有了账号、但密码忘了或拿不到浏览器」时用
+命令（密码从 stdin 读，不进 shell history / ps）：
+
+```bash
+# 宿主机（在仓库根目录执行）
+printf '%s' '新密码' | pnpm password local
+
+# 容器（docker compose 部署）
+printf '%s' '新密码' | docker compose exec -T comem node dist/commands/password.js local
+```
+
+两个前置条件：
+
+- **数据根已经初始化。** 服务启动过一次才会建 `_meta/comem.sqlite`；在从未启动过的
+  数据根上跑，报的是「数据根还没有初始化：先启动一次服务」，不是密码设错了。
+- **用户已经存在。** 命令只改密码，不建账号。没有账号时先走 `/setup`（浏览器）或上面
+  的 `POST /bootstrap/admin`（无浏览器）；否则报「用户不存在：… 先用 POST /admin/users
+  或控制台的「用户与组」页创建账号」。
+
+`auth.enabled: false` 时命令会打印一条警告：密码写进去了，但登录端点不可用（单用户模式
+本来就没有登录）。
+
+也可以不开控制台，直接用登录端点换 token：
 
 ```bash
 curl -sS http://127.0.0.1:1933/api/v1/auth/login \
@@ -351,7 +455,8 @@ curl -sS http://127.0.0.1:1933/api/v1/auth/login \
   -d '{"username":"local","password":"..."}'
 ```
 
-响应里的 `token` 就是后续请求的 `Authorization: Bearer <token>`。
+响应里的 `token` 就是后续请求的 `Authorization: Bearer <token>`。容器部署把 `1933`
+换成 compose 映射的宿主端口（默认 `18081`，正常入口 `18080` 走代理也一样）。
 
 ### 恢复组的 owner
 
@@ -635,6 +740,7 @@ docker run -d --name comem \
 |---|---|---|
 | `COMEM_SERVER_HOST` | `0.0.0.0` | 监听地址。**镜像把它设成了 0.0.0.0**，因为 `config.schema.ts` 的默认值是 `127.0.0.1`，容器里绑 loopback 时 `-p` 端口转发不可达 |
 | `COMEM_SERVER_PORT` | `1933` | 监听端口。`HEALTHCHECK` 与 `EXPOSE` 都跟它走 |
+| `COMEM_AUTH_ENABLED` | `true` | **镜像默认打开多用户登录。** 容器必须绑 `0.0.0.0`，而单用户模式只允许回环地址，两者冲突。第一个管理员用启动日志里的初始化令牌在 `/setup` 创建；设成 `false` 会让服务在启动期拒绝（`server.host` 非回环 + 没有认证） |
 | `COMEM_DATA_DIR` | `/var/lib/comem` | 数据根。容器内按 `/.dockerenv` 推导，显式覆盖见「数据卷」 |
 | `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` / `COMEM_PROVIDERS_EMBEDDING_API_KEY` | 无 | 两个供应商密钥的**真实**环境变量名（`COMEM_<SECTION>_<KEY>`）。模板里的 `apiKey` 是空串，用它们覆盖。`docker-compose.yaml` 透传的是旧的 `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY`——只有在你自己的 `config.yaml` 里写 `${VAR}` 引用时才生效 |
 | `TZ` | 未设置（UTC） | 日志时间戳是 UTC ISO 8601。需要本地时间就 `-e TZ=Asia/Shanghai` |
@@ -946,6 +1052,16 @@ XDG 路径」的失败因此不再出现。
 正常入口是 `http://127.0.0.1:18080`：`/health`、`/api/*`、`/metrics`、`/mcp` 走后端，
 其余走控制台。所有端口默认只绑 `127.0.0.1`，对外服务需要再前面加 TLS 入口。
 
+**`auth.enabled: false` 时没有认证。** 服务端把不带凭据的请求当成 `server.subject`
+（默认 `user:local`）：任何能访问这个端口的人都是同一个用户，所有操作记在同一个身份上，
+也没有审计。默认只监听 `127.0.0.1` 就是这条风险的边界；`server.host` 是非回环地址而
+`auth.enabled` 还是 `false` 时，`loadConfig` 直接抛 `INVALID_ARGUMENT`，服务拒绝启动
+（`src/config/cross-checks.ts` 的交叉校验）。TLS 只加密传输，不区分身份——前置代理终止
+TLS 之后，请求到达 CoMem 时仍然没有凭据。
+
+镜像因此默认 `COMEM_AUTH_ENABLED=true`（容器必须绑 `0.0.0.0`）。第一个管理员用启动
+日志里的初始化令牌在 `/setup` 创建，见「建第一个账号」。
+
 > 首次 `docker compose up` 如果遇到端口冲突，容器可能以「未连接网络」的状态留下
 > （`docker inspect` 里 `Networks` 为空），后续 `up -d` 只会启动它、不会重建。
 > 用 `docker compose up -d --force-recreate proxy` 重建。
@@ -961,8 +1077,8 @@ XDG 路径」的失败因此不再出现。
   源。没有做 vendor 化。
 - **非 x86_64。** `sqlite-vec` 的平台包只覆盖 linux/darwin 的 x64 与 arm64；
   `Vulkan-Headers` 的版本是固定的。arm64 构建未验证。
-- **认证。** 打开 `auth.enabled` 是配置项，镜像不做额外处理；`sessionSecret` 必须
-  显式给值，否则每次重启失效。
+- **认证。** 镜像默认 `COMEM_AUTH_ENABLED=true`，第一个管理员用启动日志里的初始化令牌
+  在 `/setup` 创建。`sessionSecret` 必须显式给值，否则每次重启已签发的 token 全部失效。
 - **备份与告警。** 镜像只提供 `/health` 与 `/metrics`，没有内置备份任务。
 
 ## 后台调度器
@@ -1799,16 +1915,17 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 ### 用户与组页 / 任务卡 403
 
 **症状**：控制台的「用户与组」页、概览页的待处理任务卡、会话页的任务表都报
-`PERMISSION_DENIED`。接口原文是 `需要系统管理员：<主体> 不在 auth.adminUserIds 里。`
+`PERMISSION_DENIED`。接口原文是 `需要系统管理员：<主体> 不在管理名单里。`
 （`src/api/http/middleware.ts`），控制台不显示这句：403 已经收敛成固定文案，那几处显示
 「需要管理员权限」的空态。
 
-**原因**：这些端点跨主体，没有目标资源可求权，只认 `auth.adminUserIds`（架构文档 §12.4）。
-名单默认是空数组 = 没有系统管理员，所以对所有人 403——包括单用户部署里的绑定主体。没有
-「第一个用户自动成为管理员」这类隐式规则。
+**原因**：这些端点跨主体，没有目标资源可求权，只认系统管理员（架构文档 §12.4）：
+`auth.adminUserIds` 里列出的用户 ID，或 `POST /api/v1/bootstrap/admin` 创建的第一个管理员
+（`app_user.bootstrap_admin = 1`）。两者都没有就是 403——包括单用户部署里的绑定主体。
 
-**处理**：在 `config.yaml` 里写 `auth.adminUserIds: ["<你的 uid>"]` 并重启。单用户部署
-（`auth.enabled: false`）同样要配，绑定主体不会自动进名单。
+**处理**：已经走 `/setup` 建过管理员的话，用那个账号登录；否则在 `config.yaml` 里写
+`auth.adminUserIds: ["<你的 uid>"]` 并重启。单用户部署（`auth.enabled: false`）没有引导
+管理员，绑定主体也不会自动进名单。
 
 ### 控制台每个请求 401
 

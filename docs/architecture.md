@@ -2988,7 +2988,7 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 
 | 入口 | 端点 | 说明 |
 |---|---|---|
-| 认证配置 | `GET /api/v1/auth/config` | 只读探测，**恒定 200**，只回 `{enabled: boolean}`。控制台在拿到身份之前调它 |
+| 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `authEnabled` / `boundSubject` / `adminConfigured` / `restartRequired` / `setupTokenRequired`。控制台在拿到身份之前调它；`needsSetup` 只在多用户模式且没有任何密码哈希时为真。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
 | 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4） |
@@ -3168,7 +3168,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
 | 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验） |
-| 认证 | `GET /auth/config`（恒定 200，只回 `{enabled}`）、`POST /auth/login`、`POST /auth/logout`（§12.7） |
+| 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`POST /auth/login`、`POST /auth/logout`（§12.7） |
 | MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
@@ -3454,7 +3454,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 **403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 
 **身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
-`web/plugins/console-identity.ts` 在应用挂载前先探测认证是否打开（`GET /auth/config`
+`web/plugins/console-identity.ts` 在应用挂载前先探测引导状态（`GET /bootstrap`
 恒定 200，响应体只有 `{enabled}`；**不用** 404 推断，那会拿「错误」当正常信号，还会
 发一个登出语义的写请求去做只读探测），再分两条路径：
 
