@@ -310,6 +310,13 @@ async function sweepWorkerPayloads(dir) {
 /**
  * 写 worker 载荷文件，返回路径。
  *
+ * **文件里存的是原始事件，消费方负责剥离。** `payload.event.messages` 是宿主给的
+ * 未处理消息（可能带着 CoMem 自己注入的块）；注入块在 `captureSession` 里剥，
+ * 因为那里同时要「剥离前的条数」区分「这一轮只有注入块」与「transcript 格式不
+ * 匹配」（`rawMessages.length === 0` 才写诊断）。目前唯一读者是
+ * `runCaptureWorker`；外部工具（排障脚本、`co-mem doctor`）若读这个文件，必须
+ * 自己调 `lib/sanitize.mjs` 的 `sanitizeCapturedMessages`。
+ *
  * @param {string} dir
  * @param {{ event: object, processStartMs: number }} payload
  * @returns {Promise<string>}

@@ -38,7 +38,7 @@ import { pathToFileURL } from 'node:url';
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { applyQueryFilters } from '../lib/filter.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
-import { escapeInjectionText } from '../lib/injection.mjs';
+import { DEFAULT_MAX_CONTEXT_BYTES, escapeInjectionText, fitContext } from '../lib/injection.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { readDeliveredUris, recordDeliveredUris } from '../lib/recall.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
@@ -166,7 +166,7 @@ export function formatRecallBlock(hits, threshold) {
 
 /**
  * @param {{ event: string, sessionId: string, cwd: string, prompt: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void }} deps
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void, maxContextBytes?: number }} deps `maxContextBytes` 来自宿主适配器（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）
  * @returns {Promise<{ context?: string } | undefined>}
  */
 export async function handleUserPromptSubmit(event, deps) {
@@ -226,7 +226,22 @@ export async function handleUserPromptSubmit(event, deps) {
     hits.filter((hit) => !deliveredSet.has(hit.uri)),
     deps.config.recallScoreThreshold,
   );
-  const context = kept.length === 0 ? undefined : renderRecallBlock(kept);
+  // 召回块也要过宿主字节上限（§15.2 的显式降级顺序）：它只有「整条丢」一档，但
+  // 丢在这里，而不是让宿主把超长输出转存成文件、只给模型一段预览。
+  const { context: rendered, dropped } =
+    kept.length === 0
+      ? { context: '', dropped: [] }
+      : fitContext(
+          [{ id: 'recall', text: renderRecallBlock(kept) }],
+          deps.maxContextBytes ?? DEFAULT_MAX_CONTEXT_BYTES,
+        );
+  if (dropped.length > 0) {
+    (deps.warn ?? warn)('召回上下文超过宿主字节上限，本轮不注入 <comem-recall>。', {
+      maxContextBytes: deps.maxContextBytes ?? DEFAULT_MAX_CONTEXT_BYTES,
+      dropped,
+    });
+  }
+  const context = rendered === '' ? undefined : rendered;
   const serializeMs = elapsedMs(serializeStartedAt);
 
   // **只有真的注入了才记账。** 「本轮一条都没给」不等于「已经给过」：写进去会让
@@ -235,7 +250,7 @@ export async function handleUserPromptSubmit(event, deps) {
   try {
     await recordDeliveredUris(
       event.sessionId,
-      kept.map((hit) => hit.uri),
+      context === undefined ? [] : kept.map((hit) => hit.uri),
       { dir },
     );
   } catch (error) {
@@ -267,6 +282,7 @@ if (isMain) {
         handleUserPromptSubmit(event, {
           config,
           http: createHttpClient({ ...config, deadline }),
+          maxContextBytes: host.MAX_CONTEXT_BYTES,
         }),
       { hardExit: true },
     );

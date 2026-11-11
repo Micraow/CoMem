@@ -59,9 +59,11 @@ export const DEFAULT_SKILL_BUDGET_TOKENS = 400;
  * 给技能目录、留出块标签与空行的余量，取 2,000。中文 2,000 字约 6 KB（3 字节/字、
  * 1 token/字），与同一个上限相容。
  *
- * 量级上：画像正文按 157 字/归档的实测速度增长（4 个会话 8 次归档 1,259 字），
- * 2,000 token 约等于 12 次归档；超过之后按「前 8 行 + 尾部 + 省略标记」截断。
- * 写盘侧把画像压短是另一件事（抽取提示词的职责），这个值只管注入。
+ * **索引化之后它约束的是索引行的总量**，不再是画像正文。画像只有一条记忆（一行），
+ * 实际永远不会触发；偏好目录的条目预算取它的 1/4（见
+ * `servers/session-start.mjs` 的 `PREFERENCES_BUDGET_DIVISOR`），才是真正起作用的
+ * 那一档。保留这个键而不是换成新名字：部署方已经设过 `COMEM_PROFILE_BUDGET_TOKENS`
+ * 的不该因为一次内部格式变化而失效。
  */
 export const DEFAULT_PROFILE_BUDGET_TOKENS = 2000;
 

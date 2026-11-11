@@ -1951,7 +1951,7 @@ export const preferencesMemoryType = {
 
 800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。
 
-**产生侧与注入侧是两个数字，不是一个。** 产生侧 `memory.profile.maxChars`（默认 800 **字符**）要求抽取时收敛；注入侧 `profileBudgetTokens`（默认 2,000 **token**，`integrations/lib/config.mjs`，见 §15.2）是兜底，超了按 head/tail 截断。产生侧卡得紧，所以注入侧在正常情况下**永远不会触发**——它挡的是这次改动之前产生的旧画像，以及人手编辑的 `profile.md`。不要把 800 当成 2,000 的余量：800 字符 ≈ 0.5–0.6K token，离 2,000 还有三倍多的空间，那三倍是给「产生侧还没跑过重写」的存量数据的，不是给新增长用的。
+**产生侧与注入侧是两个数字，不是一个。** 产生侧 `memory.profile.maxChars`（默认 800 **字符**）要求抽取时收敛；注入侧 `profileBudgetTokens`（默认 2,000 **token**，`integrations/lib/config.mjs`，见 §15.2）是兜底，超了按 `CONTEXT_BLOCK_DROP_ORDER` 降级（技能清单 → 召回 → 偏好 → 画像）；注入的是**索引**（摘要 + URI），正文靠按需读原文。产生侧卡得紧，所以注入侧在正常情况下**永远不会触发**——它挡的是这次改动之前产生的旧画像，以及人手编辑的 `profile.md`。不要把 800 当成 2,000 的余量：800 字符 ≈ 0.5–0.6K token，离 2,000 还有三倍多的空间，那三倍是给「产生侧还没跑过重写」的存量数据的，不是给新增长用的。
 
 重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 800 字正文，约 0.5–0.8K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
 
@@ -3220,7 +3220,7 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 | Hook | 做什么 |
 |---|---|
-| `SessionStart` | 注入用户 profile + 偏好 + `<available-skills>` 技能目录 |
+| `SessionStart` | 注入用户画像索引 + 偏好索引 + `<available-skills>` 技能目录 |
 | `UserPromptSubmit` | 拿这条 prompt 去 `find`，把相关记忆注入上下文 |
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的文件工具调用，指回 MCP 工具。判定全在本地、不发 HTTP，因此**不做开销上报**（预算仍然是 1000ms） |
 | `PostToolUse` | 采集工具调用与结果（作为 `tool` 部分） |
@@ -3232,7 +3232,11 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 **事件名有两套。** 内部事件名是 snake_case（`session_start` … `session_end`，7 个），出现在 `POST /telemetry/hook` 的 `event` 字段、`comem_hook_*` 的 `event` 标签与控制台的行键；PascalCase（`SessionStart` …）只出现在宿主载荷与返回信封里。两套名字的对应只写在 `integrations/lib/events.json`，三个宿主共享同一张表——各写一份时所有 hook 样本会塌进 `event="other"`（见 `lib/events.mjs` 的文件头）。这张表还标了 `reportsOverhead`：`pre_tool_use` 为 `false`，所以**进 `/metrics` 的事件是 6 个**，与「宿主会调的事件是 7 个」不是同一个集合。
 
+**`SessionStart` 注入的是索引，不是正文。** `<comem-profile>` 与 `<comem-preferences>` 每条记忆一行 `- [类型] 摘要 · comem://…`，块首固定一句「以下是记忆索引。需要细节时用 read 工具按 URI 读原文」。摘要来自服务端 `GET /content/abstract`（文件的 L0 存在索引里，目录的 L0 是 `.abstract.md`），**hook 不自己截断正文**——那是第二个摘要实现，两处口径必然漂移。整段注入的代价是每一轮重付一次画像：1,076 次归档的画像有 16 万字，而索引化之后一条记忆几十 token，地址还在，模型按需 `read` 正文。偏好目录用 `GET /fs/ls` 列直接子文件，再逐条取摘要；一次 `SessionStart` 最多为 32 条偏好拉摘要（经验上界，见 `integrations/servers/session-start.mjs` 的 `PREFERENCES_INDEX_ENTRY_LIMIT`），超出的部分在块内写「（已截断，共 M 条）」，完整列表用 `list` 取。
+
 技能目录有独立 token 预算：放不下就只列名字，连一个名字都放不下就缩成一行计数。
+
+**超宿主字节上限时按显式顺序降级，不依赖块在数组里的位置。** 顺序定义在 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER`，从最先丢到最不该丢：技能目录（可选能力清单）→ `<comem-recall>`（每轮重新检索，下一轮还有机会）→ `<comem-preferences>`（索引块，截到只剩 1 条 + 「（已截断，共 M 条）」）→ `<comem-profile>`（唯一无法从别处恢复的信息，至少保留一条带 URI 的记录）。技能目录的独立 token 预算（400）与偏好的条目预算（画像预算的 1/4）先于字节上限生效。索引化之后三个块的实际占用在 1–2 KB 量级，9,500 字节的上限**正常不会触发**——这条链挡的是偏好目录异常增长（几十条中文摘要）与部署方调低宿主上限，不是日常路径。
 
 ### 15.3 采集不阻塞对话
 
@@ -3278,7 +3282,7 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 **工具发现靠描述自解释。** `initialize` → `tools/list` 的 `description` 是 agent 唯一能看到的用法说明，所以 16 条各自必须回答「什么时候用 / 什么时候不用」，`find` / `search` / `rule_search` 三个必须能互相分辨（`find` 是语义召回、`search` 多一次意图重写、`rule_search` 取规则完整正文）。URI 参数的描述统一写上 `~` 别名——agent 不该为了拼一个绝对 URI 去猜 uid。
 
-**提示词与注入格式必须一致。** Hook 往对话里塞四个块：`<comem-profile>` / `<comem-preferences>`（`SessionStart`，一次性）与 `<comem-recall>`（`UserPromptSubmit`，每轮），另有 `<available-skills>`（技能目录）。`integrations/skills/` 的提示词按这四个块写「已经有什么」，否则 agent 会把档案当召回结果、把技能目录当记忆去 `find`。`<comem-recall>` 的条目是 `1. [类型] comem://…` 加缩进摘要，**不带分数**（§15.9 的「注入块里不写绝对分数」），所以提示词只能说「顺序即相关度」。提示词拆两份：`comem-memory` 靠「用户提到记忆」触发，`comem-rules` 必须在「用户没提记忆、但你即将动手」时触发——一份 description 覆盖不了两个触发器。
+**提示词与注入格式必须一致。** Hook 往对话里塞四个块：`<comem-profile>` / `<comem-preferences>`（`SessionStart`，一次性，**索引形态：一条记忆一行摘要 + URI**）与 `<comem-recall>`（`UserPromptSubmit`，每轮），另有 `<available-skills>`（技能目录）。`integrations/skills/` 的提示词按这四个块写「已经有什么」，否则 agent 会把档案当召回结果、把技能目录当记忆去 `find`。`<comem-recall>` 的条目是 `1. [类型] comem://…` 加缩进摘要，**不带分数**（§15.9 的「注入块里不写绝对分数」），所以提示词只能说「顺序即相关度」。提示词拆两份：`comem-memory` 靠「用户提到记忆」触发，`comem-rules` 必须在「用户没提记忆、但你即将动手」时触发——一份 description 覆盖不了两个触发器。
 
 工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证、提示词与验证步骤见 `integrations/README.md` 的「MCP 接入」。
 

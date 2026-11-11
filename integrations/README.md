@@ -432,21 +432,28 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 
 | 注入块 | 来源 | 格式 | 提示词里的定位 |
 |---|---|---|---|
-| `<comem-profile>` | `SessionStart` | 纯文本 | 一次性档案，不用再查 |
-| `<comem-preferences>` | `SessionStart` | 纯文本 | 历史默认，与当前请求冲突时以当前请求为准 |
+| `<comem-profile>` | `SessionStart` | 索引：`- [profile] 摘要 · comem://…` | 一次性档案；要看细节用 `read` 取 URI |
+| `<comem-preferences>` | `SessionStart` | 索引：一条偏好一行 | 历史默认，与当前请求冲突时以当前请求为准；细节用 `read` |
 | `<available-skills>` | `SessionStart` | `- 名字: 描述` | 技能目录，不是记忆 |
 | `<comem-recall>` | `UserPromptSubmit` | `1. [类型] comem://…` + 缩进摘要 | 本轮召回结果，直接 `read` |
 
 **`<comem-recall>` 里没有分数。** 分数只在同一次检索的同一引擎内可比（§13.2），写进
 注入块会暗示一个不存在的精度；顺序是这里唯一稳定的信息，所以只编号。
 
-**偏好按目录读，不能拼 `.overview.md`。** `.abstract.md` / `.overview.md` 是保留名
+**偏好按目录列，不能拼 `.overview.md`。** `.abstract.md` / `.overview.md` 是保留名
 （`src/domain/uri.ts` 的 `RESERVED_SEGMENT_NAMES`），`Uri.parse` 对它们抛
 `INVALID_URI`（HTTP 400）。`SessionStart` 因此走
-`GET /api/v1/content/overview?uri=comem://user/{uid}/memories/preferences`（参数是
-**目录**），由服务端 `SummaryService.read` 读那个文件。曾经这里直接 `content/read`
+`GET /api/v1/fs/ls?uri=comem://user/{uid}/memories/preferences`（参数是**目录**），
+再对每个直接子文件 `GET /content/abstract` 取摘要。曾经这里直接 `content/read`
 文件名、再用 `.catch(() => null)` 吞掉 400——`<comem-preferences>` 从上线起就没注入
 过，而文件一直在盘上。读取失败（不是 403 / 404）现在记一条 stderr 的 `warn`。
+
+**注入的是索引，不是正文。** 块首固定一句「以下是记忆索引。需要细节时用 read 工具
+按 URI 读原文」，之后每条记忆一行。摘要来自服务端 `GET /content/abstract`（文件的
+L0 在索引里，目录的 L0 是 `.abstract.md`），**不在 hook 里截断正文**：那是第二个
+摘要实现。没有 URI 的索引等于删数据，所以没有摘要时也保留 `- [类型] comem://…`。
+偏好目录一次最多为 32 条拉摘要（`PREFERENCES_INDEX_ENTRY_LIMIT`，经验上界），超出
+的部分写「（已截断，共 M 条）」。
 
 ### 注入预算契约
 
@@ -456,26 +463,27 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 
 | 约束 | 值 | 超了怎么办 |
 |---|---|---|
-| 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 保留前 8 行 / 句 + 尾部，中间插 `[… 已省略中间 N 行；完整内容用 read 取回 <URI> …]` |
-| 偏好 token 预算 | 画像预算的 1/4，默认 500 | 同上（偏好通常只有几行，按句截断） |
+| 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 索引只有一条记忆（一行），实际不触发 |
+| 偏好 token 预算 | 画像预算的 1/4，默认 500 | 按条目从后往前截，至少保留 1 条 + 「（已截断，共 M 条）」 |
 | 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
-| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 20,000 | 按「画像 > 技能目录 > 偏好」丢块，stderr 记一条 `warn` |
+| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 20,000 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能目录 → 召回 → 偏好 → 画像，stderr 记一条 `warn` |
 
-**只注入正文。** `profile.md` 的 YAML frontmatter 是噪声：`memory_type` /
-`created_at` / `uri` 模型用不上，`summary` 是正文前 256 字的副本。服务端
-`content/read` 已经剥过一次（`ContentStore.readText` 返回 `document.body`）；Hook
-再剥一次是因为它是独立部署的交付物，对端不一定是同一个版本，而半截 YAML 混进
-上下文比多一段噪声更难发现。
+**只注入摘要 + URI。** 画像与偏好的正文不再进上下文：`profile.md` 的 YAML
+frontmatter 对模型是噪声，而正文按 157 字/归档增长。模型要细节时用 `read` 取
+索引里的 URI——服务端 `content/read` 接受的就是这个地址。
 
 **token 估算按文本自身的 CJK 密度**：`ceil(CJK 码点数 × 1 + 其余码点数 × 0.25)`。
 常用的 `chars / 4` 对中文**低估 6 倍**（1000 个汉字约 1000–1500 token，不是 250），
 用它判预算会让中文画像超上限 4–6 倍。公式与 `src/domain/session.ts` 的
 `estimateTokens` 是同一份（Hook 不依赖 `src/`，所以有一份副本；**改一处要改两处**）。
 
-**为什么偏好排在技能目录之后丢。** 偏好是目录的 L1 概览，模型能用 `find` /
-`content/overview` 按需取回；技能目录是模型发现「存在哪些能力」的唯一入口，丢了
-没有恢复路径。画像是唯一不可恢复的（「这个用户是谁」），只受 token 预算约束，
-不参与丢块。
+**降级顺序是显式的，从最先丢到最不该丢。** 判据是「丢了之后还能不能拿回来」：
+技能目录是可选能力清单，模型不靠它也能工作；`<comem-recall>` 每轮重新检索，下一轮
+还有机会；偏好能用 `find` / `list` 按需取回，先截条目；画像（「这个用户是谁」）是
+唯一不可恢复的，最后才动，且至少保留一条带 URI 的记录。顺序定义在
+`integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER`，不靠块的插入位置。
+索引化之后三个块的实际占用在 1–2 KB 量级，9,500 字节的上限正常不会触发；这条链
+挡的是偏好目录异常增长与部署方调低宿主上限。
 
 **宿主字节上限的来源是宿主的实现细节，不是公开规范。** Claude Code / Codex 在 hook
 输出超过约 10,000 字符时转存文件、只放预览，这里取 9,500 留余量；DSH 没有公开上限，
@@ -546,7 +554,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
 | `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 相对阈值：只保留分数不低于本次最高分 × 该值的命中（§15.9 的「三条前提」之二） |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
-| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入 token 预算。超了保留前 8 行 / 句 + 尾部，中间插带 URI 的省略标记（见「注入预算契约」） |
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 画像索引的 token 预算（画像只有一条记忆，实际不触发）；偏好索引取它的 1/4，超了按条目截断并写「（已截断，共 M 条）」（见「注入预算契约」） |
 | `queryFilters` | `COMEM_QUERY_FILTERS`（换行分隔） | §8.8 的五条 | sed 风格正则 |
 
 ```yaml
@@ -682,14 +690,14 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 ## 注入与捕获的去重
 
 上面那四层解决的是「同一条消息别提交两次」。这里解决的是**另一个方向**：CoMem
-往宿主上下文里注入的三个块（`<comem-recall>` / `<comem-profile>` /
-`<comem-preferences>`）会留在会话里，下一轮 `Stop` 读 transcript 时，它们与用户
-真的说过的话长得一模一样。原样处理有两个后果：
+往宿主上下文里注入的四个块（`<comem-recall>` / `<comem-profile>` /
+`<comem-preferences>` / `<available-skills>`）会留在会话里，下一轮 `Stop` 读
+transcript 时，它们与用户真的说过的话长得一模一样。原样处理有两个后果：
 
 - **捕获侧**：上一轮注入的记忆被当成「用户这轮说的话」重新抽取一遍，跑几轮之后
   记忆库开始复读自己；
-- **注入侧**：一条记忆的正文里若含 `</comem-recall>`，模型会把它当成第二层注入，
-  后面跟着的正文就成了伪造的指令。
+- **注入侧**：一条记忆的正文里若含 `</comem-recall>` 或 `</available-skills>`，
+  模型会把它当成块边界，后面跟着的正文就成了伪造的指令。
 
 三个机制各管一段，代码分别在 `lib/sanitize.mjs`、`lib/injection.mjs` 的
 `escapeInjectionText`、`lib/recall.mjs`。
@@ -700,7 +708,7 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 
 | 规则 | 匹配 | 为什么 |
 |---|---|---|
-| 块级 | `<comem-recall>…</comem-recall>`、`<comem-profile>`、`<comem-preferences>`、`<system-reminder>` | 这些是 CoMem 与宿主写给模型看的，不是对话 |
+| 块级 | `<comem-recall>…</comem-recall>`、`<comem-profile>`、`<comem-preferences>`、`<available-skills>`、`<system-reminder>` | 这些是 CoMem 与宿主写给模型看的，不是对话 |
 | 行级 | 行首 `[2024-01-01T00:00:00Z]` | 宿主给消息加的时间戳，进抽取器是纯噪声 |
 | 兜底 | 裸 epoch `\b1[6-9]\d{8}\b`、`\b1[6-9]\d{11}\b` | 同上；**只在整条消息剥完块之后**做，否则会吃掉正常数字 |
 
@@ -712,22 +720,30 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 剥完变空（或只剩空白）的消息**整条丢弃**，不发空串给服务端。游标按剥离后的
 条数推进：下一轮同一份 transcript 会剥出同样的前缀，两个计数不会漂移。
 
-接入点在 `servers/stop.mjs` 的 `captureSession`：两种消息来源（载荷里的累积列表、
-transcript 解析结果）在那里合流。**不在三个宿主适配器里各剥一次**——宿主适配器
-只回答「怎么解析」，剥离是「发出去之前」的一件事。
+**两条入口走同一个函数。** `servers/stop.mjs` 的 `captureSession` 剥对话消息
+（两种来源：载荷里的累积列表、transcript 解析结果），`servers/post-tool-use.mjs`
+的 `toToolMessage` 剥工具输出——`cat` 一份 transcript 时，里面的注入块不是工具
+结果，原样落盘会让它以工具结果的身份回到记忆库。**不在三个宿主适配器里各剥
+一次**：宿主适配器只回答「怎么解析」，剥离是「发出去之前」的一件事。
+
+**五个标签按完整名字列，不靠前缀。** `available-skills` 不带 `comem-` 前缀，靠
+`comem-*` 匹配兜不住它；注入侧的转义表（`INJECTION_TAG_PREFIXES`）必须与这里的
+`BLOCK_TAGS` 同步，否则只剥一半（或者只转义一半）。
 
 ### 2. 注入侧转义（`lib/injection.mjs` 的 `escapeInjectionText`）
 
-渲染块之前把记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）。
+渲染块之前把记忆正文里的注入标签的 `<` 换成 `‹`（U+2039）。`INJECTION_TAG_PREFIXES`
+里有两个前缀：`comem-`（三个 `comem-*` 块）与 `available-skills`（技能目录块）。
 换完仍然可读（`‹/comem-recall>` 像引用了一段标签名），但不再是标签，块的边界
-只有一个。用例钉住这条性质：正文含 `</comem-recall><comem-recall>` 时，渲染结果
-里开标签与闭标签各只有一个。
+只有一个。用例钉住这条性质：正文含 `</comem-recall><comem-recall>` 或
+`</available-skills>` 时，渲染结果里每种开标签与闭标签各只有一个。
 
 为什么不是反斜杠、也不是删掉标签：反斜杠会把「转义链」引进来（Markdown 一层、
 JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉标签则改变了记忆本身。
 
-**转义只覆盖 `comem-` 前缀**。`<available-skills>` / `</available-skills>` 是第四
-个块，见下面的「误伤与残余」。
+**转义覆盖两个前缀，宿主自己的标签不覆盖。** `<system-reminder>` 这类标签留给
+宿主处理：转义它会让记忆正文里正常的引用变形，而伪造宿主标签的收益远低于伪造
+召回块（模型按 `<comem-recall>` 判断「这是记忆」）。
 
 ### 3. 跨轮账本（`lib/recall.mjs`）
 
@@ -756,7 +772,7 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
 是换一条出口（组装、预算、渲染全变），不是加一个参数。所以 v1 在 hook 侧记一份、
 客户端过滤；服务端加参数属于 API 变更，另行决定。
 
-### 误伤与残余
+### 误伤与已覆盖
 
 剥离规则认的是字符串，不是「这是不是真的注入」。以下正常文本会被吃掉：
 
@@ -768,19 +784,35 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
 | 只有开标签、没有闭标签的一段（用户手写了一半） | 从开标签吃到消息末尾 |
 
 剥离失败的方向是「少吃」，不是「多吃」——多吃的代价是把用户的话当成注入。
-反方向的残余（**只报不改**）：
 
-- **`<available-skills>` 两侧都不处理。** 它是第四个注入块，但不在 `comem-*`
-  的口径里：捕获侧不剥它（它以消息形式进了 transcript 时会被重新抽取），注入侧
-  不转义它（一条记忆作为技能描述时若含 `</available-skills>`，能提前关掉那个块）。
-- **`SessionStart` 注入的块不记账。** 画像与偏好每局只注入一次，不参与跨轮去重；
-  它们若命中后续的 `find`，仍会被 `find` 结果再注入一遍。
-- **`PostToolUse` 采集的工具输出不剥离。** 工具输出里的注入块（比如 `cat` 了一个
-  transcript）会原样上报。
+**已覆盖**（都曾出现在残余清单里，现在两侧各有用例钉住）：
+
+- **`<available-skills>` 两侧都处理。** 捕获侧把它列进 `BLOCK_TAGS`（技能目录以
+  用户消息形式进 transcript 时整段剥掉），注入侧把它列进 `INJECTION_TAG_PREFIXES`
+  （一条记忆作为技能描述时含 `</available-skills>`，渲染出来是
+  `‹/available-skills>`，关不掉目录块）。
+- **`PostToolUse` 的工具输出也剥离。** `toToolMessage` 调同一个
+  `sanitizeCapturedText`。工具输出只由注入块组成时发空串——服务端的
+  `requireStringField` 只校验 `typeof === 'string'`，空串是合法值；非字符串原样
+  透传，形状由宿主决定。
+- **`Stop` 的 worker 载荷文件存原始事件。** 载荷里是宿主给的未处理消息，剥离在
+  `captureSession` 里做——那里同时要「剥离前的条数」区分「这一轮只有注入块」与
+  「transcript 格式不匹配」。唯一读者是 `runCaptureWorker`，所以这不是缺陷；文件
+  里的注释说明了外部工具读它时要自己调 `sanitizeCapturedMessages`。
+
+**残留（设计取舍，不改）：**
+
+- **`SessionStart` 注入的块不记账。** 账本记的是「`UserPromptSubmit` 这一轮已经
+  以召回块形式投喂过哪些 URI」，它防的是同一段记忆每轮重复完整注入；画像、偏好与
+  技能目录每局只注入一次，本来就没有重复。反过来把它们的 URI 记进账本，下一轮
+  `find` 会按「已投喂」把它们过滤掉（`hits.filter((hit) => !deliveredSet.has(hit.uri))`）
+  ——而画像往往正是会话开头最相关的命中，静默压制它等于让第一轮召回变空。
 
 用例在 `tests/sanitize.test.mjs`（纯函数，含 1MB 输入耗时）、
-`tests/recall.test.mjs`（真落盘的账本）、`tests/user-prompt-submit.test.mjs`
-（转义与跨轮去重的接入）与 `tests/stop.test.mjs`（发 HTTP 前剥离）。
+`tests/post-tool-use.test.mjs`（工具输出剥离与非字符串透传）、
+`tests/session-start.test.mjs`（技能目录的转义）、`tests/recall.test.mjs`（真落盘
+的账本）、`tests/user-prompt-submit.test.mjs`（转义与跨轮去重的接入）与
+`tests/stop.test.mjs`（发 HTTP 前剥离）。
 
 ## 故障排查
 

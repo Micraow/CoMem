@@ -45,7 +45,8 @@ export const SESSION_ID_PREFIX = 'cc-';
  * 宿主对一次 hook 输出的字节上限。
  *
  * 超过之后宿主不把输出当上下文，而是**转存成文件、只放预览**——`SessionStart` 注入
- * 的三个块等于静默失效（模型看到的是「输出太大」而不是画像）。
+ * 的三个块等于静默失效（模型看到的是「输出太大」而不是画像）。CoMem 侧按
+ * `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER` 降级，不赌宿主。
  *
  * 9,500 的来源：宿主侧的观测阈值是「hook 输出超过约 10,000 字符转存文件」，9,500
  * 留 5% 余量。**这是宿主的实现细节，不是公开规范，CoMem 没有独立复测**；数字在

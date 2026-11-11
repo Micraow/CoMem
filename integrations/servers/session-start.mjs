@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 /**
- * `SessionStart`：注入用户 profile、偏好与技能目录（架构文档 §15.2）。
+ * `SessionStart`：注入用户画像索引、偏好索引与技能目录（架构文档 §15.2）。
  *
  * 会话开始时模型对「这个用户是谁、怎么做事、有哪些技能」一无所知。这三样都是
  * **稳定**的（变化以天计），适合开局一次性注入；放到每轮召回里是重复投喂。
+ *
+ * ## 注入的是索引，不是正文
+ *
+ * 画像与偏好每条只给一行 `- [类型] 摘要 · comem://…`，正文靠模型按需 `read`。
+ * 整段正文注入的代价与收益不对等：画像按 157 字/归档增长，1,076 次归档有 16 万字，
+ * 而每轮会话都要把这 16 万字重付一遍。索引化之后一条记忆几十 token，地址还在，
+ * 模型要看细节时自己取。
+ *
+ * 摘要来自服务端 `GET /content/abstract`（文件的 L0 存在索引里，目录的 L0 是
+ * `.abstract.md`）。**不在 hook 里截断正文**：那是第二个摘要实现，两处口径必然漂移，
+ * 而且 hook 拿到的正文比服务端长。
  *
  * ## 技能目录的独立 token 预算
  *
@@ -16,37 +27,30 @@
  * 三档的判定用估算 token（`estimateTokens`），粒度是「几百 token 的量级」，
  * 30% 的误差不影响结论（与 `domain/session.ts` §10.2.1 的估算同一公式）。
  *
- * ## 画像与偏好的注入预算
+ * ## 再往外是宿主字节上限
  *
- * 技能目录之外，画像与偏好也是**无上限**的：1,076 次归档的画像有 16 万字，整段塞
- * 进上下文会挤掉对话本身。两条约束：
+ * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、
+ * Codex 9,500、DSH 20,000）。超限时按 `lib/injection.mjs` 的
+ * `CONTEXT_BLOCK_DROP_ORDER` 丢块：技能目录 → 召回 → 偏好 → 画像。**顺序是显式的**，
+ * 不依赖块在数组里的位置——「从后往前丢」会让块的插入顺序变成第二份优先级表。
  *
- * 1. **只注入正文**。`profile.md` 的 YAML frontmatter（`memory_type` / `created_at`
- *    / `uri` / 256 字的 `summary`）对模型是噪声；`summary` 还是正文首行的副本。
- *    服务端 `content/read` 已经剥过一次，Hook 再剥一次是防御（插件独立部署，
- *    对端不一定是同一个版本）。
- * 2. **token 预算 + head/tail 截断**。`profileBudgetTokens`（默认 2,000）放不下时
- *    保留前 8 行 / 句 + 尾部若干，中间插一条带 URI 的省略标记。标记必须写清怎么
- *    找回——只写 `...` 的模型不知道有东西被省略。
+ * ## 读哪些接口
  *
- * 再往外是**宿主字节上限**（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）：超过之后宿主
- * 把 hook 输出转存成文件、只放预览。超限时按「画像 > 技能目录 > 偏好」丢块。
+ * - `GET /content/abstract?uri=comem://user/{uid}/memories/profile.md`（§6.5 的
+ *   个人档案，一条记忆一行）
+ * - `GET /fs/ls?uri=comem://user/{uid}/memories/preferences`（**目录**，取直接子文件）
+ * - 每个子文件再 `GET /content/abstract?uri=…`（一条偏好一行）
+ * - `GET /skills`（技能目录）
  *
- * ## 读哪些文件
- *
- * - `comem://user/{uid}/memories/profile.md`（§6.5 的个人档案）
- * - `comem://user/{uid}/memories/preferences`（**目录**，取它的 L1 概览 §9.1 的
- *   4000 字符预算）
- *
- * **偏好必须按目录读，不能拼 `.overview.md`。** `.overview.md` 是保留名
+ * **偏好必须按目录列，不能拼 `.overview.md`。** `.overview.md` 是保留名
  * （`domain/uri.ts` 的 `RESERVED_SEGMENT_NAMES`），`Uri.parse` 对它抛
  * `INVALID_URI`（HTTP 400）。曾经这里直接 `content/read` 那个文件名，又被
  * `.catch(() => null)` 吞成「没有偏好」——`<comem-preferences>` 从上线起就没注入过，
- * 而文件一直在盘上。`GET /content/overview` 接的是目录 URI，服务端自己读
- * `.overview.md`（`SummaryService.read`）。
+ * 而文件一直在盘上。`fs/ls` 接的是目录 URI，服务端 `FileSystemService.list` 逐条
+ * 求过读权限，无权限的节点不出现。
  *
  * 文件不存在不是错误：用户可能刚装好插件，还没写过 profile。静默跳过该块。
- * 其余错误（400 / 5xx / 网络）记一条 warn 再降级——它们不是「没有偏好」，是配置
+ * 其余错误（400 / 5xx / 网络）记一条 warn 再降级——它们不是「没有画像」，是配置
  * 或部署坏了。
  */
 
@@ -55,11 +59,17 @@ import { pathToFileURL } from 'node:url';
 import { DEFAULT_PROFILE_BUDGET_TOKENS, isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
-import { elideToBudget, escapeInjectionText, estimateTokens, fitContext, stripFrontmatter } from '../lib/injection.mjs';
+import {
+  DEFAULT_MAX_CONTEXT_BYTES,
+  elideMemoryIndex,
+  escapeInjectionText,
+  estimateTokens,
+  fitContext,
+} from '../lib/injection.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
-const CONTENT_READ_PATH = '/api/v1/content/read';
-const CONTENT_OVERVIEW_PATH = '/api/v1/content/overview';
+const CONTENT_ABSTRACT_PATH = '/api/v1/content/abstract';
+const FS_LIST_PATH = '/api/v1/fs/ls';
 const SKILLS_PATH = '/api/v1/skills';
 
 /** 目录不存在 / 不可读时服务端返回的状态：还没写过偏好，不是错误。 */
@@ -67,28 +77,40 @@ const MISSING_NODE_STATUSES = new Set([403, 404]);
 
 /** 注入块标签。 */
 const PROFILE_OPEN = '<comem-profile>';
+const PROFILE_CLOSE = '</comem-profile>';
 const PREFERENCES_OPEN = '<comem-preferences>';
+const PREFERENCES_CLOSE = '</comem-preferences>';
 const SKILLS_OPEN = '<available-skills>';
 
 /**
- * 宿主对一次 hook 输出的字节上限。三个块的标签、空行与 JSON 信封约 100 字节，
- * 取 128 留余量。
+ * 三个块的标签、空行与 JSON 信封约 100 字节，取 128 留余量。
  *
- * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、
- * DSH 20,000）。**调用方不传时用最严的那个**：拿不准宿主是谁，就按会静默转存
- * 文件的那个来，不能赌。
+ * `maxContextBytes` 逐宿主不同（见 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`），
+ * 调用方不传时用最严的 9,500（`DEFAULT_MAX_CONTEXT_BYTES`）。
  */
-const DEFAULT_MAX_CONTEXT_BYTES = 9500;
 const CONTEXT_ENVELOPE_BYTES = 128;
 
 /**
  * 偏好概览的预算 = 画像预算的 1/4。
  *
- * 偏好是目录的 L1 索引（一行一条摘要），默认 500 token 约 15–30 条，够模型判断
- * 「哪些偏好与这一轮相关」；完整正文走 `find` / `content/overview` 按需取。
+ * 索引化之后它是**条目数预算**：默认 500 token 约 6 条中文摘要（每条最坏 256 字 +
+ * URI），够模型判断「哪些偏好与这一轮相关」；完整正文走 `read` / `list` 按需取。
  * 不单开配置项：它是画像预算的派生值，单独配只会多一处要解释的默认值。
  */
 const PREFERENCES_BUDGET_DIVISOR = 4;
+
+/**
+ * 一次 `SessionStart` 最多为多少条偏好拉摘要。
+ *
+ * 偏好目录没有分页，`fs/ls` 一次返回全部；逐条拉摘要是一个子项一次 HTTP。上限的
+ * 来源是**内容预算的倒推**：500 token 在摘要偏长时只放得下 2 条、摘要短时约 15 条，
+ * 32 已经比可渲染的多一个数量级。再多的条目本来就会被 `elideMemoryIndex` 截掉，
+ * 提前拉只是把用户的回车延迟花在不会显示的内容上。
+ *
+ * **这是经验上界，没有测量过真实部署的偏好条数分布**；条数超过它时索引里会写
+ * 「（已截断，共 M 条）」，完整列表用 `list` 取。
+ */
+const PREFERENCES_INDEX_ENTRY_LIMIT = 32;
 
 /**
  * 粗估 token 数的出口。
@@ -133,29 +155,12 @@ export function renderSkillCatalog(skills, budgetTokens) {
   return `${SKILLS_OPEN}\n${skills.length} 个技能可用（详细列表超出预算）\n</available-skills>`;
 }
 
-/** `GET /content/read` 的结果可能是 `{text}`，也可能直接是字符串。 */
-function readText(result) {
-  if (typeof result === 'string') {
-    return result === '' ? null : result;
+/** `GET /content/abstract` 的结果是 `{abstract: string | null}`（其它字段不用）。 */
+function readAbstractText(result) {
+  if (typeof result === 'object' && result !== null && typeof result.abstract === 'string') {
+    return result.abstract.trim();
   }
-  if (typeof result === 'object' && result !== null) {
-    const text = result.text;
-    if (typeof text === 'string' && text !== '') {
-      return text;
-    }
-  }
-  return null;
-}
-
-/** `GET /content/overview` 的结果是 `{overview: string | null, degraded, source}`。 */
-function readOverview(result) {
-  if (typeof result === 'object' && result !== null) {
-    const overview = result.overview;
-    if (typeof overview === 'string' && overview.trim() !== '') {
-      return overview;
-    }
-  }
-  return null;
+  return '';
 }
 
 /**
@@ -174,32 +179,81 @@ function warnToStderr(message, data) {
   }
 }
 
-/** 目录还没建 / 不可读 = 「没有偏好」。其余错误不是。 */
+/** 节点不存在 / 不可读 = 「没有这条记忆」。其余错误不是。 */
 function isMissingNode(error) {
   return error instanceof ComemHookError && MISSING_NODE_STATUSES.has(error.status);
 }
 
+/** 读取失败的诊断字段：code / status / 消息，不含正文。 */
+function errorFields(error) {
+  return {
+    code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+    status: error instanceof ComemHookError ? (error.status ?? null) : null,
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
 /**
- * 读偏好目录的 L1 概览。
+ * 读一条记忆的 L0 摘要。
  *
- * 三种结果：字符串（有偏好）、`null`（目录不存在，静默跳过）、`null` + 一条 warn
- * （读取失败）。**不能把失败静默成「没有偏好」**——那正是这个块从上线起就没出现过
- * 的原因。
+ * 三种结果：
+ * - 字符串（可能为空串）：节点存在。空串表示「还没生成摘要」，索引行只留 URI；
+ * - `null`：节点不存在（403 / 404），调用方跳过这条；
+ * - `null` + 一条 warn：读取失败。**不能把失败静默成「没有这条记忆」**——那正是
+ *   `<comem-preferences>` 从上线起就没出现过、而文件一直在盘上的原因。
+ *
+ * @param {string} uri
+ * @param {{ http: ReturnType<typeof createHttpClient>, warn?: (message: string, data: Record<string, unknown>) => void }} deps
+ * @param {string} warnMessage
+ * @returns {Promise<string | null>}
  */
-async function readPreferences(preferencesUri, deps) {
+async function readAbstract(uri, deps, warnMessage) {
   try {
-    return readOverview(await deps.http.get(CONTENT_OVERVIEW_PATH, { uri: preferencesUri }));
+    return readAbstractText(await deps.http.get(CONTENT_ABSTRACT_PATH, { uri }));
   } catch (error) {
     if (!isMissingNode(error)) {
-      (deps.warn ?? warnToStderr)('读取偏好概览失败，本次不注入 <comem-preferences>。', {
-        uri: preferencesUri,
-        code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
-        status: error instanceof ComemHookError ? (error.status ?? null) : null,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      (deps.warn ?? warnToStderr)(warnMessage, { uri, ...errorFields(error) });
     }
     return null;
   }
+}
+
+/**
+ * 列出偏好目录的直接子文件（只要文件，不要子目录）。
+ *
+ * 按 URI 排序：目录项的顺序是文件系统顺序，不排序的话同一份记忆在不同机器上
+ * 会渲染成不同的索引顺序，模型看到的相关度顺序也跟着漂。
+ *
+ * @param {string} preferencesUri
+ * @param {{ http: ReturnType<typeof createHttpClient>, warn?: (message: string, data: Record<string, unknown>) => void }} deps
+ * @returns {Promise<string[]>}
+ */
+async function listPreferenceUris(preferencesUri, deps) {
+  let result;
+  try {
+    result = await deps.http.get(FS_LIST_PATH, { uri: preferencesUri });
+  } catch (error) {
+    if (!isMissingNode(error)) {
+      (deps.warn ?? warnToStderr)('读取偏好目录失败，本次不注入 <comem-preferences>。', {
+        uri: preferencesUri,
+        ...errorFields(error),
+      });
+    }
+    return [];
+  }
+
+  const entries = typeof result === 'object' && result !== null && Array.isArray(result.entries) ? result.entries : [];
+  return entries
+    .filter(
+      (entry) =>
+        typeof entry === 'object' &&
+        entry !== null &&
+        entry.kind === 'file' &&
+        typeof entry.uri === 'string' &&
+        entry.uri !== '',
+    )
+    .map((entry) => entry.uri)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 /** 技能列表既可能是名字数组，也可能是 `{name, description}` 数组。 */
@@ -267,17 +321,21 @@ export async function handleSessionStart(event, deps) {
   const profileUri = `${memoriesRoot}/profile.md`;
   const preferencesUri = `${memoriesRoot}/preferences`;
   const maxContextBytes = deps.maxContextBytes ?? DEFAULT_MAX_CONTEXT_BYTES;
-  const [profile, preferences, skills] = await Promise.all([
-    deps.http
-      .get(CONTENT_READ_PATH, { uri: profileUri })
-      .then(readText)
-      .catch(() => null),
-    readPreferences(preferencesUri, deps),
+  const [profileAbstract, preferenceUris, skills] = await Promise.all([
+    readAbstract(profileUri, deps, '读取画像摘要失败，本次不注入 <comem-profile>。'),
+    listPreferenceUris(preferencesUri, deps),
     deps.http
       .get(SKILLS_PATH)
       .then(readSkills)
       .catch(() => []),
   ]);
+
+  // 只拉会被渲染的条目的摘要：超出的部分 `elideMemoryIndex` 本来就会截掉。
+  const preferenceAbstracts = await Promise.all(
+    preferenceUris
+      .slice(0, PREFERENCES_INDEX_ENTRY_LIMIT)
+      .map((uri) => readAbstract(uri, deps, '读取偏好摘要失败，该条不进索引。')),
+  );
   const recallMs = elapsedMs(recallStartedAt);
 
   const serializeStartedAt = process.hrtime.bigint();
@@ -287,39 +345,56 @@ export async function handleSessionStart(event, deps) {
     deps.config.profileBudgetTokens ?? DEFAULT_PROFILE_BUDGET_TOKENS,
     Math.floor((maxContextBytes - CONTEXT_ENVELOPE_BYTES) / 4),
   );
+  const preferencesBudgetTokens = Math.floor(profileBudgetTokens / PREFERENCES_BUDGET_DIVISOR);
 
   const blocks = [];
-  if (profile !== null) {
-    // frontmatter 里的 `memory_type` / `created_at` / `uri` 对模型是噪声，`summary`
-    // 又是正文前 256 字的副本（§9.1 的 L0 预算按正文首行截断）。只注入正文。
-    // 正文是记忆，可能含 `<comem-recall>`：转义发生在拼块之前（§15.10）。
-    const body = escapeInjectionText(
-      elideToBudget(stripFrontmatter(profile), profileBudgetTokens, profileUri).trim(),
-    );
-    if (body !== '') {
-      blocks.push({ id: 'profile', text: `${PROFILE_OPEN}\n${body}\n</comem-profile>` });
-    }
+  if (profileAbstract !== null) {
+    const index = {
+      open: PROFILE_OPEN,
+      close: PROFILE_CLOSE,
+      entries: [{ type: 'profile', abstract: profileAbstract, uri: profileUri }],
+      total: 1,
+    };
+    const elided = elideMemoryIndex(index, profileBudgetTokens);
+    blocks.push({
+      id: 'profile',
+      text: elided.text,
+      index: { ...index, entries: elided.entries },
+    });
   }
-  if (preferences !== null) {
-    // 偏好与画像一样是正文：超预算时同样按「前 N 行 + 尾部 + 省略标记」截断。
-    const budget = Math.floor(profileBudgetTokens / PREFERENCES_BUDGET_DIVISOR);
-    const body = escapeInjectionText(elideToBudget(preferences.trim(), budget, preferencesUri).trim());
-    if (body !== '') {
-      blocks.push({ id: 'preferences', text: `${PREFERENCES_OPEN}\n${body}\n</comem-preferences>` });
-    }
+  const preferenceEntries = preferenceUris
+    .slice(0, PREFERENCES_INDEX_ENTRY_LIMIT)
+    .flatMap((uri, index) => {
+      const abstract = preferenceAbstracts[index];
+      return abstract === null ? [] : [{ type: 'preferences', abstract, uri }];
+    });
+  if (preferenceEntries.length > 0) {
+    const index = {
+      open: PREFERENCES_OPEN,
+      close: PREFERENCES_CLOSE,
+      entries: preferenceEntries,
+      // 标记写目录里的**总条数**，不是这次拉到的条数：模型要知道还有多少没列。
+      total: preferenceUris.length,
+    };
+    const elided = elideMemoryIndex(index, preferencesBudgetTokens);
+    blocks.push({
+      id: 'preferences',
+      text: elided.text,
+      index: { ...index, entries: elided.entries },
+    });
   }
   const catalog = renderSkillCatalog(skills, deps.config.skillBudgetTokens);
   if (catalog !== undefined) {
     blocks.push({ id: 'skills', text: catalog });
   }
 
-  // 三个块各自的预算都放不下时，按「画像 > 技能目录 > 偏好」丢：画像不可恢复，
-  // 偏好能用 find / content/overview 按需取回，技能目录丢了模型不知道有能力存在。
-  const { context: rendered, dropped } = fitContext(blocks, maxContextBytes);
-  if (dropped.length > 0) {
-    (deps.warn ?? warnToStderr)('注入上下文超过宿主字节上限，已按优先级丢弃块。', {
+  // 超宿主字节上限时按 `CONTEXT_BLOCK_DROP_ORDER` 丢：技能目录 → 召回 → 偏好 → 画像。
+  const { context: rendered, dropped, truncated } = fitContext(blocks, maxContextBytes);
+  if (dropped.length > 0 || truncated.length > 0) {
+    (deps.warn ?? warnToStderr)('注入上下文超过宿主字节上限，已按优先级降级。', {
       maxContextBytes,
       dropped,
+      truncated,
     });
   }
   const context = rendered === '' ? undefined : rendered;

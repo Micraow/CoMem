@@ -56,8 +56,8 @@ export const SESSION_ID_PREFIX = 'dsh-';
  * 宿主对一次 hook 输出的字节上限。
  *
  * DSH 的插件 hook 没有公开的输出上限，这里取「其它宿主 20,000 字节」的保守值：
- * 超过之后按 `integrations/lib/injection.mjs` 的优先级丢块（先偏好、再技能目录），
- * 而不是让宿主把整段上下文转存成文件。
+ * 超过之后按 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER` 降级
+ * （技能目录 → 召回 → 偏好 → 画像），而不是让宿主把整段上下文转存成文件。
  *
  * **这是保守假设，没有实测**。真实上限更低时调小，不要指望宿主报错——它只会
  * 静默降级成预览。

@@ -15,6 +15,12 @@
  *
  * 服务端默认隐藏工具输出（§10.1：它会泄漏环境变量与文件系统结构）。这里原样
  * 采集，过滤在抽取侧做——采集侧丢掉就再也找不回来了。
+ *
+ * **唯一的例外是 CoMem 自己注入的块。** 工具输出可能是 `cat` 出来的 transcript、
+ * 某个 hook 的原始输出，或任何含 `<comem-recall>` / `<available-skills>` 的文本。
+ * 那些块不是「工具结果」，原样落盘等于让 CoMem 自己的注入以工具结果的身份回到
+ * 记忆库（与 `Stop` 的自我污染同一条路）。剥离调 `lib/sanitize.mjs` 的
+ * `sanitizeCapturedText`——与 `Stop` 是**同一个实现**，不在这里另写一份规则。
  */
 
 import { randomUUID } from 'node:crypto';
@@ -25,6 +31,7 @@ import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
+import { sanitizeCapturedText } from '../lib/sanitize.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -39,11 +46,23 @@ const CONFLICT_STATUS = 409;
  * 一次工具调用对应**一条** `tool` 消息，两种 part 都在里面：`tool_use` 与
  * `tool_result` 拆成两条消息会让「调用 → 结果」的配对靠 ID 猜。
  *
+ * 工具输出里的 CoMem 注入块在**这里**剥掉（`lib/sanitize.mjs` 的
+ * `sanitizeCapturedText`，与 `Stop` 同一个实现）：`cat` 一份 transcript 时，
+ * 里面的 `<comem-recall>` 不是工具结果，原样落盘会让注入块以工具结果的身份进
+ * 记忆库。三个宿主适配器都经过这一处（`hosts/*.mjs` 的 `renderToolOutput` 已经把
+ * 任意形状渲染成字符串），所以剥一次就够。
+ *
+ * 非字符串原样透传：这个字段的形状由宿主决定，`toToolMessage` 不替它决定序列化
+ * 方式。剥完为空时发空串——服务端的 `requireStringField` 只校验
+ * `typeof === 'string'`（`src/api/http/routes/sessions-request.ts`），空串是合法
+ * 值；`toolOutput` 为 `null` 时本来也落在 `''` 上。
+ *
  * @param {{ toolName: string | null, toolUseId: string | null, toolInput: unknown, toolOutput: string | null }} event
  * @returns {Record<string, unknown>}
  */
 export function toToolMessage(event) {
   const toolUseId = event.toolUseId ?? randomUUID();
+  const toolOutput = event.toolOutput;
   return {
     id: `tool_${toolUseId}`,
     role: 'tool',
@@ -58,7 +77,7 @@ export function toToolMessage(event) {
       {
         kind: 'tool_result',
         toolUseId,
-        output: event.toolOutput ?? '',
+        output: typeof toolOutput === 'string' ? sanitizeCapturedText(toolOutput) : (toolOutput ?? ''),
         isError: false,
       },
     ],

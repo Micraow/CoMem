@@ -12,8 +12,14 @@ import { sanitizeCapturedMessages, sanitizeCapturedText } from '../lib/sanitize.
 
 const RECALL = '<comem-recall>\n1. [profile] comem://user/alice/memories/a.md\n   后端工程师\n</comem-recall>';
 
-test('四个块标签各自整段剥掉', () => {
-  for (const tag of ['comem-recall', 'comem-profile', 'comem-preferences', 'system-reminder']) {
+test('五个块标签各自整段剥掉', () => {
+  for (const tag of [
+    'comem-recall',
+    'comem-profile',
+    'comem-preferences',
+    'available-skills',
+    'system-reminder',
+  ]) {
     const text = `before\n<${tag}>\n任意内容\n</${tag}>\nafter`;
     assert.equal(sanitizeCapturedText(text), 'before\n\nafter', tag);
   }
@@ -58,6 +64,19 @@ test('裸 epoch 只在块剥完之后处理：块内的数字随之消失，普�
 test('只由注入块组成的消息返回空串（调用方整条丢弃）', () => {
   assert.equal(sanitizeCapturedText(RECALL), '');
   assert.equal(sanitizeCapturedText('\n\n<system-reminder>提示</system-reminder>\n\n'), '');
+});
+
+/**
+ * §15.10：技能目录块以用户消息形式进 transcript 时会被重新抽取。
+ *
+ * `<available-skills>` 是 `SessionStart` 注入的第四个块，不带 `comem-` 前缀——
+ * 靠前缀匹配的规则兜不住它，必须按完整标签名单列。
+ */
+test('<available-skills> 技能目录整段剥掉，块外正文保留', () => {
+  const catalog = '<available-skills>\n- code-review: 审查改动\n- release: 发布\n</available-skills>';
+  assert.equal(sanitizeCapturedText(catalog), '');
+  assert.equal(sanitizeCapturedText(`${catalog}\n真正的问题`), '真正的问题');
+  assert.equal(sanitizeCapturedText(`真正的问题\n${catalog}`), '真正的问题');
 });
 
 test('普通消息只去掉首尾空白，内容一个字不改', () => {

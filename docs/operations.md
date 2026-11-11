@@ -133,7 +133,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 
 | 键 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
-| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入预算。超了保留前 8 行 / 句 + 尾部，中间插带 URI 的省略标记 |
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入预算。注入的是索引（一条一行「摘要 + URI」），超了按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能清单 → 召回 → 偏好 → 画像 |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的预算。三档降级：全放 → 只名字 → 一行计数 |
 
 **画像只注入正文。** `profile.md` 的 YAML frontmatter（`memory_type` / `created_at` /

@@ -73,7 +73,7 @@ export const SESSION_ID_PREFIX = 'cx-';
  *
  * **这是宿主默认阈值倒推的预算，不是实测**：部署方可以在处理程序上把
  * `additionalContextLimit` 调大，那时这里可以跟着放宽；调大之前以宿主默认值为准，
- * 超限时按 `integrations/lib/injection.mjs` 的优先级丢块，而不是让 CoMem 自己
+ * 超限时按 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER` 降级，而不是让 CoMem 自己
  * 静默超限。
  */
 export const MAX_CONTEXT_BYTES = 9500;

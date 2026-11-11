@@ -59,6 +59,40 @@ test('消息 id 由 tool_use_id 派生（重投时稳定）', () => {
   assert.notEqual(toToolMessage(event()).id, toToolMessage(event({ toolUseId: 'tool-2' })).id);
 });
 
+/**
+ * §15.10 捕获侧剥离：工具输出是另一条把宿主上下文带进记忆库的路。
+ *
+ * `cat` 一份 transcript、某个 hook 打出原始载荷时，工具输出里的 `<comem-recall>` /
+ * `<available-skills>` 不是工具结果，原样上报等于让 CoMem 自己的注入以工具结果的
+ * 身份回到记忆库。剥离用 `lib/sanitize.mjs` 的 `sanitizeCapturedText`，与 `Stop`
+ * 同一个实现。
+ */
+test('工具输出里的注入块被剥掉，其余内容原样保留', () => {
+  const message = toToolMessage(
+    event({
+      toolOutput:
+        '文件开头\n<comem-recall>\n1. [profile] comem://user/alice/memories/a.md\n</comem-recall>\n' +
+        '<available-skills>\n- code-review: 审查改动\n</available-skills>\n文件结尾',
+    }),
+  );
+  assert.equal(message.parts[1].output, '文件开头\n\n文件结尾');
+});
+
+test('工具输出只由注入块组成时发空串（服务端只校验 typeof string）', () => {
+  const message = toToolMessage(
+    event({ toolOutput: '<comem-recall>1. [profile] comem://x</comem-recall>' }),
+  );
+  assert.equal(message.parts[1].output, '');
+});
+
+test('非字符串的工具输出原样透传，不替宿主决定序列化形状', () => {
+  for (const toolOutput of [{ stdout: 'a' }, ['a', 'b'], 42]) {
+    assert.deepEqual(toToolMessage(event({ toolOutput })).parts[1].output, toolOutput);
+  }
+  // `null` 仍然落在空串上（与改动前一致）。
+  assert.equal(toToolMessage(event({ toolOutput: null })).parts[1].output, '');
+});
+
 test('写入消息前先确保会话存在', async () => {
   const http = fakeHttp();
   const result = await handlePostToolUse(event(), {
