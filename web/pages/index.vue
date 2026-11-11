@@ -20,7 +20,7 @@
  * 空白，没有任何错误说明。现在两个请求各带自己的加载态与错误，任务卡在 403 时
  * 直接说明需要管理员权限。
  */
-import { AlertTriangle, CheckCircle2, RefreshCw, ShieldAlert } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, Plug, RefreshCw, ShieldAlert } from 'lucide-vue-next'
 
 import {
   errorMessageOf,
@@ -29,6 +29,7 @@ import {
   type HealthPayload,
   type TaskPayload,
 } from '~/composables/useApi'
+import { isFreshInstall } from '~/utils/connectGuide'
 import { healthStatusLabel } from '~/utils/healthLabels'
 import {
   taskStatusLabelOf,
@@ -147,6 +148,14 @@ async function load(): Promise<void> {
 }
 
 onMounted(load)
+
+/**
+ * 新装的数据根没有索引、没有排队任务、任务列表也是空的——这不是「队列是空的」，
+ * 是「还没有 Agent 接上来」。引导只在三项都成立时出现，已有数据的部署保持原空态。
+ */
+const needsOnboarding = computed(() =>
+  isFreshInstall(health.value, tasks.value === null ? null : tasks.value.length),
+)
 </script>
 
 <template>
@@ -207,10 +216,22 @@ onMounted(load)
         </div>
 
         <div v-else-if="tasks.length === 0" class="empty">
-          <span class="empty__icon">
-            <CheckCircle2 :size="20" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">队列是空的</span>
+          <template v-if="needsOnboarding">
+            <span class="empty__icon">
+              <Plug :size="20" :stroke-width="1.4" />
+            </span>
+            <span class="empty__title">还没有数据</span>
+            <span class="empty__text">接入 Agent 后，这里会显示索引与任务。</span>
+            <NuxtLink to="/connect" class="btn btn--primary btn--sm connect-cta">
+              接入 Agent
+            </NuxtLink>
+          </template>
+          <template v-else>
+            <span class="empty__icon">
+              <CheckCircle2 :size="20" :stroke-width="1.4" />
+            </span>
+            <span class="empty__title">队列是空的</span>
+          </template>
         </div>
 
         <UiTable v-else caption="待处理任务">
@@ -241,3 +262,10 @@ onMounted(load)
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 空态里的入口是链接，不是按钮：锚点默认带下划线，改成按钮外观后要显式去掉。 */
+.connect-cta {
+  text-decoration: none;
+}
+</style>

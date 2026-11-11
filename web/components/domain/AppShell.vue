@@ -13,8 +13,7 @@ import { useMediaQuery } from '@vueuse/core'
 
 import { consoleIdentityState, consoleScopeLabel, logoutConsole } from '~/composables/consoleIdentity'
 import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
-
-import { navLabelOf } from './SideNav.vue'
+import { navLabelOf } from '~/utils/nav'
 
 const THEME_STORAGE_KEY = 'comem-console-theme'
 
