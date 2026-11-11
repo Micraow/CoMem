@@ -22,11 +22,22 @@ const props = withDefaults(
   defineProps<{
     options: readonly SelectOption[]
     ariaLabel?: string
+    /**
+     * 原生 `<select>` 的 id。
+     *
+     * 根节点是 `<span>` 包装，`id` 不会像单根组件那样自动落到控件上；表单里要用
+     * `<label for>` 关联时显式传它。
+     */
+    id?: string
+    /** 与错误 / 说明文字的 `id` 关联（`aria-describedby`）。 */
+    describedBy?: string
     size?: 'md' | 'sm'
     disabled?: boolean
   }>(),
   {
     ariaLabel: undefined,
+    id: undefined,
+    describedBy: undefined,
     size: 'md',
     disabled: false,
   },
@@ -39,7 +50,9 @@ const model = defineModel<T>({ required: true })
   <span class="select" :class="{ 'select--sm': props.size === 'sm' }">
     <select
       v-model="model"
+      :id="props.id"
       :aria-label="props.ariaLabel"
+      :aria-describedby="props.describedBy"
       :disabled="props.disabled"
     >
       <option v-for="option in props.options" :key="option.value" :value="option.value">

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 主导航（架构文档 §16 的十个业务页）。
+ * 主导航（架构文档 §16 的业务页 + 末尾的「设置」）。
  *
  * 入口清单在 `utils/nav.ts`：标题栏面包屑要用同一份标签，而纯 TS 清单才能被
  * `tests/unit/web/nav.test.ts` 直接 import（测试运行器不加载 Vue 组件）。
@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   Plug,
   Search,
+  Settings,
   Shield,
   Terminal,
   Users,
@@ -36,6 +37,7 @@ const NAV_ICONS: Record<NavIconName, Component> = {
   prompt: FileText,
   sessions: History,
   monitor: Activity,
+  settings: Settings,
 }
 
 const state = consoleIdentityState()

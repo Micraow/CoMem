@@ -31,6 +31,19 @@ describe('主导航', () => {
   it('面包屑取当前路径的入口标签', () => {
     expect(navLabelOf('/connect')).toBe('接入 Agent');
     expect(navLabelOf('/')).toBe('概览');
+    expect(navLabelOf('/settings')).toBe('设置');
     expect(navLabelOf('/unknown')).toBe('控制台');
+  });
+
+  it('「设置」是最后一组，入口只有一个且指向 /settings', () => {
+    const last = NAV_GROUPS[NAV_GROUPS.length - 1];
+    expect(last).toBeDefined();
+    expect(last?.label).toBe('设置');
+    expect(last?.items).toEqual([{ to: '/settings', label: '设置', icon: 'settings' }]);
+
+    // 侧栏按这份清单渲染；页面里硬编码入口会让「改一处、漏一处」再次出现。
+    expect(isActivePath('/settings', '/settings')).toBe(true);
+    expect(isActivePath('/settings', '/settings/providers')).toBe(true);
+    expect(isActivePath('/settings', '/sessions')).toBe(false);
   });
 });

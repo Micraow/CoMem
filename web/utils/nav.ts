@@ -1,5 +1,8 @@
 /**
- * 主导航入口清单（架构文档 §16 的十个业务页）。
+ * 主导航入口清单（架构文档 §16 的业务页，加上「设置」）。
+ *
+ * 「设置」（`/settings`）是部署级入口，不属于 §16 的十个业务页，单独成组放在
+ * 最后：它改的是进程启动配置，与日常业务数据不是一类东西。
  *
  * 图标用名字而不是组件：这份清单要能被 `tests/unit/web/nav.test.ts` 直接 import，
  * 测试运行器不需要加载 Vue 组件。图标到组件的映射在 `SideNav.vue` 里。
@@ -21,6 +24,7 @@ export type NavIconName =
   | 'prompt'
   | 'sessions'
   | 'monitor'
+  | 'settings'
 
 export interface NavItem {
   readonly to: string
@@ -59,6 +63,11 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { to: '/sessions', label: '会话与任务', icon: 'sessions' },
       { to: '/monitor', label: '监控', icon: 'monitor' },
     ],
+  },
+  {
+    // 设置放最后一组：它是「部署级」入口，与日常业务页分开。
+    label: '设置',
+    items: [{ to: '/settings', label: '设置', icon: 'settings' }],
   },
 ]
 
