@@ -28,7 +28,7 @@ import {
 } from './admin-request.js';
 
 export function createAdminMemberRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminUserIds } = services;
+  const { identity, authorizer, systemAdmin } = services;
 
   return {
     prefix: '/admin',
@@ -38,7 +38,7 @@ export function createAdminMemberRoutes(services: AdminRouteServices): HttpRoute
       app.get<{ Params: { id: string } }>('/groups/:id/members', async (request) => {
         const groupId = assertValidGroupId(request.params.id);
         requireGroup(identity, groupId);
-        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
+        await assertManageOf(request, authorizer, systemAdmin, groupRootOf(groupId));
 
         const members = identity.listMembers(groupId);
         return ok<GroupMembersResponse>({ groupId, members, total: members.length });
@@ -64,7 +64,7 @@ export function createAdminMemberRoutes(services: AdminRouteServices): HttpRoute
           // **不能只看「自己的根」**：owner 恒 manage，任何登录用户都满足。加组
           // 成员会给出 `group:{gid}` 主体，而组根预置 `group:{gid} = write`——
           // 自助入组等于拿到整棵组子树。判定对象是组根。
-          await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
+          await assertManageOf(request, authorizer, systemAdmin, groupRootOf(groupId));
 
           const member = identity.addMember(groupId, userId);
           return ok<GroupMemberResponse>({ member });
@@ -77,7 +77,7 @@ export function createAdminMemberRoutes(services: AdminRouteServices): HttpRoute
           const groupId = assertValidGroupId(request.params.id);
           const userId = assertValidUserId(request.params.userId);
           requireGroup(identity, groupId);
-          await assertManageOf(request, authorizer, adminUserIds, groupRootOf(groupId));
+          await assertManageOf(request, authorizer, systemAdmin, groupRootOf(groupId));
 
           identity.removeMember(groupId, userId);
           return ok<GroupMemberRemoveResponse>({ groupId, userId, removed: true });

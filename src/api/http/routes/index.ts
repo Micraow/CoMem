@@ -30,10 +30,12 @@ import type { SkillService } from '../../../services/skill.js';
 import type { SummaryService } from '../../../services/summary.js';
 import type { TaskService } from '../../../services/task.js';
 import type { HttpRouteGroup } from '../server.js';
+import type { SystemAdminPolicy } from '../middleware.js';
 
 import { createAclRoutes } from './acl.js';
 import { createAdminRoutes, type AdminAccess } from './admin.js';
 import { createAuthRoutes } from './auth.js';
+import { createBootstrapRoutes, type BootstrapAccess } from './bootstrap.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
 import { createMcpRoutes } from './mcp.js';
@@ -90,12 +92,15 @@ export interface HttpRouteServices {
   /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
   readonly auth: AuthService;
   /**
-   * 系统管理员用户 ID（`config.auth.adminUserIds`）。
+   * 系统管理员判定（`config.auth.adminUserIds` + 引导管理员）。
    *
-   * 用户 / 组目录与任务队列没有「被操作的目标资源」可以求权，只认这份显式名单。
-   * 空数组 = 没有系统管理员（默认），这些端点对所有请求 403。
+   * 用户 / 组目录与任务队列没有「被操作的目标资源」可以求权，只认这份显式名单与
+   * 一次性写入的引导管理员标记。默认空 = 没有管理员（默认），这些端点对所有请求
+   * 403；`POST /bootstrap/admin` 成功后该用户立刻获得管理权。
    */
-  readonly adminUserIds: readonly string[];
+  readonly systemAdmin: SystemAdminPolicy;
+  /** 引导端点（§12.7）：`needsSetup` 探测 + 第一个管理员的创建。 */
+  readonly bootstrap: BootstrapAccess;
   /** 管理面的统计与 ACL 清理端口；SQL 细节由 bootstrap 提供。 */
   readonly adminAccess: AdminAccess;
   /**
@@ -144,6 +149,7 @@ export function createHttpRouteGroups(
     createSkillRoutes(services),
     createAdminRoutes(services),
     createAuthRoutes(services),
+    createBootstrapRoutes(services),
     createPromptRoutes(services),
     createMcpRoutes(services),
     createOpsRoutes(services),

@@ -244,8 +244,14 @@ FROM base AS core
 
 # 生产形态给 node 看的开关。NODE_ENV=production 必须在这里设，不能设在 base：
 # 否则 deps 阶段的 `pnpm install` 会跳过 devDependencies，nuxt / vitest 全装不上。
+#
+# 容器必须绑 0.0.0.0 才能被 `-p` 端口转发访问（容器内绑 loopback 时 DNAT 到 eth0
+# 不可达），而单用户模式（auth.enabled: false）只允许监听回环地址——两者冲突，
+# 所以镜像默认打开多用户登录，否则 loadConfig 会拒绝启动。首次管理员用启动日志里
+# 的初始化令牌创建。
 ENV NODE_ENV=production \
-    COMEM_SERVER_HOST=0.0.0.0
+    COMEM_SERVER_HOST=0.0.0.0 \
+    COMEM_AUTH_ENABLED=true
 
 # 数据根（架构文档 §6.5：容器里固定 /var/lib/comem）。
 # 宿主挂匿名卷 / 命名卷时，Docker 从这里继承属主；bind mount 需要宿主自己 chown。

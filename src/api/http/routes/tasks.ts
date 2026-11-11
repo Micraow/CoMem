@@ -21,7 +21,7 @@
  * 各任务类型的形状由写入方决定；从它里面猜路径做权限判定等于把授权建在
  * 不可校验的 JSON 上（改一次 payload 形状就漏一次）。
  *
- * 因此三个端点都按跨主体操作处理：只认 `auth.adminUserIds`（默认空 = 全部 403）。
+ * 因此三个端点都按跨主体操作处理：只认 `auth.adminUserIds` 或引导管理员（默认空 = 全部 403）。
  * 任务载荷里可能含会话内容（归档任务的 `sessionUri` / `archiveUri`），不能允许
  * 任意登录身份按 ID 读取，也不能允许任意身份 requeue 别人的失败任务。
  *
@@ -130,13 +130,13 @@ interface TaskRetryResponse {
 }
 
 export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { taskStore, adminUserIds } = services;
+  const { taskStore, systemAdmin } = services;
 
   return {
     prefix: '/tasks',
     register(app: FastifyInstance): void {
       app.get<{ Params: { id: string } }>('/:id', async (request) => {
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         const task = taskStore.get(request.params.id);
         if (task === null) {
           throw new ComemError('NOT_FOUND', `任务不存在：${request.params.id}`, {
@@ -147,7 +147,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/', async (request) => {
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         const query = requireRecord(request.query, 'tasks/list');
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_TASK_LIMIT, { min: 1 });
         const status = requireStatus(optionalString(query, 'status'));
@@ -157,7 +157,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
       });
 
       app.post<{ Params: { id: string } }>('/:id/retry', async (request) => {
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         const task = taskStore.get(request.params.id);
         if (task === null) {
           throw new ComemError('NOT_FOUND', `任务不存在：${request.params.id}`, {

@@ -6,13 +6,12 @@
  * 只构造一次）；`resolveIdentity` 是 HTTP 与 MCP 共用的身份解析（`auth.enabled:
  * false` 时走 `resolveIdentityOf`，打开后走 Bearer 凭据）。
  *
- * `api/` 不能 import `adapters/`（§4.2），所以 `AdminAccess` 的 SQL 留在这里。两个
- * 计数函数都是同步的：`node:sqlite` 是同步 API，事务边界也必须是同步回调。
+ * `api/` 不能 import `adapters/`（§4.2），所以 `AdminAccess` 的 SQL 留在装配层。
+ * 两个计数函数拆到了 `admin-queries.ts`、引导端口的 SQL 拆到了
+ * `bootstrap-admin.ts`——本文件已经到形状门禁的上限。
  */
 
-import type { DatabaseSync } from 'node:sqlite';
-
-import type { IdentityResolver } from '../../api/http/middleware.js';
+import type { IdentityResolver, SystemAdminPolicy } from '../../api/http/middleware.js';
 import type { Identity, IdentityHeaders } from '../../api/http/middleware.js';
 import { createHttpRouteGroups } from '../../api/http/routes/index.js';
 import type { HttpRouteGroup } from '../../api/http/server.js';
@@ -22,6 +21,8 @@ import { createToolRegistry } from '../../api/mcp/tools/index.js';
 import { USER_WILDCARD, parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 import { bearerCredential } from '../../services/auth.js';
+import { memberCountsOf, permissionCountsOf } from './admin-queries.js';
+import { createBootstrapAccess, isBootstrapAdminOf } from './bootstrap-admin.js';
 import type { ContainerServices } from './types.js';
 import type { Access } from './access.js';
 import type { Background } from './background.js';
@@ -57,16 +58,13 @@ export function createApi(
   const { observability } = background;
 
   const mcpRegistry = createToolRegistry();
-  const resolveIdentity: IdentityResolver = async (headers: IdentityHeaders) => {
-    if (!config.auth.enabled) {
-      return resolveIdentityOf(headers, subject, identityService);
-    }
-    const credential = bearerCredential(headers['authorization']);
-    if (credential === null) {
-      throw new ComemError('UNAUTHENTICATED', '缺少 Authorization: Bearer 凭据。');
-    }
-    const context = await authService.resolveBearer(credential);
-    return { subject: context.subject, principals: context.principals };
+  const resolveIdentity = createIdentityResolver(config, subject, identityService, authService);
+  const bootstrap = createBootstrapAccess(db, logger, config.auth.enabled);
+  // 每次求权查一次引导标记：它在 `POST /bootstrap/admin` 里写入，快照会让新管理员
+  // 在重启前一直 403。
+  const systemAdmin: SystemAdminPolicy = {
+    adminUserIds: config.auth.adminUserIds,
+    isBootstrapAdmin: (userId) => isBootstrapAdminOf(db, userId),
   };
 
   const mcp = new McpHttpServer({
@@ -134,8 +132,9 @@ export function createApi(
     ledger,
     identity: identityService,
     auth: authService,
-    // 管理面与任务队列的「跨主体操作」只认这份显式名单（默认空 = 没有管理员）。
-    adminUserIds: config.auth.adminUserIds,
+    // 管理面与任务队列的「跨主体操作」只认显式名单 + 引导管理员标记。
+    systemAdmin,
+    bootstrap,
     prompts,
     // `/health` 回给控制台的绑定身份（§16 的身份引导）。传装配后的值而不是
     // `config.server.subject`：`options.subject` 覆盖时两者不同，回配置值会让
@@ -149,7 +148,7 @@ export function createApi(
       permissionCounts: (principals) => permissionCountsOf(db, principals),
       memberCounts: (groupIds) => memberCountsOf(db, groupIds),
       // 撤销 API Key 的端点只有 key ID：持有者由这一行反查，授权判定才能针对
-      // 被吊销凭据的主人。SQL 留在这里（`api/` 不 import `adapters/`）。
+      // 被吊销凭据的主人。SQL 留在装配层（`api/` 不 import `adapters/`）。
       apiKeyOwner: (keyId) => {
         const row = db.prepare('SELECT user_id FROM api_key WHERE id = ?').get(keyId);
         return row === undefined ? null : String(row['user_id']);
@@ -160,6 +159,32 @@ export function createApi(
   });
 
   return { mcpRegistry, resolveIdentity, mcp, routes, services };
+}
+
+/**
+ * 身份解析器（HTTP 与 MCP 共用）。
+ *
+ * `auth.enabled: false` 走 `resolveIdentityOf`（绑定主体，不看凭据）；打开后走
+ * Bearer 凭据（session token 或 API Key）。两种形态在同一个入口分叉，调用方不需要
+ * 知道自己走的是哪条。
+ */
+function createIdentityResolver(
+  config: Foundation['config'],
+  subject: string,
+  identityService: Access['identity'],
+  authService: Access['auth'],
+): IdentityResolver {
+  return async (headers: IdentityHeaders) => {
+    if (!config.auth.enabled) {
+      return resolveIdentityOf(headers, subject, identityService);
+    }
+    const credential = bearerCredential(headers['authorization']);
+    if (credential === null) {
+      throw new ComemError('UNAUTHENTICATED', '缺少 Authorization: Bearer 凭据。');
+    }
+    const context = await authService.resolveBearer(credential);
+    return { subject: context.subject, principals: context.principals };
+  };
 }
 
 /**
@@ -209,42 +234,4 @@ async function resolveIdentityOf(
     subject,
     principals: [...new Set([...identity.principals, USER_WILDCARD])],
   };
-}
-
-/** 每个主体在物化表里的行数。一次 `IN (...)` 查询，不按用户逐条查。 */
-function permissionCountsOf(
-  db: DatabaseSync,
-  principals: readonly string[],
-): ReadonlyMap<string, number> {
-  if (principals.length === 0) {
-    return new Map();
-  }
-  const list = principals.map(() => '?').join(', ');
-  const rows = db
-    .prepare(
-      `SELECT principal, COUNT(*) AS total FROM node_permission
-       WHERE principal IN (${list})
-       GROUP BY principal`,
-    )
-    .all(...principals);
-  return new Map(rows.map((row) => [String(row['principal']), Number(row['total'])]));
-}
-
-/** 每个组的成员数。一次 `IN (...)` 查询。 */
-function memberCountsOf(
-  db: DatabaseSync,
-  groupIds: readonly string[],
-): ReadonlyMap<string, number> {
-  if (groupIds.length === 0) {
-    return new Map();
-  }
-  const list = groupIds.map(() => '?').join(', ');
-  const rows = db
-    .prepare(
-      `SELECT group_id, COUNT(*) AS total FROM group_member
-       WHERE group_id IN (${list})
-       GROUP BY group_id`,
-    )
-    .all(...groupIds);
-  return new Map(rows.map((row) => [String(row['group_id']), Number(row['total'])]));
 }

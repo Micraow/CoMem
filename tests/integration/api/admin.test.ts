@@ -149,7 +149,7 @@ async function createAdminAppAs(
       adminAccess,
       acl: container.services.acl,
       ledger: container.services.ledger,
-      adminUserIds,
+      systemAdmin: { adminUserIds, isBootstrapAdmin: () => false },
     }).register,
     { prefix: '/admin' },
   );
@@ -1285,7 +1285,7 @@ describe('授权', () => {
         acl,
         ledger,
         // 没有系统管理员：用户 / 组目录这类跨主体端点对所有人 403。
-        adminUserIds: [],
+        systemAdmin: { adminUserIds: [], isBootstrapAdmin: () => false },
       }).register,
       { prefix: '/admin' },
     );

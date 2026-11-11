@@ -38,7 +38,7 @@ import {
 } from './admin-request.js';
 
 export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, acl, ledger, adminUserIds } = services;
+  const { identity, authorizer, adminAccess, acl, ledger, systemAdmin } = services;
 
   return {
     prefix: '/admin',
@@ -52,7 +52,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           max: MAX_LIST_LIMIT,
         });
         const offset = optionalQueryInteger(query, 'offset', 0, { min: 0 });
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
 
         const users = identity.listUsers({ limit, offset });
         const counts = adminAccess.permissionCounts(
@@ -74,7 +74,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
         const id = requireString(body, 'id');
         const displayName = requireString(body, 'displayName');
         const email = optionalNullableString(body, 'email');
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
 
         const user = identity.createUser({
           id,
@@ -93,7 +93,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
         const displayName = optionalNonEmptyString(body, 'displayName');
         const email = optionalNullableString(body, 'email');
         const status = body['status'] === undefined ? undefined : parseStatus(body['status']);
-        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
+        await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
         const user = identity.updateUser(id, {
           ...(displayName === undefined ? {} : { displayName }),
@@ -105,7 +105,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
 
       app.delete<{ Params: { id: string } }>('/users/:id', async (request) => {
         const id = assertValidUserId(request.params.id);
-        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
+        await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
         const principal = userPrincipal(id);
         if (requestContextOf(request).subject === principal) {
@@ -138,7 +138,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           const id = assertValidUserId(request.params.id);
           const body = requireRecord(request.body, 'admin/users/:id/password');
           const password = requireString(body, 'password');
-          await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
+          await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
           await identity.setPassword(id, password);
           return ok<UserPasswordResponse>({ id, passwordSet: true });

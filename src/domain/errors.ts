@@ -13,6 +13,12 @@ export type ComemErrorCode =
   | 'PERMISSION_DENIED'
   | 'ALREADY_EXISTS'
   | 'CONFLICT'
+  /** 初始化端点已经关闭：`needsSetup` 已为 false（§12.7 的引导流程）。 */
+  | 'BOOTSTRAP_CLOSED'
+  /** 初始化只能在服务器本机完成（§12.7 的回环限制）。 */
+  | 'NOT_LOOPBACK'
+  /** 一次性初始化令牌缺失或不匹配（§12.7 的 Docker 引导路径）。 */
+  | 'INVALID_SETUP_TOKEN'
   | 'RESOURCE_EXHAUSTED'
   | 'PROVIDER_UNAVAILABLE'
   | 'INTERNAL';
@@ -29,6 +35,9 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ComemErrorCode, number>> = Obj
   PERMISSION_DENIED: 403,
   ALREADY_EXISTS: 409,
   CONFLICT: 409,
+  BOOTSTRAP_CLOSED: 403,
+  NOT_LOOPBACK: 403,
+  INVALID_SETUP_TOKEN: 403,
   RESOURCE_EXHAUSTED: 429,
   PROVIDER_UNAVAILABLE: 503,
   INTERNAL: 500,

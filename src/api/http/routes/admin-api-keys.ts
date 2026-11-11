@@ -28,7 +28,7 @@ import {
 } from './admin-request.js';
 
 export function createAdminApiKeyRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, adminUserIds } = services;
+  const { identity, authorizer, adminAccess, systemAdmin } = services;
 
   return {
     prefix: '/admin',
@@ -45,7 +45,7 @@ export function createAdminApiKeyRoutes(services: AdminRouteServices): HttpRoute
           const body = requireRecord(request.body, 'admin/users/:id/api-keys');
           const name = requireString(body, 'name');
           const expiresAt = optionalString(body, 'expiresAt');
-          await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
+          await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
           const { raw, record } = await identity.createApiKey(id, {
             name,
@@ -66,7 +66,7 @@ export function createAdminApiKeyRoutes(services: AdminRouteServices): HttpRoute
 
       app.get<{ Params: { id: string } }>('/users/:id/api-keys', async (request) => {
         const id = assertValidUserId(request.params.id);
-        await assertManageOf(request, authorizer, adminUserIds, userRootOf(id));
+        await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
         return ok<ApiKeyListResponse>({ keys: identity.listApiKeys(id) });
       });
 
@@ -78,7 +78,7 @@ export function createAdminApiKeyRoutes(services: AdminRouteServices): HttpRoute
         if (ownerUserId === null) {
           throw new ComemError('NOT_FOUND', `API Key 不存在：${keyId}`, { keyId });
         }
-        await assertManageOf(request, authorizer, adminUserIds, userRootOf(ownerUserId));
+        await assertManageOf(request, authorizer, systemAdmin, userRootOf(ownerUserId));
         const revoked = identity.revokeApiKey(keyId);
         if (!revoked) {
           throw new ComemError('NOT_FOUND', `API Key 不存在：${keyId}`, { keyId });

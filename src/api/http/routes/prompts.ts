@@ -13,7 +13,7 @@
  * 读（`GET /`、`GET /:id`）对任何已认证身份开放：提示词会被注入到 agent 上下文，
  * 本来就不是秘密，控制台也需要在看「有没有覆盖」时读到它。
  *
- * 写（`PUT`、`DELETE`、`POST /:id/preview`）只给 `auth.adminUserIds`：改一条
+ * 写（`PUT`、`DELETE`、`POST /:id/preview`）只给 `auth.adminUserIds` 或引导管理员：改一条
  * 提示词会影响所有用户与所有 agent，预览也会触发模板渲染（未来若接模型则是真实
  * 成本）。默认名单为空 = 这些操作对所有人 403。
  *
@@ -132,7 +132,7 @@ function parseVariables(body: Record<string, unknown>): Record<string, string> {
 }
 
 export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { prompts, adminUserIds } = services;
+  const { prompts, systemAdmin } = services;
 
   return {
     prefix: '/prompts',
@@ -146,21 +146,21 @@ export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup 
       );
 
       app.put<{ Params: { id: string }; Body: unknown }>('/:id', async (request) => {
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         const id = requirePromptId(request.params.id);
         const body = requireRecord(request.body, 'prompts/:id');
         return ok(serializeDetail(prompts.save(id, requireString(body, 'body'))));
       });
 
       app.delete<{ Params: { id: string } }>('/:id', async (request) => {
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         return ok(serializeDetail(prompts.reset(requirePromptId(request.params.id))));
       });
 
       app.post<{ Params: { id: string }; Body: unknown }>('/:id/preview', async (request) => {
         // 预览也要管理员：它复用同一份模板渲染，未来接上模型就是真实成本与
         // 注入面（模板正文可由管理员改）。
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
         const id = requirePromptId(request.params.id);
         const body = request.body === undefined ? {} : requireRecord(request.body, 'prompts/:id/preview');
         return ok<PromptPreviewResponse>({ text: prompts.preview(id, parseVariables(body)) });

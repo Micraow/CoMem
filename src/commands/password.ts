@@ -17,6 +17,7 @@
  * 不启动调度器、不建服务图：只打开数据库写一行哈希。与 `reindex` 同样只做一件事。
  */
 
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -59,15 +60,38 @@ export async function setPassword(
   // 走统一入口：漏传 `argv` 会让 `--config` / `--data-dir` 静默失效，密码就写到
   // 错误的数据根上（见 `commands/config.ts`）。
   const config = loadCommandConfig(options);
+  const dataDir = config.dataDir;
+  // `_meta/` 由服务启动时创建；它不存在说明数据根还没初始化，`openDatabase` 只会
+  // 报 `unable to open database file`——那句话不指向任何下一步。
+  const metaDir = join(dataDir, META_DIRECTORY);
+  if (!existsSync(metaDir)) {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      `数据根还没有初始化：${dataDir} 下没有 _meta 目录。先启动一次服务（它会建库），或检查 dataDir 配置是否指向正确的数据根。`,
+      { dataDir },
+    );
+  }
+
   const logger = new ConsoleLogger({ level: 'warn' });
-  const db = openDatabase(join(config.dataDir, META_DIRECTORY, DATABASE_FILE));
+  const db = openDatabase(join(metaDir, DATABASE_FILE));
   try {
     runMigrations(db);
     const users = new UserRepository({ db, logger });
     if (users.get(username) === null) {
-      throw new ComemError('NOT_FOUND', `用户不存在：${username}`, { username });
+      throw new ComemError(
+        'NOT_FOUND',
+        `用户不存在：${username}。首次部署先在控制台 /setup 创建管理员；已经有管理员时在「用户与组」页（或 POST /admin/users）创建账号，再设密码。`,
+        { username },
+      );
     }
     users.setPasswordHash(username, await hashSecret(password), new Date());
+    // 密码写进去了，但认证关着时登录端点返回 404——不说的话，使用者会以为
+    // 「设好密码就能登录」，然后在 /login 上找不到原因。
+    if (!config.auth.enabled) {
+      process.stderr.write(
+        '警告：密码已写入，但认证未启用（auth.enabled = false），登录端点不可用。要在 config.yaml 里打开 auth.enabled 并重启，才能用多用户登录。\n',
+      );
+    }
     return username;
   } finally {
     db.close();

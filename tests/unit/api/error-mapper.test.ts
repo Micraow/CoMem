@@ -4,7 +4,7 @@ import { toErrorEnvelope, httpStatusOf } from '../../../src/api/http/error-mappe
 import { fail, ok } from '../../../src/api/http/envelope.js';
 import { ComemError, type ComemErrorCode } from '../../../src/domain/errors.js';
 
-/** §19 的表格：code → HTTP 状态。十个错误码一个不少。 */
+/** §19 的表格：code → HTTP 状态。全部错误码一个不少。 */
 const STATUS_BY_CODE: readonly (readonly [ComemErrorCode, number])[] = [
   ['INVALID_URI', 400],
   ['INVALID_ARGUMENT', 400],
@@ -13,17 +13,20 @@ const STATUS_BY_CODE: readonly (readonly [ComemErrorCode, number])[] = [
   ['PERMISSION_DENIED', 403],
   ['ALREADY_EXISTS', 409],
   ['CONFLICT', 409],
+  ['BOOTSTRAP_CLOSED', 403],
+  ['NOT_LOOPBACK', 403],
+  ['INVALID_SETUP_TOKEN', 403],
   ['RESOURCE_EXHAUSTED', 429],
   ['PROVIDER_UNAVAILABLE', 503],
   ['INTERNAL', 500],
 ];
 
 describe('httpStatusOf', () => {
-  it('十个错误码逐个映射（§19）', () => {
+  it('全部错误码逐个映射（§19）', () => {
     for (const [code, status] of STATUS_BY_CODE) {
       expect(httpStatusOf(code)).toBe(status);
     }
-    expect(STATUS_BY_CODE).toHaveLength(10);
+    expect(STATUS_BY_CODE).toHaveLength(13);
   });
 });
 

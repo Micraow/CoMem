@@ -295,6 +295,6 @@ export function isTerminalStepError(code: ComemErrorCode): boolean {
     code === 'INVALID_URI' ||
     code === 'INVALID_ARGUMENT' ||
     code === 'PERMISSION_DENIED' ||
-    code === 'UNAUTHENTICATED'
+    code === 'UNAUTHENTICATED' || code === 'BOOTSTRAP_CLOSED' || code === 'NOT_LOOPBACK' || code === 'INVALID_SETUP_TOKEN'
   );
 }

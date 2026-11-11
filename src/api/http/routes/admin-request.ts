@@ -14,7 +14,7 @@ import { ComemError } from '../../../domain/errors.js';
 import type { Group, User } from '../../../domain/identity.js';
 import { Uri } from '../../../domain/uri.js';
 import type { Authorizer } from '../../../services/authorizer.js';
-import { isSystemAdmin, requestContextOf } from '../middleware.js';
+import { isSystemAdmin, requestContextOf, type SystemAdminPolicy } from '../middleware.js';
 import { optionalString } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
@@ -108,12 +108,12 @@ export type AdminRouteServices = Pick<
   readonly acl: AdminAcl;
   readonly ledger: AdminRecallLedger;
   /**
-   * 系统管理员用户 ID（`config.auth.adminUserIds`）。
+   * 系统管理员判定（`config.auth.adminUserIds` + 引导管理员）。
    *
    * 必填而不是从 `config` 里现取：路由的授权口径应当在一处装配，测试也能直接
-   * 给一个明确的名单（`[]` 表示没有管理员），不需要构造整份配置。
+   * 给一个明确的策略（空名单 + 无引导管理员表示没有管理员），不需要构造整份配置。
    */
-  readonly adminUserIds: readonly string[];
+  readonly systemAdmin: SystemAdminPolicy;
 };
 
 function invalidArgument(field: string, expected: string, value: unknown): ComemError {
@@ -180,10 +180,10 @@ export function groupRootOf(groupId: string): Uri {
 export async function assertManageOf(
   request: FastifyRequest,
   authorizer: Authorizer,
-  adminUserIds: readonly string[],
+  systemAdmin: SystemAdminPolicy,
   target: Uri,
 ): Promise<void> {
-  if (isSystemAdmin(request, adminUserIds)) {
+  if (isSystemAdmin(request, systemAdmin)) {
     return;
   }
   await authorizer.assert(target, MANAGE, requestContextOf(request).principals);

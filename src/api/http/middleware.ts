@@ -66,6 +66,8 @@ const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   '/api/v1/auth/login',
   '/api/v1/auth/logout',
   '/api/v1/auth/config',
+  // 引导端点（§12.7）：没有身份可言，授权靠回环地址或一次性初始化令牌。两个前缀各列一次。
+  '/bootstrap', '/bootstrap/admin', '/api/v1/bootstrap', '/api/v1/bootstrap/admin',
 ]);
 
 /** 请求路径（去掉查询串）。 */
@@ -268,34 +270,30 @@ export function callerUserIdOf(request: FastifyRequest): string {
 }
 
 /**
- * 当前主体是否是 `auth.adminUserIds` 里的系统管理员。
- *
- * 名单存的是用户 ID（`app_user.id`），不是 `user:{id}` 主体字符串。
+ * 系统管理员判定：显式名单 + 引导管理员（§12.4、§12.7）。名单是 `app_user.id`，
+ * 不是主体字符串；引导管理员是 `app_user.bootstrap_admin` 标记。
  */
-export function isSystemAdmin(
-  request: FastifyRequest,
-  adminUserIds: readonly string[],
-): boolean {
-  return adminUserIds.includes(callerUserIdOf(request));
+export interface SystemAdminPolicy {
+  readonly adminUserIds: readonly string[];
+  isBootstrapAdmin(userId: string): boolean;
+}
+
+export function isSystemAdmin(request: FastifyRequest, policy: SystemAdminPolicy): boolean {
+  const userId = callerUserIdOf(request);
+  return policy.adminUserIds.includes(userId) || policy.isBootstrapAdmin(userId);
 }
 
 /**
  * 跨主体端点（全局用户 / 组目录、任务队列）的门禁：只允许系统管理员。
  *
- * 这些操作没有「被操作的目标资源」可以求权，也没有可用的 ACL 条目；默认名单为空
- * → 对所有人 403。部署者显式写自己的 ID 才打开管理面。
+ * 这些操作没有「被操作的目标资源」可以求权；默认名单为空 → 对所有人 403。
  */
-export function assertSystemAdmin(
-  request: FastifyRequest,
-  adminUserIds: readonly string[],
-): void {
+export function assertSystemAdmin(request: FastifyRequest, policy: SystemAdminPolicy): void {
   const subject = requestContextOf(request).subject;
-  if (isSystemAdmin(request, adminUserIds)) {
+  if (isSystemAdmin(request, policy)) {
     return;
   }
-  throw new ComemError(
-    'PERMISSION_DENIED',
-    `需要系统管理员：${subject} 不在 auth.adminUserIds 里。`,
-    { subject },
-  );
+  throw new ComemError('PERMISSION_DENIED', `需要系统管理员：${subject} 不在管理名单里。`, {
+    subject,
+  });
 }

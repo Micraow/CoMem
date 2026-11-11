@@ -63,6 +63,11 @@ const SHARED_MESSAGE_BY_CODE = {
   CONFLICT: '并发写冲突',
   RESOURCE_EXHAUSTED: '磁盘空间不足',
   PROVIDER_UNAVAILABLE: '服务不可用',
+  // 引导端点的三个码只由 HTTP 层产生，文件系统适配器永远不会抛；放进公共表是为了
+  // 不让三个适配器的消息表各自补一条用不到的中文（`AdapterMessageCode` 是补集）。
+  BOOTSTRAP_CLOSED: '初始化已关闭',
+  NOT_LOOPBACK: '只允许本机访问',
+  INVALID_SETUP_TOKEN: '初始化令牌无效',
 } satisfies Partial<Record<ComemErrorCode, string>>;
 
 /**

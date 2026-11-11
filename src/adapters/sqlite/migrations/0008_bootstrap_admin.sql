@@ -1,0 +1,16 @@
+-- ── 引导管理员标记（架构文档 §12.7 的引导循环）──────────────────────────────
+--
+-- `POST /bootstrap/admin` 创建的第一个管理员即使不在 `auth.adminUserIds` 里也要能
+-- 调管理端点。标记必须跨重启有效，所以落库而不是放内存变量。
+--
+-- **为什么是 `app_user` 上的一列，不是独立的 `system_setting` 表**：标记只回答
+-- 「这一行是不是引导管理员」，是用户行的属性；独立表要引入 `(key, value)` 的读写
+-- 与清理时机，却只存一个布尔值，而且两张表可以在事务外不同步（出现「账号没了、
+-- 管理员标记还在」）。`ADD COLUMN` 对已有行补默认值 0，不重写、不移动任何现有
+-- 数据，已有数据根升级后行为与升级前逐字相同。
+--
+-- 写入点只有一个：`bootstrap/container/bootstrap-admin.ts` 的
+-- `installFirstAdminOf` 在一个同步写事务里复查「没有任何密码哈希」再写这一列，
+-- 所以「谁先调用谁当管理员」之外没有第二个写入点，`needsSetup` 也不会被并发
+-- 请求绕过。
+ALTER TABLE app_user ADD COLUMN bootstrap_admin INTEGER NOT NULL DEFAULT 0;

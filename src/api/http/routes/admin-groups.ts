@@ -43,7 +43,7 @@ import {
 } from './admin-request.js';
 
 export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, acl, ledger, adminUserIds } = services;
+  const { identity, authorizer, adminAccess, acl, ledger, systemAdmin } = services;
 
   return {
     prefix: '/admin',
@@ -57,7 +57,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
           max: MAX_LIST_LIMIT,
         });
         const offset = optionalQueryInteger(query, 'offset', 0, { min: 0 });
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
 
         const groups = identity.listGroups({ limit, offset });
         const memberCounts = adminAccess.memberCounts(groups.map((group) => group.id));
@@ -87,7 +87,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
         const description = optionalNullableString(body, 'description');
         // 建组分配的是**全局组目录**里的一个新 ID，没有已存在的目标资源可以
         // 求权。归到跨主体一类：由系统管理员建组，owner 仍是创建者。
-        assertSystemAdmin(request, adminUserIds);
+        assertSystemAdmin(request, systemAdmin);
 
         const ownerUserId = callerUserIdOf(request);
         const group = identity.createGroup({
@@ -111,7 +111,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
         const displayName = optionalNonEmptyString(body, 'displayName');
         const description = optionalNullableString(body, 'description');
         requireGroup(identity, id);
-        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(id));
+        await assertManageOf(request, authorizer, systemAdmin, groupRootOf(id));
 
         const group = identity.updateGroup(id, {
           ...(displayName === undefined ? {} : { displayName }),
@@ -149,7 +149,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
         // 恢复只能走 `pnpm group:owner`（§12.6）。
         if (
           group.ownerUserId !== callerUserIdOf(request) &&
-          !isSystemAdmin(request, adminUserIds)
+          !isSystemAdmin(request, systemAdmin)
         ) {
           // 不是当前 owner 时按组根的 manage 求权（Service 层会再求一次纵深防御
           // 之外的那部分由 `setGroupOwner` 跳过，原因见它的注释）。
@@ -165,7 +165,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
         const id = assertValidGroupId(request.params.id);
         // 先确认组存在再求权：删除路径会撤权、清账本，不能对不存在的组启动。
         requireGroup(identity, id);
-        await assertManageOf(request, authorizer, adminUserIds, groupRootOf(id));
+        await assertManageOf(request, authorizer, systemAdmin, groupRootOf(id));
 
         const principal = groupPrincipal(id);
         // 当前主体属于这个组时，删组会连同它的可读范围一起消失；控制台随后每个

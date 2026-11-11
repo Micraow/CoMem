@@ -29,6 +29,8 @@
 
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 
+import { ComemError } from '../domain/errors.js';
+
 /** 架构文档 §12.7 的参数；改动必须能校验旧哈希（见文件头的格式说明）。 */
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -139,4 +141,26 @@ export async function verifySecret(secret: string, stored: string): Promise<bool
     return false;
   }
   return timingSafeEqual(actual, expected);
+}
+
+/**
+ * 密码强度策略（唯一入口，路由与命令都调它）。
+ *
+ * 之前仓库里没有策略：`POST /admin/users/{id}/password` 只要求非空串，
+ * `pnpm password` 也只拒绝空串。这里补一条**下界**，不引入大小写 / 数字 / 符号的
+ * 组合规则——NIST SP 800-63B §5.1.1.2 明确建议不要用组合规则（它们把用户推向
+ * `Password1!` 这类可预测的形态，且不提高熵）。长度下界取 8，是同一节的建议值。
+ *
+ * 全空白密码单独拒绝：它满足长度下界，但输入法误触（连按空格）会产出这种口令。
+ */
+const MIN_PASSWORD_LENGTH = 8;
+
+export function assertPasswordPolicy(password: string): void {
+  if (password.length < MIN_PASSWORD_LENGTH || password.trim() === '') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      `密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符，且不能全是空白。`,
+      { field: 'password', minLength: MIN_PASSWORD_LENGTH },
+    );
+  }
 }
