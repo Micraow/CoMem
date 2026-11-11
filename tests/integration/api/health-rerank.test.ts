@@ -28,7 +28,6 @@ import { createContainer, type Container } from '../../../src/bootstrap/containe
 import { Uri } from '../../../src/domain/uri.js';
 
 const ROOT = 'comem://user/local';
-const SUBJECT = 'user:local';
 const PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
 const FILE = `${ROOT}/memories/rerank-timeout.md`;
 
@@ -124,7 +123,6 @@ describe('重排超时', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/v1/search/find',
-      headers: { 'x-comem-subject': SUBJECT },
       payload: { query: '上下文' },
     });
 
@@ -150,7 +148,6 @@ describe('重排超时', () => {
     await app.inject({
       method: 'POST',
       url: '/api/v1/search/find',
-      headers: { 'x-comem-subject': SUBJECT },
       payload: { query: '上下文' },
     });
 
@@ -174,7 +171,6 @@ describe('重排超时', () => {
     await app.inject({
       method: 'POST',
       url: '/api/v1/search/find',
-      headers: { 'x-comem-subject': SUBJECT },
       payload: { query: '上下文' },
     });
 
@@ -190,7 +186,6 @@ describe('重排超时', () => {
     await app.inject({
       method: 'POST',
       url: '/api/v1/search/find',
-      headers: { 'x-comem-subject': SUBJECT },
       payload: { query: '上下文' },
     });
 

@@ -3,13 +3,12 @@
  *
  * 空数据根 + 默认配置下，没有任何纯浏览器路径能创建第一个可登录账号：
  * `POST /admin/users` 需要 `auth.adminUserIds`（默认空 → 403），而它只能改配置 +
- * 重启；`POST /auth/login` 在 `auth.enabled: false` 时 404。这一组端点补上第一步。
+ * 重启。这一组端点补上第一步。
  *
  * ## 两个端点都不认证
  *
  * `GET /bootstrap` 只回布尔与绑定身份，**不泄露用户列表**。`POST /bootstrap/admin`
- * 在 `auth.enabled: true` 时也没有身份可用（还没有可登录的账号），所以授权不能靠
- * 请求头，只有两条：
+ * 也没有身份可用（还没有可登录的账号），所以授权不能靠凭据，只有两条：
  *
  * 1. **回环地址**（`127.0.0.1` / `::1`）：本地开发不用抄令牌；
  * 2. **一次性初始化令牌**：Docker 部署里请求经 nginx 转发，来源是容器网段地址，
@@ -21,10 +20,10 @@
  *
  * ## 只在 `needsSetup` 期间可用
  *
- * `needsSetup` 的判据是「`auth.enabled` 为 true 且 `app_user` 里没有任何一行有密码
- * 哈希」。第一次成功之后端点永久关闭（`BOOTSTRAP_CLOSED`），令牌也救不了——标记的
- * 写入只有一个入口（`installFirstAdmin`），不存在「谁先调用谁当管理员」之外的第二个
- * 写入点。
+ * `needsSetup` 的判据只有一个：`app_user` 里没有任何一行有密码哈希。认证恒开，所以
+ * 它同时就是「这份安装还没有可登录账号」。第一次成功之后端点永久关闭
+ * （`BOOTSTRAP_CLOSED`），令牌也救不了——标记的写入只有一个入口
+ * （`installFirstAdmin`），不存在「谁先调用谁当管理员」之外的第二个写入点。
  */
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -53,7 +52,7 @@ import type { HttpRouteServices } from './index.js';
  * 写密码哈希 + 标记。
  */
 export interface BootstrapAccess {
-  /** 有任意一行设过密码。路由把它与 `auth.enabled` 合成 `needsSetup`。 */
+  /** 有任意一行设过密码。`needsSetup` 就是它的取反。 */
   hasPassword(): boolean;
   /** 引导管理员的用户 ID；还没有写过标记时返回 `null`。 */
   bootstrapAdminId(): string | null;
@@ -65,31 +64,22 @@ export interface BootstrapAccess {
 
 export type BootstrapRouteServices = Pick<
   HttpRouteServices,
-  'config' | 'identity' | 'subject' | 'systemAdmin' | 'bootstrap'
+  'identity' | 'subject' | 'systemAdmin' | 'bootstrap'
 >;
 
 /** `GET /bootstrap` 的响应体。只有布尔与部署身份，没有任何用户数据。 */
 interface BootstrapStatusResponse {
+  /** 还没有任何密码：控制台整页进 `/setup`。 */
   readonly needsSetup: boolean;
-  readonly authEnabled: boolean;
-  /** 服务图绑定的主体（`server.subject`）；控制台用它发 `x-comem-subject`。 */
+  /**
+   * 回环信任使用的身份（`server.subject`）。
+   *
+   * `/setup` 用它做默认用户名：本机的 `curl` 与 hook 插件以这个主体发请求，控制台
+   * 建的第一个管理员取同一个 ID 就不会出现「两个都是我的账号」的分裂。
+   */
   readonly boundSubject: string;
   /** `auth.adminUserIds` 非空，或引导管理员已存在。 */
   readonly adminConfigured: boolean;
-  /**
-   * 是否需要重启才能登录。
-   *
-   * 恒为 `false`：`needsSetup` 只在多用户模式（`auth.enabled: true`）下为真，
-   * 而那种模式启动时已经读过认证配置。保留字段是为了让前端契约稳定。
-   */
-  readonly restartRequired: boolean;
-  /**
-   * 初始化需要一次性令牌（非回环请求）。
-   *
-   * 恒为 `true`：它不像 `needsSetup` 那样随状态变化，只是让 `/setup` 页面能说明
-   * 「去服务端日志里拿令牌」。**响应里绝不返回令牌本身。**
-   */
-  readonly setupTokenRequired: true;
 }
 
 /** `POST /bootstrap/admin` 的响应体。 */
@@ -98,9 +88,6 @@ interface BootstrapAdminResponse {
   /** 本次是否创建了账号（false = 账号已存在，只设了密码）。 */
   readonly created: boolean;
   readonly passwordSet: true;
-  readonly authEnabled: boolean;
-  /** 同 `GET /bootstrap`：多用户模式不需要重启。 */
-  readonly restartRequired: boolean;
 }
 
 function bootstrapClosed(): ComemError {
@@ -116,25 +103,21 @@ function isLoopbackRequest(request: FastifyRequest): boolean {
 }
 
 export function createBootstrapRoutes(services: BootstrapRouteServices): HttpRouteGroup {
-  const { config, identity, subject, systemAdmin, bootstrap } = services;
-  // 单用户模式的核心卖点就是「没有登录、不用建账号」：`user:local` 开箱即用，
-  // 不该被推去走多用户初始化表单。只有打开 `auth.enabled` 且还没有密码时才需要
-  // 建第一个可登录账号。
-  const needsSetup = (): boolean => config.auth.enabled && !bootstrap.hasPassword();
+  const { identity, subject, systemAdmin, bootstrap } = services;
+  // 认证恒开，所以「没有任何密码」就是「还没有可登录账号」——控制台整页进
+  // `/setup`。这是控制台唯一的一条首跑路径。
+  const needsSetup = (): boolean => !bootstrap.hasPassword();
 
   return {
     prefix: '/bootstrap',
     register(app: FastifyInstance): void {
-      // 只读探测：恒定 200，认证开关与初始化状态都是正常状态，不是错误。
+      // 只读探测：恒定 200，初始化状态是正常状态，不是错误。
       app.get('/', async () =>
         ok<BootstrapStatusResponse>({
           needsSetup: needsSetup(),
-          authEnabled: config.auth.enabled,
           boundSubject: subject,
           adminConfigured:
             systemAdmin.adminUserIds.length > 0 || bootstrap.bootstrapAdminId() !== null,
-          restartRequired: false,
-          setupTokenRequired: true,
         }),
       );
 
@@ -175,13 +158,7 @@ export function createBootstrapRoutes(services: BootstrapRouteServices): HttpRou
           throw bootstrapClosed();
         }
 
-        return ok<BootstrapAdminResponse>({
-          userId,
-          created,
-          passwordSet: true,
-          authEnabled: config.auth.enabled,
-          restartRequired: false,
-        });
+        return ok<BootstrapAdminResponse>({ userId, created, passwordSet: true });
       });
     },
   };

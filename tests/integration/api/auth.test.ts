@@ -25,7 +25,9 @@ beforeEach(async () => {
       COMEM_DATA_DIR: dataDir,
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
-      COMEM_AUTH_ENABLED: 'true',
+      // 这组用例测的是「凭据怎么解析」：关掉回环信任，否则不带凭据的 inject
+      // 会被当成 server.subject，测不出「缺凭据」与「凭据无效」。
+      COMEM_AUTH_TRUST_LOOPBACK: 'false',
       COMEM_AUTH_SESSION_SECRET: SESSION_SECRET,
       // 这组用例测认证（token 是否有效），不是测谁能调管理面。绑定主体显式声明为
       // 系统管理员；跨主体端点没有这个配置就一律 403（默认空名单）。
@@ -107,7 +109,7 @@ describe('登录', () => {
     }
   });
 
-  it('缺少 Authorization 头是 401，x-comem-subject 被忽略', async () => {
+  it('缺少 Authorization 头是 401，x-comem-subject 不是凭据', async () => {
     for (const headers of [{}, { 'x-comem-subject': 'user:local' }]) {
       const response = await inject({ method: 'GET', url: '/api/v1/admin/users', headers });
       expect(response.statusCode).toBe(401);
@@ -129,14 +131,16 @@ describe('登录', () => {
     expect(json(response)['result']).toEqual({ loggedOut: true });
   });
 
-  it('GET /auth/config 是只读探测：200 且只回 enabled（W59）', async () => {
-    const response = await inject({ method: 'GET', url: '/api/v1/auth/config' });
+  it('GET /auth/config 不存在：认证恒开，没有开关要探测', async () => {
+    const token = await login();
+    const response = await inject({
+      method: 'GET',
+      url: '/api/v1/auth/config',
+      headers: bearer(token),
+    });
 
-    expect(response.statusCode).toBe(200);
-    expect(json(response)['result']).toEqual({ enabled: true });
-    // 敏感信息不进响应：控制台只需要一个布尔值。
-    expect(response.body).not.toContain('sessionTtl');
-    expect(response.body).not.toContain('secret');
+    expect(response.statusCode).toBe(404);
+    expect(json(response)['error']).toMatchObject({ code: 'NOT_FOUND' });
   });
 });
 
@@ -302,59 +306,132 @@ describe('API Key', () => {
   });
 });
 
-describe('auth.enabled = false', () => {
-  it('登录端点 404，x-comem-subject 仍是身份来源', async () => {
-    const disabledDir = await mkdtemp(join(tmpdir(), 'comem-auth-disabled-'));
-    const disabled = await createContainer({
-      configPath: join(disabledDir, 'config.yaml'),
+describe('回环信任（auth.trustLoopback）', () => {
+  interface TrustHarness {
+    readonly container: Container;
+    readonly app: FastifyInstance;
+    readonly dir: string;
+  }
+
+  async function startTrust(trustLoopback: boolean): Promise<TrustHarness> {
+    const dir = await mkdtemp(join(tmpdir(), 'comem-auth-loopback-'));
+    const created = await createContainer({
+      configPath: join(dir, 'config.yaml'),
       env: {
         ...process.env,
-        COMEM_DATA_DIR: disabledDir,
+        COMEM_DATA_DIR: dir,
         COMEM_SUMMARY_GENERATOR: 'rule',
         COMEM_LOGGING_LEVEL: 'error',
-        COMEM_AUTH_ENABLED: 'false',
+        COMEM_AUTH_SESSION_SECRET: SESSION_SECRET,
         COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(['local']),
+        COMEM_AUTH_TRUST_LOOPBACK: trustLoopback ? 'true' : 'false',
       },
     });
-    const disabledApp = await createHttpServer({
-      config: disabled.config,
-      logger: disabled.logger,
-      observability: disabled.observability,
-      routes: disabled.routes,
-      mcp: disabled.mcp,
-      resolveIdentity: disabled.resolveIdentity,
+    await created.services.identity.setPassword('local', PASSWORD);
+    const trustApp = await createHttpServer({
+      config: created.config,
+      logger: created.logger,
+      observability: created.observability,
+      routes: created.routes,
+      mcp: created.mcp,
+      resolveIdentity: created.resolveIdentity,
     });
+    return { container: created, app: trustApp, dir };
+  }
 
+  async function stopTrust(harness: TrustHarness): Promise<void> {
+    await harness.container.services.indexObserver.drain();
+    await harness.app.close();
+    await harness.container.close();
+    await rm(harness.dir, { recursive: true, force: true });
+  }
+
+  it('回环来源没有凭据时认证为 server.subject', async () => {
+    const harness = await startTrust(true);
     try {
-      const loginResponse = await disabledApp.inject({
-        method: 'POST',
-        url: '/api/v1/auth/login',
-        payload: { username: 'local', password: PASSWORD },
-      });
-      expect(loginResponse.statusCode).toBe(404);
-
-      // 回归（W59）：关闭时探测也是 200 + `{enabled:false}`，不是拿 404 当信号。
-      const configResponse = await disabledApp.inject({
-        method: 'GET',
-        url: '/api/v1/auth/config',
-      });
-      expect(configResponse.statusCode).toBe(200);
-      expect(json(configResponse)['result']).toEqual({ enabled: false });
-
-      // v1 行为不变：不带认证头时用服务图绑定的主体。
-      const health = await disabledApp.inject({ method: 'GET', url: '/health' });
-      expect(health.statusCode).toBe(200);
-
-      const users = await disabledApp.inject({
+      const response = await harness.app.inject({
         method: 'GET',
         url: '/api/v1/admin/users',
-        headers: { 'x-comem-subject': 'user:local' },
       });
-      expect(users.statusCode).toBe(200);
+      expect(response.statusCode, response.body).toBe(200);
     } finally {
-      await disabledApp.close();
-      await disabled.close();
-      await rm(disabledDir, { recursive: true, force: true });
+      await stopTrust(harness);
+    }
+  });
+
+  it('非回环来源没有凭据 → 401', async () => {
+    const harness = await startTrust(true);
+    try {
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: '/api/v1/admin/users',
+        remoteAddress: '203.0.113.7',
+      });
+      expect(response.statusCode).toBe(401);
+      expect(json(response)['error']).toMatchObject({ code: 'UNAUTHENTICATED' });
+    } finally {
+      await stopTrust(harness);
+    }
+  });
+
+  it('Host 指向别的域名时不信回环来源（DNS rebinding 防线）', async () => {
+    const harness = await startTrust(true);
+    try {
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: '/api/v1/admin/users',
+        headers: { host: 'evil.example.com' },
+      });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await stopTrust(harness);
+    }
+  });
+
+  it('带凭据时凭据优先，回环信任不覆盖它', async () => {
+    const harness = await startTrust(true);
+    try {
+      harness.container.services.identity.createUser({ id: 'alice', displayName: 'Alice' });
+      await harness.container.services.identity.ensureUserNamespace('alice');
+      await harness.container.services.identity.setPassword('alice', PASSWORD);
+      const loginResponse = await harness.app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { username: 'alice', password: PASSWORD },
+      });
+      expect(loginResponse.statusCode, loginResponse.body).toBe(200);
+      const token = String((json(loginResponse)['result'] as Record<string, unknown>)['token']);
+
+      // 自己的根可读；绑定主体（local）的根不可读 —— 证明身份是 alice 而不是
+      // 回环信任给出的 local。
+      const own = await harness.app.inject({
+        method: 'GET',
+        url: `/api/v1/fs/ls?uri=${encodeURIComponent('comem://user/alice')}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(own.statusCode, own.body).toBe(200);
+
+      const bound = await harness.app.inject({
+        method: 'GET',
+        url: `/api/v1/fs/ls?uri=${encodeURIComponent('comem://user/local')}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(bound.statusCode).toBe(403);
+    } finally {
+      await stopTrust(harness);
+    }
+  });
+
+  it('关掉回环信任后，回环来源没有凭据也是 401', async () => {
+    const harness = await startTrust(false);
+    try {
+      const response = await harness.app.inject({
+        method: 'GET',
+        url: '/api/v1/admin/users',
+      });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await stopTrust(harness);
     }
   });
 });

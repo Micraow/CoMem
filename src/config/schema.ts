@@ -366,10 +366,11 @@ const configObjectSchema = z.object({
       host: z.string().default('127.0.0.1'),
       port: z.number().int().min(1).max(65535).default(1933),
       /**
-       * 服务图绑定的主体，形如 `user:alice`。
+       * 回环信任时使用的身份，形如 `user:alice`（架构文档 §12.7）。
        *
-       * **这是单用户部署的绑定身份**：HTTP 的 `x-comem-subject` 与它不一致时拒绝。
-       * 默认 `user:local` 只是为了让 `pnpm dev` 开箱即用——生产部署应该显式配置。
+       * `auth.trustLoopback` 打开时，来源是回环地址、又没有带凭据的请求被认证成
+       * 这个主体。默认 `user:local` 只是为了让 `pnpm dev` 开箱即用——生产部署
+       * 应该显式配置成实际的用户。
        *
        * 格式与用户目录的 ID 同一套（`domain/identity.ts` 的 `USER_ID_PATTERN`），
        * 前缀只允许 `user` / `group`；服务图目前只接受 `user` 主体，`group` 形式
@@ -388,17 +389,23 @@ const configObjectSchema = z.object({
   auth: z
     .object({
       /**
-       * 是否启用多用户认证（架构文档 §12.7）。
+       * 回环信任（架构文档 §12.7）。
        *
-       * **默认 false = v1 单用户行为**：身份由反向代理注入 `x-comem-subject`，
-       * 且必须等于 `server.subject`，否则 401。现有部署与测试全部依赖这条路径，
-       * 打开它是一次显式的部署选择。
+       * **认证恒开。** 每个请求的凭据要么是
+       * `Authorization: Bearer <session token>`，要么是
+       * `Authorization: Bearer comem_...`（API Key）。这一项不关闭认证，它只回答
+       * 「没有凭据的本机请求算谁」：打开时，来源是回环地址的请求被认证为
+       * `server.subject`——本机的 `curl`、hook 插件、MCP 客户端不必存凭据。
        *
-       * 打开后 `x-comem-subject` **被忽略**，必须带
-       * `Authorization: Bearer <session token>` 或 `Authorization: Bearer comem_...`
-       * （API key）。缺失或非法一律 401 `UNAUTHENTICATED`。
+       * **信任模型**：能连上本机端口的人本来就能读这个数据根，与 `~/.ssh` 的
+       * 权限模型同级。被认证的身份仍然是一个真实的 `app_user` 行，仍然走同一套
+       * ACL——它不是第二种身份模型。
+       *
+       * **只允许在 `server.host` 是回环地址时打开。** 非回环监听意味着任何能连上
+       * 端口的人都能冒充 `server.subject`，这种组合在启动期失败（
+       * `cross-checks.ts`），不能配了不生效。容器部署绑 `0.0.0.0`，必须关掉它。
        */
-      enabled: z.boolean().default(false),
+      trustLoopback: z.boolean().default(true),
       /**
        * 系统管理员的用户 ID（`app_user.id`，不是 `user:{id}` 主体字符串）。
        *

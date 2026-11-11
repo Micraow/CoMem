@@ -1,9 +1,9 @@
 /**
  * 首次初始化（`GET /bootstrap`、`POST /bootstrap/admin`）。
  *
- * 服务端契约来自架构文档 §16 的身份引导与 §12.7 的认证开关：初始化状态只有
- * 「没有任何用户设置过密码」这一种，创建账号的响应必须回答「是否还要重启」。
- * 这里用普通对象替身穷举字段缺失、错误码与表单校验，不依赖服务端实现。
+ * 服务端契约来自架构文档 §16 的身份引导与 §12.7 的引导循环：初始化状态只有
+ * 「没有任何密码」这一种，建好账号即可登录（不需要改配置或重启）。这里用普通
+ * 对象替身穷举字段缺失、错误码与表单校验，不依赖服务端实现。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -12,7 +12,6 @@ import {
   bootstrapErrorNotice,
   createBootstrapAdmin,
   fetchConsoleBootstrap,
-  setupAdminConfigSnippet,
   validateSetupForm,
   type ConsoleBootstrap,
 } from '../../../web/composables/consoleBootstrap.js';
@@ -39,11 +38,8 @@ function bootstrapPayload(overrides: Partial<ConsoleBootstrap> = {}): unknown {
     status: 'ok',
     result: {
       needsSetup: false,
-      authEnabled: true,
       boundSubject: 'user:local',
       adminConfigured: true,
-      restartRequired: false,
-      setupTokenRequired: true,
       ...overrides,
     },
   };
@@ -56,8 +52,6 @@ function adminPayload(overrides: Record<string, unknown> = {}): unknown {
       userId: 'local',
       created: true,
       passwordSet: true,
-      authEnabled: false,
-      restartRequired: true,
       ...overrides,
     },
   };
@@ -68,20 +62,17 @@ function errorPayload(code: string, message: string): unknown {
 }
 
 describe('初始化状态（GET /bootstrap）', () => {
-  it('解出六个状态字段，且是匿名只读 GET', async () => {
+  it('解出三个状态字段，且是匿名只读 GET', async () => {
     const calls: string[] = [];
     const request: ConsoleRequest = async (url, init) => {
       calls.push(`${init?.method ?? 'GET'} ${url}`);
-      return jsonResponse(bootstrapPayload({ needsSetup: true, authEnabled: false }));
+      return jsonResponse(bootstrapPayload({ needsSetup: true }));
     };
 
     await expect(fetchConsoleBootstrap(BASE, request)).resolves.toEqual({
       needsSetup: true,
-      authEnabled: false,
       boundSubject: 'user:local',
       adminConfigured: true,
-      restartRequired: false,
-      setupTokenRequired: true,
     });
     expect(calls).toEqual([`GET ${BASE}/bootstrap`]);
   });
@@ -127,47 +118,11 @@ describe('初始化状态（GET /bootstrap）', () => {
       { status: 'ok' },
       { status: 'ok', result: 'ok' },
       // needsSetup 不是布尔值：把字符串当真会走错分支。
-      {
-        status: 'ok',
-        result: {
-          needsSetup: 'true',
-          authEnabled: false,
-          boundSubject: 'user:local',
-          adminConfigured: false,
-          restartRequired: false,
-        },
-      },
+      { status: 'ok', result: { needsSetup: 'true', boundSubject: 'user:local', adminConfigured: false } },
       // 绑定主体为空：初始化页没法给默认用户名。
-      {
-        status: 'ok',
-        result: {
-          needsSetup: true,
-          authEnabled: false,
-          boundSubject: '',
-          adminConfigured: false,
-          restartRequired: false,
-        },
-      },
-      {
-        status: 'ok',
-        result: {
-          needsSetup: true,
-          authEnabled: false,
-          boundSubject: 'user:local',
-          adminConfigured: false,
-        },
-      },
-      // 令牌开关缺失：初始化页不知道该不该显示令牌输入框。
-      {
-        status: 'ok',
-        result: {
-          needsSetup: true,
-          authEnabled: false,
-          boundSubject: 'user:local',
-          adminConfigured: false,
-          restartRequired: true,
-        },
-      },
+      { status: 'ok', result: { needsSetup: true, boundSubject: '', adminConfigured: false } },
+      // adminConfigured 缺失：状态字段不完整就不猜。
+      { status: 'ok', result: { needsSetup: true, boundSubject: 'user:local' } },
     ];
 
     for (const payload of invalid) {
@@ -180,7 +135,7 @@ describe('初始化状态（GET /bootstrap）', () => {
 });
 
 describe('创建管理员账号（POST /bootstrap/admin）', () => {
-  it('提交 userId 与密码，响应带 restartRequired', async () => {
+  it('提交 userId 与密码，响应带创建结果', async () => {
     const calls: { url: string; init: Parameters<ConsoleRequest>[1] }[] = [];
     const request: ConsoleRequest = async (url, init) => {
       calls.push({ url, init });
@@ -194,13 +149,7 @@ describe('创建管理员账号（POST /bootstrap/admin）', () => {
       setupToken: '',
     });
 
-    expect(result).toEqual({
-      userId: 'local',
-      created: true,
-      passwordSet: true,
-      authEnabled: false,
-      restartRequired: true,
-    });
+    expect(result).toEqual({ userId: 'local', created: true, passwordSet: true });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`${BASE}/bootstrap/admin`);
     expect(calls[0]?.init?.method).toBe('POST');
@@ -340,13 +289,5 @@ describe('初始化表单校验', () => {
     expect(
       validateSetupForm({ userId: 'local', password: 'first', confirmPassword: 'first' }),
     ).toEqual({});
-  });
-});
-
-describe('配置片段', () => {
-  it('包含认证开关与系统管理员名单', () => {
-    const snippet = setupAdminConfigSnippet('alice');
-
-    expect(snippet).toBe(['auth:', '  enabled: true', '  adminUserIds:', '    - "alice"'].join('\n'));
   });
 });

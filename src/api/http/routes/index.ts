@@ -89,7 +89,7 @@ export interface HttpRouteServices {
   readonly ledger: RecallLedger;
   /** 用户与组用例（`/admin/*`）。 */
   readonly identity: IdentityService;
-  /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
+  /** 登录与入站凭据解析（§12.7）。 */
   readonly auth: AuthService;
   /**
    * 系统管理员判定（`config.auth.adminUserIds` + 引导管理员）。

@@ -146,25 +146,31 @@ acl:
   groupDefaultLevel: write   # write | read
 
 server:
-  # 监听地址。单用户模式（auth.enabled: false）只允许回环地址（127.0.0.1 /
-  # ::1 / localhost）；写成 0.0.0.0 / :: 会在启动时被拒绝——那种组合会把任何能
-  # 访问端口的人都当成 server.subject。要对外监听先打开 auth.enabled。
+  # 监听地址。回环信任（auth.trustLoopback: true）打开时只允许回环地址
+  # （127.0.0.1 / ::1 / localhost）；写成 0.0.0.0 / :: 会在启动时被拒绝——那种
+  # 组合会把任何能访问端口的人都当成 server.subject。要对外监听先把
+  # auth.trustLoopback 设成 false。
   host: 127.0.0.1
   port: 1933
-  # 服务图绑定的主体（user:{id} 或 group:{id}，id 为小写字母或数字开头、最长 64 个字符）。
-  # 这是单用户部署的绑定身份：HTTP 的 x-comem-subject 与它不一致时 401。
+  # 回环信任使用的身份（user:{id} 或 group:{id}，id 为小写字母或数字开头、最长 64 个字符）。
+  # 不带凭据的本机请求被认证成这个主体；它也是 /setup 页面的默认用户名。
   # user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置成实际的用户。
   subject: user:local
 
 auth:
-  # 多用户认证（架构文档 §12.7）。默认 false = v1 单用户行为：
-  # x-comem-subject 必须等于 server.subject。
-  #
-  # 打开后 x-comem-subject 被忽略，必须带
+  # 认证恒开：控制台永远登录，每个请求带
   #   Authorization: Bearer <session token>        （POST /api/v1/auth/login 换得）
   #   Authorization: Bearer comem_<prefix>_<secret>（POST /api/v1/admin/users/{id}/api-keys 创建）
   # 缺失或非法一律 401 UNAUTHENTICATED。组主体仍然不能当认证身份。
-  enabled: false
+  #
+  # trustLoopback 是**回环信任**，不是第二个模式：打开时，来源是回环地址、又没有
+  # 带凭据的请求被认证成 server.subject——本机的 curl、hook 插件、MCP 客户端不必
+  # 存凭据。身份仍然是一个真实的 app_user 行，仍然走同一套 ACL。
+  #
+  # 信任模型：能连上本机端口的人本来就能读这个数据根，与 ~/.ssh 的权限模型同级。
+  # 只允许在 server.host 是回环地址时打开；容器部署（绑 0.0.0.0）必须设成 false，
+  # 否则启动期拒绝。
+  trustLoopback: true
   # 系统管理员（app_user.id 列表）。用户 / 组目录这类跨主体端点（列全部用户、
   # 创建用户、列全部组、建组）没有目标资源可求权，只认这份显式名单。
   # 默认空 = 没有系统管理员，这些端点对所有人 403。

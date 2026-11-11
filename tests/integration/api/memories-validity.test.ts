@@ -65,7 +65,7 @@ function resultOf(response: { readonly body: string }): Record<string, unknown> 
 async function startServer(): Promise<FastifyInstance> {
   const started = requireContainer();
   const resolveIdentity: IdentityResolver = async (headers) => {
-    const subject = headers['x-comem-subject'] ?? OWNER;
+    const subject = headers['x-test-subject'] ?? OWNER;
     return { subject, principals: [subject, 'user:*'] };
   };
   return createHttpServer({
@@ -82,7 +82,7 @@ function pendingOf(): Promise<{ readonly body: string; readonly statusCode: numb
   return inject({
     method: 'GET',
     url: `/api/v1/memories/pending?scopeUri=${encodeURIComponent(ROOT)}`,
-    headers: { 'x-comem-subject': OWNER },
+    headers: { 'x-test-subject': OWNER },
   });
 }
 

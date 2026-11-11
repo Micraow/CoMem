@@ -9,10 +9,10 @@
  *    「请求失败」。
  * 2. **URI 参数逐段编码。** `comem://` 里的 `:` 与 `/` 在查询串里必须转义，否则
  *    服务端只拿到第一段路径。
- * 3. **身份走请求头，主体来自服务端。** 控制台在挂载前调 `GET /health` 拿绑定主体
- *    （`plugins/console-identity.ts`），这里只负责把它写进 `x-comem-subject`。没有
- *    身份时请求直接抛错——回落一个默认主体会在运维改了 `server.subject` 之后继续
- *    发旧身份，症状是每个请求 401。
+ * 3. **身份走请求头，主体来自登录响应。** 控制台在挂载前读会话
+ *    （`plugins/console-identity.ts`），这里只负责把 token 拼成
+ *    `Authorization: Bearer`。没有身份时请求直接抛错——不带凭据的请求只对回环来源
+ *    有效，而控制台不能假设自己在回环地址上。
  *
  * 超时 30 秒：控制台是内部工具，慢请求多来自摘要生成或全量树，5 秒太短；
  * 30 秒内没有响应基本等于后端挂了，继续等没有意义。
@@ -120,15 +120,14 @@ interface RequestOptions {
 }
 
 /**
- * 认证打开时收到 401：会话已失效（过期 / 改过密码 / 账号被删）。
+ * 收到 401：会话已失效（过期 / 改过密码 / 账号被删）。
  *
  * 清掉本地会话再整页跳登录页。**不做前端重试**：token 无状态，重试只会再 401
- * 一次；`redirect` 记住原地址，重新登录后回到这里。单用户模式的 401 是身份配置
- * 问题，不是「没登录」，保持当前错误展示。
+ * 一次；`redirect` 记住原地址，重新登录后回到这里。
  */
 function redirectToLoginOnUnauthenticated(): void {
   const state = consoleIdentityState()
-  if (state.status !== 'ready' || state.identity.authEnabled !== true) {
+  if (state.status !== 'ready') {
     return
   }
 
@@ -161,7 +160,7 @@ async function request<T>(
       headers: {
         accept: 'application/json',
         // 身份未引导时这里抛错，fetch 不会被调用——见文件头第 3 条。
-        ...identityHeaders(consoleIdentityOrThrow()),
+        ...identityHeaders(),
         ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),

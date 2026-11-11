@@ -192,12 +192,12 @@ describe('封套与请求 ID', () => {
 });
 
 describe('运维端点不需要认证', () => {
-  it('/health 与 /metrics 在任意身份下都 200', async () => {
+  it('/health 与 /metrics 在任意来源下都 200', async () => {
     for (const url of ['/health', '/metrics', '/api/v1/health', '/api/v1/metrics']) {
       const response = await inject({
         method: 'GET',
         url,
-        headers: { 'x-comem-subject': 'user:someone-else' },
+        remoteAddress: '203.0.113.7',
       });
       expect(response.statusCode, url).toBe(200);
     }
@@ -232,7 +232,6 @@ describe('权限与参数', () => {
     const response = await inject({
       method: 'GET',
       url: `/api/v1/fs/ls?uri=${encode('comem://user/local')}`,
-      headers: { 'x-comem-subject': SUBJECT },
     });
     // 根预置写的是 user:local，但 Access 需要先有物化行；这里用别人的根验证拒绝。
     const other = await inject({
@@ -244,11 +243,11 @@ describe('权限与参数', () => {
     expect(errorOf(other)['code']).toBe('PERMISSION_DENIED');
   });
 
-  it('身份与绑定身份不一致时 401', async () => {
+  it('非回环来源没有凭据时 401', async () => {
     const response = await inject({
       method: 'GET',
       url: `/api/v1/fs/ls?uri=${encode(ROOT)}`,
-      headers: { 'x-comem-subject': 'user:alice' },
+      remoteAddress: '203.0.113.7',
     });
     expect(response.statusCode).toBe(401);
     expect(errorOf(response)['code']).toBe('UNAUTHENTICATED');
@@ -293,9 +292,11 @@ describe('身份绑定可配置', () => {
     }
   }
 
-  it('server.subject 决定容器绑定的主体', async () => {
+  it('server.subject 决定回环信任的主体', async () => {
     await withContainer({ COMEM_SERVER_SUBJECT: 'user:alice' }, async (created) => {
-      await expect(created.resolveIdentity({})).resolves.toEqual({
+      await expect(
+        created.resolveIdentity({ host: '127.0.0.1:1933' }, { remoteAddress: '127.0.0.1' }),
+      ).resolves.toEqual({
         subject: 'user:alice',
         principals: ['user:alice', 'user:*'],
       });
@@ -304,10 +305,20 @@ describe('身份绑定可配置', () => {
 
   it('默认绑定 user:local', async () => {
     await withContainer({}, async (created) => {
-      await expect(created.resolveIdentity({})).resolves.toEqual({
+      await expect(
+        created.resolveIdentity({ host: '127.0.0.1:1933' }, { remoteAddress: '127.0.0.1' }),
+      ).resolves.toEqual({
         subject: 'user:local',
         principals: ['user:local', 'user:*'],
       });
+    });
+  });
+
+  it('非回环来源没有凭据时解析失败（不回落绑定主体）', async () => {
+    await withContainer({}, async (created) => {
+      await expect(
+        created.resolveIdentity({}, { remoteAddress: '203.0.113.7' }),
+      ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
     });
   });
 

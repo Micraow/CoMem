@@ -85,13 +85,6 @@ export async function setPassword(
       );
     }
     users.setPasswordHash(username, await hashSecret(password), new Date());
-    // 密码写进去了，但认证关着时登录端点返回 404——不说的话，使用者会以为
-    // 「设好密码就能登录」，然后在 /login 上找不到原因。
-    if (!config.auth.enabled) {
-      process.stderr.write(
-        '警告：密码已写入，但认证未启用（auth.enabled = false），登录端点不可用。要在 config.yaml 里打开 auth.enabled 并重启，才能用多用户登录。\n',
-      );
-    }
     return username;
   } finally {
     db.close();

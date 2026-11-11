@@ -31,7 +31,7 @@ function insertUserWithoutPassword(
 describe('BootstrapAccess.hasPassword 的三态', () => {
   it('无用户 → false；有用户无密码 → false；有用户有密码 → true', async () => {
     const db = openMemory();
-    const access = createBootstrapAccess(db, new NullLogger(), true, 'known-token');
+    const access = createBootstrapAccess(db, new NullLogger(), 'known-token');
 
     // 1. 无用户
     expect(access.hasPassword()).toBe(false);
@@ -49,7 +49,7 @@ describe('BootstrapAccess.hasPassword 的三态', () => {
   it('installFirstAdmin 只在没有密码时成功一次', async () => {
     const db = openMemory();
     insertUserWithoutPassword(db);
-    const access = createBootstrapAccess(db, new NullLogger(), true, 'known-token');
+    const access = createBootstrapAccess(db, new NullLogger(), 'known-token');
 
     expect(await access.installFirstAdmin('local', 'long-password')).toBe(true);
     expect(await access.installFirstAdmin('local', 'another-password')).toBe(false);
@@ -60,7 +60,7 @@ describe('BootstrapAccess.hasPassword 的三态', () => {
 describe('一次性初始化令牌', () => {
   it('匹配返回 true；长度不等 / 缺失 / 空串返回 false', () => {
     const db = openMemory();
-    const access = createBootstrapAccess(db, new NullLogger(), true, 'known-token');
+    const access = createBootstrapAccess(db, new NullLogger(), 'known-token');
 
     expect(access.verifySetupToken('known-token')).toBe(true);
     expect(access.verifySetupToken('known-toke')).toBe(false);
@@ -70,7 +70,7 @@ describe('一次性初始化令牌', () => {
     db.close();
   });
 
-  it('单用户模式不打印令牌（那模式下根本不需要初始化）', () => {
+  it('只在还没有密码时打印令牌', async () => {
     const printed: string[] = [];
     const logger: Logger = {
       debug: () => {},
@@ -79,15 +79,18 @@ describe('一次性初始化令牌', () => {
       error: () => {},
     };
     const db = openMemory();
+    insertUserWithoutPassword(db);
 
-    createBootstrapAccess(db, logger, false, 'known-token');
-    expect(printed).toEqual([]);
-
-    // 多用户模式且没有密码时必须打印，部署者才能从日志里抄。
-    createBootstrapAccess(db, logger, true, 'known-token');
+    // 新装：部署者要从日志里抄一次（容器部署没有回环来源）。
+    const access = createBootstrapAccess(db, logger, 'known-token');
     expect(printed).toEqual([
       '初始化令牌：known-token（用于首次创建管理员账号；创建完成后失效）',
     ]);
+
+    // 已经有密码：初始化完成，不再打印。
+    expect(await access.installFirstAdmin('local', 'long-password')).toBe(true);
+    createBootstrapAccess(db, logger, 'known-token');
+    expect(printed).toHaveLength(1);
     db.close();
   });
 });

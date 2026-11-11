@@ -1,9 +1,8 @@
 /**
- * 登录 / 登出 / 认证配置（架构文档 §12.7）。
+ * 登录 / 登出（架构文档 §12.7）。
  *
- * 三个端点都**不认证**：登录时还没有身份，登出没有服务端状态可清，`GET /config`
- * 是控制台在「有没有登录」之前就要回答的问题。它们进 `PUBLIC_PATHS`，由身份
- * 中间件直接放行。
+ * 两个端点都**不认证**：登录时还没有身份，登出没有服务端状态可清。它们进
+ * `PUBLIC_PATHS`，由身份中间件直接放行。
  *
  * ## 登出只是客户端丢弃 token
  *
@@ -14,41 +13,20 @@
  * 只影响自己的 token，后者只影响一把 key——看不到别人的 token，这正是无状态设计
  * 的边界。
  *
- * ## 认证未启用时登录 / 登出返回 404
+ * ## 为什么没有「认证是否启用」的探测端点
  *
- * `auth.enabled: false` 是 v1 的单用户部署，身份来自 `x-comem-subject`。此时
- * 登录端点签发的 token 不会被任何地方接受——一个「成功但没用」的端点比一个明确
- * 的 404 更难发现（AGENTS.md §1 的「假配置」）。
- *
- * ## 为什么有 `GET /config`
- *
- * 控制台需要先知道「认证开没开」才能决定走登录页还是单用户分支。曾经用
- * `POST /auth/logout` 探测：关闭时 404、打开时 200。这是拿「错误」当正常信号，
- * 每次页面加载都会在 console 里留一条 404，而且发了一个登出语义的写请求去做
- * 只读探测。`GET /config` **恒定 200**，只回 `{enabled}`——不回 `sessionTtl`、
- * 不回任何密钥材料的长度或形状。
+ * 认证恒开，这个问题没有答案可问。控制台的状态全来自 `GET /bootstrap`（是否需要
+ * 初始化）与浏览器里的会话，不再有一个「开关」要探测。
  */
 
 import type { FastifyInstance } from 'fastify';
 
-import { ComemError } from '../../../domain/errors.js';
 import { ok } from '../envelope.js';
 import { requireRecord, requireString, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
 
-export type AuthRouteServices = Pick<HttpRouteServices, 'auth' | 'config'>;
-
-function assertEnabled(config: HttpRouteServices['config']): void {
-  if (!config.auth.enabled) {
-    throw new ComemError('NOT_FOUND', '认证未启用（auth.enabled = false）。');
-  }
-}
-
-/** `GET /auth/config` 的响应体：只回认证开关，不回任何密钥材料。 */
-interface AuthConfigResponse {
-  readonly enabled: boolean;
-}
+export type AuthRouteServices = Pick<HttpRouteServices, 'auth'>;
 
 /** `POST /auth/login` 的响应体：session token 与认证后的身份。 */
 interface LoginResponse {
@@ -65,17 +43,12 @@ interface LogoutResponse {
 }
 
 export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
-  const { auth, config } = services;
+  const { auth } = services;
 
   return {
     prefix: '/auth',
     register(app: FastifyInstance): void {
-      // 只读探测：200 恒定，认证开关是一个布尔值，不是错误。控制台在拿到任何
-      // 身份之前调它，因此不能要求凭据。
-      app.get('/config', async () => ok<AuthConfigResponse>({ enabled: config.auth.enabled }));
-
       app.post<{ Body: unknown }>('/login', async (request) => {
-        assertEnabled(config);
         const body = requireRecord(request.body, 'auth/login');
         const username = requireString(body, 'username');
         const password = requireString(body, 'password');
@@ -90,10 +63,7 @@ export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
       });
 
       // 客户端丢弃 token 即完成登出；服务端没有可失效的行。
-      app.post('/logout', async () => {
-        assertEnabled(config);
-        return ok<LogoutResponse>({ loggedOut: true });
-      });
+      app.post('/logout', async () => ok<LogoutResponse>({ loggedOut: true }));
     },
   };
 }

@@ -16,40 +16,45 @@ import { isLoopbackAddress } from '../domain/network.js';
 import type { ComemConfig } from './schema.js';
 
 /**
- * 单用户模式不允许监听非回环地址（§12.7）。
+ * 回环信任不允许与非回环监听组合（§12.7）。
  *
- * `auth.enabled: false` 时没有身份可言：`resolveIdentityOf` 把**任何**不带头的
- * 请求都当成 `server.subject`。默认的 `127.0.0.1` 只把这件事限制在本机；写成
- * `0.0.0.0` / `::` 之后，任何能访问端口的人都是同一个用户。这种暴露必须是
- * 部署者显式选择的结果（打开认证），不能靠「默认值碰巧安全」。
+ * `auth.trustLoopback: true` 时，**任何**不带凭据的回环请求都被认证成
+ * `server.subject`。默认的 `127.0.0.1` 只把这件事限制在本机；写成 `0.0.0.0` /
+ * `::` 之后，任何能访问端口的人都是同一个用户——区别只在于 NAT / 代理后的来源
+ * 地址不再被 Node 报成回环，于是「配了不生效」比「配了生效」更常见。这一项在
+ * 启动期失败，不留给第一次请求发现。
  *
  * `0.0.0.0` / `::` 算**非回环**：它们监听所有接口，不是「只在本机」。
  */
-function assertSingleUserHostIsLoopback(config: ComemConfig): void {
-  if (config.auth.enabled || isLoopbackAddress(config.server.host)) {
+function assertTrustLoopbackHostIsLoopback(config: ComemConfig): void {
+  if (!config.auth.trustLoopback || isLoopbackAddress(config.server.host)) {
     return;
   }
   throw new ComemError(
     'INVALID_ARGUMENT',
-    `auth.enabled 是 false 时 server.host 必须是回环地址（127.0.0.1 / ::1 / localhost），当前是 ${config.server.host}。单用户模式把任何能访问端口的人都当成 server.subject（${config.server.subject}）。要对外监听必须打开认证：
+    `auth.trustLoopback 是 true 时 server.host 必须是回环地址（127.0.0.1 / ::1 / localhost），当前是 ${config.server.host}。回环信任把不带凭据的本机请求当成 server.subject（${config.server.subject}），非回环监听会让任何能连上端口的人都成为这个用户。要对外监听必须关掉它：
 
 auth:
-  enabled: true
+  trustLoopback: false
 
 （或把 server.host 改回 127.0.0.1，只允许本机访问。）`,
-    { field: 'server.host', host: config.server.host, authEnabled: config.auth.enabled },
+    {
+      field: 'auth.trustLoopback',
+      host: config.server.host,
+      trustLoopback: config.auth.trustLoopback,
+    },
   );
 }
 
 /**
  * 校验一组**必须同时成立**的配置组合。
  *
- * 顺序是有意的：先挡「没有认证却监听所有接口」——它让任何一个能连上端口的人拿到
+ * 顺序是有意的：先挡「回环信任 + 监听所有接口」——它让任何一个能连上端口的人拿到
  * 绑定主体的全部权限，比其它几条配置错误严重一个量级；其余几条只影响某条功能是否
  * 真的按配置生效。
  */
 export function assertCrossChecks(config: ComemConfig): void {
-  assertSingleUserHostIsLoopback(config);
+  assertTrustLoopbackHostIsLoopback(config);
 
   /**
    * 交叉校验：检索后端要向量，就必须有嵌入供应商。

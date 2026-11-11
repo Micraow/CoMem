@@ -1,10 +1,13 @@
 /**
  * 控制台路由守卫的判定（`web/utils/consoleGuard.ts` ↔ `web/middleware/console-auth.global.ts`）。
  *
- * 三种状态各自有「必须跳」与「必须放行」：初始化未完成时除了初始化页与登录页
- * 都跳 `/setup`；没有会话时跳 `/login` 并带回跳地址；已有身份时登录页与初始化
- * 页都回概览。`pending` / `failed` 由 `app.vue` 自己渲染加载态与整页错误，守卫
- * 不参与，否则「后端不可达」会变成反复重定向。
+ * 三种状态各自有「必须跳」与「必须放行」：还没有账号时除了初始化页与登录页
+ * 都跳 `/setup`；有账号但没有会话时跳 `/login` 并带回跳地址；已有身份时登录页
+ * 与初始化页都回概览。`pending` / `failed` 由 `app.vue` 自己渲染加载态与整页
+ * 错误，守卫不参与，否则「后端不可达」会变成反复重定向。
+ *
+ * 前两种状态不是两种部署形态：`setup-required` 建完账号就变成 `unauthenticated`，
+ * 登录成功就是 `ready`。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -18,21 +21,18 @@ import {
 
 const BOOTSTRAP: ConsoleBootstrap = {
   needsSetup: true,
-  authEnabled: false,
   boundSubject: 'user:local',
   adminConfigured: false,
-  restartRequired: true,
-  setupTokenRequired: true,
 };
 
 const SETUP_REQUIRED: ConsoleIdentityState = { status: 'setup-required', bootstrap: BOOTSTRAP };
 const UNAUTHENTICATED: ConsoleIdentityState = { status: 'unauthenticated' };
 const READY: ConsoleIdentityState = {
   status: 'ready',
-  identity: { subject: 'user:alice', scopes: ['comem://user/alice'], authEnabled: true },
+  identity: { subject: 'user:alice', scopes: ['comem://user/alice'] },
 };
 
-describe('初始化未完成（needsSetup: true）', () => {
+describe('还没有账号（needsSetup: true）', () => {
   it('受保护页面重定向到 /setup', () => {
     expect(consoleRedirectFor(SETUP_REQUIRED, '/', '/')).toBe(CONSOLE_SETUP_PATH);
     expect(consoleRedirectFor(SETUP_REQUIRED, '/files', '/files?uri=comem://user/local')).toBe(
@@ -50,7 +50,7 @@ describe('初始化未完成（needsSetup: true）', () => {
   });
 });
 
-describe('没有会话（auth.enabled: true）', () => {
+describe('有账号但没有会话', () => {
   it('受保护页面跳登录页并带回跳地址', () => {
     expect(consoleRedirectFor(UNAUTHENTICATED, '/review', '/review')).toBe(
       `${CONSOLE_LOGIN_PATH}?redirect=${encodeURIComponent('/review')}`,

@@ -9,7 +9,7 @@
  * 「配置没生效」变成一片「请求失败」。
  *
  * 登录页与初始化页不套外壳：没有身份时连侧栏都不该出现，否则用户会以为登录后
- * 还能用那些导航。单用户模式（`auth.enabled: false`）永远不会进入这两个分支。
+ * 还能用那些导航。有身份之后才渲染外壳。
  */
 import { consoleIdentityState } from '~/composables/consoleIdentity'
 

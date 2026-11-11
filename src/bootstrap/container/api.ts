@@ -3,8 +3,8 @@
  *
  * 两处装配位置要紧：`services` 是 `Container.services` 的唯一来源（同一个
  * `taskRepository` 同时进 `services.taskStore`、`routes.taskStore` 与 `adminAccess`，
- * 只构造一次）；`resolveIdentity` 是 HTTP 与 MCP 共用的身份解析（`auth.enabled:
- * false` 时走 `resolveIdentityOf`，打开后走 Bearer 凭据）。
+ * 只构造一次）；`resolveIdentity` 是 HTTP 与 MCP 共用的身份解析（凭据 + 回环信任，
+ * §12.7）。
  *
  * `api/` 不能 import `adapters/`（§4.2），所以 `AdminAccess` 的 SQL 留在装配层。
  * 两个计数函数拆到了 `admin-queries.ts`、引导端口的 SQL 拆到了
@@ -12,7 +12,7 @@
  */
 
 import type { IdentityResolver, SystemAdminPolicy } from '../../api/http/middleware.js';
-import type { Identity, IdentityHeaders } from '../../api/http/middleware.js';
+import type { Identity, IdentityHeaders, IdentityRequest } from '../../api/http/middleware.js';
 import { createHttpRouteGroups } from '../../api/http/routes/index.js';
 import type { HttpRouteGroup } from '../../api/http/server.js';
 import type { ToolRegistry } from '../../api/mcp/registry.js';
@@ -20,6 +20,7 @@ import { McpHttpServer } from '../../api/mcp/server.js';
 import { createToolRegistry } from '../../api/mcp/tools/index.js';
 import { USER_WILDCARD, parsePrincipal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
+import { isLoopbackAddress, isLoopbackHostHeader } from '../../domain/network.js';
 import { bearerCredential } from '../../services/auth.js';
 import { memberCountsOf, permissionCountsOf } from './admin-queries.js';
 import { createBootstrapAccess, isBootstrapAdminOf } from './bootstrap-admin.js';
@@ -59,7 +60,7 @@ export function createApi(
 
   const mcpRegistry = createToolRegistry();
   const resolveIdentity = createIdentityResolver(config, subject, identityService, authService);
-  const bootstrap = createBootstrapAccess(db, logger, config.auth.enabled);
+  const bootstrap = createBootstrapAccess(db, logger);
   // 每次求权查一次引导标记：它在 `POST /bootstrap/admin` 里写入，快照会让新管理员
   // 在重启前一直 403。
   const systemAdmin: SystemAdminPolicy = {
@@ -71,7 +72,7 @@ export function createApi(
     registry: mcpRegistry,
     config,
     logger,
-    resolveIdentity: async ({ headers }) => resolveIdentity(headers),
+    resolveIdentity: async ({ headers, remoteAddress }) => resolveIdentity(headers, { remoteAddress }),
     context: {
       filesystem,
       search,
@@ -162,11 +163,14 @@ export function createApi(
 }
 
 /**
- * 身份解析器（HTTP 与 MCP 共用）。
+ * 身份解析器（HTTP 与 MCP 共用，§12.7）：**凭据优先，回环信任兜底**。
  *
- * `auth.enabled: false` 走 `resolveIdentityOf`（绑定主体，不看凭据）；打开后走
- * Bearer 凭据（session token 或 API Key）。两种形态在同一个入口分叉，调用方不需要
- * 知道自己走的是哪条。
+ * 带了 `Authorization: Bearer` 就按凭据解析，无效一律 401——一个过期的 token 静默
+ * 变成 `server.subject` 比 401 危险得多。没有凭据时，只有 `auth.trustLoopback`
+ * 打开、来源是回环地址、且 `Host` 也指向本机，才认证成 `server.subject`。
+ *
+ * 回环信任不是第二种身份模型：拿到的仍然是一个真实的 `app_user` 行，仍然走同一套
+ * ACL（`access.ts` 的文件头说明了服务图只有一份）。
  */
 function createIdentityResolver(
   config: Foundation['config'],
@@ -174,64 +178,65 @@ function createIdentityResolver(
   identityService: Access['identity'],
   authService: Access['auth'],
 ): IdentityResolver {
-  return async (headers: IdentityHeaders) => {
-    if (!config.auth.enabled) {
-      return resolveIdentityOf(headers, subject, identityService);
-    }
+  return async (headers, request) => {
     const credential = bearerCredential(headers['authorization']);
-    if (credential === null) {
-      throw new ComemError('UNAUTHENTICATED', '缺少 Authorization: Bearer 凭据。');
+    if (credential !== null) {
+      const context = await authService.resolveBearer(credential);
+      return { subject: context.subject, principals: context.principals };
     }
-    const context = await authService.resolveBearer(credential);
-    return { subject: context.subject, principals: context.principals };
+    if (trustsLoopback(config, headers, request)) {
+      return resolveBoundSubject(subject, identityService);
+    }
+    throw new ComemError(
+      'UNAUTHENTICATED',
+      '缺少 Authorization: Bearer 凭据。只有本机回环地址的请求可以不带凭据。',
+    );
   };
 }
 
 /**
- * 解析请求身份。
- *
- * v1 不做认证：身份由反向代理注入 `x-comem-subject`。**没有这个头时用服务图绑定的
- * 主体**（`server.subject`）——单用户桌面部署没有代理，要求它配一个头只会让
- * `curl /health` 之外的手工调用全部 401。
- *
- * 与绑定身份不一致时抛 `UNAUTHENTICATED`：服务图只有一份（见 `access.ts` 的文件头），
- * 静默换成绑定的身份就是冒充。多租户部署要换成真正的认证 + 每请求服务图。
+ * 这次请求是否命中回环信任。`Host` 也要指向本机：只看来源地址会被 DNS rebinding
+ * 绕过（远程页面用自己的域名解析到 `127.0.0.1`，浏览器发出的连接来源就是回环地址）。
  */
-async function resolveIdentityOf(
+function trustsLoopback(
+  config: Foundation['config'],
   headers: IdentityHeaders,
+  request: IdentityRequest | undefined,
+): boolean {
+  if (!config.auth.trustLoopback || !isLoopbackHostHeader(headers['host'])) {
+    return false;
+  }
+  const address = request?.remoteAddress;
+  return address !== undefined && isLoopbackAddress(address);
+}
+
+/**
+ * 回环信任请求的身份：服务图绑定的主体（`server.subject`）。
+ *
+ * 用户目录是身份的真相：不存在的用户、已禁用的用户都不该拿到 principals。启动时
+ * 已经预置了绑定主体，所以返回 null 只可能是控制台把当前用户删了或禁用了。
+ */
+async function resolveBoundSubject(
   boundSubject: string,
   identityService: Access['identity'],
 ): Promise<Identity> {
-  const raw = headers['x-comem-subject'];
-  const subject = typeof raw === 'string' && raw !== '' ? raw : boundSubject;
-
   let principal;
   try {
-    principal = parsePrincipal(subject);
+    principal = parsePrincipal(boundSubject);
   } catch (error) {
-    throw new ComemError('UNAUTHENTICATED', `身份不合法：${errorMessage(error)}`, { subject });
+    throw new ComemError('UNAUTHENTICATED', `身份不合法：${errorMessage(error)}`, { subject: boundSubject });
   }
   if (principal.kind !== 'user') {
-    throw new ComemError('UNAUTHENTICATED', `身份必须是 user 主体：${subject}`, { subject });
-  }
-  if (subject !== boundSubject) {
-    throw new ComemError(
-      'UNAUTHENTICATED',
-      `v1 单用户部署只接受配置里的身份 ${boundSubject}，收到 ${subject}。`,
-      { subject, boundSubject },
-    );
+    throw new ComemError('UNAUTHENTICATED', `身份必须是 user 主体：${boundSubject}`, { subject: boundSubject });
   }
 
-  // 用户目录是身份的真相：不存在的用户、已禁用的用户都不该拿到 principals。
-  // 启动时已经预置了绑定主体（`createUser` 忽略 CONFLICT），所以这里对正常部署
-  // 不会返回 null；返回 null 只可能是控制台把当前用户删了或禁用了。
-  const identity = identityService.resolveSubject(subject);
+  const identity = identityService.resolveSubject(boundSubject);
   if (identity === null) {
-    throw new ComemError('UNAUTHENTICATED', `用户不存在或已禁用：${subject}`, { subject });
+    throw new ComemError('UNAUTHENTICATED', `用户不存在或已禁用：${boundSubject}`, { subject: boundSubject });
   }
 
   return {
-    subject,
+    subject: boundSubject,
     principals: [...new Set([...identity.principals, USER_WILDCARD])],
   };
 }

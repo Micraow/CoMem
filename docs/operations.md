@@ -98,7 +98,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
-| `auth.enabled` | `false` | 关着时身份来自 `x-comem-subject`（单用户，`server.host` 必须是回环地址）；打开后要求 `Authorization: Bearer`，第一次启动进 `/setup` 建管理员，见「多用户部署」 |
+| `auth.trustLoopback` | `true` | 回环信任（§12.7）：没有凭据、来源是回环地址、且 `Host` 指向本机的请求被认证成 `server.subject`。**只允许在 `server.host` 是回环地址时打开**（否则启动期拒绝）；容器部署必须设成 `false`。它不是「关闭认证」——认证恒开，见「认证与账号」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
 | `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码会轮换身份版本，旧 token 立即失效 |
 | `auth.adminUserIds` | `[]` | 额外的系统管理员名单（`app_user.id`）。跨主体端点（列全部用户 / 组、建用户、建组、`/tasks`）只认这份名单与引导管理员（`app_user.bootstrap_admin = 1`）。默认空 = 只有 `/setup` 创建的第一个管理员；其它账号要管这些页面就显式列进来 |
@@ -285,14 +285,18 @@ pnpm check:shape
 **`web/` 与 `integrations/` 没有 lint**，这是已知空洞。控制台的类型错误由 `build:web`
 抓，Hook 插件的正确性由 `test:integrations` 的 173 条断言抓。
 
-## 多用户部署
+## 认证与账号
 
-默认配置是单用户：不带凭据的请求都当成 `server.subject`（默认 `user:local`），且
-`server.host` 必须是回环地址。要让多个用户各自登录，打开 `auth`：
+认证恒开：控制台只有一个入口（登录），每个非公开端点都要求
+`Authorization: Bearer <凭据>`。回环信任（`auth.trustLoopback`，默认 `true`）让本机的
+`curl`、hook 插件、MCP 客户端不必存凭据——它不是第二个模式，被认证的身份仍然是一个
+真实的用户账号。
 
 ```yaml
 auth:
-  enabled: true
+  # 回环信任：没有凭据的本机请求认证成 server.subject（默认 user:local）。
+  # 只允许在 server.host 是回环地址时打开；容器部署必须设成 false。
+  trustLoopback: true
   # 留空 = 进程随机值：重启后已签发的 token 全部失效。要跨重启保持登录就配一个
   # 足够长的随机串（`openssl rand -base64 48`），并保证它不泄露。
   sessionSecret: ""
@@ -302,14 +306,18 @@ auth:
   adminUserIds: []
 ```
 
-打开之后：
-
 - 还没有任何账号设过密码时，控制台整页进 `/setup` 创建第一个管理员（见「建第一个账号」）。
-- 所有非公开端点要求 `Authorization: Bearer <凭据>`，缺失或无效一律 401
-  `UNAUTHENTICATED`。
+  这是唯一一条首跑路径：单用户部署第一次打开浏览器也走它。
 - 凭据有两种：登录拿到的 session token，或 `POST /api/v1/admin/users/{id}/api-keys`
-  签发的 API Key（`comem_...`）。
-- `x-comem-subject` 被忽略。仍然拒绝 `group:` 主体——组永远不能当认证主体。
+  签发的 API Key（`comem_...`）。缺失或无效一律 401 `UNAUTHENTICATED`；带凭据的请求
+  每个独立求权，仍然拒绝 `group:` 主体——组永远不能当认证主体。
+- **`x-comem-subject` 不是凭据**，服务端不读它。本机进程用回环信任，跨网络用 Bearer。
+- **信任模型**：能连上本机端口的人本来就能读这个数据根，与 `~/.ssh` 的权限模型同级。
+  判定要求来源地址是回环地址 **且** `Host` 指向本机（挡 DNS rebinding）；带了凭据就按
+  凭据解析，无效不会回退到回环信任。
+- **容器部署必须关掉它**（`COMEM_AUTH_TRUST_LOOPBACK=false`）：容器绑 `0.0.0.0`，而
+  回环信任只允许回环监听。关掉之后所有请求都带 Bearer——回环信任是一个全局开关，不按
+  来源地址部分生效，所以容器内进程访问 `127.0.0.1:1933` 也需要凭据。
 
 ### 谁能管用户与组
 
@@ -326,7 +334,8 @@ auth:
 （`app_user.bootstrap_admin = 1`，端点随后永久关闭），以及 `auth.adminUserIds` 里显式
 列出的用户 ID。两者都不是隐式规则：引导管理员只写一次，名单默认空。
 
-**单用户部署里的绑定主体不是管理员。** 要把管理面开放给其它账号，把它的 ID 写进
+**回环信任给出的 `server.subject` 不是管理员。** 本机 `curl` 以这个身份发请求，但跨
+主体端点不认「请求来自本机」这个事实。要把管理面开放给其它账号，把它的 ID 写进
 `auth.adminUserIds` 并重启；否则控制台的「用户与组」页、概览页的待处理任务卡与会话页的
 任务表都会一直报 403。
 
@@ -334,36 +343,15 @@ auth:
 现在只有引导管理员和名单里的人能管。从旧配置升上来、且已经初始化过（`/setup` 返回
 `BOOTSTRAP_CLOSED`）时补 `adminUserIds: [<uid>]`，否则这些页面一直 403。
 
-**单用户模式下用 `pnpm password` 设过密码，再切多用户时最容易踩。** 那个账号有密码，
-所以 `/setup` 认为初始化已经完成（返回 `BOOTSTRAP_CLOSED`），但它**不是**引导管理员。切换
-时把它的 ID 写进 `auth.adminUserIds` 再重启，否则登录成功却管不了任何人。
+**先跑过 `pnpm password` 的部署最容易踩。** 那个账号有密码，所以 `/setup` 认为初始化
+已经完成（返回 `BOOTSTRAP_CLOSED`），但它**不是**引导管理员（引导标记只在
+`POST /bootstrap/admin` 里写入）。把它的 ID 写进 `auth.adminUserIds` 再重启，否则登录
+成功却管不了任何人。
 
 ### 建第一个账号
 
-两条路径，选一条走完就能用。本地开发默认是路径 A，Docker 部署走路径 B。
-
-#### 路径 A：单用户本地模式（默认，零配置）
-
-`auth.enabled` 默认是 `false`，没有登录这一步，也没有账号要建：
-
-```bash
-pnpm install
-cd web && pnpm install && cd ..
-pnpm dev
-```
-
-打开 http://127.0.0.1:3081 ，里面的身份固定是 `user:local`。服务启动时会自动建好这个
-账号和它的命名空间，顶部有一条常驻横幅说明当前是单用户模式。
-
-**这条路径没有认证。** 服务端把不带凭据的请求当成 `server.subject`（默认
-`user:local`）：任何能访问这个端口的人都是同一个用户，所有操作记在同一个身份上，也没有
-审计。默认只监听 `127.0.0.1` 正是为此；把 `server.host` 改成非回环地址而 `auth.enabled`
-还是 `false` 时，服务**拒绝启动**。
-
-**Docker 部署不是这条路径。** 容器必须绑 `0.0.0.0` 才能被端口转发，所以镜像默认打开
-多用户登录（`COMEM_AUTH_ENABLED=true`），首跑走路径 B。
-
-#### 路径 B：多用户登录
+一条路径：起服务 → 从启动日志拿初始化令牌 → `/setup` 建管理员 → 登录。本地开发、
+Docker、纯 SSH 都走它，区别只在地址与端口。
 
 **Docker（docker compose）**
 
@@ -392,20 +380,18 @@ docker compose logs comem | grep 初始化令牌
 
 **本地开发（`pnpm dev`）**
 
-1. 在 `config.yaml` 里打开多用户登录：
-
-```yaml
-auth:
-  enabled: true
-  sessionSecret: ""
-  sessionTtlSeconds: 86400
-  adminUserIds: []
+```bash
+pnpm install
+cd web && pnpm install && cd ..
+pnpm dev
 ```
 
-2. 重启 `pnpm dev`。
-3. 打开 http://127.0.0.1:3081/setup 。从回环地址打开时**不需要令牌**（令牌是给经
-   nginx 转发的 Docker 请求用的），填用户名与密码创建。
-4. 打开 http://127.0.0.1:3081/login 登录。
+打开 http://127.0.0.1:3081/setup 。从回环地址打开时**不需要令牌**（令牌是给经 nginx
+转发的 Docker 请求用的），填用户名与密码创建；然后到 `/login` 登录。
+
+默认用户名是 `local`（`server.subject` 的默认值）。**建议就用它**：本机的 `curl` 与
+hook 插件通过回环信任拿到的身份也是 `user:local`，建同一个 ID 才不会出现「两个都是我的
+账号」的分裂。要换成别的 ID，把 `server.subject` 一起改。
 
 **没有浏览器（纯 SSH）时**，用同一个端点创建第一个管理员：
 
@@ -444,10 +430,7 @@ printf '%s' '新密码' | docker compose exec -T comem node dist/commands/passwo
   的 `POST /bootstrap/admin`（无浏览器）；否则报「用户不存在：… 先用 POST /admin/users
   或控制台的「用户与组」页创建账号」。
 
-`auth.enabled: false` 时命令会打印一条警告：密码写进去了，但登录端点不可用（单用户模式
-本来就没有登录）。
-
-也可以不开控制台，直接用登录端点换 token：
+认证恒开，命令写完就能登录。也可以不开控制台，直接用登录端点换 token：
 
 ```bash
 curl -sS http://127.0.0.1:1933/api/v1/auth/login \
@@ -740,7 +723,7 @@ docker run -d --name comem \
 |---|---|---|
 | `COMEM_SERVER_HOST` | `0.0.0.0` | 监听地址。**镜像把它设成了 0.0.0.0**，因为 `config.schema.ts` 的默认值是 `127.0.0.1`，容器里绑 loopback 时 `-p` 端口转发不可达 |
 | `COMEM_SERVER_PORT` | `1933` | 监听端口。`HEALTHCHECK` 与 `EXPOSE` 都跟它走 |
-| `COMEM_AUTH_ENABLED` | `true` | **镜像默认打开多用户登录。** 容器必须绑 `0.0.0.0`，而单用户模式只允许回环地址，两者冲突。第一个管理员用启动日志里的初始化令牌在 `/setup` 创建；设成 `false` 会让服务在启动期拒绝（`server.host` 非回环 + 没有认证） |
+| `COMEM_AUTH_TRUST_LOOPBACK` | `false` | **镜像默认关掉回环信任。** 容器必须绑 `0.0.0.0`，而回环信任只允许回环监听，两者冲突；设成 `true` 会让服务在启动期拒绝（`server.host` 非回环 + 回环信任）。关掉之后，经 nginx 来的请求走 Bearer，容器内进程访问 `127.0.0.1:1933` 仍走回环信任。第一个管理员用启动日志里的初始化令牌在 `/setup` 创建 |
 | `COMEM_DATA_DIR` | `/var/lib/comem` | 数据根。容器内按 `/.dockerenv` 推导，显式覆盖见「数据卷」 |
 | `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` / `COMEM_PROVIDERS_EMBEDDING_API_KEY` | 无 | 两个供应商密钥的**真实**环境变量名（`COMEM_<SECTION>_<KEY>`）。模板里的 `apiKey` 是空串，用它们覆盖。`docker-compose.yaml` 透传的是旧的 `COMEM_LLM_KEY` / `COMEM_EMBEDDING_KEY`——只有在你自己的 `config.yaml` 里写 `${VAR}` 引用时才生效 |
 | `TZ` | 未设置（UTC） | 日志时间戳是 UTC ISO 8601。需要本地时间就 `-e TZ=Asia/Shanghai` |
@@ -1052,15 +1035,17 @@ XDG 路径」的失败因此不再出现。
 正常入口是 `http://127.0.0.1:18080`：`/health`、`/api/*`、`/metrics`、`/mcp` 走后端，
 其余走控制台。所有端口默认只绑 `127.0.0.1`，对外服务需要再前面加 TLS 入口。
 
-**`auth.enabled: false` 时没有认证。** 服务端把不带凭据的请求当成 `server.subject`
-（默认 `user:local`）：任何能访问这个端口的人都是同一个用户，所有操作记在同一个身份上，
-也没有审计。默认只监听 `127.0.0.1` 就是这条风险的边界；`server.host` 是非回环地址而
-`auth.enabled` 还是 `false` 时，`loadConfig` 直接抛 `INVALID_ARGUMENT`，服务拒绝启动
-（`src/config/cross-checks.ts` 的交叉校验）。TLS 只加密传输，不区分身份——前置代理终止
-TLS 之后，请求到达 CoMem 时仍然没有凭据。
+**容器里的回环信任必须关掉。** 镜像绑 `0.0.0.0`（否则 `-p` 端口转发不可达），而
+`auth.trustLoopback: true` 只允许回环监听——两者同时成立时 `loadConfig` 直接抛
+`INVALID_ARGUMENT`，服务拒绝启动（`src/config/cross-checks.ts` 的交叉校验）。镜像因此
+默认 `COMEM_AUTH_TRUST_LOOPBACK=false`。关掉之后：
 
-镜像因此默认 `COMEM_AUTH_ENABLED=true`（容器必须绑 `0.0.0.0`）。第一个管理员用启动
-日志里的初始化令牌在 `/setup` 创建，见「建第一个账号」。
+- 所有请求都要带 `Authorization: Bearer`：经 nginx 来的来源是容器网段，容器内进程访问
+  `127.0.0.1:1933` 也一样——回环信任是一个全局开关，不按来源地址部分生效。控制台登录
+  之后本来就带它；hook 插件与 MCP 客户端要配 `COMEM_TOKEN` / API Key。
+
+TLS 只加密传输，不区分身份——前置代理终止 TLS 之后，请求到达 CoMem 时仍然要看凭据。
+第一个管理员用启动日志里的初始化令牌在 `/setup` 创建，见「建第一个账号」。
 
 > 首次 `docker compose up` 如果遇到端口冲突，容器可能以「未连接网络」的状态留下
 > （`docker inspect` 里 `Networks` 为空），后续 `up -d` 只会启动它、不会重建。
@@ -1077,8 +1062,9 @@ TLS 之后，请求到达 CoMem 时仍然没有凭据。
   源。没有做 vendor 化。
 - **非 x86_64。** `sqlite-vec` 的平台包只覆盖 linux/darwin 的 x64 与 arm64；
   `Vulkan-Headers` 的版本是固定的。arm64 构建未验证。
-- **认证。** 镜像默认 `COMEM_AUTH_ENABLED=true`，第一个管理员用启动日志里的初始化令牌
-  在 `/setup` 创建。`sessionSecret` 必须显式给值，否则每次重启已签发的 token 全部失效。
+- **认证。** 认证恒开，镜像默认 `COMEM_AUTH_TRUST_LOOPBACK=false`；第一个管理员用启动
+  日志里的初始化令牌在 `/setup` 创建。`sessionSecret` 必须显式给值，否则每次重启已签发
+  的 token 全部失效。
 - **备份与告警。** 镜像只提供 `/health` 与 `/metrics`，没有内置备份任务。
 
 ## 后台调度器
@@ -1510,7 +1496,7 @@ ADD CONSTRAINT`，只能新表 + `INSERT INTO ... SELECT` + `DROP` + `RENAME`）
 
 ## 监控
 
-两个端点都不认证：探活系统没有 CoMem 身份，要求 `x-comem-subject` 只会让 `curl /health`
+两个端点都不认证：探活系统没有 CoMem 身份，要求凭据只会让 `curl /health`
 全部 401。它们也不读用户内容（`src/api/http/routes/ops.ts`）。
 
 ### `/health`
@@ -1556,7 +1542,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | 字段 | 含义 | 什么时候要管 |
 |---|---|---|
 | `result.status` | `ok` / `degraded` | `degraded` = 摘要走的是规则降级，或存在降级摘要的目录，或最近一次重排调用失败（已退回融合分）。降级必须可见（§17.9） |
-| `result.subject` | 服务图绑定的主体（`server.subject`） | 控制台用它拼 `x-comem-subject`。与期望的用户不符 = 配置没生效（见「控制台每个请求 401」） |
+| `result.subject` | 服务图绑定的主体（`server.subject`） | 回环信任用它认证本机请求。与 `config.yaml` 里写的不是同一个用户 = 配置没生效（见「控制台每个请求 401」） |
 | `result.scopes` | 该主体可寻址且可读的根（个人根在前） | 为空 = 主体没有任何可访问的命名空间，控制台会明确说明 |
 | `index.totalNodes` | 索引里的节点数（`node` 表全量，不是当前身份可见的条数——那个看 MCP `health` 的 `index.visibleNodes`） | 掉到 0 而磁盘上有文件 = 索引没写进去，看 `reconcile.log` |
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
@@ -1901,10 +1887,10 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 
 1. **数据根是空的、还没初始化**：启动时会预置 `user/{uid}/` 与 `memories` / `resources` /
    `skills` / `sessions` 四个目录的权限行（`src/bootstrap/container.ts`）。没跑到说明启动自检失败。
-2. **`x-comem-subject` 与绑定身份不一致**：`auth.enabled: false` 时服务图只有一份。请求头写了
-   `user:bob` 而装配时绑定的是 `user:local`，直接 `UNAUTHENTICATED`（401），不是 403。
-   打开 `auth.enabled` 后这个头被忽略，缺 Bearer 凭据同样是 401（`src/bootstrap/container.ts`
-   的 `resolveIdentity`）。
+2. **请求身份不是这个作用域的用户**：`GET /sessions` 只列当前身份可读的根。用 API Key 或
+   session token 代表 `user:bob` 时，`user:local` 的会话列表是 403（权限不足，不是 401）。
+   没有凭据且不是回环来源时根本走不到这里——`src/bootstrap/container/api.ts` 的
+   `createIdentityResolver` 先返回 401 `UNAUTHENTICATED`。
 3. **手动改过 `.acl.json`**：把 `user:{uid}` 那条删了。owner 恒 `manage` 不受影响，但如果改的是
    `restricted` 又没加直接授权，会真的没权限。
 
@@ -1921,38 +1907,35 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 
 **原因**：这些端点跨主体，没有目标资源可求权，只认系统管理员（架构文档 §12.4）：
 `auth.adminUserIds` 里列出的用户 ID，或 `POST /api/v1/bootstrap/admin` 创建的第一个管理员
-（`app_user.bootstrap_admin = 1`）。两者都没有就是 403——包括单用户部署里的绑定主体。
+（`app_user.bootstrap_admin = 1`）。两者都没有就是 403——回环信任给出的
+`server.subject` 不会自动进名单，跨主体端点不认「请求来自本机」这个事实。
 
 **处理**：已经走 `/setup` 建过管理员的话，用那个账号登录；否则在 `config.yaml` 里写
-`auth.adminUserIds: ["<你的 uid>"]` 并重启。单用户部署（`auth.enabled: false`）没有引导
-管理员，绑定主体也不会自动进名单。
+`auth.adminUserIds: ["<你的 uid>"]` 并重启。
 
 ### 控制台每个请求 401
 
-**症状**：`auth.enabled: false` 时控制台能打开，但每个请求都是 `UNAUTHENTICATED`；
-`curl` 不带请求头反而正常。
+**症状**：控制台能打开，但每个请求都是 `UNAUTHENTICATED`；`curl` 不带凭据反而正常。
 
-**原因**：单用户形态下，控制台发的 `x-comem-subject` 与服务图绑定的主体不一致。控制台
-不硬编码身份，它在启动时调 `GET /health` 拿 `result.subject`
-（`web/composables/consoleIdentity.ts`），所以只要服务端返回的是期望的主体，两边就一致。
-打开 `auth.enabled` 后 `x-comem-subject` 被忽略；这个症状对应的是凭据缺失或失效，控制台
-会清掉会话并跳登录页。
+**原因**：`curl` 走的是回环信任（来源是回环地址、`Host` 指向本机），控制台走的是
+`Authorization: Bearer <session token>`。控制台的 token 缺失、过期或签名不匹配时，服务端
+不会回退到回环信任，而是 401。
 
 **处理**：
 
-1. 先确认部署形态：`curl -s http://127.0.0.1:1933/api/v1/auth/config`
-   返回 `{"status":"ok","result":{"enabled":false}}` 是单用户，`enabled: true` 是多用户。
-   这个端点恒定 200，不需要凭据。
-2. 单用户：`curl -s http://127.0.0.1:1933/health | jq .result.subject`。不是期望的主体，
-   说明 `server.subject` 没生效：检查 `COMEM_SERVER_SUBJECT` 环境变量与 `config.yaml`
-   的优先级（CLI > 环境变量 > 配置文件 > 默认值），改完要重启后端。
-3. 多用户：重新登录。登录后仍然 401 时，检查 `auth.sessionSecret` 是否在重启后变化
-   （空串 = 进程随机值），以及账号是否被改过密码 / 删除（`session_epoch` 轮换会让旧
-   token 立即失效）。
-4. 控制台整页显示「控制台无法确定当前身份」时，说明 `/health` 拉取失败或字段缺失。
-   错误页会写出原因（HTTP 状态、超时、不是 JSON），按它排查；此时控制台**不会**发
+1. 先看回环信任是否生效：`curl -s http://127.0.0.1:1933/health | jq .result.subject`。
+   不是期望的主体，说明 `server.subject` 没生效：检查 `COMEM_SERVER_SUBJECT` 环境变量与
+   `config.yaml` 的优先级（CLI > 环境变量 > 配置文件 > 默认值），改完要重启后端。
+2. 重新登录。登录后仍然 401 时，检查 `auth.sessionSecret` 是否在重启后变化（空串 = 进程
+   随机值），以及账号是否被改过密码 / 删除（`session_epoch` 轮换会让旧 token 立即失效）。
+3. 容器部署里 `curl` 也不带凭据就 401，是因为镜像默认
+   `COMEM_AUTH_TRUST_LOOPBACK=false`（容器绑 `0.0.0.0`）。在容器内访问
+   `127.0.0.1:1933` 仍然走回环信任；从宿主机经 `-p` 端口转发来的请求来源是容器网段，
+   必须带 Bearer。用 `POST /api/v1/auth/login` 换 token，或给该用户签一把 API Key。
+4. 控制台整页显示「控制台无法确定当前身份」时，说明 `GET /bootstrap` 拉取失败或字段
+   缺失。错误页会写出原因（HTTP 状态、超时、不是 JSON），按它排查；此时控制台**不会**发
    任何业务请求。
-5. 整页显示「当前主体没有可访问的命名空间」时，`result.scopes` 为空：该主体在用户
+5. 整页显示「当前主体没有可访问的命名空间」时，登录用户的 `scopes` 为空：该主体在用户
    目录里不存在 / 被禁用，或根目录的权限行没物化（见上面「会话页 403」）。
 
 ### `pnpm dev` 起不来
@@ -2058,16 +2041,17 @@ COMEM_SERVER_PORT=8080 pnpm dev
    （`memory.ttl.defaultDays`）+ 四类类型豁免。`node.expires_at` 列与
    `TtlService.setExpiry` 都已删除（`0005_sliding_ttl.sql`）。要让某条记忆永不过期，
    改它的类型或把 `defaultDays` 设回 0。
-3. **认证默认关闭。** `auth.enabled: false` 时身份来自 `x-comem-subject`，且必须等于
-   `server.subject`（`src/bootstrap/container/api.ts` 的 `resolveIdentityOf`）——这是单用户
-   形态，控制台不需要登录。打开 `auth.enabled` 后身份来自凭据（session token 或 API Key），
-   `Authorizer` 按每请求的 `principals` 求权：组外用户读不到组根
-   （`tests/integration/services/acl.test.ts` 的 `user:bob` 用例）。控制台按同一份凭据
-   工作：没有会话时整页跳 `/login?redirect=...`，登录页用 `POST /auth/login` 换 session
-   token，之后每个请求带 `Authorization: Bearer <token>`；凭据存 `sessionStorage`（刷新
-   保留、关标签页即清），顶栏提供退出。收到 401 时清掉本地会话并回登录页。可读根多于
-   一个时顶栏出现作用域选择器，选择存 `sessionStorage`，刷新后恢复；组根不可读时不会
-   列出来。
+3. **回环信任不区分本机的进程。** `auth.trustLoopback` 打开时，来源是回环地址、且
+   `Host` 指向本机的请求被认证成 `server.subject`（`src/bootstrap/container/api.ts` 的
+   `resolveBoundSubject`）。本机任何能连上端口的人都是这个用户——与 `~/.ssh` 的权限模型
+   同级，不是漏洞，但部署时必须知道。要区分身份就关掉它，让所有请求都带
+   `Authorization: Bearer`（session token 或 API Key）。`Authorizer` 按每请求的
+   `principals` 求权：组外用户读不到组根（`tests/integration/services/acl.test.ts` 的
+   `user:bob` 用例）。控制台按同一份凭据工作：没有会话时整页跳
+   `/login?redirect=...`，登录页用 `POST /auth/login` 换 session token，之后每个请求带
+   `Authorization: Bearer <token>`；凭据存 `sessionStorage`（刷新保留、关标签页即清），
+   顶栏提供退出。收到 401 时清掉本地会话并回登录页。可读根多于一个时顶栏出现作用域
+   选择器，选择存 `sessionStorage`，刷新后恢复；组根不可读时不会列出来。
 4. **`reindex` 不重建物化权限。** `pnpm reindex` 从磁盘重建检索索引（`node` /
    `node_fts`）、向量（`node_embedding`）与关联边（`memory_link` 的 `derived_from`，
    `--only=links` 或 `all`），物化权限（`node_permission`）不在它的
@@ -2269,9 +2253,8 @@ COMEM_SERVER_PORT=8080 pnpm dev
     指标」；暂存由调度器按 24 小时清理（见「后台调度器」的已知限制）。
 
 32. **`GET /health` 不需要认证，会回绑定主体与它的可读根。** 响应里的 `subject` 与
-    `scopes` 是给控制台做身份引导用的（架构文档 §16）；单用户部署里未认证就能读到部署者
-    身份与命名空间列表。多用户部署下它仍然只回 `server.subject` 那一个主体的信息，不回
-    任何用户数据。
+    `scopes` 是回环信任使用的身份（架构文档 §12.7）；未认证就能读到部署者身份与命名空间
+    列表。它只回 `server.subject` 那一个主体的信息，不回任何用户数据。
 
 33. **同一个 `dataDir` 只支持一个服务端进程。** 会话的累计消息数（轮次时钟）与消息幂等
     索引都是进程内缓存，两个进程写同一个数据根会漏计已归档消息，跨轮去重窗口随之算错

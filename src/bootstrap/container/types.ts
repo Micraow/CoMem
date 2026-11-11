@@ -78,7 +78,7 @@ export interface Container {
   readonly mcp: McpHttpServer;
   /** 已装配好的 HTTP 路由分组。 */
   readonly routes: readonly HttpRouteGroup[];
-  /** 请求身份解析（`x-comem-subject`）。 */
+  /** 请求身份解析（凭据 + 回环信任，§12.7）。 */
   readonly resolveIdentity: IdentityResolver;
   /**
    * 存量向量回填的依赖（`main.ts` 的 `startVectorBackfill` 消费）。
@@ -132,6 +132,6 @@ export interface ContainerServices {
   readonly prompts: PromptService;
   /** 用户与组用例（`/admin/*`、登录）。 */
   readonly identity: IdentityService;
-  /** 登录与入站凭据解析（`auth.enabled: true` 时生效）。 */
+  /** 登录与入站凭据解析（§12.7）。 */
   readonly auth: AuthService;
 }

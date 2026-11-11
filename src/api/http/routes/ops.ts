@@ -2,8 +2,8 @@
  * 运维路由（架构文档 §14、§17.1、§17.9）。
  *
  * 两个端点都**不认证**：探活与 Prometheus 抓取由运维系统发起，它们没有 CoMem 身份；
- * 要求一个 `x-comem-subject` 头只会让 `curl /health` 全部 401。两个端点也不读用户
- * 内容——`/health` 只做计数聚合与绑定身份，`/metrics` 只输出进程内累加器。
+ * 要求凭据只会让 `curl /health` 全部 401。两个端点也不读用户内容——`/health` 只做
+ * 计数聚合与绑定身份，`/metrics` 只输出进程内累加器。
  *
  * `/health` 的 `status` 判定（§17.9）：
  *
@@ -24,13 +24,13 @@
  *
  * ## `subject` / `scopes` 为什么在 `/health` 里
  *
- * 控制台必须知道服务端绑定的主体，才能拼出可用的 `x-comem-subject`（§18）。让它在
- * 构建期注入或读一个 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改
- * `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
+ * `subject` 是回环信任使用的身份（§12.7），`scopes` 是它可读的根。运维用
+ * `curl /health | jq .result.subject` 就能确认 `server.subject` 有没有真的生效；
+ * 控制台不读这个值（它的身份来自登录响应），但排障时两边的期望值要对得上。
  *
  * MCP 的 `health` 工具从 W28 起就返回这两个字段（§13.2），HTTP 侧补齐后两边一致。
- * 公开端点因此多暴露一个部署身份（`user:alice`）——v1 没有认证，`/health` 的调用方
- * 不带请求头时会被当成绑定主体，这个值本来就不是秘密。
+ * 公开端点因此多暴露一个部署身份（`user:alice`）——回环信任让本机调用本来就被当成
+ * 绑定主体，这个值不是秘密。
  */
 
 import type { FastifyInstance } from 'fastify';

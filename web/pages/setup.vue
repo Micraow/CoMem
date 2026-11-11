@@ -1,14 +1,13 @@
 <script setup lang="ts">
 /**
- * 首次初始化页（架构文档 §16 的控制台身份引导、§12.7 的认证开关）。
+ * 首次初始化页（架构文档 §16 的控制台身份引导、§12.7 的引导循环）。
  *
- * 只在服务端说「还没有任何用户设置过密码」时出现（`GET /bootstrap` 的
- * `needsSetup: true`），由全局中间件把其它路径重定向过来。这一页不套外壳，也不
- * 借助身份状态发请求：它调用的两个端点都是匿名的，此时控制台还没有身份。
+ * 只在服务端说「还没有任何密码」时出现（`GET /bootstrap` 的 `needsSetup: true`），
+ * 由全局中间件把其它路径重定向过来。这一页不套外壳，也不借助身份状态发请求：
+ * 它调用的两个端点都是匿名的，此时控制台还没有身份。
  *
- * 创建成功后是否还要重启由服务端回答（`restartRequired`）。为 true 说明认证
- * 开关没有打开，账号建了也登不进去——控制台既不能改 `config.yaml`，也不能替
- * 用户重启进程，所以这里给出完整的配置片段和重启命令，不假装初始化已经完成。
+ * 创建成功即可登录——账号、密码哈希与引导管理员标记在同一个事务里写入，不需要
+ * 改配置或重启。
  *
  * ## 初始化令牌可以留空
  *
@@ -21,12 +20,9 @@ import { AlertTriangle, UserPlus } from 'lucide-vue-next'
 
 import {
   ConsoleBootstrapError,
-  SETUP_RESTART_COMMAND,
   bootstrapErrorNotice,
   createBootstrapAdmin,
-  setupAdminConfigSnippet,
   validateSetupForm,
-  type BootstrapAdminResult,
   type SetupFormErrors,
 } from '~/composables/consoleBootstrap'
 import { consoleIdentityState } from '~/composables/consoleIdentity'
@@ -54,14 +50,6 @@ const submitting = ref(false)
 const errors = ref<SetupFormErrors>({})
 const formError = ref<string | null>(null)
 const tokenError = ref<string | null>(null)
-const created = ref<BootstrapAdminResult | null>(null)
-
-/** 服务端说需要令牌时显示输入框。响应里没有令牌本身，它在启动日志里。 */
-const showSetupToken = bootstrap === null || bootstrap.setupTokenRequired
-
-const configSnippet = computed(() =>
-  created.value === null ? '' : setupAdminConfigSnippet(created.value.userId),
-)
 
 function errorMessageOf(caught: unknown): string {
   if (caught instanceof ConsoleBootstrapError) {
@@ -98,21 +86,13 @@ async function submit(): Promise<void> {
 
   submitting.value = true
   try {
-    const result = await createBootstrapAdmin(
-      String(config.public.apiBase),
-      (url, init) => fetch(url, init),
-      {
-        userId: userId.value.trim(),
-        displayName: displayName.value,
-        password: password.value,
-        setupToken: setupToken.value,
-      },
-    )
-    if (result.restartRequired) {
-      created.value = result
-      return
-    }
-    // 认证本来就开着，账号建好即可登录。整页跳转让插件用新状态重新引导。
+    await createBootstrapAdmin(String(config.public.apiBase), (url, init) => fetch(url, init), {
+      userId: userId.value.trim(),
+      displayName: displayName.value,
+      password: password.value,
+      setupToken: setupToken.value,
+    })
+    // 账号建好即可登录。整页跳转让插件用新状态重新引导。
     window.location.assign('/login?created=1')
   } catch (caught) {
     // 初始化已经完成（另一个标签页抢先建好了账号）：状态过期了，整页重新引导。
@@ -135,9 +115,6 @@ async function submit(): Promise<void> {
   }
 }
 
-function goLogin(): void {
-  window.location.assign('/login')
-}
 </script>
 
 <template>
@@ -156,20 +133,7 @@ function goLogin(): void {
       <h1 id="setup-title" class="setup__title">初始化 CoMem</h1>
       <p class="setup__lead">这是首次启动，需要创建一个管理员账号。</p>
 
-      <section v-if="created !== null" class="setup__next" aria-labelledby="setup-next-title">
-        <h2 id="setup-next-title" class="setup__next-title">管理员账号已创建</h2>
-        <p class="setup__text">
-          还需要在配置里启用多用户登录，这个账号才能登录。把下面几行加到
-          <code>config.yaml</code>：
-        </p>
-        <pre class="setup__code">{{ configSnippet }}</pre>
-        <p class="setup__text">然后重启 CoMem 服务：</p>
-        <pre class="setup__code">{{ SETUP_RESTART_COMMAND }}</pre>
-        <p class="setup__text">重启后用这个用户名和密码登录。</p>
-        <UiButton variant="primary" class="setup__submit" @click="goLogin">去登录</UiButton>
-      </section>
-
-      <form v-else class="setup__form" novalidate @submit.prevent="submit">
+      <form class="setup__form" novalidate @submit.prevent="submit">
         <div class="field">
           <label class="field__label" for="setup-user-id">用户名</label>
           <UiInput
@@ -194,7 +158,7 @@ function goLogin(): void {
           />
         </div>
 
-        <div v-if="showSetupToken" class="field">
+        <div class="field">
           <label class="field__label" :for="TOKEN_INPUT_ID">初始化令牌</label>
           <UiInput
             :id="TOKEN_INPUT_ID"
@@ -291,38 +255,6 @@ function goLogin(): void {
   display: grid;
   gap: var(--s-4);
   margin-top: 24px;
-}
-
-.setup__next {
-  display: grid;
-  gap: var(--s-3);
-  margin-top: 24px;
-}
-
-.setup__next-title {
-  font-size: 17px;
-  font-weight: 590;
-  letter-spacing: -0.011em;
-}
-
-.setup__text {
-  color: var(--label-2);
-  font-size: 14px;
-  line-height: 1.52;
-}
-
-.setup__code {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: var(--r-control);
-  background: var(--surface-2);
-  box-shadow: var(--inset-hair);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.5;
-  overflow-x: auto;
-  /* 一键全选，复制配置片段不用拖鼠标。 */
-  user-select: all;
 }
 
 .setup__submit {

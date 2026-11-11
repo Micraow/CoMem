@@ -2893,7 +2893,7 @@ UTC 形态，不在序列化层换格式）；`supersedes` 非空即「这条记
 
 **`GroupMember.role` 是派生字段。** 唯一真相是 `app_group.owner_user_id`：只有 `userId === ownerUserId` 才是 `owner`。`group_member.role` 列已废弃、写入只落常量 `member`，读取时不采用；`POST /admin/groups/{id}/members` 显式传 `role` 返回 `INVALID_ARGUMENT`，改 owner 的入口只有 `POST /admin/groups/{id}/owner`。
 
-**升级说明：这是一次破坏性变更。** 存量部署必须显式配 `auth.adminUserIds: [<uid>, ...]`，否则用户与组管理端点、`/tasks` 全部 403。单用户部署（`auth.enabled: false`）同样要写自己的 ID——跨主体端点不认绑定主体。
+**升级说明：这是一次破坏性变更。** 存量部署必须显式配 `auth.adminUserIds: [<uid>, ...]`，否则用户与组管理端点、`/tasks` 全部 403。回环信任（`auth.trustLoopback`）给出的 `server.subject` 同样要写进名单——跨主体端点不认「请求来自本机」这个事实。
 
 管理面的组 owner 变更不能只看「自己根的 manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能接管别人的组。判定改用组根的主体集合。
 
@@ -2936,9 +2936,9 @@ pnpm group:owner <groupId> <userId>
 
 ### 12.7 请求身份与认证
 
-ACL 求值需要「这次请求是谁」。v1 是单用户部署，身份由反向代理注入的
-`x-comem-subject` 决定，并且必须等于服务图绑定的主体（`server.subject`）；
-多用户部署打开 `auth.enabled` 之后，身份来自凭据，`x-comem-subject` 被忽略。
+ACL 求值需要「这次请求是谁」。**认证恒开**：身份来自凭据（session token 或
+API Key）。唯一的例外是**回环信任**——没有凭据、来源是回环地址、且 `Host` 也
+指向本机的请求被认证为服务图绑定的主体（`server.subject`）。
 
 ```ts
 interface RequestContext {
@@ -2952,6 +2952,25 @@ type Credential =
   | { kind: 'api-key'; apiKey: string }
   | { kind: 'session'; userId: string };
 ```
+
+**回环信任是一条信任策略，不是第二个模式。** 它不改变身份的来源：被认证的身份
+仍然是一个真实的 `app_user` 行，仍然走同一套 ACL，仍然出现在 `principals` 里。
+它省掉的只是「本机进程为什么还要存一份凭据」——`curl`、hook 插件、MCP 客户端
+本来就和数据根在同一台机器上。
+
+信任模型：**能连上本机端口的人本来就能读这个数据根**，与 `~/.ssh` 的权限模型
+同级。`auth.trustLoopback` 默认 `true`，但只允许在 `server.host` 是回环地址时
+打开（`cross-checks.ts`）：非回环监听意味着任何能连上端口的人都成为
+`server.subject`，这种组合在启动期失败，不能配了不生效。容器部署绑 `0.0.0.0`，
+必须设 `trustLoopback: false`。
+
+**判定来源必须是连接事实，不能是请求头。** 来源地址取
+`request.socket.remoteAddress`；额外要求 `Host` 指向本机，是为了挡 DNS rebinding
+（远程页面用自己的域名解析到 `127.0.0.1`，浏览器发出的连接来源就是回环地址）。
+`x-comem-subject` 不再是身份来源，服务端不读它。
+
+**凭据优先。** 带了 `Authorization` 就按凭据解析；无效一律 401，**不回退**到
+回环信任——一个过期的 token 静默变成 `server.subject` 比 401 危险得多。
 
 **两种凭据。** 用户名 + 密码（`app_user.password_hash`，`node:crypto` 的 scrypt，
 `N=16384, r=8, p=1`，16 字节盐）换 session token；API Key（`api_key` 表，一个
@@ -2988,7 +3007,7 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 
 | 入口 | 端点 | 说明 |
 |---|---|---|
-| 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `authEnabled` / `boundSubject` / `adminConfigured` / `restartRequired` / `setupTokenRequired`。控制台在拿到身份之前调它；`needsSetup` 只在多用户模式且没有任何密码哈希时为真。**不返回令牌本身** |
+| 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `boundSubject` / `adminConfigured`。控制台在拿到身份之前调它；`needsSetup` 就是「`app_user` 里没有任何密码哈希」。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
 | 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4） |
@@ -2996,8 +3015,8 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 | 列出 key | `GET /api/v1/admin/users/{id}/api-keys` | 同上；只回 `prefix`，永不回哈希 |
 | 撤销 key | `DELETE /api/v1/admin/api-keys/{keyId}` | 先反查持有者，再对持有者的根求 `manage`，或系统管理员；幂等 |
 
-`auth.enabled: false` 时登录端点返回 404：签发一个不会被接受的 token 比明确的
-404 更难发现。
+**改密码 / 撤销凭据是唯一的「让 token 立刻失效」入口。** 认证恒开之后没有
+「关掉认证」这个开关，撤销只能针对具体凭据（§12.7 的 session token 段）。
 
 ### 12.8 ACL 写入的锁契约
 
@@ -3246,12 +3265,12 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 | 宿主 | 走哪条 | 配置里写什么 |
 |---|---|---|
-| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL；`auth.enabled: true` 时再一个 `Authorization` 头 |
+| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL；跨网络访问时再一个 `Authorization` 头 |
 | 只支持本地 stdio 服务器 | **stdio 代理**（`integrations/servers/mcp-proxy.mjs`） | `command: node` + `args: [<仓库>/integrations/servers/mcp-proxy.mjs]` |
 
 最小配置只有两样：`url`（`http://127.0.0.1:1933/mcp`）与可选认证头。**`type` / `transport` 不能省**——Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器并跳过（报 `has a "url" but no "type"`），DSH 的 `transport` 是必填字段。
 
-认证走请求头（§12.7）：`auth.enabled: false`（v1 单用户）时身份取 `server.subject`，不需要头，`x-comem-subject` 与它不一致会 401；`auth.enabled: true` 时带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。**凭据的三种传法**：直连时写进宿主的 MCP 配置（用宿主自己的变量展开，如 `${COMEM_API_KEY}`）；用代理时由代理读 `COMEM_TOKEN` / 配置文件，宿主配置里不出现密钥；只认 `--header` 的宿主用命令行参数（`claude mcp add --header "Authorization: Bearer …"`）。
+认证走请求头（§12.7）：带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。唯一的例外是回环信任——来源是回环地址、又没有带凭据的请求被认证成 `server.subject`，本机的 `curl` 与 hook 插件因此不必存凭据。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。**凭据的三种传法**：直连时写进宿主的 MCP 配置（用宿主自己的变量展开，如 `${COMEM_API_KEY}`）；用代理时由代理读 `COMEM_TOKEN` / 配置文件，宿主配置里不出现密钥；只认 `--header` 的宿主用命令行参数（`claude mcp add --header "Authorization: Bearer …"`）。
 
 **为什么还是做 stdio 代理。** 早先的判断是「Claude Code 和 DSH 都原生支持 Streamable HTTP，代理是多余的常驻进程」。**这个判断把「我验证过的两个宿主」当成了「所有宿主」**：MCP 规范里 `stdio` 是一等公民，只支持本地 stdio 服务器的宿主不会因为另外两个支持 HTTP 就不再存在。代理约 200 行，不引依赖、不重写认证——它复用 hook 的配置链（`integrations/lib/config.mjs`），把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`。**服务端无状态省掉了三块**：没有 `Mcp-Session-Id` 可缓存、没有 `DELETE` 可发、没有会话过期要重放 `initialize`。这是它比通用代理短的那部分。
 
@@ -3430,7 +3449,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 
 | 页面 | 内容 |
 |---|---|
-| 登录 | 认证打开且浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
+| 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
 | 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks` |
 | 文件树 | 左树右详情；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块 |
 | 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4） |
@@ -3453,28 +3472,34 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 
 **403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 
-**身份来自服务端。** 控制台不硬编码 `x-comem-subject`，也不硬编码登录用户。
+**身份来自登录。** 控制台只有一个身份来源：浏览器里的会话。
 `web/plugins/console-identity.ts` 在应用挂载前先探测引导状态（`GET /bootstrap`
-恒定 200，响应体只有 `{enabled}`；**不用** 404 推断，那会拿「错误」当正常信号，还会
-发一个登出语义的写请求去做只读探测），再分两条路径：
+恒定 200；**不用** 404 推断，那会拿「错误」当正常信号，还会发一个登出语义的写
+请求去做只读探测），再读 `sessionStorage`：
 
-- **单用户（默认）**：调一次 `GET /health`（§17.9），用返回的 `subject` 拼
-  `x-comem-subject`；没有存过的选择时用 `scopes[0]` 作作用域根。
-- **多用户**：从 `sessionStorage` 恢复会话；没有会话或已过期时整页进
-  `/login?redirect=...`，登录成功用 `POST /auth/login` 换 session token，之后每个请求带
+- **没有任何密码**（`needsSetup: true`，新装即如此）：整站进 `/setup`，创建第一个
+  管理员后回 `/login`。这是控制台唯一一条首跑路径，单用户部署第一次打开浏览器也
+  走它。
+- **有账号但没有会话**（或会话已过期）：整页进 `/login?redirect=...`，登录成功用
+  `POST /auth/login` 换 session token，之后每个请求带
   `Authorization: Bearer <token>`。登录响应带 `subject` 与 `principals`，控制台按
   `user:{uid}` / `group:{gid}` 推出候选根，再逐个用 `GET /fs/tree` 验证可读；读不到的根
   （组根未预置）不列出来。凭据存 `sessionStorage`（刷新保留、关标签页即清），不存
   `localStorage`；收到 401 时清掉本地会话并回登录页。
 
-插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的
-请求会带错主体。拉取失败时整页显示错误，**不回落 `user:local`**：回落会在运维把
-`server.subject` 改成 `user:alice` 之后继续发旧身份，症状是每个请求 401，而界面上只有
-「请求失败」。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」区分开。
-**作用域选择器**只在可读根多于一个时出现，选择存 `sessionStorage`；切换后文件树、检索、
-权限管理各自重新加载，文件详情不在新根下时回 `/files`。
+**两个状态是同一条路径的两段。** `setup-required` 建完账号就变成
+`unauthenticated`，登录成功就是 `ready`；`web/utils/consoleGuard.ts` 里没有按部署
+形态分叉的规则。
 
-**为什么不给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把硬编码换成第二处配置：运维改 `server.subject` 时还要记得改控制台。服务端已经是这个值的唯一真相，控制台问一次即可。
+插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的
+请求会没有凭据。拉取失败时整页显示错误，**不猜一个默认身份**：即使回环信任会让服务端
+接受不带凭据的本机请求，控制台也不在没有身份的情况下渲染页面——那会让「服务端不可达」
+看起来像正常状态。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」
+区分开。**作用域选择器**只在可读根多于一个时出现，选择存 `sessionStorage`；切换后
+文件树、检索、权限管理各自重新加载，文件详情不在新根下时回 `/files`。
+
+**为什么不该给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把登录身份换成第二处配置：
+运维改 `server.subject` 时还要记得改控制台，而控制台的真实身份来自登录响应。
 
 ### 16.1 视觉方向：Apple
 
@@ -3496,7 +3521,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 
 **界面文案原则**：不把提示词抄到 UI 上。开发期内部术语（page_id、digest、summary_pending）不进用户可见区域，用「基线」「待刷新」这类词。
 
-**控制台不显示绑定主体名。** `user:local` 是 `server.subject` 的默认值，属于部署配置而不是用户信息；头像只显示当前主体的首字母（`user:alice` → `A`），没有主体时显示 `?`。表单占位符写真实输入约束（如邮箱格式 `name@example.com`、用户 ID 的字符集），不写示例人名。
+**头像只显示当前登录用户的首字母。** 主体名是内部标识，`user:alice` → `A`；没有主体时显示 `?`。唯一出现部署身份的地方是 `/setup` 的默认用户名——那一次它就是要创建的那个账号（本机 `curl` 与 hook 插件以它发请求，控制台建同一个 ID 才不会出现「两个都是我的账号」的分裂）。表单占位符写真实输入约束（如邮箱格式 `name@example.com`、用户 ID 的字符集），不写示例人名。
 
 **请求明细没有查询端点。** `request_log` 只落 SQLite，`src/api/http/routes/` 里没有 `GET /stats/requests`；监控页只列 `/metrics` 里的聚合项，不伪造逐条记录。要按路由、状态码、用户筛选，得先加一个查询端点。
 
@@ -3724,7 +3749,7 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 | 字段 | 含义 |
 |---|---|
 | `status` | `ok` / `degraded`。判定收在 `src/api/health-status.ts`，两个入口共用；没有第三种状态 |
-| `subject` | 服务图绑定的主体（`server.subject`）。控制台用它拼 `x-comem-subject`（§16） |
+| `subject` | 服务图绑定的主体（`server.subject`），也是回环信任使用的身份（§12.7） |
 | `scopes` | 该主体可寻址且可读的根，个人根在前。为空 = 没有可访问的命名空间 |
 | `index.totalNodes` | `node` 表全量条数（`GET /health`），不是当前身份可见的条数 |
 | `queue` | `{pending, processing}` |
@@ -3740,7 +3765,7 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 
 **`subject` / `scopes` 两边同义。** MCP 的 `health` 工具与服务端 `GET /health` 返回同一组字段：同一个服务，两种接口，语义相同。**索引条数是唯一的例外**：`GET /health` 的 `index.totalNodes` 是 `node` 表全量（运维要知道库有多大），MCP `health` 的 `index.visibleNodes` 是权限与状态过滤后当前身份**可检索**的条数（`glob` 与四个检索面共用 `status = 'active'` 谓词，归档 / 待复核节点不计入；工具不能绕过权限数别人的节点）。两者**不同名**，因为它们是两个不同的问题；同名会让「库有 19 条、我能看到 12 条」被误读成同一个数在漂移。`scopes` 的算法是「个人根 + 可读的组根」，与 MCP 的 `readScopes` 一致；`/health` 没有请求身份，所以只报告**绑定主体**读得到的根。
 
-**`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。v1 没有认证，不带请求头的调用本来就被当成绑定主体，这个值不是秘密；多租户要换成真正的认证时，这个字段也要跟着重新设计。
+**`/health` 是公开端点，因此会暴露部署身份。** 它不认证（§17.1），`subject` 是 `user:alice` 这类部署标识。回环信任让本机调用本来就被当成绑定主体，这个值不是秘密；跨网络的调用方要拿它得先登录。
 
 **`degraded` 的判定**：模型不可用且开了规则降级、存在降级摘要的目录、最近一次重排调用失败（已退回融合分），或 MCP 侧的索引计数失败。降级必须可见——静默降级等于骗人。重排的降级状态与摘要走同一个模式，不另造一套：`rerank.degraded` 为真时 `status` 也是 `degraded`；`rerank.failures` 是累计值，`lastFailure` 在成功一次后清空，两者分别回答「历史上失败过几次」与「现在还在不在跑」。
 
@@ -3869,9 +3894,15 @@ acl:
 server:
   host: 127.0.0.1
   port: 1933
-  # auth.enabled: false 时的绑定主体：HTTP 的 x-comem-subject 与它不一致时 401。
+  # 回环信任使用的身份：不带凭据的本机请求被认证成它（§12.7）。
   # 默认 user:local 只是为了让 pnpm dev 开箱即用；生产部署应显式配置。
   subject: user:local
+
+auth:
+  # 认证恒开：控制台永远登录，每个请求带 Authorization: Bearer <凭据>。
+  # trustLoopback 是回环信任，不是第二个模式；只有 server.host 是回环地址时
+  # 才允许打开（否则启动期失败）。容器部署必须设成 false。
+  trustLoopback: true
 
 logging:
   level: info
@@ -3899,9 +3930,9 @@ task:
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
 
-**`server.subject` 是 `auth.enabled: false` 时的绑定身份，不是认证配置。** 认证关闭时每个请求的 `x-comem-subject` 必须与它一致，否则 401；`Authorizer` 收的是每请求的 `principals`，但这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container/api.ts` 的 `resolveIdentityOf`）。打开 `auth.enabled` 后身份来自凭据，每个请求独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的单用户桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
+**`server.subject` 是回环信任使用的身份，不是认证配置。** `auth.trustLoopback` 打开时，来源是回环地址、又没有带凭据的请求被认证成它；`Authorizer` 收的是每请求的 `principals`，这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container/api.ts` 的 `resolveBoundSubject`）。带凭据的请求每个独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
 
-**控制台跟随这个值，不重复配置。** `GET /health` 返回 `subject` 与 `scopes`（§17.9），控制台启动时拉一次，用 `subject` 拼请求头。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把硬编码换成第二处配置：运维改 `server.subject` 时还要改控制台，漏改的症状是每个请求 401。
+**控制台不读这个值。** 它的身份来自登录响应；`GET /bootstrap` 只回 `boundSubject` 作为 `/setup` 的默认用户名（§16）。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把配置复制一份，两边迟早不一致。
 
 **`type` 决定用哪个 AI SDK provider。** 写 `openai-compatible` 走 `@ai-sdk/openai-compatible`，写 `anthropic` 走 `@ai-sdk/anthropic`。换供应商只改配置，不改代码。
 

@@ -299,7 +299,7 @@ export function createMcpProxy(options) {
         return errorResponse(
           id,
           AUTH_FAILED,
-          `CoMem 拒绝了凭据（HTTP ${error.status}）。检查 COMEM_TOKEN 或 ~/.config/comem/config.yaml 的 token；auth.enabled: false 的部署不需要 Authorization 头。${detail === '' ? '' : ` 服务端说：${detail}`}`,
+          `CoMem 拒绝了凭据（HTTP ${error.status}）。检查 COMEM_TOKEN 或 ~/.config/comem/config.yaml 的 token；连本机回环地址（127.0.0.1 / localhost）时不需要它。${detail === '' ? '' : ` 服务端说：${detail}`}`,
         );
       }
       return errorResponse(

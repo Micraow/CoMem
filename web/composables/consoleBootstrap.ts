@@ -1,25 +1,15 @@
 /**
- * 首次初始化（架构文档 §16 的控制台身份引导、§12.7 的认证开关）。
+ * 首次初始化（架构文档 §16 的控制台身份引导、§12.7 的引导循环）。
  *
  * ## 为什么需要这一页
  *
- * 默认配置（`auth.enabled: false`）是单用户模式：服务端把不带凭据的请求当成
- * `server.subject`，任何能访问这个端口的人都是同一个用户。空数据根 + 默认配置
- * 下，浏览器里没有任何路径能创建第一个可登录账号——控制台看起来正常，实际没有
- * 认证，也没有人能登录。
+ * 认证恒开，而空数据根下浏览器里没有任何路径能创建第一个可登录账号。控制台先问
+ * `GET /api/v1/bootstrap`：这份安装是否还没有任何密码（`needsSetup`），以及回环
+ * 信任使用的身份是什么（`boundSubject`，初始化页拿它做默认用户名）。`needsSetup`
+ * 为 true 时整站进初始化页，而不是渲染一个没有身份的外壳。
  *
- * `GET /api/v1/bootstrap` 把这三件事说清楚：这份安装是否还没有任何用户设置过
- * 密码（`needsSetup`）、认证是否打开（`authEnabled`）、服务端绑定的主体是什么
- * （`boundSubject`）。`needsSetup` 为 true 时控制台先进入初始化页，而不是渲染
- * 一个没有身份的外壳。
- *
- * ## 创建账号不等于能登录
- *
- * `POST /bootstrap/admin` 负责建账号并设密码，但**打开认证是配置项**：改
- * `config.yaml` 需要重启进程，控制台既不能写那个文件，也不能替用户重启服务。
- * 所以响应里的 `restartRequired` 为 true 时，页面给出完整的配置片段与重启命令，
- * 不假装初始化已经完成。为 false 时（认证本来就打开，只是缺第一个账号）直接去
- * 登录页。
+ * 建好账号即可登录：`POST /bootstrap/admin` 在同一个事务里写密码哈希与引导管理员
+ * 标记，不需要重启、也不需要再改配置。
  *
  * ## 回环地址或一次性令牌
  *
@@ -28,8 +18,7 @@
  * 回环的话 Docker 用户打开初始化页会被拒——引导页承诺了却做不到。
  *
  * 控制台分不清自己是不是回环地址，所以令牌输入框一直显示、可以留空：本地
- * `pnpm dev` 不带也能过，容器部署从日志里复制一次。`GET /bootstrap` 的
- * `setupTokenRequired` 决定要不要显示这个输入框。
+ * `pnpm dev` 不带也能过，容器部署从日志里复制一次。
  *
  * ## 错误码是契约
  *
@@ -45,19 +34,10 @@ import type { ConsoleRequest } from './consoleIdentity'
 export interface ConsoleBootstrap {
   /** 没有任何用户设置过密码。新装为 `true`。 */
   readonly needsSetup: boolean
-  /** 多用户认证是否打开。`false` 是单用户模式（默认）。 */
-  readonly authEnabled: boolean
-  /** 服务端绑定的主体，形如 `user:local`。初始化页用它做默认用户名。 */
+  /** 回环信任使用的身份，形如 `user:local`。初始化页用它做默认用户名。 */
   readonly boundSubject: string
-  /** 是否已经有系统管理员（`auth.adminUserIds` 非空）。 */
+  /** 是否已经有系统管理员（`auth.adminUserIds` 非空，或引导管理员已存在）。 */
   readonly adminConfigured: boolean
-  /** 打开认证是否需要重启进程。 */
-  readonly restartRequired: boolean
-  /**
-   * 是否需要一次性初始化令牌。响应里不出现令牌本身——它在服务端启动日志里。
-   * 为 true 时初始化页显示令牌输入框；当前实现恒为 true。
-   */
-  readonly setupTokenRequired: boolean
 }
 
 /** 创建管理员账号的输入。空的显示名与令牌都不提交。 */
@@ -74,8 +54,6 @@ export interface BootstrapAdminResult {
   readonly userId: string
   readonly created: boolean
   readonly passwordSet: boolean
-  readonly authEnabled: boolean
-  readonly restartRequired: boolean
 }
 
 /** 表单字段 → 错误文案。没有错误的字段不出现在对象里。 */
@@ -91,9 +69,6 @@ export interface SetupFormInput {
   readonly password: string
   readonly confirmPassword: string
 }
-
-/** 重启服务的命令。提示用户手动执行，控制台不代为重启。 */
-export const SETUP_RESTART_COMMAND = 'pnpm start'
 
 /** 初始化接口的错误。`code` 是服务端的错误码；网络错误用 `BOOTSTRAP_UNAVAILABLE`。 */
 export class ConsoleBootstrapError extends Error {
@@ -138,33 +113,17 @@ function readBootstrapResult(payload: unknown): ConsoleBootstrap {
   }
   const result = payload['result']
   const needsSetup = result['needsSetup']
-  const authEnabled = result['authEnabled']
   const boundSubject = result['boundSubject']
   const adminConfigured = result['adminConfigured']
-  const restartRequired = result['restartRequired']
-  const setupTokenRequired = result['setupTokenRequired']
 
-  if (
-    typeof needsSetup !== 'boolean' ||
-    typeof authEnabled !== 'boolean' ||
-    typeof adminConfigured !== 'boolean' ||
-    typeof restartRequired !== 'boolean' ||
-    typeof setupTokenRequired !== 'boolean'
-  ) {
+  if (typeof needsSetup !== 'boolean' || typeof adminConfigured !== 'boolean') {
     throw invalidBootstrap('缺少布尔状态字段')
   }
   if (typeof boundSubject !== 'string' || boundSubject === '') {
     throw invalidBootstrap('没有返回绑定主体')
   }
 
-  return {
-    needsSetup,
-    authEnabled,
-    boundSubject,
-    adminConfigured,
-    restartRequired,
-    setupTokenRequired,
-  }
+  return { needsSetup, boundSubject, adminConfigured }
 }
 
 function readAdminResult(payload: unknown): BootstrapAdminResult {
@@ -179,15 +138,11 @@ function readAdminResult(payload: unknown): BootstrapAdminResult {
   const userId = result['userId']
   const created = result['created']
   const passwordSet = result['passwordSet']
-  const authEnabled = result['authEnabled']
-  const restartRequired = result['restartRequired']
   if (
     typeof userId !== 'string' ||
     userId === '' ||
     typeof created !== 'boolean' ||
-    typeof passwordSet !== 'boolean' ||
-    typeof authEnabled !== 'boolean' ||
-    typeof restartRequired !== 'boolean'
+    typeof passwordSet !== 'boolean'
   ) {
     throw new ConsoleBootstrapError(
       'INVALID_BOOTSTRAP_RESPONSE',
@@ -195,7 +150,7 @@ function readAdminResult(payload: unknown): BootstrapAdminResult {
     )
   }
 
-  return { userId, created, passwordSet, authEnabled, restartRequired }
+  return { userId, created, passwordSet }
 }
 
 /**
@@ -322,15 +277,4 @@ export function validateSetupForm(input: SetupFormInput): SetupFormErrors {
   }
 
   return errors
-}
-
-/**
- * 需要重启时贴进 `config.yaml` 的片段。
- *
- * 账号建好了但认证开关没打开时，服务端无法在不重启的情况下让它生效。片段包含
- * 开关与系统管理员名单：没有名单里那一行，这个账号能登录，但用户与组管理、任务
- * 列表这些跨主体端点对它全是 403（`auth.adminUserIds` 默认空）。
- */
-export function setupAdminConfigSnippet(userId: string): string {
-  return ['auth:', '  enabled: true', '  adminUserIds:', `    - "${userId}"`].join('\n')
 }

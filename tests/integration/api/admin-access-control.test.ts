@@ -41,7 +41,6 @@ async function start(adminUserIds: readonly string[]): Promise<Harness> {
       COMEM_DATA_DIR: dataDir,
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
-      COMEM_AUTH_ENABLED: 'true',
       COMEM_AUTH_SESSION_SECRET: SESSION_SECRET,
       COMEM_AUTH_ADMIN_USER_IDS: JSON.stringify(adminUserIds),
     },
@@ -257,7 +256,7 @@ describe('改密码只能改自己的（或系统管理员）', () => {
 });
 
 describe('系统管理员默认空名单', () => {
-  it('auth.enabled: true 且 adminUserIds 为空：已登录用户调用户 / 组目录都 403', async () => {
+  it('adminUserIds 为空：已登录用户调用户 / 组目录都 403', async () => {
     const harness = await start([]);
     try {
       await seedUser(harness, 'alice');

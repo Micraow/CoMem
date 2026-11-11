@@ -20,8 +20,7 @@ let stderr: MockInstance;
 
 beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'comem-password-'));
-  // 默认 `auth.enabled: false` 时成功的用例都会打印警告；统一接住，断言放在
-  // 需要它的用例里（否则 `pnpm test` 的输出会被这条警告刷屏）。
+  // 接住 stderr：命令成功时不该往上写任何东西，失败路径的断言各自检查。
   stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 });
 
@@ -122,32 +121,11 @@ describe('pnpm password', () => {
     ).rejects.toThrow(/用户不存在：bob.*POST \/admin\/users/);
   });
 
-  /**
-   * `auth.enabled: false` 时登录端点 404。命令静默成功会让人以为「设好密码就能
-   * 登录」，然后在 `/login` 上找不到原因。
-   */
-  it('auth.enabled: false 时写入密码并打印警告', async () => {
+  it('写入密码，成功时不往 stderr 写任何东西', async () => {
     seed();
     stderr.mockClear();
 
     await setPassword('alice', 'new-password', {
-      env: { ...process.env, COMEM_DATA_DIR: dataDir },
-    });
-
-    expect(passwordHash()).not.toBeNull();
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('认证未启用（auth.enabled = false）'),
-    );
-  });
-
-  it('auth.enabled: true 时不打印警告', async () => {
-    seed();
-    const configPath = join(dataDir, 'config.yaml');
-    await writeFile(configPath, 'auth:\n  enabled: true\n', 'utf8');
-    stderr.mockClear();
-
-    await setPassword('alice', 'new-password', {
-      path: configPath,
       env: { ...process.env, COMEM_DATA_DIR: dataDir },
     });
 

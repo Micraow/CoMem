@@ -125,7 +125,8 @@ beforeEach(async () => {
  * 用指定的身份解析器起 HTTP 服务。
  *
  * 外层用例只需要容器绑定的那个身份；ACL 用例要在一个进程里区分两个调用方，
- * 所以身份从请求头来（`x-comem-subject`），不再走「只接受绑定主体」的生产解析器。
+ * 所以身份从一个**测试自定的**请求头来（`x-test-subject`；生产解析器不读任何身份头，
+ * 它只认凭据与回环信任）。
  */
 async function startServer(resolveIdentity: IdentityResolver): Promise<FastifyInstance> {
   const started = container;
@@ -222,7 +223,7 @@ describe('GET /memories/{uri}/links：另一端也要可读', () => {
     // 外层 beforeEach 起的服务只接受绑定身份；这组用例要两个身份。
     await app?.close();
     app = await startServer(async (headers) => {
-      const subject = headers['x-comem-subject'] ?? SUBJECT_A;
+      const subject = headers['x-test-subject'] ?? SUBJECT_A;
       return { subject, principals: [subject, 'user:*'] };
     });
   });
@@ -273,7 +274,7 @@ describe('GET /memories/{uri}/links：另一端也要可读', () => {
     const response = await inject({
       method: 'GET',
       url: `/api/v1/memories/${encode(ARCHIVE_A)}/links?direction=backlinks`,
-      headers: { 'x-comem-subject': SUBJECT_A },
+      headers: { 'x-test-subject': SUBJECT_A },
     });
     expect(response.statusCode).toBe(200);
     // B 的 URI 一个字符都不出现。先断这条：变异（去掉另一端求权）时红的正是它。
@@ -292,7 +293,7 @@ describe('GET /memories/{uri}/links：另一端也要可读', () => {
     const response = await inject({
       method: 'GET',
       url: `/api/v1/memories/${encode(MEMORY_A)}/links`,
-      headers: { 'x-comem-subject': SUBJECT_A },
+      headers: { 'x-test-subject': SUBJECT_A },
     });
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain(MEMORY_B);

@@ -80,7 +80,7 @@ function encode(uri: string): string {
 async function startServer(): Promise<FastifyInstance> {
   const started = requireContainer();
   const resolveIdentity: IdentityResolver = async (headers) => {
-    const subject = headers['x-comem-subject'] ?? VIEWER;
+    const subject = headers['x-test-subject'] ?? VIEWER;
     return { subject, principals: principalsOf(subject) };
   };
   return createHttpServer({
@@ -170,7 +170,7 @@ function pendingOf(subject: string): Promise<{ readonly body: string; readonly s
   return inject({
     method: 'GET',
     url: `/api/v1/memories/pending?scopeUri=${encode(OWNER_ROOT)}`,
-    headers: { 'x-comem-subject': subject },
+    headers: { 'x-test-subject': subject },
   });
 }
 

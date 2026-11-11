@@ -8,12 +8,11 @@
  * 移动端（< 768px）侧栏收成抽屉：同一份 `SideNav` 放进 Dialog 的 left 形态，
  * 不复制一份导航结构。
  */
-import { LogOut, Menu, Moon, Sun, ShieldAlert } from 'lucide-vue-next'
+import { LogOut, Menu, Moon, Sun } from 'lucide-vue-next'
 import { useMediaQuery } from '@vueuse/core'
 
 import { consoleIdentityState, consoleScopeLabel, logoutConsole } from '~/composables/consoleIdentity'
 import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
-import { singleUserModeNotice } from '~/utils/consoleBanner'
 
 import { navLabelOf } from './SideNav.vue'
 
@@ -35,16 +34,6 @@ const currentLabel = computed(() => navLabelOf(route.path))
 const identityState = consoleIdentityState()
 const identity = identityState.status === 'ready' ? identityState.identity : null
 const scopeRoot = useScopeRoot()
-const authEnabled = identity?.authEnabled === true
-
-/**
- * 单用户模式横幅。
- *
- * 常驻而不是 toast：认证状态在本次页面生命周期内不会变，toast 消失之后用户又
- * 回到「不知道自己在以谁的身份操作」。文案在 `utils/consoleBanner.ts`，那里
- * 能用普通替身测「显示 / 不显示」。
- */
-const singleUserNotice = singleUserModeNotice(identity)
 
 const subjectInitial = computed(() => {
   const subject = identity?.subject ?? ''
@@ -132,11 +121,6 @@ watch(
     </UiDialog>
 
     <div class="main">
-      <div v-if="singleUserNotice !== null" class="mode-banner">
-        <ShieldAlert :size="14" :stroke-width="1.5" aria-hidden="true" />
-        <span>{{ singleUserNotice }}</span>
-      </div>
-
       <header class="titlebar">
         <button
           v-if="isMobile"
@@ -177,7 +161,6 @@ watch(
             <Moon v-else :size="16" :stroke-width="1.4" />
           </button>
           <button
-            v-if="authEnabled"
             type="button"
             class="iconbtn"
             aria-label="退出登录"
@@ -198,23 +181,5 @@ watch(
 <style scoped>
 .scope-picker {
   width: 168px;
-}
-
-/* 常驻横幅：橙色提示底，不可关闭。 */
-.mode-banner {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 18px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--orange-ink);
-  background: var(--orange-tint);
-  border-bottom: 0.5px solid var(--separator);
-}
-
-.mode-banner > svg {
-  flex: none;
 }
 </style>

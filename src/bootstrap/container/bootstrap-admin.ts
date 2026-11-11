@@ -15,7 +15,7 @@
  * `api/` 不能 import `adapters/`（架构文档 §4.2）。仓储方法在
  * `adapters/sqlite/`，这里只做「把几个仓储调用收成一个端口」以及需要跨调用
  * 原子性的那几条 SQL。**写入只有一个入口**：`installFirstAdminOf` 在一个同步写事务
- * 里复查 `needsSetup`、写密码哈希、写标记——三条同时成功或同时回滚，不存在
+ * 里复查「没有任何密码」、写密码哈希、写标记——三条同时成功或同时回滚，不存在
  * 「密码设了、标记没写」或反过来的崩溃窗口。
  *
  * ## 一次性初始化令牌
@@ -24,10 +24,9 @@
  * 的 `/setup` 页面永远拿不到 200。令牌是第二条授权路径——非回环请求必须同时提供
  * 启动日志里打印的那一串。
  *
- * 令牌**只在内存里**：进程启动时随机生成，`needsSetup` 为 true 时打印一次。重启
- * 换新是正确语义（初始化本来就要求重启才能让 `auth.enabled` 生效），落盘反而会
- * 留下一个比它保护的东西活得更久的凭据。比较用 `timingSafeEqual`，长度不等直接
- * false。
+ * 令牌**只在内存里**：进程启动时随机生成，`needsSetup` 为 true 时打印一次。落盘
+ * 反而会留下一个比它保护的东西活得更久的凭据。比较用 `timingSafeEqual`，长度不等
+ * 直接 false。
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -110,15 +109,16 @@ function tokenMatches(expected: string, candidate: string | undefined): boolean 
  *
  * `setupToken` 参数只给单测用：生产路径不传，随机生成。集成测试从启动日志里
  * 解析令牌（那也正是部署者要做的事）。
+ *
+ * 只要还没有任何密码就打印令牌：回环请求本来不需要它，但「怎么拿到第一个账号」
+ * 必须有一个不依赖打开浏览器的答案（容器部署、纯 SSH）。
  */
 export function createBootstrapAccess(
   db: DatabaseSync,
   logger: Logger,
-  authEnabled: boolean,
   setupToken: string = randomBytes(SETUP_TOKEN_BYTES).toString('base64url'),
 ): BootstrapAccess {
-  // 单用户模式不需要初始化，不打印令牌；多用户模式且还没有密码时才打印。
-  if (authEnabled && !hasPasswordHashOf(db)) {
+  if (!hasPasswordHashOf(db)) {
     logger.info(`初始化令牌：${setupToken}（用于首次创建管理员账号；创建完成后失效）`);
   }
   return {

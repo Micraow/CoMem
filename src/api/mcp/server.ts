@@ -72,12 +72,13 @@ export interface McpServerOptions {
   readonly config: ComemConfig;
   readonly logger: Logger;
   /**
-   * 从请求解析身份。真实实现在 bootstrap，测试用固定身份。
-   *
-   * 失败必须抛 `ComemError('UNAUTHENTICATED')`（或任意异常，server 会收敛成 401）。
+   * 从请求解析身份。真实实现在 bootstrap，测试用固定身份。`remoteAddress` 是 TCP
+   * 来源地址（回环信任靠它判定），**不能**从请求头取。失败必须抛
+   * `ComemError('UNAUTHENTICATED')`（或任意异常，server 会收敛成 401）。
    */
   readonly resolveIdentity: (request: {
     readonly headers: Record<string, string | undefined>;
+    readonly remoteAddress?: string;
   }) => Promise<McpIdentity>;
   /**
    * 除「本次请求的身份」之外的依赖。每次请求由它 + 认证结果拼出 `McpToolContext`。
@@ -99,9 +100,7 @@ export interface McpHttpRequest {
 /** `node:http` 兼容的最小响应形状。 */
 export interface McpHttpReply {
   readonly raw: ServerResponse;
-  /**
-   * 接管响应。Fastify 需要它来跳过自己的发送逻辑；`node:http` 适配器不实现。
-   */
+  /** 接管响应。Fastify 需要它来跳过自己的发送逻辑；`node:http` 适配器不实现。 */
   hijack?(): void;
 }
 
@@ -211,7 +210,8 @@ export class McpHttpServer {
 
     let identity: McpIdentity;
     try {
-      identity = await this.#options.resolveIdentity({ headers: request.headers });
+      const { headers, raw } = request;
+      identity = await this.#options.resolveIdentity({ headers, remoteAddress: raw.socket.remoteAddress });
     } catch (error) {
       const failure = ComemError.from(error);
       this.#options.logger.warn('MCP 身份解析失败。', {

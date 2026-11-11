@@ -61,7 +61,7 @@ function reject(uri: string, reason: string): Promise<{ readonly body: string; r
   return inject({
     method: 'POST',
     url: `/api/v1/memories/${encodeURIComponent(uri)}/reject`,
-    headers: { 'x-comem-subject': OWNER, 'content-type': 'application/json' },
+    headers: { 'x-test-subject': OWNER, 'content-type': 'application/json' },
     payload: { reason },
   });
 }
@@ -69,7 +69,7 @@ function reject(uri: string, reason: string): Promise<{ readonly body: string; r
 async function startServer(): Promise<FastifyInstance> {
   const started = requireContainer();
   const resolveIdentity: IdentityResolver = async (headers) => {
-    const subject = headers['x-comem-subject'] ?? OWNER;
+    const subject = headers['x-test-subject'] ?? OWNER;
     return { subject, principals: [subject, 'user:*'] };
   };
   return createHttpServer({

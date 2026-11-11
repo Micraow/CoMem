@@ -271,14 +271,17 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 就起代理：`servers/mcp-proxy.mjs` 把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`，再把
 响应写回 stdout。两条路走同一个端点、同一套凭据、同一份 16 个工具。
 
-**与宿主无关的最小配置**只有两样——一个 URL，和（`auth.enabled: true` 时）一个认证头：
+**与宿主无关的最小配置**只有两样——一个 URL，和（跨网络访问时）一个认证头：
 
 ```json
 { "url": "http://127.0.0.1:1933/mcp", "headers": { "Authorization": "Bearer <凭据>" } }
 ```
 
-`auth.enabled: false`（v1 默认）时 `headers` 整段可以省掉。下面两节是两个具体宿主的
-写法；其它宿主按它的文档把这两样映射过去即可。
+**访问本机服务端时 `headers` 整段可以省掉**：`auth.trustLoopback` 默认打开，来源是回环
+地址、`Host` 也指向本机的请求被认证成 `server.subject`（`~/.config/comem/config.yaml`
+里的 `server.subject`，默认 `user:local`）。这就是本机进程的信任模型——能连上本机端口的
+人本来就能读这个数据根，与 `~/.ssh` 同级。下面两节是两个具体宿主的写法；其它宿主按它的
+文档把这两样映射过去即可。
 
 #### stdio 代理
 
@@ -300,7 +303,7 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 | 环境变量 | 说明 |
 |---|---|
 | `COMEM_BASE_URL` | 服务端地址；代理拼成 `<baseUrl>/mcp` |
-| `COMEM_TOKEN` | `Authorization: Bearer` 的值；`auth.enabled: false` 时留空 |
+| `COMEM_TOKEN` | `Authorization: Bearer` 的值；`baseUrl` 是回环地址时留空（走回环信任），经 nginx 等非回环地址访问时必须填 |
 | `COMEM_MCP_TIMEOUT_MS` | 等 MCP 响应的超时，默认 `30000`。**别照 hook 的 5 秒配**：`find` 开了重排时 p95 就有 9.35 秒 |
 | `COMEM_DEBUG` | `1` 时把转发日志写到 **stderr**（stdout 只走协议） |
 
@@ -327,8 +330,9 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 并跳过，报告 `MCP server "comem" has a "url" but no "type"`。`"streamable-http"` 是
 `"http"` 的别名，两种写法都认。
 
-`auth.enabled: true` 的部署要带 API Key。`${VAR}` 会在 Claude Code 读取配置时展开，
-key 不用写进仓库：
+**跨网络访问**（Docker 经 nginx、远程开发机）要带 API Key：容器绑 `0.0.0.0`，回环
+信任被关掉，来源不是回环地址。`${VAR}` 会在 Claude Code 读取配置时展开，key 不用写进
+仓库：
 
 ```json
 {
@@ -364,7 +368,7 @@ claude mcp add --transport http comem http://127.0.0.1:1933/mcp \
     serverName: comem
     transport: streamable-http
     url: http://127.0.0.1:1933/mcp
-    # auth.enabled: true 时才有意义；false 时可以整段删掉
+    # 跨网络访问时才有意义；访问本机服务端时可以整段删掉（回环信任）
     headers:
       Authorization: !!js '`Bearer ${process.env.COMEM_API_KEY}`'
 ```
@@ -374,10 +378,13 @@ claude mcp add --transport http comem http://127.0.0.1:1933/mcp \
 
 ### 认证
 
-| 部署 | 请求头 | 行为 |
+| 访问方式 | 请求头 | 行为 |
 |---|---|---|
-| `auth.enabled: false`（默认，v1 单用户） | 不需要 | 身份取 `server.subject`；带 `x-comem-subject` 且与它不一致会 401 |
-| `auth.enabled: true` | `Authorization: Bearer <凭据>` | 凭据是 `comem_` 开头的 API Key，或 `POST /api/v1/auth/login` 换来的 session token；缺失或非法一律 401 `UNAUTHENTICATED` |
+| 本机（`http://127.0.0.1:1933`、`http://localhost:1933`） | 不需要 | 回环信任：身份取 `server.subject`（默认 `user:local`）。判定要求来源是回环地址 **且** `Host` 指向本机 |
+| 跨网络（容器经 nginx、远程主机） | `Authorization: Bearer <凭据>` | 凭据是 `comem_` 开头的 API Key，或 `POST /api/v1/auth/login` 换来的 session token；缺失或非法一律 401 `UNAUTHENTICATED` |
+
+**`x-comem-subject` 不是凭据。** 服务端不读它；本机的身份只由回环信任决定，不能靠一个
+请求头换成别人。
 
 API Key 从管理端点签发（明文只在创建响应里出现一次）：
 
@@ -403,7 +410,7 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
    带工具名与 `requestId`（取自 `x-request-id`，没有就生成）。
 
 **没有 `✔ Connected` 时先看三处**：`url` 有没有带 `/mcp`；`type` / `transport` 是不是
-写成了 HTTP 而不是默认的 stdio；`auth.enabled: true` 时 `Authorization` 头有没有真的发出去
+写成了 HTTP 而不是默认的 stdio；跨网络访问时 `Authorization` 头有没有真的发出去
 （Claude Code 的 `claude mcp get <name>` 会列出发送的头，DSH 看启动日志里的连接失败原因）。
 
 ### 提示词
@@ -718,8 +725,9 @@ SQLite 的写锁。
 **stdio 代理报「连不上」**：`curl $COMEM_BASE_URL/health`。代理只读环境变量与
 `~/.config/comem/config.yaml`，不读仓库根的 `config.yaml`——那是服务端的配置。
 
-**stdio 代理报「拒绝了凭据（HTTP 401）」**：`COMEM_TOKEN` 没设或已失效。`auth.enabled:
-false` 的部署不要设它（设了也不比对，但别让一个过期的 key 留在环境里误导排查）。
+**stdio 代理报「拒绝了凭据（HTTP 401）」**：`COMEM_TOKEN` 没设或已失效，而 `baseUrl`
+不是回环地址（回环地址会自动走回环信任）。`COMEM_BASE_URL` 是 `127.0.0.1` /
+`localhost` 时不需要 token；经 nginx 或远程主机访问时必须带一把有效的 API Key。
 
 ## 测试
 

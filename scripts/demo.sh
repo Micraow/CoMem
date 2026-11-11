@@ -118,8 +118,8 @@ server:
 auth:
   # 第 4/7 步要读 `GET /tasks/{id}`，这个端点只认系统管理员名单
   # （src/api/http/routes/tasks.ts）。名单默认是空数组 = 对所有人 403，所以演示
-  # 必须把绑定主体（server.subject 的 uid）写进来。auth.enabled 保持默认的
-  # false：演示是单用户形态，身份来自 server.subject。
+  # 必须把回环信任的主体（server.subject 的 uid）写进来。演示脚本用本机 curl
+  # 发请求，来源是回环地址，trustLoopback 保持默认的 true。
   adminUserIds: [local]
 logging:
   level: warn

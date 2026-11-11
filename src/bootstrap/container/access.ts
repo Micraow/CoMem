@@ -10,13 +10,16 @@
  * 保持同一函数作用域，语句顺序逐条不变——`ensureUserNamespace` 只在 `acl` 赋值之后
  * 被调用（`createUser` 与显式 `ensure`），与拆分前完全相同。
  *
- * ## 身份是单租户的
+ * ## 服务图仍绑定一个身份
  *
- * `AclService` 在构造期绑定身份（`Authorizer` 的三个方法没有 subject 参数，§12.4），
- * 而 `Container.services` 只有一份。v1 是单用户部署：服务图绑定在
- * `config.server.subject`（`options.subject` 可覆盖，测试与脚本用）。HTTP 的
- * `x-comem-subject` 与它不一致时直接 401——让「换一个身份」静默降级成「用绑定的
- * 身份」就是冒充。多租户要的是每请求一份服务图，那是另一套装配，不在本 wave。
+ * `Container.services` 只有一份，服务图绑定在 `config.server.subject`
+ * （`options.subject` 可覆盖，测试与脚本用）。它有两个用途：回环信任把不带凭据的
+ * 本机请求认证成它（§12.7）；后台任务（记忆合并、摘要）以它作为写入主体。
+ *
+ * **请求身份不经过这里。** 每个 HTTP / MCP 请求的 `principals` 由凭据解析得出
+ * （`api.ts` 的 `createIdentityResolver`），`Authorizer` 收的是每请求的身份。
+ * 把「换一个身份」静默降级成「用绑定的身份」就是冒充，所以回环信任只在没有凭据
+ * 且来源确实是本机时生效。
  */
 
 import { randomBytes } from 'node:crypto';
@@ -93,7 +96,7 @@ export async function createAccess(
 
   // 启动时确保配置的主体存在于用户目录（§12.6）。
   //
-  // 没有这一行，`resolveIdentityOf` 第一次调 `IdentityService.resolve` 就拿到
+  // 没有这一行，`resolveBoundSubject` 第一次调 `IdentityService.resolve` 就拿到
   // `null`，所有非公开端点都是 401——一个刚部署、还没通过控制台建过任何用户的
   // 实例，连登录都做不到。已存在时 `createUser` 抛 `CONFLICT`，这是唯一可以忽略
   // 的错误：用户目录里已经有这个主体，启动不需要改它的显示名或状态。

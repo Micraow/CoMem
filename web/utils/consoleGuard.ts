@@ -2,8 +2,14 @@
  * 控制台路由守卫的判定（架构文档 §16）。
  *
  * 判定是纯函数，中间件只负责把结果交给 `navigateTo`。理由和 `healthLabels.ts`
- * 一样：守卫有三种「必须跳」与三种「必须放行」，写在 `defineNuxtRouteMiddleware`
+ * 一样：守卫有几种「必须跳」与几种「必须放行」，写在 `defineNuxtRouteMiddleware`
  * 里就没法用普通替身穷举——测一个中间件要装整个 Nuxt 运行时。
+ *
+ * ## 两个状态是同一条路径的两段
+ *
+ * `setup-required` 是「这份安装还没有账号」，`unauthenticated` 是「有账号、浏览器
+ * 里没有会话」。它们不是两种模式：前者建完账号就转到后者，后者登录成功就是
+ * `ready`。所以这里只有一条规则链，没有按部署形态分叉。
  *
  * ## 为什么初始化完成前也放行登录页
  *
@@ -48,8 +54,8 @@ export function consoleRedirectFor(
     if (path === CONSOLE_LOGIN_PATH) {
       return null
     }
-    // 初始化页在多用户模式下没有意义：没有账号可建（`needsSetup` 是 false），
-    // 直接去登录，不把它当成 `redirect` 目标带回来。
+    // 初始化页在这里没有意义：账号已经有了（`needsSetup` 是 false），直接去登录，
+    // 不把它当成 `redirect` 目标带回来。
     if (path === CONSOLE_SETUP_PATH) {
       return CONSOLE_LOGIN_PATH
     }

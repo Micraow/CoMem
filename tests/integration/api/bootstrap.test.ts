@@ -2,7 +2,8 @@
  * 引导端点（§12.7 的引导循环）。
  *
  * 覆盖：`needsSetup` 的三种真值状态、第一个管理员的创建与永久关闭、非回环请求的
- * 一次性令牌、重启后标记仍有效。
+ * 一次性令牌、重启后标记仍有效。认证恒开，所以「没有任何密码」是控制台唯一一条
+ * 首跑路径。
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -35,11 +36,7 @@ async function stop(harness: Harness): Promise<void> {
   await harness.container.close();
 }
 
-async function startAt(
-  dataDir: string,
-  authEnabled: boolean,
-  registerCleanup = true,
-): Promise<Harness> {
+async function startAt(dataDir: string, registerCleanup = true): Promise<Harness> {
   const container = await createContainer({
     configPath: join(dataDir, 'config.yaml'),
     env: {
@@ -47,7 +44,6 @@ async function startAt(
       COMEM_DATA_DIR: dataDir,
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
-      COMEM_AUTH_ENABLED: authEnabled ? 'true' : 'false',
       COMEM_AUTH_SESSION_SECRET: SESSION_SECRET,
     },
   });
@@ -68,19 +64,19 @@ async function startAt(
   return { container, app, dataDir };
 }
 
-async function start(authEnabled: boolean): Promise<Harness> {
-  return startAt(await mkdtemp(join(tmpdir(), 'comem-bootstrap-')), authEnabled);
+async function start(): Promise<Harness> {
+  return startAt(await mkdtemp(join(tmpdir(), 'comem-bootstrap-')));
 }
 
 /** 从启动日志里取出一次性初始化令牌（部署者做的也是这件事）。 */
 async function startWithToken(): Promise<Harness & { readonly token: string }> {
   const info = vi.spyOn(ConsoleLogger.prototype, 'info');
-  const harness = await start(true);
+  const harness = await start();
   const line = info.mock.calls
     .map(([message]) => String(message))
     .find((message) => message.startsWith(SETUP_TOKEN_PREFIX));
   if (line === undefined) {
-    throw new Error('多用户模式且没有密码时必须打印初始化令牌');
+    throw new Error('还没有任何密码时必须打印初始化令牌');
   }
   const token = line.slice(SETUP_TOKEN_PREFIX.length, line.indexOf('（'));
   return { ...harness, token };
@@ -128,29 +124,18 @@ function body(userId: string, overrides: Record<string, unknown> = {}): Record<s
 }
 
 describe('GET /bootstrap', () => {
-  it('单用户模式：不需要初始化，user:local 开箱即用', async () => {
-    const harness = await start(false);
-
-    const response = await inject(harness, { method: 'GET', url: '/api/v1/bootstrap' });
-
-    expect(response.statusCode).toBe(200);
-    expect(resultOf(response)).toEqual({
-      needsSetup: false,
-      authEnabled: false,
-      boundSubject: 'user:local',
-      adminConfigured: false,
-      restartRequired: false,
-      setupTokenRequired: true,
-    });
-    // 只读、不泄露用户列表。
-    expect(resultOf(response)).not.toHaveProperty('users');
-  });
-
-  it('多用户模式：没有密码时 needsSetup 为 true；建好第一个账号后为 false', async () => {
-    const harness = await start(true);
+  it('新装：没有任何密码时 needsSetup 为 true，建好第一个账号后为 false', async () => {
+    const harness = await start();
 
     const before = await inject(harness, { method: 'GET', url: '/api/v1/bootstrap' });
-    expect(resultOf(before)).toMatchObject({ needsSetup: true, adminConfigured: false });
+    expect(before.statusCode).toBe(200);
+    expect(resultOf(before)).toEqual({
+      needsSetup: true,
+      boundSubject: 'user:local',
+      adminConfigured: false,
+    });
+    // 只读、不泄露用户列表。
+    expect(resultOf(before)).not.toHaveProperty('users');
 
     const created = await inject(harness, {
       method: 'POST',
@@ -166,7 +151,7 @@ describe('GET /bootstrap', () => {
 
 describe('POST /bootstrap/admin', () => {
   it('回环地址：设密码 + 引导管理员，第二次调用永久关闭', async () => {
-    const harness = await start(true);
+    const harness = await start();
 
     const first = await inject(harness, {
       method: 'POST',
@@ -174,13 +159,7 @@ describe('POST /bootstrap/admin', () => {
       payload: body('local'),
     });
     expect(first.statusCode, first.body).toBe(200);
-    expect(resultOf(first)).toEqual({
-      userId: 'local',
-      created: false,
-      passwordSet: true,
-      authEnabled: true,
-      restartRequired: false,
-    });
+    expect(resultOf(first)).toEqual({ userId: 'local', created: false, passwordSet: true });
 
     // 能登录，且引导管理员能调跨主体端点（adminUserIds 是空的）。
     const token = await login(harness, 'local');
@@ -201,7 +180,7 @@ describe('POST /bootstrap/admin', () => {
   });
 
   it('用户不存在时创建账号（created: true）', async () => {
-    const harness = await start(true);
+    const harness = await start();
 
     const response = await inject(harness, {
       method: 'POST',
@@ -219,7 +198,7 @@ describe('POST /bootstrap/admin', () => {
   });
 
   it('普通用户调管理面 403（引导标记只给那一个用户）', async () => {
-    const harness = await start(true);
+    const harness = await start();
     await inject(harness, {
       method: 'POST',
       url: '/api/v1/bootstrap/admin',
@@ -241,7 +220,7 @@ describe('POST /bootstrap/admin', () => {
   });
 
   it('空 id / 弱口令是 400，且不消耗初始化', async () => {
-    const harness = await start(true);
+    const harness = await start();
 
     for (const payload of [
       body('', { password: PASSWORD }),
@@ -321,7 +300,7 @@ describe('重启后引导管理员仍有效', () => {
   it('同一数据根再 createContainer 一次，登录后仍能调管理面', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'comem-bootstrap-restart-'));
     try {
-      const first = await startAt(dataDir, true, false);
+      const first = await startAt(dataDir, false);
       const created = await inject(first, {
         method: 'POST',
         url: '/api/v1/bootstrap/admin',
@@ -331,7 +310,7 @@ describe('重启后引导管理员仍有效', () => {
       // 只关实例，不删数据根：第二个实例要复用同一份库。
       await stop(first);
 
-      const second = await startAt(dataDir, true, false);
+      const second = await startAt(dataDir, false);
       try {
         expect(
           (await inject(second, { method: 'GET', url: '/api/v1/bootstrap' })).statusCode,

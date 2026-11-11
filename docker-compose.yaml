@@ -46,11 +46,12 @@ services:
       # 能看见「监听地址」这个部署参数。
       COMEM_SERVER_HOST: 0.0.0.0
       # 容器必须绑 0.0.0.0 才能被 `-p` 端口转发与 nginx 的 `proxy_pass
-      # http://comem:1933` 访问（DNAT 到容器 eth0，不是 loopback）。而单用户模式
-      # （auth.enabled: false）只允许监听回环地址，所以这里必须打开多用户登录，
-      # 否则 loadConfig 会在启动时拒绝。首次管理员用启动日志里的初始化令牌创建
-      # （见 docs/operations.md「Docker 部署」）。
-      COMEM_AUTH_ENABLED: "true"
+      # http://comem:1933` 访问（DNAT 到容器 eth0，不是 loopback）。而回环信任
+      # 只允许回环监听，所以这里必须关掉它，否则 loadConfig 会在启动时拒绝。
+      # 关掉之后所有请求都要带 Bearer：经 nginx 来的来源是容器网段，容器内进程
+      # 访问 127.0.0.1:1933 也一样（回环信任是一个全局开关，不按来源地址部分生效）。
+      # 首次管理员用启动日志里的初始化令牌创建（见 docs/operations.md「Docker 部署」）。
+      COMEM_AUTH_TRUST_LOOPBACK: "false"
       # 配置项的真实环境变量名（`config.example.yaml` 不再用 `${…}` 占位符，
       # 改为按 `COMEM_` + 路径大写 + `_` 的规则覆盖）。密钥放宿主环境或同目录的
       # `.env`（compose 自动读取），不要写进这个文件。留空时服务能启动，

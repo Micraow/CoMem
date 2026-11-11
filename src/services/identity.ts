@@ -1,9 +1,9 @@
 /**
  * 身份用例（架构文档 §12.1、§12.5、§12.6）。
  *
- * 这一层把「用户目录 + 组成员」拼成一次请求的身份：HTTP 层从
- * `x-comem-subject` 拿到 `user:alice`，`resolve` 展开成
- * `['group:eng', 'user:alice']`，`AclService` 只认这个集合。规则全部在
+ * 这一层把「用户目录 + 组成员」拼成一次请求的身份：HTTP 层从凭据（或回环信任）
+ * 拿到 `user:alice`，`resolve` 展开成 `['group:eng', 'user:alice']`，
+ * `AclService` 只认这个集合。规则全部在
  * `domain/identity.ts`，持久化全部在两个仓储，这里只做三件事：校验入口、把
  * 「不存在」翻译成 `NOT_FOUND`、把「解析失败」翻译成 `null`。
  *
@@ -465,7 +465,7 @@ export class IdentityService {
   }
 
   /**
-   * 把「主体字符串」解析成一次请求的身份（v1 路径，`auth.enabled: false`）。
+   * 把「主体字符串」解析成一次请求的身份（回环信任路径，`auth.trustLoopback`）。
    *
    * 输入形如 `user:alice`。解析失败（格式不对 / 用户不存在 / 已禁用）返回 `null`，
    * **不抛**——HTTP 层要把它映射成 401 而不是 500。

@@ -3,7 +3,7 @@
  *
  * 这一层只做两件事：把「登录请求」换成 session token，把「入站凭据」换成
  * `RequestContext`。真正的凭据校验（密码哈希、API Key 哈希、账号状态、组展开）
- * 在 `IdentityService.resolve` 里——它同时被 v1 的 `x-comem-subject` 路径使用。
+ * 在 `IdentityService.resolve` 里——回环信任也复用它（`resolveSubject`）。
  *
  * ## 无状态 session
  *

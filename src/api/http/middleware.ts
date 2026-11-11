@@ -7,7 +7,7 @@
  * |---|---|---|
  * | 1 | 可观测 | 用 `withRequestScope` 包住**整个**请求 |
  * | 2 | 请求 ID | 从 `x-request-id` 取，没有就生成；回写响应头 |
- * | 3 | 身份 | 从 `x-comem-subject` 取；缺失时用 v1 单用户默认值 |
+ * | 3 | 身份 | 从 `Authorization: Bearer` 取；没有凭据时只认回环信任 |
  *
  * ## 为什么可观测必须排第一
  *
@@ -16,13 +16,13 @@
  * 这也是唯一一个用 **callback 风格** 的理由：只有 `done()` 在 `run()` 的回调里被调用，
  * Fastify 后续的 Promise 链才会继承这个上下文。
  *
- * ## 身份为什么可以不校验
+ * ## 身份来自凭据，没有第二种来源
  *
- * v1 不做认证：身份由反向代理（Hook 插件、控制台网关）注入 `x-comem-subject`，本服务
- * 只负责把它变成 `RequestContext.subject`。**没这个头时用服务图绑定的主体**
- * （`server.subject`）——单用户桌面部署没有代理，要求它配置一个头只会让
- * `curl /health` 之类的手工调用全部 401。多租户部署要换成真正的认证，那时这里必须
- * 改成「缺失即 401 UNAUTHENTICATED」。
+ * 认证恒开：`Authorization: Bearer <session token 或 API Key>` 是唯一的身份来源。
+ * 唯一的例外是**回环信任**（`auth.trustLoopback`，§12.7）——它是信任策略而不是
+ * 另一个模式，判定收在装配层的 `resolveIdentity` 里。来源地址从 `request.socket`
+ * 读（请求头可以伪造），`Host` 只用来挡 DNS rebinding（`domain/network.ts` 的
+ * `isLoopbackHostHeader`）。
  *
  * ## 中间件抛错
  *
@@ -42,9 +42,6 @@ import type { ObservabilityService } from '../../services/observability.js';
 /** 请求 ID 的响应头与入站头同名（§17.7）。 */
 export const REQUEST_ID_HEADER = 'x-request-id';
 
-/** 注入身份的请求头。v1 由反向代理设置。 */
-export const SUBJECT_HEADER = 'x-comem-subject';
-
 /**
  * 不认证的路径（§17.1、§17.9）。
  *
@@ -58,14 +55,11 @@ const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   '/metrics',
   '/api/v1/health',
   '/api/v1/metrics',
-  // 登录时还没有身份，登出没有服务端状态可清，`GET /auth/config` 是控制台在
-  // 「有没有登录」之前就要回答的问题（§12.7）。两个前缀各列一次，与运维端点同理。
+  // 登录时还没有身份，登出没有服务端状态可清（§12.7）。两个前缀各列一次。
   '/auth/login',
   '/auth/logout',
-  '/auth/config',
   '/api/v1/auth/login',
   '/api/v1/auth/logout',
-  '/api/v1/auth/config',
   // 引导端点（§12.7）：没有身份可言，授权靠回环地址或一次性初始化令牌。两个前缀各列一次。
   '/bootstrap', '/bootstrap/admin', '/api/v1/bootstrap', '/api/v1/bootstrap/admin',
 ]);
@@ -85,12 +79,17 @@ export interface RequestContext {
 /** `resolveIdentity` 的入参：已归一化的请求头。 */
 export type IdentityHeaders = Readonly<Record<string, string | undefined>>;
 
+/** 请求头以外的连接事实：回环信任必须看真实来源地址（TCP 决定，伪造不了）。 */
+export interface IdentityRequest {
+  readonly remoteAddress?: string;
+}
+
 export interface Identity {
   readonly subject: string;
   readonly principals: readonly string[];
 }
 
-export type IdentityResolver = (headers: IdentityHeaders) => Promise<Identity>;
+export type IdentityResolver = (headers: IdentityHeaders, request?: IdentityRequest) => Promise<Identity>;
 
 export type RequestIdMiddleware = (
   request: FastifyRequest,
@@ -212,16 +211,18 @@ export function createRequestIdMiddleware(): RequestIdMiddleware {
 /**
  * 身份（§12.4 的出口清单依赖它）。
  *
- * `resolveIdentity` 由装配方提供：真实实现读头并展开组，测试可以传固定身份。这里只
- * 负责把结果落到请求上下文——认证失败时抛 `ComemError('UNAUTHENTICATED')`，由
- * `error-mapper` 转成 401。
+ * `resolveIdentity` 由装配方提供（真实实现解析凭据 / 回环信任并展开组，测试可以传
+ * 固定身份），这里只负责把结果落到请求上下文。来源地址必须一起传下去：回环信任靠
+ * 它判定，而不是靠请求头。
  */
 export function createIdentityMiddleware(resolve: IdentityResolver): IdentityMiddleware {
   return async (request) => {
     if (PUBLIC_PATHS.has(pathnameOf(request))) {
       return;
     }
-    const identity = await resolve(normalizeHeaders(request.headers));
+    const identity = await resolve(normalizeHeaders(request.headers), {
+      remoteAddress: request.socket.remoteAddress,
+    });
     const context = requestContexts.get(request);
     if (context === undefined) {
       // 请求 ID 中间件没跑：装配顺序错了。抛 INTERNAL 而不是静默丢身份。
