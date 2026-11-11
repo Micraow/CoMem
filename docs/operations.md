@@ -1596,7 +1596,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
     "status": "degraded",
     "subject": "user:local",
     "scopes": ["comem://user/local"],
-    "index": { "nodes": 4 },
+    "index": { "totalNodes": 4 },
     "queue": { "pending": 0, "processing": 0 },
     "summary": { "degraded": false, "pendingDirs": 0, "degradedDirs": 3 },
     "memoryExtract": { "skipped": false, "reason": null },
