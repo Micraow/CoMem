@@ -22,6 +22,7 @@ import type { AuthService } from '../../services/auth.js';
 import type { ContextAssembler } from '../../services/context-assembler.js';
 import type { EmbeddingService } from '../../services/embedding.js';
 import type { FileSystemService } from '../../services/filesystem.js';
+import type { LlmService } from '../../services/llm.js';
 import type { IdentityService } from '../../services/identity.js';
 import type { IndexObserver } from '../../services/index-observer.js';
 import type { MemoryService } from '../../services/memory.js';
@@ -97,6 +98,9 @@ export interface Container {
 
 export interface ContainerServices {
   readonly filesystem: FileSystemService;
+  /** 模型服务（`POST /config/test` 的 LLM 探针）。 */
+  readonly llm: LlmService;
+  readonly embedding: EmbeddingService;
   readonly acl: AclService;
   readonly summary: SummaryService;
   readonly session: SessionService;

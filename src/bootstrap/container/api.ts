@@ -48,11 +48,10 @@ export function createApi(
   memoryStack: MemoryStack,
   background: Background,
 ): Api {
-  const { config, logger, db, index, taskRepository, prompts, userRepository, groupRepository } =
-    core;
+  const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository } = core;
   const { memoryLink } = core;
   const { acl, subject, groups, identity: identityService, auth: authService } = access;
-  const { summary, filesystem, task, session, assembler, ledger, search, indexObserver } =
+  const { summary, filesystem, task, session, assembler, ledger, search, indexObserver, llm, embedding } =
     retrieval;
   const { authorizer } = retrieval;
   const { memory, consolidation, resource, reconcile, skill } = memoryStack;
@@ -92,7 +91,7 @@ export function createApi(
   });
 
   const services: ContainerServices = {
-    filesystem,
+    filesystem, llm, embedding,
     acl,
     summary,
     session,
@@ -114,7 +113,7 @@ export function createApi(
   };
 
   const routes = createHttpRouteGroups({
-    config,
+    config, configSnapshot, llm, embedding,
     observability,
     filesystem,
     acl,

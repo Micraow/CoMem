@@ -124,6 +124,91 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `ingest.extractionTimeoutMs` | `1800000` | 每批阶段二的最长等待（30 分钟）。`0` = 不等。超时按批算，不是按总量 |
 | `ingest.paths.<harness>` | `[]` | 源路径覆盖。留空用默认路径：Claude Code `~/.claude/projects`、Codex `~/.codex/sessions`、DeepSeek `~/Downloads/**/conversations.json`、Qwen `~/Downloads/**/Qwen-chat-export-*.json` |
 
+### 在控制台里改设置
+
+服务端的配置只在**启动时读一次**。控制台不能热改内存里的快照，但可以把修改写进
+第二份配置文件，重启后生效：
+
+```
+环境变量 COMEM_* > {dataDir}/_meta/config.override.yaml > config.yaml > 内置默认值
+```
+
+覆盖文件固定叫 `config.override.yaml`，位置由 `dataDir` 决定（默认数据根下的
+`_meta/`，容器里是 `/var/lib/comem/_meta/config.override.yaml`）。
+
+**加载顺序是两阶段。** `dataDir` 本身在配置里，覆盖文件的位置又由它决定，所以
+`loadConfig` 先合并 `config.yaml` + 环境变量 + 默认值、只解析出 `dataDir`，再读
+覆盖文件、把它合并进**文件层**（仍在环境变量之下），最后完整校验一次。合并是深
+合并：只写 `providers.llm.default.pricing.outputPerMillion` 不会把同段的
+`inputPerMillion` 清掉。
+
+**覆盖文件里不能写 `dataDir`。** 它决定覆盖文件自己在哪里，改它等于换库；出现即
+启动失败，并提示改用 `--data-dir` 或 `COMEM_DATA_DIR`。覆盖文件里的未知键（拼写
+错误）与类型错误同样在启动期失败，错误消息带覆盖文件路径与字段。
+
+#### 三个端点
+
+| 端点 | 权限 | 说明 |
+|---|---|---|
+| `GET /api/v1/config` | 系统管理员 | 全部 84 个叶子。每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；密钥类只回 `configured` 与 `masked`（`****abcd`，末 4 位），`value` 是 `null` |
+| `PATCH /api/v1/config` | 系统管理员 | 请求体 `{ "values": { "providers.llm.default.baseUrl": "http://127.0.0.1:8089/v1" } }`；先完整校验，合法才原子写入（同目录临时文件 + `rename`，权限 `0600`） |
+| `POST /api/v1/config/test` | 系统管理员 | 请求体 `{ "target": "llm" \| "embedding" \| "rerank" }`，回 `{ ok, latencyMs, detail }` |
+
+`GET /api/v1/config` 顶层另有 `overridePath` 与 `overrideWritable`（`fs.access`
+的结果）。`PATCH` 成功回 `{ written, overridePath, restartRequired: true }`——
+**写了覆盖文件不等于生效**，必须重启进程。
+
+**密钥的写入口只有 `apiKey`（以及不可编辑的 `auth.sessionSecret`）。** 写空串
+等于清除（`apiKey: ""`），不写这个键等于不改。`GET` 的响应里永远没有明文；
+`masked` 只保留末 4 位。
+
+**这些值不可编辑，而且 `value` 恒为 `null`**（只回 `reason`）：`dataDir`、
+`auth.sessionSecret`、`auth.adminUserIds`、`auth.trustLoopback`、`server.host`、
+`server.port`、`logging.file`、`ingest.paths.*`、`task.*`。它们是部署拓扑、认证
+边界或任务队列内部参数，暴露出去不会让控制台多出可用的设置，只会多出提权目标。
+`retrieval.queryFilters` 的值可见但也不可写：schema 只校验它是字符串数组，非法
+正则要等到检索时才报错。
+
+**`POST /api/v1/config/test` 测的是当前进程已生效的配置，不是刚写到磁盘、还没
+重启的覆盖文件。** 三个探针分别是：LLM 发一条 `maxTokens: 1` 的普通 completion
+（不走结构化输出，非 JSON 网关也能测）；Embedding 嵌一个唯一短串，同时检查
+`degraded` / `reason` 与 `vectors[0].length === dimension`（`type: disabled` 不抛
+错，只回 `degraded`）；Rerank 直接 `POST <baseUrl>/rerank`。失败一律
+`ok: false` 并带 `detail`。
+
+#### Docker 下怎么写
+
+容器里 `dataDir` 默认是 `/var/lib/comem`，`/var/lib/comem/_meta` 在数据卷里。
+只要卷不是只读挂载，控制台的 `PATCH` 就能写；镜像里的 `USER node` 需要有该目录
+的写权限。若数据根不可写，`GET /config` 的 `overrideWritable` 为 `false`，`PATCH`
+以 `INTERNAL` 失败，不会留下半截文件。
+
+```yaml
+services:
+  comem:
+    volumes:
+      - comem-data:/var/lib/comem   # 不要加 :ro；覆盖文件要写在这里
+```
+
+#### 回滚
+
+覆盖文件是普通的 YAML，回滚等价于删键或删文件：
+
+```bash
+# 删掉一条（或几条）覆盖，保留其余
+$EDITOR /var/lib/comem/_meta/config.override.yaml
+
+# 全部回滚到 config.yaml / 环境变量
+rm /var/lib/comem/_meta/config.override.yaml
+```
+
+两种操作都要重启进程。没有热重载：没有 `SIGHUP`，也没有 `fs.watch`。`PATCH` 不会
+假装成功，响应里的 `restartRequired: true` 是固定值。
+
+`pnpm check:config` 也会读覆盖文件：里面的每个键必须是 schema 里存在的节点，拼错
+（zod 默认会安静剥掉未知字段）会让检查失败；覆盖文件**不需要**被 `config.yaml`
+覆盖，它就是用来覆盖的。
+
 ### Hook 的注入预算
 
 `SessionStart` 往对话里注入三个块（`<comem-profile>` / `<comem-preferences>` /
@@ -1016,7 +1101,7 @@ docker run --rm comem:local node -e "require('node:sqlite'); require('sqlite-vec
 
 **容器内外结果一致**（`1968 passed | 1 skipped`，105 个文件）。`resolveDataDir` 仍用
 `existsSync('/.dockerenv') || pid === 1` 判定容器，但 `loadConfig` 把 `container` /
-`isRoot` 做成可注入参数（`src/config/index.ts:270`），`tests/unit/config.test.ts` 的
+`isRoot` 做成可注入参数（`src/config/index.ts:212`），`tests/unit/config.test.ts` 的
 `dataDir` 用例显式传 `container: false`（`:132`）、`container: true`（`:156`）、
 `isRoot: true`（`:166`），断言与运行环境无关——之前那 3 条「容器里 dataDir 推导成
 XDG 路径」的失败因此不再出现。

@@ -3949,6 +3949,36 @@ task:
 
 环境变量覆盖：`COMEM_<SECTION>_<KEY>`。所有魔法数字集中在这里，判断标准是「改一个值要翻几个文件」。
 
+**控制台写的是第二份配置文件。** 服务端配置只在启动时读一次，没有热重载（没有
+`SIGHUP`、没有 `fs.watch`）。控制台把修改写到
+`{dataDir}/_meta/config.override.yaml`，优先级是：
+
+```
+环境变量 COMEM_* > 覆盖文件 > config.yaml > 内置默认值
+```
+
+加载是两阶段的：`dataDir` 本身在配置里，覆盖文件的位置又由它决定，所以先合并
+`config.yaml` + 环境变量 + 默认值、只解析出 `dataDir`，再读覆盖文件并合并进**文件
+层**（仍在环境变量之下），最后完整 `safeParse` 一次。合并是深合并。覆盖文件不允许
+写 `dataDir`（改它等于换库）；未知键（zod 默认会剥掉）与类型错误都在启动期失败，
+错误消息带覆盖文件路径与字段。
+
+三个端点都只给系统管理员（`auth.adminUserIds` + 引导管理员）：
+
+| 端点 | 行为 |
+|---|---|
+| `GET /api/v1/config` | 84 个叶子，每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；顶层 `overridePath` / `overrideWritable`。密钥类只回 `configured` 与 `masked`（末 4 位），`value` 是 `null` |
+| `PATCH /api/v1/config` | 写覆盖文件。先完整校验，合法才原子写（临时文件 + `rename`，`0600`）；回 `restartRequired: true` |
+| `POST /api/v1/config/test` | `target: llm` 发一条 `maxTokens: 1` 的 completion；`embedding` 嵌唯一短串并检查 `degraded` / 维度；`rerank` 直接 `POST <baseUrl>/rerank`。测的是**当前进程已生效**的配置 |
+
+**明文永不出现在响应里。** `apiKey` / `auth.sessionSecret` 只回 `configured` 与
+`masked`（`****abcd`）；`apiKey` 写空串等于清除，不写等于不改。`dataDir`、
+`auth.sessionSecret`、`auth.adminUserIds`、`auth.trustLoopback`、`server.host`、
+`server.port`、`logging.file`、`ingest.paths.*`、`task.*` 除了 `editable: false`
+之外，`value` 也置 `null` 并附 `reason`——只靠 `editable` 仍然是「值在响应里，
+只是看起来不可写」。`retrieval.queryFilters` 可见但不可写（非法正则没有启动期
+校验）。写入不改变运行中的配置；「保存成功」与「已经生效」在控制台上必须分开。
+
 **`server.subject` 是回环信任使用的身份，不是认证配置。** `auth.trustLoopback` 打开时，来源是回环地址、又没有带凭据的请求被认证成它；`Authorizer` 收的是每请求的 `principals`，这条路径只展开「绑定的那个用户 + 它加入的组」+ `user:*`（`src/bootstrap/container/api.ts` 的 `resolveBoundSubject`）。带凭据的请求每个独立求权（§12.7）。默认 `user:local` 只服务于 `pnpm dev` 的桌面形态；生产部署要显式写成实际的用户（如 `user:alice`）。格式校验在 `loadConfig` 里做（`user:{id}` / `group:{id}`，id 与用户目录同一套字符集），非法值在启动时抛 `INVALID_ARGUMENT`，不会拖到第一个请求。`group:{gid}` 能通过格式校验，但绑定身份只接受 `user` 主体，`createContainer` 会以 `INVALID_ARGUMENT` 拒绝——组永远不能当认证主体。
 
 **控制台不读这个值。** 它的身份来自登录响应；`GET /bootstrap` 只回 `boundSubject` 作为 `/setup` 的默认用户名（§16）。给控制台加 `NUXT_PUBLIC_SUBJECT` 只是把配置复制一份，两边迟早不一致。

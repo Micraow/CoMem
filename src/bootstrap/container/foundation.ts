@@ -34,8 +34,8 @@ import { SqliteFtsIndex } from '../../adapters/sqlite/retrieval-index.js';
 import { TaskRepository } from '../../adapters/sqlite/task-repository.js';
 import { UserRepository } from '../../adapters/sqlite/user-repository.js';
 import { SqliteVectorIndex } from '../../adapters/sqlite/vector-index.js';
-import { loadConfig } from '../../config/index.js';
-import type { ComemConfig } from '../../config/index.js';
+import { loadConfigSnapshot } from '../../config/index.js';
+import type { ComemConfig, ConfigSnapshot } from '../../config/index.js';
 import type { Logger } from '../../domain/log.js';
 import { MemoryLinkService } from '../../services/memory-link.js';
 import { PromptService } from '../../services/prompt-service.js';
@@ -48,6 +48,8 @@ const DATABASE_FILE = 'comem.sqlite';
 /** 适配器、仓储与进程级单例。后续每个阶段都收这一份，不再各自 `new`。 */
 export interface Foundation {
   readonly config: ComemConfig;
+  /** 配置的四层输入与来源：`GET /config` 读它，避免请求时重读磁盘。 */
+  readonly configSnapshot: ConfigSnapshot;
   readonly logger: Logger;
   readonly dataDir: string;
   readonly db: DatabaseSync;
@@ -69,11 +71,12 @@ export interface Foundation {
 }
 
 export function createFoundation(options: CreateContainerOptions): Foundation {
-  const config = loadConfig({
+  const configSnapshot = loadConfigSnapshot({
     ...(options.configPath === undefined ? {} : { path: options.configPath }),
     ...(options.env === undefined ? {} : { env: options.env }),
     argv: [...(options.argv ?? [])],
   });
+  const config = configSnapshot.config;
 
   const consoleLogger = new ConsoleLogger({ level: config.logging.level });
   const logger =
@@ -124,6 +127,7 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
 
   return {
     config,
+    configSnapshot,
     logger,
     dataDir,
     db,

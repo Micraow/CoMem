@@ -52,14 +52,17 @@
  * 分支条件恒假。这些都是「配置到达了代码」，不是「配置到达了行为」。
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as ts from 'typescript';
 import { parse as parseYaml } from 'yaml';
 
+import { resolveConfigPaths } from '../src/config/index.js';
+import { readConfigFile } from '../src/config/file.js';
 import { configSchema } from '../src/config/schema.js';
+import { errorMessage } from '../src/domain/errors.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC_DIR = join(ROOT, 'src');
@@ -275,6 +278,20 @@ function collectLeaves(value: unknown, prefix: readonly string[] = []): string[]
   return leaves;
 }
 
+/** 对象路径 + 叶子路径：覆盖文件把对象写成标量时是类型错误，不是未知键。 */
+function collectNodes(value: unknown, prefix: readonly string[] = []): string[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return [];
+  }
+  const nodes: string[] = [];
+  for (const [key, child] of Object.entries(value)) {
+    const path = [...prefix, key];
+    nodes.push(path.join('.'));
+    nodes.push(...collectNodes(child, path));
+  }
+  return nodes;
+}
+
 function main(): void {
   const configFile = ts.readConfigFile(join(ROOT, 'tsconfig.json'), (path) =>
     readFileSync(path, 'utf8'),
@@ -303,7 +320,8 @@ function main(): void {
     fail('`ComemConfig` 不是对象类型。');
   }
   const { nodes, paths: configPaths, symbols: configSymbols } = buildConfigTree(checker, configType);
-  const leaves = collectLeaves(configSchema.parse({}));
+  const configDefaults = configSchema.parse({});
+  const leaves = collectLeaves(configDefaults);
 
   const sourceFiles = program
     .getSourceFiles()
@@ -527,6 +545,51 @@ function main(): void {
   const missingInExample = leaves.filter((leaf) => !exampleLeaves.has(leaf));
   const staleInExample = [...exampleLeaves].filter((leaf) => !schemaLeaves.has(leaf)).sort();
 
+  // ── 覆盖文件：里面的键必须是 schema 里存在的节点 ──
+  //
+  // 覆盖文件**不需要**被 `config.yaml` 覆盖——它就是用来覆盖的。这里只回答「这个
+  // 键拼对了吗」：zod 默认剥掉未知字段，拼错的键会安静地不生效。
+  let overridePath = '(无法定位)';
+  const overrideOut: string[] = [];
+  let overrideIssueCount = 0;
+  try {
+    overridePath = resolveConfigPaths({ argv: process.argv.slice(2) }).overridePath;
+  } catch (error) {
+    overrideOut.push(`  ✗ 无法定位覆盖文件：${errorMessage(error)}`);
+    overrideIssueCount += 1;
+  }
+  if (overridePath !== '(无法定位)') {
+    if (!existsSync(overridePath)) {
+      overrideOut.push('  （不存在：没有覆盖任何配置）');
+    } else {
+      try {
+        const overrideValue = readConfigFile(overridePath, process.env, 'override');
+        const schemaNodes = new Set(collectNodes(configDefaults));
+        const schemaLeaves = new Set(leaves);
+        for (const path of collectLeaves(overrideValue)) {
+          if (schemaNodes.has(path)) {
+            continue;
+          }
+          // 挂在已知叶子下面的值（如 `apiKey: {x: 1}`）是类型错误；启动期会报。
+          let prefix = '';
+          if (
+            path.split('.').some((segment) => {
+              prefix = prefix === '' ? segment : `${prefix}.${segment}`;
+              return schemaLeaves.has(prefix);
+            })
+          ) {
+            continue;
+          }
+          overrideOut.push(`  ✗ 覆盖文件里的键 ${path} 不在 schema 里（拼写错误？）`);
+          overrideIssueCount += 1;
+        }
+      } catch (error) {
+        overrideOut.push(`  ✗ ${errorMessage(error)}`);
+        overrideIssueCount += 1;
+      }
+    }
+  }
+
   // ── 输出 ──
   const out: string[] = [];
   out.push(`配置叶子 ${String(leaves.length)} 个`);
@@ -584,7 +647,14 @@ function main(): void {
     newOptionalDependencies.length +
     resolvedLegacy.length +
     missingInExample.length +
-    staleInExample.length;
+    staleInExample.length +
+    overrideIssueCount;
+  out.push('');
+  out.push(`覆盖文件 ${overridePath}`);
+  for (const line of overrideOut) {
+    out.push(line);
+  }
+
   out.push('');
   out.push(`歧义匹配 ${String(ambiguities.length)} 处（启发式结果，需人工核对）`);
   for (const ambiguity of ambiguities) {

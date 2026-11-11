@@ -31,9 +31,7 @@ import type { Models } from './models.js';
 import { InheritingAuthorizer } from './ports.js';
 import { fsErrorCode } from '../../domain/errors.js';
 
-/**
- * 召回账本的文件存储。`write` 必须原子（临时文件 + `rename`）：账本损坏时
- * `RecallLedger.load` 会降级成空账本（多投一次），写了一半的 JSON 则会持续损坏。 */
+/** 召回账本的文件存储。`write` 必须原子（临时文件 + `rename`）：半截 JSON 会持续损坏。 */
 class FileLedgerStore implements LedgerStore {
   async read(key: string): Promise<string | null> {
     try {
@@ -79,6 +77,8 @@ export interface Retrieval {
   readonly task: TaskService;
   readonly session: SessionService;
   readonly search: SearchService;
+  /** 模型服务：`POST /config/test` 的探针要用**当前进程已生效**的实例。 */
+  readonly llm: Models['llm']; readonly embedding: Models['embedding'];
 }
 
 type RetrievalCore = Pick<
@@ -236,8 +236,7 @@ export function createRetrieval(
   });
 
   return {
-    summary,
-    assembler,
+    summary, assembler,
     reconcileLog,
     indexObserver,
     authorizer,
@@ -246,5 +245,6 @@ export function createRetrieval(
     task,
     session,
     search,
+    llm, embedding,
   };
 }

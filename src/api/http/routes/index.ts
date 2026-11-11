@@ -10,14 +10,16 @@
  */
 
 import type { ToolRegistry } from '../../mcp/registry.js';
-import type { ComemConfig } from '../../../config/index.js';
+import type { ComemConfig, ConfigSnapshot } from '../../../config/index.js';
 import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AuthService } from '../../../services/auth.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
 import type { ConsolidationService } from '../../../services/consolidation.js';
+import type { EmbeddingService } from '../../../services/embedding.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
 import type { IdentityService } from '../../../services/identity.js';
+import type { LlmService } from '../../../services/llm.js';
 import type { MemoryService } from '../../../services/memory.js';
 import type { MemoryLinkService } from '../../../services/memory-link.js';
 import type { ObservabilityService } from '../../../services/observability.js';
@@ -36,6 +38,7 @@ import { createAclRoutes } from './acl.js';
 import { createAdminRoutes, type AdminAccess } from './admin.js';
 import { createAuthRoutes } from './auth.js';
 import { createBootstrapRoutes, type BootstrapAccess } from './bootstrap.js';
+import { createConfigRoutes } from './config.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
 import { createMcpRoutes } from './mcp.js';
@@ -53,6 +56,16 @@ import { createTelemetryRoutes } from './telemetry.js';
 /** 路由层需要的全部依赖。`acl` 同时是 `Authorizer`（管理面方法也在它上面）。 */
 export interface HttpRouteServices {
   readonly config: ComemConfig;
+  /**
+   * 配置的四层输入与来源（`GET /config`）。
+   *
+   * 与 `config` 分开：生效值是快照，来源只能在加载时留下——请求时重读磁盘会
+   * 把「启动时生效的值」和「现在磁盘上的值」混在一起。
+   */
+  readonly configSnapshot: ConfigSnapshot;
+  /** 模型服务：`POST /config/test` 的 LLM / 嵌入探针。 */
+  readonly llm: LlmService;
+  readonly embedding: EmbeddingService;
   readonly observability: ObservabilityService;
   readonly filesystem: FileSystemService;
   /** 管理面（`getAcl` / `setAcl` / grant / revoke）。 */
@@ -150,6 +163,7 @@ export function createHttpRouteGroups(
     createAdminRoutes(services),
     createAuthRoutes(services),
     createBootstrapRoutes(services),
+    createConfigRoutes(services),
     createPromptRoutes(services),
     createMcpRoutes(services),
     createOpsRoutes(services),

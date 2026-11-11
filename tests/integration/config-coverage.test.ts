@@ -73,6 +73,11 @@ vi.mock('../../src/config/index.js', async (importOriginal) => {
     ...actual,
     loadConfig: (options?: Parameters<typeof actual.loadConfig>[0]) =>
       trace.wrap(actual.loadConfig(options), ''),
+    // 装配已经改读 `loadConfigSnapshot`；两个入口都要包，否则 L4 记录不到任何读取。
+    loadConfigSnapshot: (options?: Parameters<typeof actual.loadConfigSnapshot>[0]) => {
+      const snapshot = actual.loadConfigSnapshot(options);
+      return { ...snapshot, config: trace.wrap(snapshot.config, '') };
+    },
   };
 });
 
