@@ -7,18 +7,22 @@
  * 之后仍会发 `user:local`，服务端的身份中间件按「请求头与绑定主体不一致」返回
  * 401——配置项存在但不生效，而且控制台看起来一切正常。
  *
- * ## 两种部署形态
+ * ## 三种部署形态
  *
+ * - **没有账号**（`GET /bootstrap` 的 `needsSetup: true`，新装即如此）：整站进
+ *   初始化页。空数据根 + 默认配置下浏览器里没有任何路径能创建第一个可登录账号，
+ *   渲染外壳只会让「没有认证」看起来像正常状态。
  * - `auth.enabled: false`（默认）：身份来自 `x-comem-subject`，`/health` 的
  *   `subject` / `scopes` 就是答案。没有登录页，单用户模式开箱可用。
  * - `auth.enabled: true`：`x-comem-subject` 被忽略，必须带
- *   `Authorization: Bearer <session token 或 API Key>`。此时控制台先探测认证是否
- *   打开，再读浏览器里的会话；没有会话就进登录页。
+ *   `Authorization: Bearer <session token 或 API Key>`。此时读浏览器里的会话；
+ *   没有会话就进登录页。
  *
- * 探测走 `GET /auth/config`：公开、只读、200 恒定，响应体只有
- * `{enabled: boolean}`。曾经用 `POST /auth/logout` 的 200 / 404 推断开关——那是
- * 拿「错误」当正常信号（默认配置下每次加载都在 console 里留一条 404），而且
- * 发了一个登出语义的写请求去做只读探测。
+ * 认证开关与「是否需要初始化」都来自 `GET /bootstrap`：公开、只读、200 恒定。
+ * 曾经用 `POST /auth/logout` 的 200 / 404 推断开关——那是拿「错误」当正常信号
+ * （默认配置下每次加载都在 console 里留一条 404），而且发了一个登出语义的写请求
+ * 去做只读探测。`GET /auth/config` 停止使用：它和 `/bootstrap` 回的是同一个配置
+ * 项，两条路径就是两个真相。
  *
  * ## 认证模式下为什么还要探测作用域
  *
@@ -40,6 +44,7 @@ import {
   writeConsoleSession,
   type ConsoleSession,
 } from './consoleAuth'
+import { fetchConsoleBootstrap, type ConsoleBootstrap } from './consoleBootstrap'
 
 /** 服务端绑定的身份。字段与 MCP `health` 的 `subject` / `scopes` 同名同义（§13.2）。 */
 export interface ConsoleIdentity {
@@ -60,6 +65,11 @@ export interface ConsoleIdentity {
 /** 身份引导的状态。`pending` 只在插件跑完之前存在，控制台挂载时不会再看到它。 */
 export type ConsoleIdentityState =
   | { readonly status: 'pending' }
+  /**
+   * 这份安装还没有任何可登录账号。`app.vue` 渲染初始化页，全局中间件把其它路径
+   * 重定向过去。`bootstrap` 带默认用户名（`boundSubject`）与是否需要重启。
+   */
+  | { readonly status: 'setup-required'; readonly bootstrap: ConsoleBootstrap }
   | { readonly status: 'ready'; readonly identity: ConsoleIdentity }
   /** 认证已打开，但浏览器里没有可用的会话。`app.vue` 渲染登录页。 */
   | { readonly status: 'unauthenticated' }
@@ -127,6 +137,11 @@ export function setConsoleIdentity(identity: ConsoleIdentity): void {
 /** 认证打开且没有可用会话时调用。 */
 export function setConsoleIdentityUnauthenticated(): void {
   state = { status: 'unauthenticated' }
+}
+
+/** 服务端说这份安装还没有可登录账号时调用。 */
+export function setConsoleIdentitySetupRequired(bootstrap: ConsoleBootstrap): void {
+  state = { status: 'setup-required', bootstrap }
 }
 
 /** 插件拉取失败后调用。`message` 是给用户看的整页错误。 */
@@ -261,48 +276,6 @@ export async function fetchConsoleIdentity(
   return readHealthResult(payload)
 }
 
-/**
- * 探测认证是否打开。
- *
- * 见文件头：`GET /auth/config` 是只读端点，认证关闭与打开都返回 200，响应体是
- * `{status:'ok', result:{enabled:boolean}}`。非 200 或字段缺失都不是「能继续往下
- * 走」的答案，直接整页报错——猜一个默认值会让单用户部署以错误的分支启动。
- */
-export async function probeAuthEnabled(
-  baseUrl: string,
-  request: ConsoleRequest,
-): Promise<boolean> {
-  const response = await request(`${trimBase(baseUrl)}/auth/config`, {
-    headers: { accept: 'application/json' },
-  })
-  if (!response.ok) {
-    throw new ConsoleIdentityError(
-      'AUTH_PROBE_FAILED',
-      `服务端 /auth/config 返回 HTTP ${String(response.status)}，控制台无法判断是否启用认证。`,
-    )
-  }
-
-  let payload: unknown
-  try {
-    payload = await response.json()
-  } catch {
-    throw new ConsoleIdentityError(
-      'AUTH_PROBE_FAILED',
-      '服务端 /auth/config 返回的不是 JSON，控制台无法判断是否启用认证。',
-    )
-  }
-
-  const result = isRecord(payload) ? payload['result'] : undefined
-  const enabled = isRecord(result) ? result['enabled'] : undefined
-  if (typeof enabled !== 'boolean') {
-    throw new ConsoleIdentityError(
-      'AUTH_PROBE_FAILED',
-      '服务端 /auth/config 没有返回 enabled 布尔值，控制台无法判断是否启用认证。',
-    )
-  }
-  return enabled
-}
-
 /** `user:alice` → `comem://user/alice`；通配主体与非法形状返回 `null`。 */
 function principalToScope(principal: string): string | null {
   const separator = principal.indexOf(':')
@@ -386,15 +359,24 @@ async function fetchReadableScopes(
 /**
  * 引导身份。插件调一次，结果是 `app.vue` 的整页分支。
  *
- * 认证关闭时不读存储、不要求登录——这是默认配置，必须开箱可用。
+ * 顺序是**先问初始化状态，再按部署形态读身份**：空数据根 + 默认配置下没有任何
+ * 浏览器路径能创建第一个可登录账号，先渲染外壳只会让「没有认证」看起来像正常
+ * 状态。认证关闭时不读存储、不要求登录——这是默认配置，必须开箱可用。
  */
 export async function bootstrapConsoleIdentity(
   baseUrl: string,
   request: ConsoleRequest,
 ): Promise<ConsoleIdentityState> {
-  const authEnabled = await probeAuthEnabled(baseUrl, request)
-  if (!authEnabled) {
-    return { status: 'ready', identity: await fetchConsoleIdentity(baseUrl, request) }
+  const bootstrap = await fetchConsoleBootstrap(baseUrl, request)
+  if (bootstrap.needsSetup) {
+    return { status: 'setup-required', bootstrap }
+  }
+
+  if (!bootstrap.authEnabled) {
+    const identity = await fetchConsoleIdentity(baseUrl, request)
+    // 显式写 `false` 而不是留空：外壳据此显示单用户模式横幅，「没有认证」不能
+    // 只在这个字段缺省时被推断出来。
+    return { status: 'ready', identity: { ...identity, authEnabled: false } }
   }
 
   const session = readConsoleSession()

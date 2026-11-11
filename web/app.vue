@@ -3,19 +3,21 @@
  * 控制台根组件。
  *
  * 身份由 `plugins/console-identity.ts` 在应用挂载前解析（`await` 的插件），所以
- * 这里读到的已经是最终状态：要么有身份，要么明确失败，要么认证打开但没有会话。
+ * 这里读到的已经是最终状态：要么有身份，要么明确失败，要么认证打开但没有会话，
+ * 要么这份安装还没有可登录账号。
  * **身份未知时不渲染任何页面**——服务端会按 401 拒绝，让页面先渲染再报错只会把
  * 「配置没生效」变成一片「请求失败」。
  *
- * 登录页不套外壳：没有身份时连侧栏都不该出现，否则用户会以为登录后还能用那些
- * 导航。单用户模式（`auth.enabled: false`）永远不会进入这个分支。
+ * 登录页与初始化页不套外壳：没有身份时连侧栏都不该出现，否则用户会以为登录后
+ * 还能用那些导航。单用户模式（`auth.enabled: false`）永远不会进入这两个分支。
  */
 import { consoleIdentityState } from '~/composables/consoleIdentity'
 
 const state = consoleIdentityState()
 
 const failureMessage = state.status === 'failed' ? state.message : null
-const unauthenticated = state.status === 'unauthenticated'
+/** 没有外壳的页面：登录页与初始化页。 */
+const shellless = state.status === 'unauthenticated' || state.status === 'setup-required'
 const emptyScopesSubject =
   state.status === 'ready' && state.identity.scopes.length === 0 ? state.identity.subject : null
 
@@ -32,7 +34,7 @@ function retry(): void {
     <button type="button" class="btn btn--primary" @click="retry">重试</button>
   </div>
 
-  <NuxtPage v-else-if="unauthenticated" />
+  <NuxtPage v-else-if="shellless" />
 
   <div v-else-if="state.status === 'pending'" class="bootstrap" aria-busy="true" />
 

@@ -8,12 +8,12 @@ import {
 } from '../../../web/composables/consoleAuth.js';
 import {
   ConsoleIdentityError,
+  bootstrapConsoleIdentity,
   consoleIdentityOrThrow,
   consoleIdentityState,
   fetchConsoleIdentity,
   identityHeaders,
   logoutConsole,
-  probeAuthEnabled,
   type ConsoleRequest,
   type HealthFetcher,
   type HealthResponseLike,
@@ -194,60 +194,96 @@ describe('控制台会话存储', () => {
   });
 });
 
-describe('认证探测（GET /auth/config）', () => {
-  function requestOf(
-    result: unknown,
-    status = 200,
+describe('身份引导的状态机（GET /bootstrap 优先）', () => {
+  const BOOTSTRAP = {
+    needsSetup: false,
+    authEnabled: false,
+    boundSubject: SUBJECT,
+    adminConfigured: true,
+    restartRequired: false,
+    setupTokenRequired: true,
+  } as const;
+
+  /** 按 URL 路由的替身；未登记的路径返回 404。 */
+  function routedRequest(
+    routes: Readonly<Record<string, unknown>>,
     calls: string[] = [],
   ): ConsoleRequest {
     return async (url, init) => {
       calls.push(`${init?.method ?? 'GET'} ${url}`);
+      const payload = routes[url];
       return {
-        ok: status >= 200 && status < 300,
-        status,
-        json: async () => ({ status: status >= 200 && status < 300 ? 'ok' : 'error', result }),
+        ok: payload !== undefined,
+        status: payload === undefined ? 404 : 200,
+        json: async () => payload,
       };
     };
   }
 
-  it('auth.enabled: false 返回 false，且是只读 GET', async () => {
+  it('needsSetup: true 进初始化状态，且不再请求 /health', async () => {
     const calls: string[] = [];
-    const request = requestOf({ enabled: false }, 200, calls);
-
-    await expect(probeAuthEnabled(BASE, request)).resolves.toBe(false);
-    // 旧实现是 `POST /auth/logout` + 404 推断；这里钉住「只读 + 200」。
-    expect(calls).toEqual([`GET ${BASE}/auth/config`]);
-  });
-
-  it('auth.enabled: true 返回 true', async () => {
-    await expect(probeAuthEnabled(BASE, requestOf({ enabled: true }))).resolves.toBe(true);
-  });
-
-  it('非 200 抛 AUTH_PROBE_FAILED，不猜开关', async () => {
-    await expect(probeAuthEnabled(BASE, requestOf({ enabled: false }, 500))).rejects.toMatchObject(
-      { code: 'AUTH_PROBE_FAILED' },
+    const state = await bootstrapConsoleIdentity(
+      BASE,
+      routedRequest(
+        {
+          [`${BASE}/bootstrap`]: {
+            status: 'ok',
+            result: { ...BOOTSTRAP, needsSetup: true, restartRequired: true },
+          },
+        },
+        calls,
+      ),
     );
-  });
 
-  it('响应体缺 enabled 布尔值时抛 AUTH_PROBE_FAILED', async () => {
-    for (const result of [undefined, {}, { enabled: 'false' }, { enabled: 0 }]) {
-      await expect(probeAuthEnabled(BASE, requestOf(result))).rejects.toMatchObject({
-        code: 'AUTH_PROBE_FAILED',
-      });
-    }
-  });
-
-  it('响应体不是 JSON 时抛 AUTH_PROBE_FAILED', async () => {
-    const request: ConsoleRequest = async () => ({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new SyntaxError('Unexpected token < in JSON');
-      },
+    expect(state.status).toBe('setup-required');
+    expect(state).toMatchObject({
+      status: 'setup-required',
+      bootstrap: { needsSetup: true, boundSubject: SUBJECT, restartRequired: true },
     });
+    expect(calls).toEqual([`GET ${BASE}/bootstrap`]);
+  });
 
-    await expect(probeAuthEnabled(BASE, request)).rejects.toMatchObject({
-      code: 'AUTH_PROBE_FAILED',
+  it('needsSetup: false 且认证关闭 → 单用户就绪，身份来自 /health', async () => {
+    const calls: string[] = [];
+    const state = await bootstrapConsoleIdentity(
+      BASE,
+      routedRequest(
+        {
+          [`${BASE}/bootstrap`]: { status: 'ok', result: BOOTSTRAP },
+          [`${BASE}/health`]: {
+            status: 'ok',
+            result: { subject: SUBJECT, scopes: ['comem://user/alice'] },
+          },
+        },
+        calls,
+      ),
+    );
+
+    // `authEnabled: false` 是显式的：外壳据此显示单用户模式横幅。
+    expect(state).toEqual({
+      status: 'ready',
+      identity: { subject: SUBJECT, scopes: ['comem://user/alice'], authEnabled: false },
+    });
+    expect(calls).toEqual([`GET ${BASE}/bootstrap`, `GET ${BASE}/health`]);
+  });
+
+  it('needsSetup: false 且认证打开、没有会话 → 登录页', async () => {
+    clearConsoleSession();
+    const state = await bootstrapConsoleIdentity(
+      BASE,
+      routedRequest({
+        [`${BASE}/bootstrap`]: { status: 'ok', result: { ...BOOTSTRAP, authEnabled: true } },
+      }),
+    );
+
+    expect(state).toEqual({ status: 'unauthenticated' });
+  });
+
+  it('/bootstrap 失败时整页报错，不回落单用户身份', async () => {
+    const request: ConsoleRequest = async () => ({ ok: false, status: 500, json: async () => ({}) });
+
+    await expect(bootstrapConsoleIdentity(BASE, request)).rejects.toMatchObject({
+      code: 'BOOTSTRAP_UNAVAILABLE',
     });
   });
 });
