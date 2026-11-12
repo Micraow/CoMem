@@ -45,6 +45,7 @@ import { createInferenceRoutes } from './inference.js';
 import type { LocalInferencePort } from './inference.js';
 import { createMcpRoutes } from './mcp.js';
 import { createMemoryCreateRoutes } from './memories-create.js';
+import { createMemoryMetaRoutes } from './memories-meta.js';
 import { createMemoryRoutes } from './memories.js';
 import { createOpsRoutes } from './ops.js';
 import { createPromptRoutes } from './prompts.js';
@@ -169,6 +170,7 @@ export function createHttpRouteGroups(
     createAclRoutes(services),
     createMemoryCreateRoutes(services),
     createMemoryRoutes(services),
+    createMemoryMetaRoutes(services),
     createResourceRoutes(services),
     createSkillRoutes(services),
     createAdminRoutes(services),

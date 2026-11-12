@@ -195,7 +195,7 @@ describe('来源徽章', () => {
     expect(CONFIG_SOURCES.map(sourceLabelOf)).toEqual([
       '默认值',
       '配置文件',
-      '覆盖文件',
+      '来自网页保存',
       '环境变量',
     ]);
     expect(new Set(CONFIG_SOURCES.map(sourceToneOf)).size).toBe(4);

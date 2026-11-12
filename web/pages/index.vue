@@ -32,7 +32,11 @@ import {
 import { isFreshInstall } from '~/utils/connectGuide'
 import { fileRouteOf } from '~/utils/fileRoute'
 import { formatMonthDayTime } from '~/utils/format'
-import { healthStatusLabel } from '~/utils/healthLabels'
+import {
+  hasSummaryFailure,
+  healthBadgeOf,
+  isRuleSummary,
+} from '~/utils/healthLabels'
 import {
   taskStatusLabelOf,
   taskTypeLabelOf,
@@ -68,6 +72,18 @@ const TASK_STATUS_VARIANT = {
   running: 'blue',
 } satisfies Record<ClaimableTaskStatus, BadgeVariant>
 
+const healthBadge = computed(() =>
+  health.value === null ? null : healthBadgeOf(health.value),
+)
+
+/**
+ * 「摘要降级目录数」在规则摘要下是正常数据，不是故障。
+ *
+ * 规则生成器产出的每个摘要都会被标成 degraded，因此规则模式下这个数字既不该
+ * 变红，也不该继续叫「降级」。模型生成器下才有真正的失败。
+ */
+const summaryIsRule = computed(() => health.value !== null && isRuleSummary(health.value))
+
 const stats = computed<readonly { key: string; label: string; value: string; tone?: string }[]>(
   () => [
     {
@@ -89,9 +105,10 @@ const stats = computed<readonly { key: string; label: string; value: string; ton
     },
     {
       key: 'degraded',
-      label: '摘要降级目录数',
+      label: summaryIsRule.value ? '规则摘要目录数' : '摘要降级目录数',
       value: health.value === null ? '—' : String(health.value.summary.degradedDirs),
-      tone: (health.value?.summary.degradedDirs ?? 0) > 0 ? 'is-red' : undefined,
+      tone:
+        health.value !== null && hasSummaryFailure(health.value) ? 'is-red' : undefined,
     },
   ],
 )
@@ -160,9 +177,16 @@ function onCreated(uri: string): void {
     <div class="page">
       <DomainPageHeader title="概览">
         <template #actions>
-          <UiBadge v-if="health !== null" :variant="health.status === 'degraded' ? 'orange' : 'green'">
-            {{ healthStatusLabel(health.status) }}
-          </UiBadge>
+          <template v-if="healthBadge !== null">
+            <UiBadge :variant="healthBadge.variant">{{ healthBadge.label }}</UiBadge>
+            <NuxtLink
+              v-if="healthBadge.action === 'configure-model'"
+              to="/settings"
+              class="model-cta"
+            >
+              去配置模型
+            </NuxtLink>
+          </template>
           <UiButton
             variant="secondary"
             size="sm"
@@ -268,5 +292,19 @@ function onCreated(uri: string): void {
 
 .connect-cta {
   text-decoration: none;
+}
+
+/* 徽章旁边的下一步入口。小一号，别抢徽章的注意力。 */
+.model-cta {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.model-cta:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 </style>

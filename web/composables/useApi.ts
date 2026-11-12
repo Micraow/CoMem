@@ -22,6 +22,7 @@ import type { AclEffect, AclLevel, AclMode } from '~/utils/aclLabels'
 import type { FsEntryKind } from '~/utils/fsLabels'
 import type { HealthStatus } from '~/utils/healthLabels'
 import type { NodeStatus } from '~/utils/nodeStatus'
+import type { RetrievalEngine } from '~/utils/searchLabels'
 import type { ClaimableTaskStatus, TaskType } from '~/utils/taskLabels'
 import type { McpToolKind } from '~/utils/toolLabels'
 import type { Ref } from 'vue'
@@ -342,7 +343,7 @@ export interface FsListPayload {
   readonly entries: readonly TreeEntryPayload[]
 }
 
-/** `GET /fs/stat`。`stat` 为 null 表示节点不存在。 */
+/** `GET /fs/stat`。目标不存在时接口返回 404 `NOT_FOUND`；`stat` 为 null 只用于并发删除。 */
 export interface FsStatPayload {
   readonly uri: string
   readonly stat: {
@@ -365,10 +366,37 @@ export interface HealthPayload {
   readonly scopes: readonly string[]
   readonly index: { readonly totalNodes: number }
   readonly queue: { readonly pending: number; readonly processing: number }
+  /**
+   * 摘要层。
+   *
+   * `degraded` 是**生成器选择**：服务端把它设成 `config.summary.generator === 'rule'`。
+   * 规则生成器产出的摘要恒带 `degraded: true`，所以规则模式下 `degradedDirs` 是
+   * 「规则摘要目录数」，不是失败数。模型摘要失败要看 `degraded === false` 且
+   * `degradedDirs > 0`（`utils/healthLabels.ts` 的 `hasSummaryFailure`）。
+   */
   readonly summary: {
     readonly degraded: boolean
     readonly pendingDirs: number
     readonly degradedDirs: number
+  }
+  /** 实际生效的检索策略（`retrieval.engine`）。检索页按它如实标注引擎。 */
+  readonly retrieval: {
+    readonly engine: RetrievalEngine
+  }
+  /**
+   * 归档提交是否跳过记忆抽取。没有配置模型时服务端会跳过 `memory_extract`，
+   * 会话照常归档但不产生记忆。它不参与 `status` 判定（规则摘要已经让 status
+   * 是 degraded），但界面需要它区分「没配」与「配了但坏了」。
+   */
+  readonly memoryExtract: {
+    readonly skipped: boolean
+    readonly reason: 'llm_disabled' | null
+  }
+  /** 重排健康度。`failures` 是累计值，成功一次后 `degraded` 清空。 */
+  readonly rerank: {
+    readonly configured: boolean
+    readonly degraded: boolean
+    readonly failures: number
   }
   /**
    * 记忆健康度（§17.5）。`oldestPendingAgeSeconds` 为 null 表示没有待复核记忆。
@@ -397,6 +425,28 @@ export interface ContentReadPayload {
   readonly uri: string
   readonly text: string
   readonly truncated: boolean
+}
+
+/**
+ * `GET /memories/{uri}` 的单条记忆元数据（文件详情页的「记忆」区块）。
+ *
+ * 与 `GET /content/read` 同一档权限：这是按 URI 读一条记忆的状态与有效期，不是
+ * 管理面数据。`memoryType` / `status` 取自**检索索引**（决定能不能搜到的那一行），
+ * 不是记忆文件的 frontmatter：TTL 归档只改索引行，文件里仍是 `active`。
+ * 两者为 `null` 表示这个文件不在索引里、或不是一条当前记忆（目录、`.history`
+ * 版本文件、`.abstract.md`）——界面显示「未知」，不把它当成「请求失败」。
+ * `status` 的文案在 `utils/nodeStatus.ts`。
+ *
+ * `validFrom` / `validUntil` 在响应里**始终存在**，`null` 表示该侧无界（旧数据
+ * 缺字段与「没有有效期」在界面上是同一种状态）。时间串是 ISO 8601 UTC，展示时
+ * 才换成本地时区。
+ */
+export interface MemoryMetaPayload {
+  readonly uri: string
+  readonly memoryType: string | null
+  readonly status: NodeStatus | null
+  readonly validFrom: string | null
+  readonly validUntil: string | null
 }
 
 /**

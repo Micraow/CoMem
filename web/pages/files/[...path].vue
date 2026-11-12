@@ -16,6 +16,13 @@
  * 右栏的摘要来源与新鲜度只展示服务端真的有的字段：单节点的生成时间、模型、
  * 版本当前没有出口，界面写「未知」而不是拿全站数字冒充单节点状态。
  *
+ * ## 记忆节点显示检索资格
+ *
+ * `memories/` 下的文件另外取一次 `GET /memories/{uri}`：记忆类型、状态、有效期与
+ * 「能否被检索」。后者由状态推导——检索只返回 `active` 节点，`pending` 与
+ * `archived` 在 `find` / `search` / `glob` 里都被过滤掉。这份元数据与摘要、关联边
+ * 各自独立失败，取不到只影响「记忆」区块。
+ *
  * ## 摘要失败不连坐正文
  *
  * `/fs/stat` 与 `/content/abstract` 对同一 URI 都是读权限，摘要取不到不代表节点
@@ -26,6 +33,7 @@ import { AlertTriangle, Copy, FolderOpen, Info } from 'lucide-vue-next'
 
 import {
   errorMessageOf,
+  forbiddenMessageOf,
   useApi,
   type AclPayload,
   type ContentReadPayload,
@@ -33,6 +41,7 @@ import {
   type HealthPayload,
   type MemoryLinkPayload,
   type MemoryLinksPayload,
+  type MemoryMetaPayload,
   type SummaryLayerPayload,
   type TreeEntryPayload,
 } from '~/composables/useApi'
@@ -113,6 +122,15 @@ const memoryLinks = ref<readonly MemoryLinkPayload[]>([])
 const memoryBacklinks = ref<readonly MemoryLinkPayload[]>([])
 const linksError = ref<string | null>(null)
 
+/**
+ * 记忆元数据（仅 `memories/` 下的文件）。
+ *
+ * 与摘要、关联边一样的独立失败域：取不到只影响右栏的「记忆」区块，正文与权限
+ * 照常显示。`null` 表示还没取到或这个节点不是可解析的记忆，界面按「未知」处理。
+ */
+const memoryMeta = ref<MemoryMetaPayload | null>(null)
+const memoryMetaError = ref<string | null>(null)
+
 /** 文件的有效权限来自父目录；等于当前节点时不显示「继承自」。 */
 const aclInheritedFrom = computed(() =>
   aclScope.value !== null && aclScope.value !== selectedUri.value ? aclScope.value : null,
@@ -145,6 +163,14 @@ const visibleLayerTabs = computed(() =>
  * 不请求，也不显示一个「不适用」的空区块。
  */
 const isMemoryNode = computed(() => selectedUri.value !== null && isMemoryUri(selectedUri.value))
+
+/**
+ * 右栏「记忆」区块的显示条件：`memories/` 下的**文件**。
+ *
+ * 目录（例如 `memories/rules`）也是记忆路径，但没有一条记忆的元数据；给它一个
+ * 「未知」区块只会让人以为状态读不出来。
+ */
+const memoryMetaEnabled = computed(() => isMemoryNode.value && entryKind.value === 'file')
 
 const outgoingRows = computed<readonly LinkRow[]>(() => linkRowsOf(memoryLinks.value, 'links'))
 const backlinkRows = computed<readonly LinkRow[]>(() =>
@@ -211,6 +237,28 @@ async function loadLinks(uri: string): Promise<void> {
   }
 }
 
+/**
+ * 单条记忆的元数据。
+ *
+ * 路径形状与关联边相同：URI 作为路径参数，逐段 `encodeURIComponent`（`comem://`
+ * 里的 `:` 与 `/` 不编码会被 Fastify 当成多段路径）。权限与正文同一档。
+ *
+ * 403 换成用户能读懂的那句；其它失败保留服务端消息，那是排查依据。切换节点后
+ * 迟到的响应属于上一个节点，直接丢弃。
+ */
+async function loadMemoryMeta(uri: string): Promise<void> {
+  try {
+    const payload = await api.get<MemoryMetaPayload>(`/memories/${encodeURIComponent(uri)}`)
+    if (selectedUri.value === uri) {
+      memoryMeta.value = payload
+    }
+  } catch (caught) {
+    if (selectedUri.value === uri) {
+      memoryMetaError.value = forbiddenMessageOf(caught, '你没有权限查看这条记忆的状态')
+    }
+  }
+}
+
 async function loadNode(uri: string): Promise<void> {
   loading.value = true
   error.value = null
@@ -227,6 +275,8 @@ async function loadNode(uri: string): Promise<void> {
   memoryLinks.value = []
   memoryBacklinks.value = []
   linksError.value = null
+  memoryMeta.value = null
+  memoryMetaError.value = null
   degraded.value = false
   layer.value = 'l0'
   loadedLayers.value = new Set<LevelTab>(['l0'])
@@ -242,6 +292,11 @@ async function loadNode(uri: string): Promise<void> {
 
     if (health.value === null) {
       void loadHealth()
+    }
+
+    // 记忆元数据也是独立请求：失败只影响右栏的「记忆」区块。
+    if (statPayload.stat.kind === 'file' && isMemoryUri(uri)) {
+      void loadMemoryMeta(uri)
     }
 
     // ACL 只能设在目录上：文件的有效权限来自最近的目录祖先。
@@ -531,6 +586,9 @@ onBeforeUnmount(() => {
                 :acl="acl"
                 :acl-error="aclError"
                 :acl-inherited-from="aclInheritedFrom"
+                :memory-enabled="memoryMetaEnabled"
+                :memory="memoryMeta"
+                :memory-error="memoryMetaError"
                 :loading="loading"
               />
             </div>

@@ -47,6 +47,25 @@ export const DEFAULT_SERVER_BASE_URL = 'http://127.0.0.1:1933'
 /** MCP 端点路径（`docs/architecture.md` §15.6）。 */
 export const MCP_ENDPOINT_PATH = '/mcp'
 
+/**
+ * 从控制台实际使用的 API 地址推导服务地址。
+ *
+ * `useApi()` 把 `runtimeConfig.public.apiBase` 拼在路径前面；默认值是相对路径
+ * （`/api/v1`），由 Nuxt 的 devProxy / 反向代理转到后端，浏览器这一侧看不到后端
+ * 端口。只有部署把 `apiBase` 配成绝对地址（`http://host:port/api/v1`）时才能
+ * 可靠地取到 origin；相对路径返回 `null`，页面改用可编辑的服务地址输入框。
+ */
+export function serverBaseUrlFromApiBase(apiBase: string): string | null {
+  if (!/^https?:\/\//iu.test(apiBase)) {
+    return null
+  }
+  try {
+    return new URL(apiBase).origin
+  } catch {
+    return null
+  }
+}
+
 /** MCP 服务器名；决定宿主里的工具前缀（`mcp__comem__*`）。 */
 export const MCP_SERVER_NAME = 'comem'
 
@@ -249,6 +268,10 @@ export type VerificationTone = 'ok' | 'warn' | 'fail' | 'idle'
 
 export interface VerificationHealth {
   readonly status: 'ok' | 'degraded'
+  /** 没有模型时的精简模式；有就据此给出健康状态的说明。 */
+  readonly memoryExtract?: { readonly skipped: boolean }
+  /** 规则摘要也是合法状态，不该在「服务端可达」里说成降级。 */
+  readonly summary?: { readonly degraded: boolean }
 }
 
 export interface VerificationSession {
@@ -305,14 +328,26 @@ function latestActivityOf(sessions: readonly VerificationSession[]): string | nu
  * 并把本机命令放在 `hint` 里，不声称「已推进」。
  */
 export function deriveVerification(input: VerificationInput): VerificationResult {
+  // `/health` 返回 200 就说明服务端可达；健康状态放在 detail 里单独说，不再把
+  // 「可达」与「降级」挤进同一个徽章（规则摘要 / 未配置模型都会让 status 是
+  // degraded，那是合法配置，不是连不上）。
+  let serverDetail = '已连通，运行正常'
+  if (input.health !== null) {
+    if (input.health.memoryExtract?.skipped === true) {
+      serverDetail = '已连通，当前是精简模式（未配置模型）'
+    } else if (input.health.summary?.degraded === true) {
+      serverDetail = '已连通，当前使用规则摘要'
+    } else if (input.health.status === 'degraded') {
+      serverDetail = '已连通，但服务报告降级运行'
+    }
+  }
+
   const server: VerificationCheck =
     input.healthError !== null
       ? { key: 'server', label: '服务端可达', tone: 'fail', detail: input.healthError, hint: null }
       : input.health === null
         ? { key: 'server', label: '服务端可达', tone: 'idle', detail: '还没有检查', hint: null }
-        : input.health.status === 'degraded'
-          ? { key: 'server', label: '服务端可达', tone: 'warn', detail: '服务端报告降级运行', hint: null }
-          : { key: 'server', label: '服务端可达', tone: 'ok', detail: '运行正常', hint: null }
+        : { key: 'server', label: '服务端可达', tone: 'ok', detail: serverDetail, hint: null }
 
   let sessions: VerificationCheck
   if (input.sessionsError !== null) {

@@ -244,7 +244,7 @@ import {
   useApi,
   type HealthPayload,
 } from '~/composables/useApi'
-import { healthStatusLabel } from '~/utils/healthLabels'
+import { healthBadgeOf } from '~/utils/healthLabels'
 
 useHead({ title: '监控 · CoMem 控制台' })
 
@@ -290,16 +290,9 @@ const availableMetrics = computed<readonly string[]>(() =>
   ),
 )
 
-const healthBadge = computed<{ variant: 'green' | 'orange'; label: string } | null>(() => {
-  const status = health.value?.status
-  if (status === undefined) {
-    return null
-  }
-  return {
-    variant: status === 'degraded' ? 'orange' : 'green',
-    label: healthStatusLabel(status),
-  }
-})
+const healthBadge = computed(() =>
+  health.value === null ? null : healthBadgeOf(health.value),
+)
 
 /**
  * 取 Prometheus 文本。
@@ -353,9 +346,16 @@ onMounted(load)
     <div class="page">
       <DomainPageHeader title="监控">
         <template #actions>
-          <UiBadge v-if="healthBadge !== null" :variant="healthBadge.variant">
-            {{ healthBadge.label }}
-          </UiBadge>
+          <template v-if="healthBadge !== null">
+            <UiBadge :variant="healthBadge.variant">{{ healthBadge.label }}</UiBadge>
+            <NuxtLink
+              v-if="healthBadge.action === 'configure-model'"
+              to="/settings"
+              class="model-cta"
+            >
+              去配置模型
+            </NuxtLink>
+          </template>
           <UiButton variant="secondary" size="sm" :disabled="loading" @click="load">
             <RefreshCw :size="14" :stroke-width="1.5" />
             刷新
@@ -435,6 +435,20 @@ onMounted(load)
 <style scoped>
 .section {
   margin-bottom: 26px;
+}
+
+/* 徽章旁边的下一步入口。 */
+.model-cta {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.model-cta:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .section__title {

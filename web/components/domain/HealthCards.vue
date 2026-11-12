@@ -40,6 +40,7 @@ export function formatDuration(seconds: number): string {
 
 <script setup lang="ts">
 import type { HealthPayload } from '~/composables/useApi'
+import { hasSummaryFailure, isRuleSummary } from '~/utils/healthLabels'
 
 const props = defineProps<{
   health: HealthPayload | null
@@ -52,6 +53,16 @@ interface StatCard {
   readonly value: string
   readonly sub: string | null
 }
+
+/**
+ * 规则摘要不是故障。`summary.degraded` 是生成器选择，规则生成器产出的摘要恒带
+ * `degraded`，所以这个模式下 `degradedDirs` 只能叫「规则摘要目录数」。
+ */
+const summary = computed(() => props.health?.summary ?? null)
+const ruleSummary = computed(() => summary.value !== null && isRuleSummary({ summary: summary.value }))
+const summaryFailed = computed(
+  () => summary.value !== null && hasSummaryFailure({ summary: summary.value }),
+)
 
 const stats = computed<readonly StatCard[]>(() => {
   const health = props.health
@@ -80,14 +91,12 @@ const stats = computed<readonly StatCard[]>(() => {
     },
     {
       key: 'degraded',
-      label: '摘要降级目录数',
+      label: ruleSummary.value ? '规则摘要目录数' : '摘要降级目录数',
       value: health === null ? '—' : String(health.summary.degradedDirs),
       sub: health === null ? null : `待刷新 ${health.summary.pendingDirs}`,
     },
   ]
 })
-
-const summary = computed(() => props.health?.summary ?? null)
 
 /** 摘要工作有问题的目录数：降级 + 待刷新。 */
 const attentionDirs = computed(() => {
@@ -112,20 +121,40 @@ const degradedPercent = computed<number>(() =>
     </div>
 
     <div v-if="summary !== null" class="health__gauge">
-      <UiProgress
-        :value="summary.degradedDirs"
-        :max="Math.max(attentionDirs, 1)"
-        label="摘要降级占待处理摘要目录的比例"
-      />
-      <p class="health__note">
-        <template v-if="attentionDirs === 0">
-          摘要生成正常：没有降级目录，也没有待刷新的目录。
-        </template>
-        <template v-else>
-          {{ summary.degradedDirs }} 个目录降级为规则摘要，{{ summary.pendingDirs }} 个目录待刷新，
-          合计 {{ attentionDirs }} 个目录（{{ degradedPercent }}% 已降级）。
-        </template>
-      </p>
+      <template v-if="ruleSummary">
+        <div class="health__state">
+          <UiBadge variant="gray">规则摘要（正常）</UiBadge>
+        </div>
+        <p class="health__note">
+          当前使用规则摘要，属于正常；配置模型后可恢复模型摘要。
+          <template v-if="summary.degradedDirs > 0">
+            已生成规则摘要的目录 {{ summary.degradedDirs }} 个。
+          </template>
+          <template v-if="summary.pendingDirs > 0">
+            另有 {{ summary.pendingDirs }} 个目录待刷新。
+          </template>
+        </p>
+      </template>
+      <template v-else>
+        <UiProgress
+          v-if="summaryFailed"
+          :value="summary.degradedDirs"
+          :max="Math.max(attentionDirs, 1)"
+          label="模型摘要失败后退回规则摘要的目录比例"
+        />
+        <p class="health__note">
+          <template v-if="summaryFailed">
+            {{ summary.degradedDirs }} 个目录的模型摘要失败，已退回规则摘要；
+            {{ summary.pendingDirs }} 个目录待刷新，合计 {{ attentionDirs }} 个目录（{{ degradedPercent }}% 已降级）。
+          </template>
+          <template v-else-if="summary.pendingDirs > 0">
+            没有失败的摘要；{{ summary.pendingDirs }} 个目录待刷新。
+          </template>
+          <template v-else>
+            摘要生成正常：没有降级目录，也没有待刷新的目录。
+          </template>
+        </p>
+      </template>
     </div>
   </div>
 </template>
@@ -150,6 +179,12 @@ const degradedPercent = computed<number>(() =>
   border-radius: var(--r-card);
   background: var(--surface);
   box-shadow: var(--inset-hair), var(--shadow-card);
+}
+
+.health__state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .health__note {

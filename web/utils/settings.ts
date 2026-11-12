@@ -236,7 +236,7 @@ const GROUP_LABELS = {
 const SOURCE_LABELS = {
   default: '默认值',
   file: '配置文件',
-  override: '覆盖文件',
+  override: '来自网页保存',
   env: '环境变量',
 } satisfies Record<ConfigSource, string>
 
@@ -252,7 +252,7 @@ const SOURCE_TONES = {
 const SOURCE_NOTES = {
   default: '没有任何配置文件与环境变量设置它。',
   file: '来自 config.yaml。保存后写入覆盖文件，覆盖它。',
-  override: '来自覆盖文件（本页写入的那份）。',
+  override: '来自本页保存的那份配置；重启后才会成为正在运行的值。',
   env: '环境变量优先于本页设置；要改它得改环境变量再重启。',
 } satisfies Record<ConfigSource, string>
 
@@ -884,4 +884,19 @@ export function testSummaryOf(result: ConfigTestPayload): string {
 /** 分组是否是三组可测试的模型供应商之一。 */
 export function isConfigTestTarget(group: ConfigGroup): group is ConfigTestTarget {
   return (CONFIG_TEST_TARGETS as readonly string[]).includes(group)
+}
+
+/**
+ * 每个可测试分组对应的 `type` 字段。类型是「停用」时没有可调的供应商，
+ * `/config/test` 只会返回参数错误；页面据此不发请求。
+ */
+const CONFIG_TEST_TYPE_PATHS = {
+  llm: 'providers.llm.default.type',
+  embedding: 'providers.embedding.type',
+  rerank: 'providers.rerank.type',
+} satisfies Record<ConfigTestTarget, string>
+
+/** 可测试分组 → 该组 `type` 的配置路径。 */
+export function testTypePathOf(target: ConfigTestTarget): string {
+  return CONFIG_TEST_TYPE_PATHS[target]
 }

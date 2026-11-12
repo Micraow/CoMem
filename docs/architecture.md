@@ -34,7 +34,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 | 技能 | 包管理（目录 + `SKILL.md` + 附属文件），不做运行时 |
 | 规则 | 带 schema 的记忆子类型，`rule_search` 只做条件召回，不做编译管线 |
 | MCP | 只做 16 个工具 |
-| 控制台 | 十个业务页面（概览、文件树、检索调试、记忆复核、ACL、用户与组、会话与任务、监控、提示词、工具），多用户部署下多一个登录页（§16） |
+| 控制台 | 十个业务页面（概览、文件树、检索、记忆复核、ACL、用户与组、会话与任务、监控、提示词、工具），多用户部署下多一个登录页（§16） |
 
 ## 4. 分层
 
@@ -248,7 +248,7 @@ CoMem/
 │   ├── pages/
 │   │   ├── index.vue                 # 概览
 │   │   ├── files/[...path].vue       # 文件树
-│   │   ├── search.vue                # 检索调试
+│   │   ├── search.vue                # 检索
 │   │   ├── review.vue                # 记忆复核
 │   │   ├── acl.vue                   # 权限管理
 │   │   ├── admin.vue                 # 用户与组
@@ -972,9 +972,11 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 `n.uri` 的 GLOB 范围，这两列只作为逐候选行的谓词；迁移注释里记了 5000 行的
 `EXPLAIN QUERY PLAN` 实测，建索引后两条 plan 不变，只多出每次 `upsert` 的两棵 B 树维护。
 
-这两列（连同 `supersedes`）在 HTTP 上的唯一出口是待复核列表：`GET /memories/pending` 总是
-输出 `validFrom` / `validUntil` / `supersedes` 三个键，无值时是 `null` 而不是省略键（§12.4）；
-没有单条记忆 GET，所以已生效的记忆在控制台看不到这三个值。
+这两列（连同 `supersedes`）在 HTTP 上的出口是待复核列表与单条记忆元数据：
+`GET /memories/pending` 总是输出 `validFrom` / `validUntil` / `supersedes` 三个键；
+`GET /memories/{uri}` 按 URI 输出 `validFrom` / `validUntil`（不带 `supersedes`，那个只服务
+于拒绝时的回退提示）。两处都是无值时显式 `null` 而不是省略键（§12.4）。已生效的记忆因此
+也能在控制台看到有效期。
 
 **迁移清单**（`src/adapters/sqlite/migrations/`）：
 
@@ -2854,7 +2856,7 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 检索侧的 `node_permission` 是物化结果，不是快照：改 ACL 时整棵子树重算，保证它等于「此刻的 `effective()`」。
 
-**新节点在写路径的求权步骤物化。** 新建节点在 `node_permission` 里还没有行，写操作（`write` / `edit` / `mkdir` / `mv` 的目标）由 `InheritingAuthorizer` 在缓存未命中时先 `materializeNode` 再判定；读操作只给**磁盘上已存在**的节点补物化，拼错的 URI 不会因为一次 GET 就在库里多一条权限行。因此 `write` 的 `create` / `append` 模式必须先按 write 求权，再做「目标是否存在 / 读现有正文」的预读——预读是 read 操作，顺序反过来时新路径会先撞上读路径的「不存在不物化」，把一次写操作误报成 `需要 read（1）级别`。MCP `write` 与 HTTP `POST /content/write` 共用这一条顺序。
+**新节点在写路径的求权步骤物化。** 新建节点在 `node_permission` 里还没有行，写操作（`write` / `edit` / `mkdir` / `mv` 的目标）由 `InheritingAuthorizer` 在缓存未命中时先 `materializeNode` 再判定；读操作只给**磁盘上已存在**的节点补物化，拼错的 URI 不会因为一次 GET 就在库里多一条权限行。读的目标不存在、但祖先链对调用方**可读**时抛 `NOT_FOUND`（404）——调用方问的是「这条记忆在哪」，不是「我有没有权限」；祖先链也不可读时仍是 `PERMISSION_DENIED`，跨作用域探测不能靠错误码判断节点是否存在。祖先链判定复用 `readChain` + `effectiveAcl`（`services/acl/guard.ts`），不写第二份 ACL 求值，也不为探测物化新行。因此 `write` 的 `create` / `append` 模式必须先按 write 求权，再做「目标是否存在 / 读现有正文」的预读——预读是 read 操作，顺序反过来时新路径会先撞上读路径的「不存在不物化」，把一次写操作误报成 `需要 read（1）级别`。MCP `write` 与 HTTP `POST /content/write` 共用这一条顺序。
 
 ### 12.4 出口清单
 
@@ -2867,6 +2869,7 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | `find` / `search` / `grep` / `glob` | 逐条 read |
 | `GET /memories/pending` | scope 根 read，再逐条按记录 URI 求 read |
 | `GET /memories/{uri}/links` | 查询 URI read，边的另一端也求 read |
+| `GET /memories/{uri}` | 查询 URI read（与 `content/read` 同一档） |
 | `write` / `edit` / `mkdir` | write |
 | `rm` / `mv` | manage |
 | `getAcl` / `setAcl` | manage |
@@ -2878,7 +2881,11 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | 提示词（`PUT` / `DELETE` / `preview`） | 系统管理员 |
 | 列全部用户 / 建用户 / 列全部组 / 建组、`/tasks` 三个端点 | 系统管理员 |
 
-**列表语义**：无权限节点完全不出现，不返回「存在但无权」的占位。文件名和摘要本身就是信息。两个容易漏的出口按这条原则各多做一道求权：
+**列表语义**：无权限节点完全不出现，不返回「存在但无权」的占位。文件名和摘要本身就是信息。
+
+**「不存在」与「没有权限」用错误码分开。** 读类出口（`read` / `stat` / `download` / `grep` / `glob` 的范围、`find` / `search` 的 `targetUri`、HTTP `GET /content/read`）的目标既不在物化表、也不在磁盘上时，按祖先链求一次 read：有则 `NOT_FOUND`（404），无则保持 `PERMISSION_DENIED`（403）。祖先链求值复用 `readChain` + `effectiveAcl`（`services/acl/guard.ts`），不写第二份 ACL 求值；探测本身不物化新行。写路径不变：新路径照旧先物化再求权。
+
+两个容易漏的出口按「无权限完全不出现」各多做一道求权：
 
 - `GET /memories/pending`：`listPending` 递归扫 `memories/`，走的是**不传 `principals`** 的 `rawFilesystem`——`restricted` 切断或显式 `deny` 的子目录照样会被列出，而一条待复核记录的 URI、`fields`、`sources` 全是内容。路由层在 scope 根求 read 之后，再按**每条记录自己的 URI** 逐条求 read，无权限的记录整条不返回。
 - `GET /memories/{uri}/links`：查询的 URI 已求 read，边的**另一端**是独立资源，要再求一次 read（`links` 查 `to`，`backlinks` 查 `from`）。`backlinks` 列出的 `comem://user/bob/memories/profile/health-condition.md` 已经说出了 Bob 有哪些记忆，所以无权限的边也整条不返回，不留占位或打码。
@@ -2888,7 +2895,10 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 区分「这个字段不存在于响应里」与「这条记忆没有该值」——前者是契约漂移，后者是正常状态，
 省略键把两者压成同一个 `undefined`。字段原样取自 frontmatter（与 `updatedAt` 同为 ISO 8601
 UTC 形态，不在序列化层换格式）；`supersedes` 非空即「这条记忆顶替了某个版本」。复核页靠这
-三个键回答「是否只在某段区间有效、是否替换了上一版本」，而后端没有单条记忆 GET（§16）。
+三个键回答「是否只在某段区间有效、是否替换了上一版本」。`GET /memories/{uri}` 是单条记忆
+的只读元数据出口：`memoryType` / `status` 取自检索索引（`n.status` 就是能不能被搜到的判据），
+`validFrom` / `validUntil` 取自记忆文件，供文件详情页回答「这条记忆为什么能／不能被搜到」
+（§16）；`supersedes` 仍只出现在待复核列表。
 
 **管理端点判定的是目标资源，不是调用方自己的根。** 对「自己的根」求 `manage` 对每个登录用户都成立（user 根 owner 恒为本人），用它当门禁等于任何登录用户都是管理员。所以改密码、改资料、启用禁用、删除用户，签发 / 列出 / 吊销 API Key，改组资料、删除组、加退组成员，一律对目标用户根或组根求 `manage`。吊销 API Key 的请求里只有 key ID，先反查持有者，再对持有者的根求权——否则任何登录用户都能吊销别人的凭据。组 owner 变更不能只看组根 manage 的历史原因见下。
 
@@ -3189,7 +3199,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
+| 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源/技能 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
@@ -3508,8 +3518,8 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 |---|---|
 | 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
 | 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
-| 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块 |
-| 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4） |
+| 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块，文件还有「记忆」区块（类型、状态、能否被检索、有效期） |
+| 检索 | 输入 query，选「直接查找 / 先理解再检索」，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4）；结果标题用摘要或文件名、URI 降为第二行；右上角如实显示实际引擎（关键词匹配 / 向量检索 / 混合检索，读 `GET /health` 的 `retrieval.engine`）；0 命中区分「库空」与「无匹配」，并说明关键词引擎的边界 |
 | 记忆复核 | `pending` 列表 + diff 视图（before/after）；详情头显示有效期与「替换上一版本」提示；批量失败的原因逐条列在页面上；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
@@ -3524,6 +3534,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 - **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
+- **文件详情页的「记忆」区块回答「为什么搜不到」。** `memories/` 下的**文件**另请求一次 `GET /memories/{uri}`，显示记忆类型、状态、能否被检索与有效期。状态与类型取自**检索索引**而不是记忆文件的 frontmatter：TTL 归档只把索引行改成 `archived`，文件里仍是 `active`（§11.7），读文件会在归档后给出相反的答案。能否被检索由状态推导：检索只返回 `active`（索引的 `n.status = 'active'`），所以 `pending` 写「待复核，检索不到」并给「去复核」入口，`archived` 写「已归档，检索不到」并说明按 URI 仍可读取。没有恢复端点，因此不给恢复按钮——按了也做不成事。有效期来自记忆文件（索引的 `NodeStat` 没有这两列）。没有索引行、目录、`.history` 版本文件与 `.abstract.md` 显示「未知」，与请求失败分开。请求失败只影响这一块，正文、摘要、关联与权限照常渲染（`web/pages/files/[...path].vue`、`web/components/domain/SummaryPanel.vue`）。
 
 **浏览器里能创建第一条记忆。** 概览页的「还没有数据」空态与文件树工具栏各有一个「新建记忆」入口，共用同一个对话框：选记忆类型（中文名来自 `web/utils/memoryTypeLabels.ts`），填标题/主题与正文，提交走 `POST /memories`。路径不在控制台拼——服务端把标题映射成 identity 值并用各类型自己的 `filename` 模板渲染，响应带最终 URI（见 §11.1）。成功后关闭对话框、刷新目录树、跳到那条文件；`experiences` / `rules` 落在复核队列里，提示语写「等待复核」而不是只说「已保存」。失败时按 `details.field` 把 400 的原文挂在标题或内容字段旁，其余失败（403、网络）挂在对话框内——表单不吞掉服务端的诊断信息（`web/components/domain/MemoryCreateDialog.vue`）。
 
@@ -3814,6 +3825,7 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 | `queue` | `{pending, processing}` |
 | `summary.degraded` | 是否降级到规则摘要 |
 | `summary.pendingDirs` | 待刷新目录数 |
+| `retrieval.engine` | 仅 `GET /health`：实际生效的检索策略（`fts5` / `vector` / `hybrid`）；控制台据此显示「关键词匹配 / 向量检索 / 混合检索」 |
 | `rerank.configured` | 是否配了重排（`retrieval.rerank.enabled` + `providers.rerank.type: http`） |
 | `rerank.degraded` | 最近一次重排调用是否失败（已退回融合分） |
 | `rerank.failures` | 进程启动以来重排失败的累计次数（间歇性失败看得出来） |
