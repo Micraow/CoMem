@@ -313,28 +313,29 @@ onMounted(() => {
           </div>
         </div>
 
-        <div v-if="saveError !== null" class="callout callout--danger" role="alert">
-          <AlertTriangle :size="15" :stroke-width="1.4" />
+        <UiCallout v-if="saveError !== null">
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div>{{ saveError }}</div>
-        </div>
+        </UiCallout>
       </div>
 
-      <div v-if="loadError !== null" class="callout callout--danger" role="alert">
-        <AlertTriangle :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="loadError !== null">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
         <div>
           {{ loadError }}
           <UiButton variant="plain" size="sm" @click="load">重试</UiButton>
         </div>
-      </div>
+      </UiCallout>
 
       <UiCard v-else-if="forbidden" panel>
-        <div class="empty">
-          <span class="empty__icon">
-            <ShieldAlert :size="20" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">需要管理员权限</span>
-          <span class="caption">设置只给系统管理员。让管理员把账号加进系统管理员名单后再打开。</span>
-        </div>
+        <UiEmpty title="需要管理员权限">
+          <template #default="{ size }">
+            <ShieldAlert :size="size" :stroke-width="1.4" />
+          </template>
+          <template #extra>
+            <span class="caption">设置只给系统管理员。让管理员把账号加进系统管理员名单后再打开。</span>
+          </template>
+        </UiEmpty>
       </UiCard>
 
       <div v-else-if="view === null" class="settings-loading" aria-busy="true" aria-label="正在加载设置">

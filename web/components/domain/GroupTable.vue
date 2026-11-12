@@ -45,19 +45,14 @@ const emit = defineEmits<{
   delete: [group: GroupRowPayload]
   page: [offset: number]
 }>()
-
-const pageStart = computed(() => (props.groups.length === 0 ? 0 : props.offset + 1))
-const pageEnd = computed(() => props.offset + props.groups.length)
-const canPrev = computed(() => props.offset > 0)
-const canNext = computed(() => props.offset + props.limit < props.total)
 </script>
 
 <template>
   <div class="stack-16">
-    <div v-if="props.error !== null" class="callout callout--danger">
-      <Users :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="props.error !== null">
+      <template #icon><Users :size="15" :stroke-width="1.4" /></template>
       <div>{{ props.error }}</div>
-    </div>
+    </UiCallout>
 
     <UiCard title="组" panel flush>
       <template #actions>
@@ -135,32 +130,19 @@ const canNext = computed(() => props.offset + props.limit < props.total)
         </tbody>
       </UiTable>
 
-      <div v-else class="empty">
-        <span class="empty__icon">
-          <Users :size="20" :stroke-width="1.4" />
-        </span>
-        <span class="empty__title">还没有组</span>
-      </div>
+      <UiEmpty v-else v-slot="{ size }" title="还没有组">
+        <Users :size="size" :stroke-width="1.4" />
+      </UiEmpty>
 
       <template v-if="props.total > props.limit" #foot>
-        <span class="caption">{{ pageStart }}–{{ pageEnd }} / {{ props.total }}</span>
-        <span class="spacer" />
-        <UiButton
-          variant="secondary"
-          size="sm"
-          :disabled="!canPrev || props.loading"
-          @click="emit('page', Math.max(0, props.offset - props.limit))"
-        >
-          上一页
-        </UiButton>
-        <UiButton
-          variant="secondary"
-          size="sm"
-          :disabled="!canNext || props.loading"
-          @click="emit('page', props.offset + props.limit)"
-        >
-          下一页
-        </UiButton>
+        <UiPager
+          :total="props.total"
+          :limit="props.limit"
+          :offset="props.offset"
+          :shown="props.groups.length"
+          :loading="props.loading"
+          @page="emit('page', $event)"
+        />
       </template>
     </UiCard>
   </div>

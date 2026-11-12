@@ -192,10 +192,10 @@ watch(scopeRoot, () => {
 
       <UiTabs v-model="tab" :items="TABS" aria-label="会话与任务" />
 
-      <div v-if="actionError !== null" class="callout callout--danger mt-16">
-        <AlertTriangle :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="actionError !== null" class="mt-16">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
         <div>{{ actionError }}</div>
-      </div>
+      </UiCallout>
 
       <div class="mt-16">
         <DomainSessionList

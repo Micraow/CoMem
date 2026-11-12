@@ -13,10 +13,17 @@ type BadgeVariant =
   | 'teal'
   | 'gray'
   | 'outline'
+  | 'outline-faint'
+  | 'solid'
 
-withDefaults(defineProps<{ variant?: BadgeVariant }>(), { variant: 'gray' })
+type BadgeSize = 'md' | 'sm'
+
+withDefaults(defineProps<{ variant?: BadgeVariant; size?: BadgeSize }>(), {
+  variant: 'gray',
+  size: 'md',
+})
 </script>
 
 <template>
-  <span class="pill" :class="`pill--${variant}`"><slot /></span>
+  <span class="pill" :class="[`pill--${variant}`, size === 'sm' && 'pill--sm']"><slot /></span>
 </template>

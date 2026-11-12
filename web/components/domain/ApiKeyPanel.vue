@@ -183,10 +183,10 @@ watch(createOpen, (open) => {
       </UiButton>
     </div>
 
-    <div v-if="error !== null" class="callout callout--danger">
-      <AlertTriangle :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="error !== null">
+      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
       <div>{{ error }}</div>
-    </div>
+    </UiCallout>
 
     <div v-else-if="loading && keys.length === 0" class="skeleton-block">
       <UiSkeleton v-for="index in 4" :key="index" :width="`${72 - index * 8}%`" height="14px" />
@@ -231,13 +231,9 @@ watch(createOpen, (open) => {
       </tbody>
     </UiTable>
 
-    <div v-else class="empty">
-      <span class="empty__icon">
-        <KeyRound :size="20" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">还没有 API Key</span>
-      <span class="empty__text">API Key 用来让 Agent 接入，创建后请立即保存。</span>
-    </div>
+    <UiEmpty v-else v-slot="{ size }" title="还没有 API Key" text="API Key 用来让 Agent 接入，创建后请立即保存。">
+      <KeyRound :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
     <UiDialog
       v-model="createOpen"

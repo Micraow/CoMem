@@ -247,10 +247,10 @@ function commitTitleOf(session: SessionSummaryPayload): string {
 
 <template>
   <div class="stack-16">
-    <div v-if="props.error !== null" class="callout callout--danger">
-      <AlertTriangle :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="props.error !== null">
+      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
       <div>{{ props.error }}</div>
-    </div>
+    </UiCallout>
 
     <div v-if="props.loading && props.sessions.length === 0" class="session-skeleton">
       <UiSkeleton v-for="index in 4" :key="index" :width="`${72 - index * 6}%`" height="16px" />
@@ -280,9 +280,9 @@ function commitTitleOf(session: SessionSummaryPayload): string {
             <span class="session__id mono">{{ session.id }}</span>
           </button>
 
-          <span class="session__status" :data-status="session.status">
+          <UiBadge :variant="session.status === 'open' ? 'solid' : 'outline-faint'" size="sm">
             {{ sessionStatusLabel(session.status) }}
-          </span>
+          </UiBadge>
 
           <span class="session__count">待提交 {{ session.messageCount }} 条</span>
 
@@ -313,10 +313,10 @@ function commitTitleOf(session: SessionSummaryPayload): string {
         </p>
 
         <div v-if="openId === session.id" class="session__body">
-          <div v-if="detailError !== null" class="callout callout--danger">
-            <AlertTriangle :size="15" :stroke-width="1.4" />
+          <UiCallout v-if="detailError !== null">
+            <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
             <div>{{ detailError }}</div>
-          </div>
+          </UiCallout>
 
           <div v-else-if="detailLoadingId === session.id" class="stack-10" aria-busy="true">
             <UiSkeleton width="60%" height="14px" />
@@ -324,14 +324,13 @@ function commitTitleOf(session: SessionSummaryPayload): string {
             <UiSkeleton width="42%" height="14px" />
           </div>
 
-          <div v-else-if="partsOf(session.id).length === 0" class="empty">
-            <span class="empty__icon">
-              <MessageSquare :size="20" :stroke-width="1.4" />
-            </span>
-            <span class="empty__title">
-              {{ session.status === 'open' ? '这个会话还没有消息' : '没有待提交的消息' }}
-            </span>
-          </div>
+          <UiEmpty
+            v-else-if="partsOf(session.id).length === 0"
+            v-slot="{ size }"
+            :title="session.status === 'open' ? '这个会话还没有消息' : '没有待提交的消息'"
+          >
+            <MessageSquare :size="size" :stroke-width="1.4" />
+          </UiEmpty>
 
           <ol v-else class="messages">
             <li
@@ -379,12 +378,9 @@ function commitTitleOf(session: SessionSummaryPayload): string {
       </article>
     </div>
 
-    <div v-else-if="props.error === null" class="empty">
-      <span class="empty__icon">
-        <CheckCircle2 :size="20" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">还没有会话</span>
-    </div>
+    <UiEmpty v-else-if="props.error === null" v-slot="{ size }" title="还没有会话">
+      <CheckCircle2 :size="size" :stroke-width="1.4" />
+    </UiEmpty>
   </div>
 </template>
 
@@ -456,29 +452,6 @@ function commitTitleOf(session: SessionSummaryPayload): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 状态：强调色深浅 + 文字，不用红黄绿。 */
-.session__status {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 9px;
-  border-radius: var(--r-pill);
-  font-size: 13px;
-  font-weight: 590;
-  white-space: nowrap;
-}
-
-.session__status[data-status="open"] {
-  background: var(--accent);
-  color: #fff;
-}
-
-.session__status[data-status="archived"] {
-  background: transparent;
-  box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
-  color: var(--label-3);
 }
 
 .session__count {

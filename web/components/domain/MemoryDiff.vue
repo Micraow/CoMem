@@ -183,12 +183,9 @@ function nameOf(uri: string): string {
 
 <template>
   <section class="split__main" aria-live="polite">
-    <div v-if="props.memory === null" class="empty">
-      <span class="empty__icon">
-        <Check :size="22" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">复核队列已清空</span>
-    </div>
+    <UiEmpty v-if="props.memory === null" v-slot="{ size }" title="复核队列已清空" :size="22">
+      <Check :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
     <template v-else>
       <div class="doc-pane">

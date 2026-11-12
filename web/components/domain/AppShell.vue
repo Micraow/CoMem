@@ -9,18 +9,26 @@
  * 不复制一份导航结构。
  */
 import { LogOut, Menu, Moon, Sun } from 'lucide-vue-next'
-import { useMediaQuery } from '@vueuse/core'
+import { useColorMode, useMediaQuery } from '@vueuse/core'
 
 import { consoleIdentityState, consoleScopeLabel, logoutConsole } from '~/composables/consoleIdentity'
 import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
 import { navLabelOf } from '~/utils/nav'
 
-const THEME_STORAGE_KEY = 'comem-console-theme'
-
 const isMobile = useMediaQuery('(max-width: 767px)')
 const navOpen = ref(false)
 const route = useRoute()
-const theme = useState<'dark' | 'light'>('comem-console-theme', () => 'dark')
+/** 键名沿用旧的 `comem-console-theme`，换实现不能让现有用户丢偏好。 */
+const theme = useColorMode({
+  selector: 'html',
+  attribute: 'data-theme',
+  storageKey: 'comem-console-theme',
+  initialValue: 'dark',
+})
+/** storage 里可能是旧版本留下的非法值，按旧实现的规则退回深色。 */
+if (theme.value !== 'dark' && theme.value !== 'light') {
+  theme.value = 'dark'
+}
 
 const currentLabel = computed(() => navLabelOf(route.path))
 
@@ -73,36 +81,9 @@ async function logout(): Promise<void> {
   }
 }
 
-function applyTheme(value: 'dark' | 'light'): void {
-  document.documentElement.dataset.theme = value
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, value)
-  } catch {
-    // 隐私模式下写不了 localStorage：当前会话仍然切换，下次打开回到默认深色。
-  }
-}
-
 function toggleTheme(): void {
   theme.value = theme.value === 'dark' ? 'light' : 'dark'
-  applyTheme(theme.value)
 }
-
-function readStoredTheme(): 'dark' | 'light' | null {
-  try {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY)
-    return saved === 'dark' || saved === 'light' ? saved : null
-  } catch {
-    return null
-  }
-}
-
-onMounted(() => {
-  const saved = readStoredTheme()
-  if (saved !== null) {
-    theme.value = saved
-  }
-  applyTheme(theme.value)
-})
 
 watch(
   () => route.fullPath,

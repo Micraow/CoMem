@@ -231,10 +231,10 @@ onMounted(() => {
           </div>
 
           <div v-else-if="error !== null" class="aside-pad">
-            <div class="callout callout--danger">
-              <FileText :size="15" :stroke-width="1.4" />
+            <UiCallout>
+              <template #icon><FileText :size="15" :stroke-width="1.4" /></template>
               <div>{{ error }}</div>
-            </div>
+            </UiCallout>
             <UiButton variant="secondary" size="sm" @click="load">重试</UiButton>
           </div>
 

@@ -77,12 +77,6 @@ const props = withDefaults(
   { forbidden: false, highlightId: null },
 )
 
-/** 状态徽章的深浅档位；未知名回落到中性底，不发明第三档。文案在 `taskLabels.ts`。 */
-const STATUS_DEPTH: Readonly<Record<string, string>> = {
-  pending: 'pending',
-  running: 'running',
-}
-
 const expiredCount = computed(() => props.tasks.filter((task) => isLeaseExpired(task)).length)
 
 watch(
@@ -98,18 +92,14 @@ watch(
   },
   { immediate: true },
 )
-
-function depthOf(status: string): string {
-  return STATUS_DEPTH[status] ?? 'pending'
-}
 </script>
 
 <template>
   <div class="stack-16">
-    <div v-if="props.error !== null" class="callout callout--danger">
-      <AlertTriangle :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="props.error !== null">
+      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
       <div>{{ props.error }}</div>
-    </div>
+    </UiCallout>
 
     <div v-if="expiredCount > 0" class="callout callout--warn">
       <AlertTriangle :size="15" :stroke-width="1.4" />
@@ -129,12 +119,9 @@ function depthOf(status: string): string {
         <span class="caption">按创建时间升序，只含可认领的任务</span>
       </template>
 
-      <div v-if="props.forbidden" class="empty">
-        <span class="empty__icon">
-          <ShieldAlert :size="20" :stroke-width="1.4" />
-        </span>
-        <span class="empty__title">需要管理员权限</span>
-      </div>
+      <UiEmpty v-if="props.forbidden" v-slot="{ size }" title="需要管理员权限">
+        <ShieldAlert :size="size" :stroke-width="1.4" />
+      </UiEmpty>
 
       <div v-else-if="props.loading && props.tasks.length === 0" class="task-skeleton">
         <UiSkeleton v-for="index in 5" :key="index" :width="`${78 - index * 5}%`" height="14px" />
@@ -164,9 +151,9 @@ function depthOf(status: string): string {
             </td>
             <td>{{ taskTypeLabelOf(task.type) }}</td>
             <td>
-              <span class="depth" :data-depth="depthOf(task.status)">
+              <UiBadge :variant="task.status === 'running' ? 'solid' : 'outline-faint'">
                 {{ taskStatusLabelOf(task.status) }}
-              </span>
+              </UiBadge>
             </td>
             <td>
               <time class="mono" :title="formatDateTimeWithSeconds(task.createdAt)">
@@ -191,12 +178,9 @@ function depthOf(status: string): string {
         </tbody>
       </UiTable>
 
-      <div v-else class="empty">
-        <span class="empty__icon">
-          <RotateCcw :size="20" :stroke-width="1.4" />
-        </span>
-        <span class="empty__title">队列是空的</span>
-      </div>
+      <UiEmpty v-else v-slot="{ size }" title="队列是空的">
+        <RotateCcw :size="size" :stroke-width="1.4" />
+      </UiEmpty>
     </UiCard>
   </div>
 </template>
@@ -219,30 +203,6 @@ function depthOf(status: string): string {
   line-height: 18px;
   color: var(--label-3);
   vertical-align: 1px;
-}
-
-/* 状态：强调色的四档深浅，不是红黄绿（§16.1）。 */
-.depth {
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  padding: 0 10px;
-  border-radius: var(--r-pill);
-  font-size: 13px;
-  font-weight: 590;
-  letter-spacing: 0;
-  white-space: nowrap;
-}
-
-.depth[data-depth="pending"] {
-  background: transparent;
-  box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
-  color: var(--label-3);
-}
-
-.depth[data-depth="running"] {
-  background: var(--accent);
-  color: #fff;
 }
 
 .lease-expired {

@@ -368,12 +368,9 @@ onBeforeUnmount(() => {
       <DomainFileTree :selected="selectedUri" @select="selectNode" />
 
       <section class="split__main" aria-live="polite">
-        <div v-if="selectedUri === null" class="empty">
-          <span class="empty__icon">
-            <FolderOpen :size="22" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">还没有选择文件</span>
-        </div>
+        <UiEmpty v-if="selectedUri === null" v-slot="{ size }" title="还没有选择文件" :size="22">
+          <FolderOpen :size="size" :stroke-width="1.4" />
+        </UiEmpty>
 
         <div v-else class="doc-pane">
           <div class="doc-pane__inner">
@@ -400,10 +397,10 @@ onBeforeUnmount(() => {
               <UiBadge v-if="degraded" variant="orange">摘要降级</UiBadge>
             </div>
 
-            <div v-if="error !== null" class="callout callout--danger">
-              <AlertTriangle :size="15" :stroke-width="1.4" />
+            <UiCallout v-if="error !== null">
+              <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
               <div>{{ error }}</div>
-            </div>
+            </UiCallout>
 
             <div v-else class="detail-grid">
               <div>
@@ -414,10 +411,10 @@ onBeforeUnmount(() => {
                   <span>{{ LEVEL_TAB_NOTE[layer] }}</span>
                 </div>
 
-                <div v-if="layerError !== null" class="callout callout--danger">
-                  <AlertTriangle :size="15" :stroke-width="1.4" />
+                <UiCallout v-if="layerError !== null">
+                  <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
                   <div>{{ layerError }}</div>
-                </div>
+                </UiCallout>
 
                 <div v-else-if="loading || layerLoading" class="skeleton-block" aria-busy="true">
                   <UiSkeleton width="42%" height="14px" />
@@ -442,19 +439,13 @@ onBeforeUnmount(() => {
                       <span>{{ abstractText.length }} 字符</span>
                     </div>
                   </div>
-                  <div v-else-if="abstractFailed" class="empty">
-                    <span class="empty__title">摘要没有取到</span>
-                  </div>
-                  <div v-else class="empty">
-                    <span class="empty__title">还没有摘要</span>
-                  </div>
+                  <UiEmpty v-else-if="abstractFailed" title="摘要没有取到" />
+                  <UiEmpty v-else title="还没有摘要" />
                 </template>
 
                 <template v-else-if="layer === 'l1'">
                   <pre v-if="overviewText !== null" class="doc-raw">{{ overviewText }}</pre>
-                  <div v-else class="empty">
-                    <span class="empty__title">还没有概览</span>
-                  </div>
+                  <UiEmpty v-else title="还没有概览" />
                 </template>
 
                 <template v-else>
@@ -479,16 +470,12 @@ onBeforeUnmount(() => {
                         </tr>
                       </tbody>
                     </UiTable>
-                    <div v-else class="empty">
-                      <span class="empty__title">这个目录是空的</span>
-                    </div>
+                    <UiEmpty v-else title="这个目录是空的" />
                   </template>
 
                   <template v-else>
                     <pre v-if="contentText !== null && contentText !== ''" class="doc-raw">{{ contentText }}</pre>
-                    <div v-else class="empty">
-                      <span class="empty__title">这个文件是空的</span>
-                    </div>
+                    <UiEmpty v-else title="这个文件是空的" />
                   </template>
                 </template>
 

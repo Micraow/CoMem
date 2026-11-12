@@ -121,19 +121,16 @@ const hasChecked = computed(() => checked.value.length > 0)
       </div>
 
       <div v-else-if="props.error !== null" class="aside-pad">
-        <div class="callout callout--danger">
-          <ClipboardCheck :size="15" :stroke-width="1.4" />
+        <UiCallout>
+          <template #icon><ClipboardCheck :size="15" :stroke-width="1.4" /></template>
           <div>{{ props.error }}</div>
-        </div>
+        </UiCallout>
         <UiButton variant="secondary" size="sm" @click="emit('refresh')">重试</UiButton>
       </div>
 
-      <div v-else-if="props.memories.length === 0" class="empty">
-        <span class="empty__icon">
-          <ClipboardCheck :size="20" :stroke-width="1.4" />
-        </span>
-        <span class="empty__title">没有待复核的记忆</span>
-      </div>
+      <UiEmpty v-else-if="props.memories.length === 0" v-slot="{ size }" title="没有待复核的记忆">
+        <ClipboardCheck :size="size" :stroke-width="1.4" />
+      </UiEmpty>
 
       <ul v-else class="rrows">
         <li

@@ -166,10 +166,10 @@ const needsOnboarding = computed(() =>
         </template>
       </DomainPageHeader>
 
-      <div v-if="healthError !== null" class="callout callout--danger mb-24">
-        <AlertTriangle :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="healthError !== null" class="mb-24">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
         <div>{{ healthError }}</div>
-      </div>
+      </UiCallout>
 
       <div class="stats mb-24">
         <div v-for="stat in stats" :key="stat.key" class="stat rise">
@@ -184,43 +184,37 @@ const needsOnboarding = computed(() =>
           <span class="caption">最早创建优先，只含可认领的任务</span>
         </template>
 
-        <div v-if="tasksForbidden" class="empty">
-          <span class="empty__icon">
-            <ShieldAlert :size="20" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">需要管理员权限</span>
-        </div>
+        <UiEmpty v-if="tasksForbidden" v-slot="{ size }" title="需要管理员权限">
+          <ShieldAlert :size="size" :stroke-width="1.4" />
+        </UiEmpty>
 
-        <div v-else-if="tasksError !== null" class="empty">
-          <span class="empty__icon">
-            <AlertTriangle :size="20" :stroke-width="1.4" />
-          </span>
-          <span class="empty__title">任务列表没有取到</span>
-          <span class="empty__text">{{ tasksError }}</span>
-        </div>
+        <UiEmpty v-else-if="tasksError !== null" v-slot="{ size }" title="任务列表没有取到" :text="tasksError">
+          <AlertTriangle :size="size" :stroke-width="1.4" />
+        </UiEmpty>
 
         <div v-else-if="tasks === null" class="stack-12" aria-busy="true">
           <UiSkeleton v-for="index in 5" :key="index" :width="`${64 - index * 6}%`" height="14px" />
         </div>
 
-        <div v-else-if="tasks.length === 0" class="empty">
-          <template v-if="needsOnboarding">
-            <span class="empty__icon">
-              <Plug :size="20" :stroke-width="1.4" />
-            </span>
-            <span class="empty__title">还没有数据</span>
-            <span class="empty__text">接入 Agent 后，这里会显示索引与任务。</span>
-            <NuxtLink to="/connect" class="btn btn--primary btn--sm connect-cta">
-              接入 Agent
-            </NuxtLink>
-          </template>
-          <template v-else>
-            <span class="empty__icon">
-              <CheckCircle2 :size="20" :stroke-width="1.4" />
-            </span>
-            <span class="empty__title">队列是空的</span>
-          </template>
-        </div>
+        <template v-else-if="tasks.length === 0">
+          <UiEmpty
+            v-if="needsOnboarding"
+            title="还没有数据"
+            text="接入 Agent 后，这里会显示索引与任务。"
+          >
+            <template #default="{ size }">
+              <Plug :size="size" :stroke-width="1.4" />
+            </template>
+            <template #extra>
+              <NuxtLink to="/connect" class="btn btn--primary btn--sm connect-cta">
+                接入 Agent
+              </NuxtLink>
+            </template>
+          </UiEmpty>
+          <UiEmpty v-else v-slot="{ size }" title="队列是空的">
+            <CheckCircle2 :size="size" :stroke-width="1.4" />
+          </UiEmpty>
+        </template>
 
         <UiTable v-else caption="待处理任务">
           <thead>

@@ -137,21 +137,20 @@ watch([() => props.selected, state], () => {
       </div>
 
       <div v-else-if="error !== null" class="aside-pad">
-        <div class="callout callout--danger">
-          <AlertTriangle :size="15" :stroke-width="1.4" />
+        <UiCallout>
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div>{{ error }}</div>
-        </div>
+        </UiCallout>
         <UiButton variant="secondary" size="sm" @click="refresh">重试</UiButton>
       </div>
 
-      <div v-else-if="rows.length === 0" class="empty">
-        <span class="empty__icon">
-          <Folder :size="20" :stroke-width="1.4" />
-        </span>
-        <span class="empty__title">
-          {{ filter.trim() === '' ? '这个命名空间还没有内容' : '已展开的路径里没有匹配项' }}
-        </span>
-      </div>
+      <UiEmpty
+        v-else-if="rows.length === 0"
+        v-slot="{ size }"
+        :title="filter.trim() === '' ? '这个命名空间还没有内容' : '已展开的路径里没有匹配项'"
+      >
+        <Folder :size="size" :stroke-width="1.4" />
+      </UiEmpty>
 
       <div v-else class="tree" role="tree" aria-label="命名空间目录树">
         <div

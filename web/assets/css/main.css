@@ -259,14 +259,6 @@ svg {
   color: var(--accent-ink);
 }
 
-.navitem__count {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  color: var(--label-3);
-}
-
 .sidebar__foot {
   margin-top: auto;
   padding: 14px 10px 4px;
@@ -427,20 +419,9 @@ svg {
   display: none;
 }
 
-.scrim {
-  display: none;
-}
-
 /* ==========================================================================
    排版
    ========================================================================== */
-
-.title-xl {
-  font-size: 28px;
-  line-height: 1.16;
-  font-weight: 700;
-  letter-spacing: -0.021em;
-}
 
 .title {
   font-size: 22px;
@@ -878,16 +859,8 @@ svg {
   color: var(--label-3);
 }
 
-.stat__v.is-accent {
-  color: var(--accent-ink);
-}
-
 .stat__v.is-red {
   color: var(--red-ink);
-}
-
-.stat__v.is-green {
-  color: var(--green-ink);
 }
 
 .stat__v.is-orange {
@@ -959,88 +932,24 @@ svg {
   color: var(--label-2);
 }
 
-.tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: var(--r-sm);
-  background: var(--fill-2);
-  font-size: 14px;
-  color: var(--label-2);
-  box-shadow: var(--inset-hair);
-  white-space: nowrap;
+/* 描边的淡色版：任务/会话状态里「不强调」的那一档，文字比 outline 更暗。 */
+.pill--outline-faint {
+  background: transparent;
+  box-shadow: inset 0 0 0 0.5px var(--hairline-strong);
+  color: var(--label-3);
 }
 
-.tag b {
-  font-family: var(--mono);
-  font-weight: 600;
-  color: var(--label);
+/* 实心强调色：任务/会话状态里「正在发生」的那一档。 */
+.pill--solid {
+  background: var(--accent);
+  color: #fff;
 }
 
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  flex: none;
-  display: inline-block;
-}
-
-.dot--pulse {
-  position: relative;
-}
-
-.dot--pulse::after {
-  content: "";
-  position: absolute;
-  inset: -4px;
-  border-radius: 50%;
-  border: 1px solid currentColor;
-  opacity: 0.45;
-  animation: pulse 2.4s var(--ease) infinite;
-}
-
-@keyframes pulse {
-  0% {
-    transform: scale(0.6);
-    opacity: 0.6;
-  }
-  70% {
-    transform: scale(1.9);
-    opacity: 0;
-  }
-  100% {
-    transform: scale(1.9);
-    opacity: 0;
-  }
-}
-
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 14px;
-  color: var(--label-2);
-  font-family: var(--mono);
-  letter-spacing: -0.005em;
-}
-
-.status--ok {
-  color: var(--green-ink);
-}
-
-.status--warn {
-  color: var(--orange-ink);
-}
-
-.status--err {
-  color: var(--red-ink);
-}
-
-.status--info {
-  color: var(--accent-ink);
+/* 22px 档：会话列表的头行比表格行更紧，字距跟随上一层的排版（不写死成 0）。 */
+.pill--sm {
+  height: 22px;
+  padding: 0 9px;
+  letter-spacing: inherit;
 }
 
 /* 层级地层符号 L0 / L1 / L2 */
@@ -1232,12 +1141,6 @@ svg {
   color: var(--label-3);
   font-variant-numeric: tabular-nums;
   flex: none;
-}
-
-.tchild {
-  margin-left: 15px;
-  border-left: 0.5px solid var(--separator);
-  padding-left: 3px;
 }
 
 .tree-skeleton {
@@ -1501,48 +1404,6 @@ svg {
   white-space: nowrap;
 }
 
-/* 摘要新鲜度仪表 */
-.gauge {
-  display: grid;
-  gap: 8px;
-}
-
-.gauge__track {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--fill-2);
-  overflow: hidden;
-  position: relative;
-}
-
-.gauge__fill {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--orange);
-  transition: width 0.6s var(--ease);
-}
-
-.gauge__fill.is-ok {
-  background: var(--green);
-}
-
-.gauge__legend {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  font-family: var(--mono);
-  font-size: 13px;
-  color: var(--label-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.gauge__legend b {
-  color: var(--label);
-  font-weight: 600;
-}
-
 /* ==========================================================================
    提示条与空状态
    ========================================================================== */
@@ -1655,15 +1516,6 @@ svg {
   animation: skeleton-shimmer 1.5s var(--ease) infinite;
 }
 
-.skeleton--text {
-  height: 12px;
-}
-
-.skeleton--stack {
-  display: grid;
-  gap: 10px;
-}
-
 @keyframes skeleton-shimmer {
   from {
     background-position: 130% 0;
@@ -1689,11 +1541,6 @@ svg {
 /* ==========================================================================
    工具类
    ========================================================================== */
-
-.stack-6 {
-  display: grid;
-  gap: 6px;
-}
 
 .stack-8 {
   display: grid;
@@ -1725,11 +1572,6 @@ svg {
   gap: 24px;
 }
 
-.stack-32 {
-  display: grid;
-  gap: 32px;
-}
-
 .rowflex {
   display: flex;
   align-items: center;
@@ -1739,10 +1581,6 @@ svg {
 
 .spacer {
   flex: 1;
-}
-
-.hidden {
-  display: none !important;
 }
 
 .sr-only {
@@ -1757,32 +1595,8 @@ svg {
   border: 0;
 }
 
-.mt-8 {
-  margin-top: 8px;
-}
-
-.mt-12 {
-  margin-top: 12px;
-}
-
 .mt-16 {
   margin-top: 16px;
-}
-
-.mt-20 {
-  margin-top: 20px;
-}
-
-.mt-24 {
-  margin-top: 24px;
-}
-
-.mt-32 {
-  margin-top: 32px;
-}
-
-.mb-8 {
-  margin-bottom: 8px;
 }
 
 .mb-12 {
@@ -2027,10 +1841,6 @@ svg {
 
   .doc-title {
     font-size: 24px;
-  }
-
-  .titlebar .tag {
-    display: none;
   }
 }
 

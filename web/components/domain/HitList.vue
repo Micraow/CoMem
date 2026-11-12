@@ -118,10 +118,10 @@ function filePathOf(uri: string): string {
 
 <template>
   <div class="hitlist" aria-live="polite">
-    <div v-if="props.error !== null" class="callout callout--danger">
-      <SearchX :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="props.error !== null">
+      <template #icon><SearchX :size="15" :stroke-width="1.4" /></template>
       <div>{{ props.error }}</div>
-    </div>
+    </UiCallout>
 
     <div v-else-if="props.loading" class="stack-10" aria-busy="true">
       <div v-for="index in SKELETON_ROWS" :key="index" class="hit hit--skeleton">
@@ -130,19 +130,13 @@ function filePathOf(uri: string): string {
       </div>
     </div>
 
-    <div v-else-if="!props.searched" class="empty">
-      <span class="empty__icon">
-        <Sparkles :size="20" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">还没有检索</span>
-    </div>
+    <UiEmpty v-else-if="!props.searched" v-slot="{ size }" title="还没有检索">
+      <Sparkles :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
-    <div v-else-if="props.hits === null || props.hits.length === 0" class="empty">
-      <span class="empty__icon">
-        <SearchX :size="20" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">没有找到匹配的内容</span>
-    </div>
+    <UiEmpty v-else-if="props.hits === null || props.hits.length === 0" v-slot="{ size }" title="没有找到匹配的内容">
+      <SearchX :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
     <ul v-else class="hitrows">
       <li

@@ -501,12 +501,9 @@ onMounted(() => {
 
       <div class="mt-16">
         <UiCard v-if="forbidden" :title="tab === 'users' ? '用户' : '组'" panel flush>
-          <div class="empty">
-            <span class="empty__icon">
-              <ShieldAlert :size="20" :stroke-width="1.4" />
-            </span>
-            <span class="empty__title">需要管理员权限</span>
-          </div>
+          <UiEmpty v-slot="{ size }" title="需要管理员权限">
+            <ShieldAlert :size="size" :stroke-width="1.4" />
+          </UiEmpty>
         </UiCard>
 
         <DomainUserTable
@@ -645,10 +642,10 @@ onMounted(() => {
       <div class="stack-16 drawer-body">
         <p class="caption">共 {{ members.length }} 个成员</p>
 
-        <div v-if="membersError !== null" class="callout callout--danger">
-          <AlertTriangle :size="15" :stroke-width="1.4" />
+        <UiCallout v-if="membersError !== null">
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div>{{ membersError }}</div>
-        </div>
+        </UiCallout>
 
         <div v-else-if="membersLoading" class="stack-12">
           <UiSkeleton v-for="index in 4" :key="index" :width="`${70 - index * 6}%`" height="14px" />
@@ -680,9 +677,7 @@ onMounted(() => {
           </tbody>
         </UiTable>
 
-        <div v-else class="empty">
-          <span class="empty__title">还没有成员</span>
-        </div>
+        <UiEmpty v-else title="还没有成员" />
 
         <form class="rowflex" @submit.prevent="addMember">
           <UiInput

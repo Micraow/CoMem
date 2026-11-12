@@ -307,12 +307,12 @@ watch(scopeRoot, () => {
 
 <template>
   <div class="content content--split review-page">
-    <section
+    <UiCallout
       v-if="batchFailures.length > 0"
-      class="callout callout--danger batch-failures"
+      class="batch-failures"
       aria-label="批量操作失败原因"
     >
-      <AlertTriangle :size="15" :stroke-width="1.4" />
+      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
       <div class="batch-failures__body">
         <p><b>{{ batchFailures.length }} 条没有处理成功：</b></p>
         <ul class="batch-failures__list">
@@ -325,7 +325,7 @@ watch(scopeRoot, () => {
       <button type="button" class="iconbtn" aria-label="关闭失败原因" @click="batchFailures = []">
         <X :size="15" :stroke-width="1.6" />
       </button>
-    </section>
+    </UiCallout>
 
     <div class="split">
       <DomainReviewList

@@ -205,19 +205,13 @@ function confirm(): void {
 
 <template>
   <div class="acl-editor">
-    <div v-if="props.uri === null" class="empty">
-      <span class="empty__icon">
-        <ShieldAlert :size="22" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">还没有选择节点</span>
-    </div>
+    <UiEmpty v-if="props.uri === null" v-slot="{ size }" title="还没有选择节点" :size="22">
+      <ShieldAlert :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
-    <div v-else-if="props.error !== null" class="empty">
-      <span class="empty__icon">
-        <ShieldAlert :size="22" :stroke-width="1.4" />
-      </span>
-      <span class="empty__title">{{ props.error }}</span>
-    </div>
+    <UiEmpty v-else-if="props.error !== null" v-slot="{ size }" :title="props.error" :size="22">
+      <ShieldAlert :size="size" :stroke-width="1.4" />
+    </UiEmpty>
 
     <template v-else>
       <header class="doc-head">
@@ -296,14 +290,13 @@ function confirm(): void {
           </tbody>
         </UiTable>
 
-        <div v-else class="empty empty--inline">
-          <span class="empty__title">这个节点没有直接授权</span>
-          <span class="empty__text">
-            {{
-              isRestricted ? '仅本节点且没有直接授权：所有主体都没有权限。' : '权限全部来自祖先链。'
-            }}
-          </span>
-        </div>
+        <UiEmpty
+          v-else
+          title="这个节点没有直接授权"
+          :text="
+            isRestricted ? '仅本节点且没有直接授权：所有主体都没有权限。' : '权限全部来自祖先链。'
+          "
+        />
       </section>
 
       <section class="grantbar">

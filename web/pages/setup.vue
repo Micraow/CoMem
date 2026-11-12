@@ -201,10 +201,10 @@ async function submit(): Promise<void> {
           </span>
         </div>
 
-        <div v-if="formError !== null" class="callout callout--danger" role="alert">
-          <AlertTriangle :size="15" :stroke-width="1.4" />
+        <UiCallout v-if="formError !== null">
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div>{{ formError }}</div>
-        </div>
+        </UiCallout>
 
         <UiButton variant="primary" type="submit" :disabled="submitting" class="setup__submit">
           <UserPlus :size="15" :stroke-width="1.6" />

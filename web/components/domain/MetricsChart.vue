@@ -119,12 +119,9 @@ const isEmpty = computed(() => cards.value.length === 0 && tokenData.value.lengt
 </script>
 
 <template>
-  <div v-if="isEmpty" class="empty">
-    <span class="empty__icon">
-      <BarChart3 :size="20" :stroke-width="1.4" />
-    </span>
-    <span class="empty__title">还没有指标数据</span>
-  </div>
+  <UiEmpty v-if="isEmpty" v-slot="{ size }" title="还没有指标数据">
+    <BarChart3 :size="size" :stroke-width="1.4" />
+  </UiEmpty>
 
   <div v-else class="usage">
     <div v-if="cards.length > 0" class="usage__cards">

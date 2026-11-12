@@ -71,12 +71,9 @@ function chartDataOf(breakdown: HookEventBreakdown) {
 </script>
 
 <template>
-  <div v-if="props.events.length === 0" class="empty">
-    <span class="empty__icon">
-      <Timer :size="20" :stroke-width="1.4" />
-    </span>
-    <span class="empty__title">还没有开销上报</span>
-  </div>
+  <UiEmpty v-if="props.events.length === 0" v-slot="{ size }" title="还没有开销上报">
+    <Timer :size="size" :stroke-width="1.4" />
+  </UiEmpty>
 
   <div v-else class="hooks">
     <div v-if="props.asyncMs !== null" class="hooks__async">

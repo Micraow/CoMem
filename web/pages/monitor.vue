@@ -363,10 +363,10 @@ onMounted(load)
         </template>
       </DomainPageHeader>
 
-      <div v-if="error !== null" class="callout callout--danger mb-24">
-        <AlertTriangle :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="error !== null" class="mb-24">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
         <div>{{ error }}</div>
-      </div>
+      </UiCallout>
 
       <section class="section">
         <h2 class="section__title">记忆健康度</h2>

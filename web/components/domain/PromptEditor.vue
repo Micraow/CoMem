@@ -125,15 +125,12 @@ function save(): void {
     </div>
 
     <div v-else-if="props.error !== null" class="doc-pane stack-12">
-      <div class="callout callout--danger">
+      <UiCallout>
         <div>{{ props.error }}</div>
-      </div>
+      </UiCallout>
     </div>
 
-    <div v-else-if="props.detail === null" class="empty">
-      <span class="empty__title">还没有自定义提示词</span>
-      <span class="empty__text">从左侧选一条，修改之后保存；保存的内容会覆盖仓库里的默认值。</span>
-    </div>
+    <UiEmpty v-else-if="props.detail === null" title="还没有自定义提示词" text="从左侧选一条，修改之后保存；保存的内容会覆盖仓库里的默认值。" />
 
     <template v-else>
       <header class="editor-head">

@@ -129,10 +129,10 @@ async function submit(): Promise<void> {
           />
         </label>
 
-        <div v-if="error !== null" class="callout callout--danger" role="alert">
-          <AlertTriangle :size="15" :stroke-width="1.4" />
+        <UiCallout v-if="error !== null">
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div>{{ error }}</div>
-        </div>
+        </UiCallout>
 
         <UiButton variant="primary" type="submit" :disabled="submitting" class="login__submit">
           <LockKeyhole :size="15" :stroke-width="1.6" />

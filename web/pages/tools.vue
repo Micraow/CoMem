@@ -126,10 +126,10 @@ onMounted(() => {
         </template>
       </DomainPageHeader>
 
-      <div v-if="error !== null" class="callout callout--danger">
-        <AlertTriangle :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="error !== null">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
         <div>{{ error }}</div>
-      </div>
+      </UiCallout>
 
       <div v-else-if="loading && tools.length === 0" class="stack-16" aria-busy="true">
         <div v-for="index in 4" :key="index" class="tool-skeleton">

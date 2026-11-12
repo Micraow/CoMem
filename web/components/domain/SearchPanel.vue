@@ -11,6 +11,8 @@
  *
  * `find` / `search` 的差别靠选项标签表达（「带查询计划」），不写说明段落。
  */
+import { useDebounceFn } from '@vueuse/core'
+
 import type { SearchContextType, SearchMode, SearchLevel } from './HitList.vue'
 
 const query = defineModel<string>('query', { required: true })
@@ -56,10 +58,11 @@ const CONTEXT_OPTIONS = [
 
 const canSubmit = computed(() => query.value.trim() !== '' && !props.loading)
 
-let timer: ReturnType<typeof setTimeout> | undefined
+const fire = useDebounceFn(() => emit('submit'), DEBOUNCE_MS)
 
 function submitNow(): void {
-  clearTimeout(timer)
+  // 不取消，点「检索」之后 300ms 会在防抖到期时再提交一次。
+  fire.cancel()
   if (!canSubmit.value) {
     return
   }
@@ -67,13 +70,11 @@ function submitNow(): void {
 }
 
 function schedule(): void {
-  clearTimeout(timer)
   if (query.value.trim() === '') {
+    fire.cancel()
     return
   }
-  timer = setTimeout(() => {
-    emit('submit')
-  }, DEBOUNCE_MS)
+  fire()
 }
 
 watch([query, mode, scope, limit, level, contextType], schedule)
@@ -87,7 +88,7 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onBeforeUnmount(() => {
-  clearTimeout(timer)
+  fire.cancel()
 })
 </script>
 
