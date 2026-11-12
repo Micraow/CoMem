@@ -1913,6 +1913,8 @@ export const preferencesMemoryType = {
 
 内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`identity`、`soul`、`experiences`、`rules`。
 
+**浏览器新建记忆的路径也由服务端算。** 控制台的「新建记忆」只收类型、标题/主题与正文，提交到 `POST /memories`；`domain/memory-types/creation.ts` 的 `deriveCreationIdentity` 把标题映射成该类型的 identity 值（单段类型整份标题作值；`rules` 的 `{scenario}/{rule}.md` 按 `/` 分成两段；`events` 缺日期前缀时补今天的本地日期），再交给 `renderMemoryUri` / `renderPath` 用 schema 的 `filename` 模板渲染。响应带最终 URI，控制台只做跳转——路径规则仍然只有 `memories/` 下这一份，前端没有模板解析器。同类型同标题再次提交走 `upsertMemory` 的字段级合并，响应里的 `created` 区分「新建」与「更新」；`events` 是 `addOnly`，撞名返回 `ALREADY_EXISTS`。
+
 #### 用户画像（`profile`）
 
 画像**整份注入每次会话的开头**（`integrations/servers/session-start.mjs`），长度是每次请求的固定成本。它的 `description` 原样渲染进抽取提示词（`services/prompts/extract.ts` 的 `renderMemoryTypes`），所以那里写的是**判定规则**而不是摘要：收录范围、路由表、格式契约、反例。改它等于改模型行为。
@@ -2852,6 +2854,8 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 检索侧的 `node_permission` 是物化结果，不是快照：改 ACL 时整棵子树重算，保证它等于「此刻的 `effective()`」。
 
+**新节点在写路径的求权步骤物化。** 新建节点在 `node_permission` 里还没有行，写操作（`write` / `edit` / `mkdir` / `mv` 的目标）由 `InheritingAuthorizer` 在缓存未命中时先 `materializeNode` 再判定；读操作只给**磁盘上已存在**的节点补物化，拼错的 URI 不会因为一次 GET 就在库里多一条权限行。因此 `write` 的 `create` / `append` 模式必须先按 write 求权，再做「目标是否存在 / 读现有正文」的预读——预读是 read 操作，顺序反过来时新路径会先撞上读路径的「不存在不物化」，把一次写操作误报成 `需要 read（1）级别`。MCP `write` 与 HTTP `POST /content/write` 共用这一条顺序。
+
 ### 12.4 出口清单
 
 每一个出口都必须过 `Authorizer`，漏一个就是泄露：
@@ -3185,10 +3189,11 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
+| 记忆 | `GET /memories/pending`、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源/技能 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
+| 本地推理 | `GET /inference/local`、`POST /inference/local/start`、`POST /inference/local/stop`。三个都只认系统管理员；启动命令与 pid 管理见 §18.2 |
 | 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验） |
 | 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`POST /auth/login`、`POST /auth/logout`（§12.7） |
 | MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
@@ -3233,7 +3238,9 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 七个事件、六个脚本：`PreCompact` 与 `SessionEnd` 共用 `servers/pre-compact.mjs`，但内部事件名（`pre_compact` / `session_end`）与预算各自独立。
 
-**事件名有两套。** 内部事件名是 snake_case（`session_start` … `session_end`，7 个），出现在 `POST /telemetry/hook` 的 `event` 字段、`comem_hook_*` 的 `event` 标签与控制台的行键；PascalCase（`SessionStart` …）只出现在宿主载荷与返回信封里。两套名字的对应只写在 `integrations/lib/events.json`，三个宿主共享同一张表——各写一份时所有 hook 样本会塌进 `event="other"`（见 `lib/events.mjs` 的文件头）。这张表还标了 `reportsOverhead`：`pre_tool_use` 为 `false`，所以**进 `/metrics` 的事件是 6 个**，与「宿主会调的事件是 7 个」不是同一个集合。
+**这张表是 Claude Code / Codex 的「hook 脚本」面。** DSH 没有 hook 脚本，它的生命周期点是同进程 Cordis 插件订阅的 typed 事件，原生插件（§15.7）只覆盖其中五个：`agent/created`（≈ `SessionStart`）、`agent/pre-step`（≈ `UserPromptSubmit`）、`session/event` 的 `turn/end`（≈ `Stop`）、`agent/disposed`（`SessionEnd` 的近似物）、`session/event` 的 `compaction/start`（`PreCompact` 只能观察、不能拦截）。没有 `PreToolUse` / `PostToolUse` 的等价接缝被接上。
+
+**事件名有两套。** 内部事件名是 snake_case（`session_start` … `session_end`，7 个），出现在 `POST /telemetry/hook` 的 `event` 字段、`comem_hook_*` 的 `event` 标签与控制台的行键；PascalCase（`SessionStart` …）只出现在宿主载荷与返回信封里。两套名字的对应只写在 `integrations/lib/events.json`，两个 hook 宿主共享同一张表——各写一份时所有 hook 样本会塌进 `event="other"`（见 `lib/events.mjs` 的文件头）。这张表还标了 `reportsOverhead`：`pre_tool_use` 为 `false`，所以**进 `/metrics` 的事件是 6 个**，与「宿主会调的事件是 7 个」不是同一个集合。
 
 **`SessionStart` 注入的是索引，不是正文。** `<comem-profile>` 与 `<comem-preferences>` 每条记忆一行 `- [类型] 摘要 · comem://…`，块首固定一句「以下是记忆索引。需要细节时用 read 工具按 URI 读原文」。摘要来自服务端 `GET /content/abstract`（文件的 L0 存在索引里，目录的 L0 是 `.abstract.md`），**hook 不自己截断正文**——那是第二个摘要实现，两处口径必然漂移。整段注入的代价是每一轮重付一次画像：1,076 次归档的画像有 16 万字，而索引化之后一条记忆几十 token，地址还在，模型按需 `read` 正文。偏好目录用 `GET /fs/ls` 列直接子文件，再逐条取摘要；一次 `SessionStart` 最多为 32 条偏好拉摘要（经验上界，见 `integrations/servers/session-start.mjs` 的 `PREFERENCES_INDEX_ENTRY_LIMIT`），超出的部分在块内写「（已截断，共 M 条）」，完整列表用 `list` 取。
 
@@ -3246,6 +3253,8 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 采集跑在**分离的 worker 进程**里，`Stop` 立刻返回。只有 `PreCompact` / `SessionEnd` 会等提交完成（在 hook 超时预算内）。
 
 **为什么必须分离**：`Stop` 卡住等于把用户的输入延迟绑在 LLM 抽取上。抽取一次几秒到几十秒，用户会以为宿主卡死了。
+
+**DSH 插件的采集不在分离进程里**：它在 `session/event` 的 `turn/end` 拿本轮消息，剥离后直接 `POST /sessions/{id}/messages` + `/commit`。这不会卡住模型——事件是 emit 模式，插件 fire-and-forget；提交失败时消息留在内存缓冲里，下一次 `turn/end` 重投（服务端按消息 `id` 幂等）。代价是进程被强杀时最后半轮会丢，见 DSH 插件 README 的已知限制。
 
 ### 15.4 去重与幂等
 
@@ -3260,7 +3269,7 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 ### 15.5 会话 ID
 
-宿主没有统一的会话 ID 格式，插件按宿主加前缀：`cc-`（Claude Code）、`dsh-`（DSH）、`cx-`（Codex）。
+宿主没有统一的会话 ID 格式，插件按宿主加前缀：`cc-`（Claude Code）、`dsh-`（DSH 插件）、`cx-`（Codex）。前缀只在 ID 还没有这个前缀时补——`dsh-` 开头的原生会话 ID 不会被加成 `dsh-dsh-`。
 
 ### 15.6 MCP 接入
 
@@ -3291,15 +3300,32 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 ### 15.7 支持哪些宿主
 
-v1 做三个：**Claude Code**（hooks + MCP，最常用）、**DSH**（plugin + MCP）和 **Codex**（hooks + MCP）。
+v1 做三个：**Claude Code**（hooks + MCP，最常用）、**Codex**（hooks + MCP）和 **DSH**（原生插件 + MCP）。
 
-三个宿主的 Hook 事件名与载荷都覆盖 §15.2 的七个事件：
+**两个 hook 宿主**的事件名与载荷覆盖 §15.2 的七个事件：
 
 | 宿主 | Hook 形态 | 事件名 | 配置文件 |
 |---|---|---|---|
 | Claude Code | settings 里的 hooks | `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` / `PreCompact` / `SessionEnd`（后两者都装 `pre-compact.mjs`，内部事件名不同） | `~/.claude/settings.json` |
-| DSH | 插件 hooks | 同上（插件定义的形状） | `~/.dsh/settings.json` |
 | Codex | `hooks.json` 或 `config.toml` 内联 `[hooks]` | 同上（官方文档 <https://developers.openai.com/codex/hooks>；另有 `SubagentStart` / `SubagentStop` / `PermissionRequest` / `PostCompact` / `Interrupt`，CoMem 只接其中这七个） | `~/.codex/hooks.json` 或 `<repo>/.codex/hooks.json` |
+
+**DSH 不是 hook 宿主。** DSH 0.2.2-rc.1 没有「宿主执行一个命令并读 JSON」的面：配置是
+`$DSH_HOME/profiles/<name>/cordis.patch.yml` 里的插件条目，生命周期是同进程 Cordis
+插件订阅的 typed 事件。接入物是独立包 `integrations/dsh-plugin/`，覆盖五个接缝：
+
+| 接缝 | 等价于 | 实现 |
+|---|---|---|
+| `agent/created` | `SessionStart` | `handleSessionStart` + `agent.inject()` |
+| `agent/pre-step`（waterfall） | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则 `handleUserPromptSubmit` 并把块折进 `decision.messages` |
+| `session/event` 的 `turn/end` | `Stop` | `sanitizeCapturedMessages` → `ensureSession` → `POST /sessions/{id}/messages` + `/commit` |
+| `agent/disposed` | `SessionEnd` 的近似物 | 尽力补交，emit 模式没人等 |
+| `session/event` 的 `compaction/start` | `PreCompact` | **做不到**：只记一条 warn，压缩前不归档 |
+
+插件不写第二份渲染 / 预算 / 剥离：它 import `integrations/servers/*.mjs` 的
+`handleSessionStart` / `handleUserPromptSubmit` / `ensureSession`，以及 `lib/` 的
+`injection.mjs` / `sanitize.mjs` / `recall.mjs` / `http.mjs` / `lifecycle.mjs`。
+`hosts/dsh.mjs` 已删除——它假设的载荷形状、`transcriptPath` 与工具名都不存在，
+永远不会被调用。`install --host dsh` 在写第一个字节之前失败并指向插件。
 
 Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` / `cwd` /
 `hook_event_name`，信封是 `hookSpecificOutput.additionalContext` 与
@@ -3308,8 +3334,9 @@ Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` /
 的非托管 Hook 运行前需要用户在 `/hooks` 里审查并信任。
 
 **不做 Cursor、TRAE、OpenCode 等的 Hook。** 它们的 hook 事件名和 payload 各不相同，
-每个都要单独适配并对着真实宿主验证。适配器接口留好即可——加一个宿主仍然只加一个
-`hosts/<name>.mjs` 文件，再加一条 `cli.mjs` 的 `DEFAULT_SETTINGS` 条目。
+每个都要单独适配并对着真实宿主验证。适配器接口留好即可——加一个 **hook 宿主**仍然
+只加一个 `hosts/<name>.mjs` 文件，再加一条 `cli.mjs` 的 `DEFAULT_SETTINGS` 条目。
+DSH 这种没有 hook 面的宿主走自己的插件包，不塞进 `hosts/`。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
 
@@ -3330,12 +3357,15 @@ integrations/
 │   └── mcp-proxy.mjs          # stdio → POST /mcp（§15.6）
 ├── hosts/                     # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
-│   ├── codex.mjs
-│   └── dsh.mjs
-├── lib/                       # 与宿主无关的共享模块
+│   └── codex.mjs
+├── dsh-plugin/                # DSH 原生插件（独立包，装进 profile）
+│   ├── package.json           # main / engines.dsh
+│   ├── lib/index.js           # 五个接缝的订阅者
+│   └── README.md
+├── lib/                       # 与宿主无关的共享模块（hook 与 DSH 插件共用）
 │   ├── config.mjs             # 配置 + 宿主解析 + bypass
 │   ├── http.mjs               # 超时 / 重试 / 错误封套
-│   ├── hook-runner.mjs        # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── hook-runner.mjs        # 入口骨架：stdin → 归一化 → 预算 → 信封（两个 hook 宿主共用）
 │   ├── lifecycle.mjs          # 总预算 / stdin 上限 / 诊断与兜底退出
 │   ├── is-main.mjs            # 入口判定：被直接执行还是被测试 import（六个入口共用）
 │   ├── values.mjs             # 载荷取值：asRecord / text / renderToolOutput / describeEntry
@@ -3355,7 +3385,7 @@ integrations/
 └── tests/                     # node:test
 ```
 
-宿主适配器只回答五个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**、**transcript 怎么解析**。入口骨架（读 stdin → 归一化 → 总预算 → 写信封 → 退出）不属于这五个问题，也没有宿主差异，三个宿主共用 `integrations/lib/hook-runner.mjs` 的 `createRunHook`；「适配器之间不互相 import」约束的是信封与载荷解析，不是 `lib/`。
+宿主适配器只回答五个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**、**transcript 怎么解析**。入口骨架（读 stdin → 归一化 → 总预算 → 写信封 → 退出）不属于这五个问题，也没有宿主差异，两个 hook 宿主共用 `integrations/lib/hook-runner.mjs` 的 `createRunHook`（DSH 插件不经过它：它的载荷不是 stdin JSON）；「适配器之间不互相 import」约束的是信封与载荷解析，不是 `lib/`。
 
 第五个是踩过的坑：`Stop` 拿到的 `transcript_path` 是**宿主自己的格式**，不是通用格式。Claude Code 的 JSONL 每行有顶层 `message.{role,content}`；Codex 的 rollout 是 `{"type":"response_item","payload":{"type":"message","role":…,"content":[{"type":"input_text","text":…}]}}`，没有顶层 `message`。**共用一个解析器就等于只支持一个宿主**——被共用的那个会静默返回 0 条消息，hook 正常退出 0、什么都不报，整条被动捕获链路根本不会启动。所以解析下放到 `integrations/hosts/*.mjs` 的 `parseTranscript`，`stop.mjs` 只负责「拿路径 → 交给宿主 → 拿消息」。其余状态机由 `lib/` 承担：去重（`dedup.mjs`）、游标（`cursor.mjs`）、跨进程锁（`lock.mjs`）、超时与重试（`http.mjs`）。
 
@@ -3461,7 +3491,7 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 §15.9 保证「注入什么」，这一节保证**注入物不会反过来污染记忆**。三个机制，细节与用例在 `integrations/README.md` 的「注入与捕获的去重」：
 
-1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级（`<comem-recall>` / `<comem-profile>` / `<comem-preferences>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则）、行首时间戳前缀、裸 epoch（只在块剥完之后做）。剥空的消息整条丢弃，游标按剥离后的条数推进。三个宿主适配器不各剥一次——它们只回答「怎么解析」。
+1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级（`<comem-recall>` / `<comem-profile>` / `<comem-preferences>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则）、行首时间戳前缀、裸 epoch（只在块剥完之后做）。剥空的消息整条丢弃，游标按剥离后的条数推进。两个宿主适配器不各剥一次——它们只回答「怎么解析」；DSH 插件的 `turn/end` 也调同一个函数。
 2. **注入侧转义**（`integrations/lib/injection.mjs` 的 `escapeInjectionText`）。记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）：正文含 `</comem-recall><comem-recall>` 时，渲染后的块里开标签与闭标签各只有一个，结构没被破坏，内容仍然可读。反斜杠会把转义链引进来，删标签会改变记忆本身。
 3. **跨轮账本**（`integrations/lib/recall.mjs`）。账本是 `{tmpDir}/comem-recall-ledger.json`（与游标、事件去重同一个目录——hook 是短命进程，跨轮只能靠文件，且它拿不到服务端的 `dataDir`），记「本会话已投喂的 URI」，下一轮检索后排除。**本轮一条都没注入时不记账**：「没给过」不等于「给过了」，写了会让这些记忆在去重窗口内被静默压制。上限 200 条、FIFO；`sessionId` 变了整份替换（会话切换即重置）。客户端过滤不补位，所以检索时多要 `min(已投喂条数, recallLimit)` 条。
 
@@ -3477,8 +3507,8 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 | 页面 | 内容 |
 |---|---|
 | 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
-| 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks` |
-| 文件树 | 左树右详情；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块 |
+| 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
+| 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块 |
 | 检索调试 | 输入 query，选 `find` / `search`，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4） |
 | 记忆复核 | `pending` 列表 + diff 视图（before/after）；详情头显示有效期与「替换上一版本」提示；批量失败的原因逐条列在页面上；通过 / 拒绝 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
@@ -3494,6 +3524,8 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 - **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
+
+**浏览器里能创建第一条记忆。** 概览页的「还没有数据」空态与文件树工具栏各有一个「新建记忆」入口，共用同一个对话框：选记忆类型（中文名来自 `web/utils/memoryTypeLabels.ts`），填标题/主题与正文，提交走 `POST /memories`。路径不在控制台拼——服务端把标题映射成 identity 值并用各类型自己的 `filename` 模板渲染，响应带最终 URI（见 §11.1）。成功后关闭对话框、刷新目录树、跳到那条文件；`experiences` / `rules` 落在复核队列里，提示语写「等待复核」而不是只说「已保存」。失败时按 `details.field` 把 400 的原文挂在标题或内容字段旁，其余失败（403、网络）挂在对话框内——表单不吞掉服务端的诊断信息（`web/components/domain/MemoryCreateDialog.vue`）。
 
 **复核页把有效期、替换关系与失败原因都摆在页面上。** 详情头在有 `validUntil` 时写「有效期截止 …」，`validFrom` 与 `updatedAt` 不同时写「自 … 起生效」；`supersedes` 非空时在差异区上方给一条提示：通过会替换掉上一版本，拒绝则恢复到覆盖前的值（`web/components/domain/MemoryDiff.vue`）——用户在按按钮之前，需要知道按钮会做什么。服务端没有批量端点，批量操作逐条独立执行，**失败原因逐条列在队列上方**（可逐条看、可关闭，下一轮开始时清空），toast 只说「成功 N 条，失败 M 条」：3 秒后消失的 toast 装不下「哪几条、各自为什么」（`web/pages/review.vue`）。
 
@@ -4109,6 +4141,47 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 「谁能改」需要先有「谁的配置」这个概念，而 v1 是单租户部署（§12.4）。和 `/telemetry`、
 `/health` 一样不鉴权——它们都不碰用户内容。
 
+### 18.2 本地推理服务
+
+设置页的「本地推理服务」卡片让用户在浏览器里完成「选择 + 启动 + 使用」。三个端点
+都只给系统管理员：
+
+| 端点 | 行为 |
+|---|---|
+| `GET /api/v1/inference/local` | 回 `available` / `running` / `endpoint` / `dimension` / `backend` / `device` / `model` / `missing` / `startCommand`。`endpoint` 取 `providers.embedding.baseUrl` 的源地址，没配用 `http://127.0.0.1:8089` |
+| `POST /api/v1/inference/local/start` | 用服务端写死的命令拉起子进程并等到就绪。成功回 `{started: true, ready: true, endpoint, dimension}`；进程退出或超时回 409 `CONFLICT`（`details` 带 `started` / `ready` / `reason`）；缺依赖回 400 `INVALID_ARGUMENT`（`details` 带 `missing` / `startCommand`） |
+| `POST /api/v1/inference/local/stop` | 只停 pid 文件里记录的那个进程组，回 `{stopped: true}` |
+
+**`available` 的判据是本机文件**：`local-inference/.venv/bin/python`、
+`local-inference/server.py`、`local-inference/models/` 下至少一个 embedding `.gguf`。
+缺项列进 `missing`（`venv` / `server` / `embedding-model` / `rerank-model`）；
+`rerank-model` 缺失不阻止启动（命令自动加 `--no-rerank`）。核心镜像里没有
+`local-inference/`，因此恒为 `available: false`；`comem:local-inference` 镜像把源码
+放在 `/app/local-inference`、虚拟环境在 `/opt/comem-inference/.venv`、模型挂到
+`/models`，同样不满足判据——容器部署仍按 `docs/operations.md` 的「本地推理（可选镜像）」
+手动启动，卡片只用于本机源码部署。
+
+**启动命令写死在服务端**：`nice -n 10 taskset -c 0-5 .venv/bin/python server.py
+--device cpu --threads 6`。请求体不参与任何决策；路径、device、threads 都不接受
+调用方输入。
+
+**只管理自己启动的进程。** spawn 用 `detached: true` + `stdio: 'ignore'`，pid 写进
+`{dataDir}/_meta/local-inference.pid`；`stop` 只对 pid 文件里的进程组发
+SIGTERM / SIGKILL，不按名字 `pkill`——用户可能在终端里手动跑着同一个 `server.py`。
+HTTP 进程重启后先校验 pid 存活与 `/proc/<pid>/cmdline`；对不上只清文件。
+
+**等待与失败。** `start` 最多等 25 秒（控制台请求超时是 30 秒）：模型加载实测 8 秒
+左右，留出的余量够慢机器用。`dimension` / `backend` / `device` / `model` 都来自子进程
+的 `/health`，不是配置值——服务实际加载的模型与配置里想用的模型可能不是同一个。
+
+**「一键填入」只改表单。** 向量配置写 `type` / `baseUrl` / `model` / `apiKey` /
+`dimension`，重排配置写 `type` / `baseUrl` / `model` / `apiKey`；不自动保存，也不代填
+`retrieval.engine` / `retrieval.rerank.enabled`（前者是检索策略，后者默认关是刻意的）。
+
+**仓库根从模块位置推导。** 服务可能从任意工作目录启动，不能用 `process.cwd()`；
+`src/adapters/local-inference/` 与 `dist/adapters/local-inference/` 深度相同，
+`../../..` 在两处都指向仓库根（与 `config/prompt-defaults.ts` 同一理由）。
+
 ## 19. 错误模型
 
 `ComemError { code, message, details? }`。`code` 是稳定枚举，`message` 是给用户看的中文句子。
@@ -4214,7 +4287,7 @@ check:reachability → check:shape → build:web → test → test:integrations`
 | P8 | MCP 16 工具 | MCP 客户端可连 | ✅ |
 | P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 能看到「CoMem 让每个请求多花多少毫秒」 | ✅ |
 | P10 | 控制台十个页面 | 完整演示路径 | ✅ |
-| P11 | Hook 插件（Claude Code + DSH） | 真实会话自动入库 | ✅ |
+| P11 | Hook 插件（Claude Code + Codex）与 DSH 原生插件 | 真实会话自动入库 | ✅ |
 | P12 | 文档定稿 | 全部文档与实现一致 | 未完成 |
 
 **路径锁与元数据写保护排在 P2，Context Assembly 与 Recall Ledger 排在 P3。** 前两者是**正确性**问题，晚补等于在错误的地基上盖楼；后两者跟检索是同一层，拆开做要改两遍。

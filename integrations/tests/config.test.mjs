@@ -166,13 +166,9 @@ test('bypass：path 优先于 cwd', () => {
   assert.equal(isBypassed({ cwd: '/home/alice/repo', path: '/home/alice/scratch/a.ts' }, env), true);
 });
 
-test('宿主解析：claude-code 与 dsh 都能加载', async () => {
+test('宿主解析：默认是 claude-code', async () => {
   const claude = await resolveHost({ env: {}, argv: [] });
   assert.equal(claude.SESSION_ID_PREFIX, 'cc-');
-  const dsh = await resolveHost({ env: {}, argv: [] }).then(() =>
-    resolveHost({ env: {}, argv: ['--host', 'dsh'] }),
-  );
-  assert.equal(dsh.SESSION_ID_PREFIX, 'dsh-');
 });
 
 test('宿主名不合法（路径穿越）时拒绝加载', async () => {

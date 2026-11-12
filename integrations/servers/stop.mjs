@@ -22,7 +22,7 @@
  * ## 为什么 worker 载荷走文件
  *
  * `detached` + `stdio: 'ignore'` 的进程拿不到父进程的 stdin。载荷走环境变量会
- * 撞 Linux 的单个变量上限（DSH 适配器可能把整段对话放进载荷），所以写临时文件、
+ * 撞 Linux 的单个变量上限（一轮对话可能很长），所以写临时文件、
  * 把路径传过去；worker 读完立刻删。过期文件在每次写入前顺带清掉。
  *
  * ## transcript 的格式由宿主决定
@@ -198,10 +198,14 @@ async function reportEmptyCapture(dir, event, transcript, provided) {
  * 409 能证明上一轮的消息没被清空**——所以这里不能把 409 当错误，也不能把
  * 409 之外的状态当成「已存在」。
  *
+ * 导出给 DSH 原生插件（`integrations/dsh-plugin/lib/index.js`）用：它不走
+ * `captureSession` 的游标与 worker，但「先建会话再写消息」这一步与 `Stop` 完全
+ * 相同，语义和 409 的处理只能有一份。
+ *
  * @param {{ sessionId: string }} event
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient> }} deps
  */
-async function ensureSession(event, deps) {
+export async function ensureSession(event, deps) {
   try {
     await deps.http.post(SESSIONS_PATH, {
       sessionId: event.sessionId,
@@ -238,7 +242,7 @@ export async function captureSession(event, deps) {
       // 失败会表现成「采集偶尔不生效」——那种问题最难查。
       await mkdir(dir, { recursive: true });
       const cursor = await readCursor(event.sessionId, { dir });
-      // 宿主直接给了累积列表（DSH 的 `data.messages`）就用它；否则交给当前宿主的
+      // 载荷里直接给了累积列表（`event.messages`）就用它；否则交给当前宿主的
       // transcript 解析器（`hosts/<host>.mjs` 的 `parseTranscript`）。
       const provided = Array.isArray(event.messages) ? event.messages : null;
       const transcript =

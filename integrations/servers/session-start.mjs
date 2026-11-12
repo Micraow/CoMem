@@ -29,8 +29,8 @@
  *
  * ## 再往外是宿主字节上限
  *
- * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、
- * Codex 9,500、DSH 20,000）。超限时按 `lib/injection.mjs` 的
+ * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、Codex
+ * 9,500；DSH 插件传的是默认的 9,500）。超限时按 `lib/injection.mjs` 的
  * `CONTEXT_BLOCK_DROP_ORDER` 丢块：技能目录 → 召回 → 偏好 → 画像。**顺序是显式的**，
  * 不依赖块在数组里的位置——「从后往前丢」会让块的插入顺序变成第二份优先级表。
  *
@@ -287,7 +287,8 @@ function readSkills(result) {
  *   env?: NodeJS.ProcessEnv,
  *   warn?: (message: string, data: Record<string, unknown>) => void,
  *   maxContextBytes?: number,
- * }} deps `maxContextBytes` 来自宿主适配器（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）
+ *   processStartMs?: () => number,
+ * }} deps `maxContextBytes` 来自宿主适配器（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）；`processStartMs` 供进程内调用方（DSH 插件）覆盖「进程启动」这一段——那里没有起进程，值是 0
  * @returns {Promise<{ context?: string } | undefined>}
  */
 export async function handleSessionStart(event, deps) {
@@ -390,7 +391,12 @@ export async function handleSessionStart(event, deps) {
     {
       event: event.event,
       sessionId: event.sessionId,
-      phases: { processStartMs: processStartMs(), recallMs, serializeMs, captureMs: 0 },
+      phases: {
+        processStartMs: (deps.processStartMs ?? processStartMs)(),
+        recallMs,
+        serializeMs,
+        captureMs: 0,
+      },
     },
     { config: deps.config, http: deps.http },
   );

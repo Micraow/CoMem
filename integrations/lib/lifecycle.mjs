@@ -126,15 +126,20 @@ export function budgetForEvent(event) {
 }
 
 /**
- * 建一个从**进程启动**算起的总 deadline。
+ * 建一个总 deadline。
  *
  * `AbortSignal.timeout` 内部定时器被 Node unref（实测 `node -e "AbortSignal.timeout(60000)"`
  * 21ms 退出），所以它自己不会把进程留在事件循环里。
  *
+ * 起点默认是**进程启动**（`performance.timeOrigin`）：hook 是短命进程，「用户等了
+ * 多久」从进程拉起算起。进程内调用方（DSH 插件）没有起进程，它要的是「从这一刻
+ * 起最多等多久」，由第二个参数传入起点——同一个实现，不另写一份。
+ *
  * @param {number} budgetMs
+ * @param {number} [startedAtMs] 预算起点（epoch ms），默认取进程启动时刻
  */
-export function createDeadline(budgetMs) {
-  const expiresAt = processStartEpochMs() + budgetMs;
+export function createDeadline(budgetMs, startedAtMs = processStartEpochMs()) {
+  const expiresAt = startedAtMs + budgetMs;
   // `AbortSignal.timeout` 只接受整数毫秒；`timeOrigin` 带小数。
   const remaining = Math.max(0, Math.round(expiresAt - Date.now()));
   return {

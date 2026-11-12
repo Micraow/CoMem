@@ -336,7 +336,7 @@ prompt 就是后一种形态。要上表里的召回率，把 `retrieval.engine`
 
 ## 🔌 接入你的 Agent
 
-CoMem 通过 **MCP**（Streamable HTTP）和 **Hook 插件**接入 agent。Hook 在会话开始时检索并注入相关记忆，在会话结束时采集消息。**已适配三个宿主：Claude Code、Codex、DSH**——同一套命令，`--host` 选宿主。
+CoMem 通过 **MCP**（Streamable HTTP）和 **自动注入 / 采集**接入 agent。注入在会话开始时给画像与偏好索引、每轮按 prompt 召回相关记忆；采集在轮次结束时把消息交给 CoMem 归档。**已适配三个宿主：Claude Code、Codex、DSH**——前两个用 `--host` 装 hook 脚本，DSH 用原生 Cordis 插件。
 
 **Hook 插件用仓库内的脚本装，不是 `npx`。** `integrations/package.json` 是 `private: true`、没有发布到 npm，`npx co-mem` 会拿到 `404 Not Found`。下面的命令都要在**仓库根目录**执行。
 
@@ -366,27 +366,38 @@ node integrations/cli.mjs install --host codex          # 写入 ~/.codex/hooks.
 <details>
 <summary><strong>DSH</strong></summary>
 
-DSH 没有 settings 里的 hook 面，所以 **`install --host dsh` 会失败**（它不再写一个没人读的
-`~/.dsh/settings.json`）。DSH 的 hook 由 `@deepseek-ai/dsh-hooks-claude-code` /
-`dsh-hooks-codex` 两个桥插件提供，挂在 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的
-`configPath` 上：
+DSH 没有 hook 脚本面：它的生命周期点是同进程 Cordis 插件订阅的 typed 事件。所以
+DSH 上不用 `install --host dsh`（它会在写任何字节之前失败，并指向插件），而是装
+`integrations/dsh-plugin/`：
 
 ```bash
-# 1. 用 Claude Code 方言生成 hooks 文件
-node integrations/cli.mjs install --host claude-code --settings ~/.dsh/comem/hooks.json
+# 1. 装进 profile
+dsh plugin --profile web add "link:$PWD/integrations/dsh-plugin"
 ```
 
 ```yaml
-# 2. 在 cordis.patch.yml 里挂上桥
-- name: '@deepseek-ai/dsh-hooks-claude-code'
-  config:
-    configPath: ~/.dsh/comem/hooks.json
+# 2. 在 $DSH_HOME/profiles/web/cordis.patch.yml 里加一条 insert
+- insert:
+    - id: comem
+      name: comem-dsh-plugin
+      config:
+        baseUrl: http://127.0.0.1:1933
+        token: ''            # 非回环时必须给
 ```
 
-配置格式来自两个桥包 0.2.2-rc.1 的 README，**未端到端验证**；两个桥各只实现 5 个事件，
-`PreCompact` / `SessionEnd` 不会触发，`Stop` 也采不到 transcript。要完整的七个事件，用
-`--host claude-code` 或 `--host codex` 直连宿主。细节见
-[集成指南的 DSH 一节](integrations/README.md#dsh)。
+```bash
+# 3. 不启动也能验证组合成功
+dsh --profile web --dump-config | grep -A6 'id: comem'
+```
+
+插件覆盖五个接缝：`agent/created`（画像 / 偏好 / 技能索引）、`agent/pre-step`
+（每轮召回）、`session/event` 的 `turn/end`（采集 + 提交）、`agent/disposed`
+（尽力补交）、`session/event` 的 `compaction/start`（只 warn）。
+
+**已知限制**：DSH 没有可在压缩前拦截的接缝，压缩前不会额外归档；没有真正的
+`SessionEnd`，进程被强杀时最后半轮会丢；工具调用/结果不采集；子 agent 会话不注入
+也不采集。细节与配置见
+[插件 README](integrations/dsh-plugin/README.md) 和[集成指南](integrations/README.md#dsh)。
 </details>
 
 <details>
@@ -426,7 +437,7 @@ flowchart TB
 | `src/adapters/` | ④ 适配层 | 文件系统、SQLite、模型、日志 |
 | `src/config/`、`src/bootstrap/` | — | 装配输入与依赖装配 |
 | `web/` | — | Nuxt 3 控制台，独立构建 |
-| `integrations/` | — | Hook 插件（Claude Code、DSH），独立交付物 |
+| `integrations/` | — | Hook 插件（Claude Code、Codex）与 DSH 原生插件，独立交付物 |
 
 依赖规则用 ESLint `no-restricted-imports` **强制**：`domain/` 不出现 `node:fs`/`node:sqlite`/`fetch`，`services/` 不出现 `ai`，`services/` 只能用 `import type` 引用 `adapters/`。这不是风格问题——领域层一旦碰 IO，ACL 求值就没法用内存数据穷举测试。
 </details>

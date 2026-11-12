@@ -18,7 +18,7 @@
  * `{tmpdir}/comem-cursors.json`：
  *
  * ```json
- * { "cc-7f3a91c2": 42, "dsh-0b1c": 7 }
+ * { "cc-7f3a91c2": 42, "cx-thr_1": 7 }
  * ```
  *
  * 写入是「临时文件 + rename」，与事件去重文件同一个理由：半个 JSON 读回来等于

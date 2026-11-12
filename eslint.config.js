@@ -39,11 +39,14 @@ export default tseslint.config(
     },
   },
   {
-    // 纯 `.mjs` 脚本（`scripts/`、`integrations/`）跑在 Node 里，不是浏览器。
+    // 纯 `.mjs` / `.js` 脚本（`scripts/`、`integrations/`）跑在 Node 里，不是浏览器。
     //
     // `tseslint.configs.recommended` 只为 TypeScript 关掉 `no-undef`（类型检查
     // 已经覆盖它），`.mjs` 拿不到这层豁免，又没声明 Node 全局，于是 `process` /
     // `fetch` / `setTimeout` 全部报未定义。这不是代码问题，是配置缺口。
+    //
+    // `integrations/dsh-plugin/` 是 `.js`（它是装进 DSH profile 的独立包，`type:
+    // module`），与 `integrations/` 的 `.mjs` 同一个运行环境，走同一份全局表。
     //
     // `integrations/tests/` 用 `node --test` 且从 `node:test` 显式 import
     // `test`，不需要测试运行器的 `describe` / `it` 全局；它需要的只是 Node 全局。
@@ -51,7 +54,7 @@ export default tseslint.config(
     // Node >=22.5），不是测试专属 API。
     //
     // `globals` 包没装（少一个依赖），手列 v1 用到的集合；新增全局时在这里补。
-    files: ['scripts/**/*.mjs', 'integrations/**/*.mjs'],
+    files: ['scripts/**/*.mjs', 'integrations/**/*.mjs', 'integrations/**/*.js'],
     languageOptions: {
       globals: {
         process: 'readonly',

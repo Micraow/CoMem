@@ -22,7 +22,6 @@ import { test } from 'node:test';
 
 import { parseTranscript as parseClaudeCode } from '../hosts/claude-code.mjs';
 import { parseTranscript as parseCodex } from '../hosts/codex.mjs';
-import { parseTranscript as parseDsh } from '../hosts/dsh.mjs';
 import { captureSession } from '../servers/stop.mjs';
 
 /**
@@ -249,12 +248,6 @@ test('混合格式不串味：各自的解析器不认对方的行', () => {
   assert.match(codexOnClaude.sample, /keys=uuid,type,message/);
 });
 
-test('DSH 不解析 transcript：结果带「未验证」说明', () => {
-  const parsed = parseDsh('任意内容');
-  assert.deepEqual(parsed.messages, []);
-  assert.match(parsed.note, /未验证/);
-});
-
 test('回归：Codex rollout 走完整 captureSession 时 captured > 0', async () => {
   await withTempDir(async (dir) => {
     const transcript = join(dir, 'rollout-2026-11-06T11-35-38-thr_1.jsonl');
@@ -353,30 +346,5 @@ test('没有 transcript 路径时也记一条，与「给了但解析不出」�
     assert.equal(log.reason, 'no-transcript-path');
     assert.equal(log.transcript, null);
     assert.equal(log.lines, 0);
-  });
-});
-
-test('DSH 载荷没有 messages 时，transcript 路径的「未验证」写进诊断', async () => {
-  await withTempDir(async (dir) => {
-    const transcript = join(dir, 'session.jsonl');
-    await writeFile(transcript, '{"unknown":true}\n', 'utf8');
-    const http = fakeHttp();
-
-    await captureSession(
-      {
-        host: 'dsh',
-        event: 'stop',
-        sessionId: 'dsh-1',
-        cwd: dir,
-        eventId: null,
-        transcriptPath: transcript,
-        messages: null,
-      },
-      { config: { tmpDir: dir, userId: 'alice' }, http, env: {} },
-    );
-
-    const log = JSON.parse((await readFile(join(dir, 'comem-capture.log'), 'utf8')).trim());
-    assert.equal(log.host, 'dsh');
-    assert.match(log.note, /未验证/);
   });
 });

@@ -79,7 +79,8 @@ const MATCHERS = Object.freeze({ PreToolUse: 'Read|Write|Edit' });
  * 根目录里没有读它（可能要先经过交互式信任）。用 `--settings` 指到项目级路径前
  * 先自己确认一次。
  *
- * `dsh` 不在这张表里——DSH 没有 settings 里的 hook 面，见 `UNSUPPORTED_HOSTS`。
+ * `dsh` 不在这张表里——DSH 没有 settings 里的 hook 面，用原生插件接入，见
+ * `UNSUPPORTED_HOSTS`。
  */
 const DEFAULT_SETTINGS = Object.freeze({
   'claude-code': join(homedir(), '.claude', 'settings.json'),
@@ -89,48 +90,25 @@ const DEFAULT_SETTINGS = Object.freeze({
 /**
  * 不支持 `install` 的宿主，值是给人看的失败说明。
  *
- * **DSH 为什么不能装。** DSH 0.2.2-rc.1 读的配置是
- * `$DSH_HOME/profiles/<name>/settings.yaml`，而它已经是遗留文件：启动时
- * `@deepseek-ai/dsh-settings` 的 `importLegacyDocument` 把它一次性导入 profile 并
- * 改名为 `settings.yaml.imported`（`lib/index.js:346-349`）。`~/.dsh/settings.json`
- * 一个读者都没有——写它不报错，只是永远不生效。
- *
- * DSH 的 hook 面**完全由插件提供**：`@deepseek-ai/dsh-hooks-claude-code`（Claude
- * Code 方言）或 `@deepseek-ai/dsh-hooks-codex`（Codex 方言），挂在
- * `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里，用 `configPath` 指向一个
- * `hooks.json`，或指向一个 `hooks` 键里放着配置的 settings 文件。字段名来自这两个
- * 包 0.2.2-rc.1 的 README。
- *
- * `install` 完不成这条链路：它要往 profile 里装插件、改一份 YAML，两件都不做；
- * 两个桥还各只实现 5 个事件（没有 `PreCompact` / `SessionEnd`），`Stop` 拿到的
- * `transcript_path` 也永远是空值。写一个没人读的文件比报错更难发现——用户会以为
- * 装好了。所以这里直接失败。
- *
- * **未验证**：本机没有装这两个桥包，`configPath` 能否真的让 CoMem 的 hook 跑起来
- * 没有端到端验证；字段名来自包 README，不是实测。
+ * **DSH 没有 settings 里的 hook 面。** 它的生命周期点是同进程 Cordis 插件订阅的
+ * typed 事件，没有「宿主读一个 hooks 文件」这一层：写 `~/.dsh/settings.json` 不报错，
+ * 只是永远不生效。CoMem 的接入物是 `integrations/dsh-plugin/` 这个原生插件，不是
+ * `servers/*.mjs` 的脚本，所以 `install` 在这里写不出任何东西——它在写第一个字节
+ * 之前失败，并把用户指向插件的安装步骤。**这不是「做不到」**，只是不走 install。
  */
 const UNSUPPORTED_HOSTS = Object.freeze({
   dsh: [
-    'DSH 没有 settings 里的 hook 面，install 不会写 ~/.dsh/settings.json（那个文件没有读者）。',
+    'DSH 用原生插件接入，install 不写 DSH 的配置。',
     '',
-    '  DSH 0.2.2-rc.1 读 $DSH_HOME/profiles/<name>/settings.yaml；它已是遗留文件，',
-    '  启动时被一次性导入并改名为 settings.yaml.imported。',
+    '  安装：dsh plugin --profile <name> add link:<仓库>/integrations/dsh-plugin',
+    '  再在 $DSH_HOME/profiles/<name>/cordis.patch.yml 里加一条 insert：',
+    "      - insert:",
+    '          - id: comem',
+    '            name: comem-dsh-plugin',
+    '            config:',
+    '              baseUrl: http://127.0.0.1:1933',
     '',
-    '  DSH 的 hook 面由插件提供：@deepseek-ai/dsh-hooks-claude-code 或',
-    '  @deepseek-ai/dsh-hooks-codex，挂在 $DSH_HOME/profiles/<name>/cordis.patch.yml',
-    '  里，用 configPath 指向一个 hooks 文件。本仓库不安装这两个插件、也不改 profile',
-    '  的 YAML，所以 install 在这里无法完成。配置格式未端到端验证，两个桥各只实现',
-    '  5 个事件（PreCompact / SessionEnd 不会触发）。',
-    '',
-    '  代替做法：',
-    '    1. node integrations/cli.mjs install --host claude-code --settings <path>/hooks.json',
-    '    2. 在 cordis.patch.yml 里加：',
-    "         - name: '@deepseek-ai/dsh-hooks-claude-code'",
-    '           config:',
-    '             configPath: <path>/hooks.json',
-    '    3. 验证：启动 DSH 后看日志里的 hook/invoked，再跑一轮对话看游标是否前进。',
-    '',
-    '  细节见 integrations/README.md 的「DSH」一节。',
+    '  见 integrations/dsh-plugin/README.md。',
   ].join('\n'),
 });
 
@@ -192,8 +170,7 @@ export function hookGroup(event, host, options = {}) {
  * 宿主能不能被 `install` / `uninstall` 写配置。
  *
  * 必须在**写第一个字节之前**调用：静默写一个没人读的文件，用户会以为装好了。
- * 显式传了 `--settings` 也不放行——`--host dsh` 选的是 DSH 适配器的载荷形状，
- * 而 DSH 只通过两个桥插件发 Claude Code / Codex 方言的载荷。
+ * 显式传了 `--settings` 也不放行——DSH 的接缝是插件，不是 settings 里的命令。
  */
 function assertInstallable(host) {
   const explanation = UNSUPPORTED_HOSTS[host];
@@ -262,7 +239,7 @@ function hooksOf(settings) {
  * 幂等：重复 install 不会产生重复条目（先清后写）。
  *
  * 不支持的宿主（`dsh`）在这里抛错，**一个字节都不写**。这是安装期失败：CLI 把
- * 说明打到 stderr、退出码非 0。
+ * 说明打到 stderr、退出码非 0，并指向原生插件的安装路径。
  *
  * @param {{ host?: string, settingsPath?: string, root?: string, execPath?: string }} [options]
  * @returns {Promise<{ settingsPath: string, backupPath: string | null, events: string[] }>}
@@ -295,9 +272,9 @@ export async function install(options = {}) {
 /**
  * 卸载：只删我们加的条目，空事件键一并清掉。
  *
- * 与 `install` 对称：不支持的宿主同样在写之前失败。旧版本可能已经往
- * `~/.dsh/settings.json` 写过东西，那个文件没有读者，删不删都不影响 DSH——这里
- * 不替用户收拾，只在说明里点出它的存在。
+ * 与 `install` 对称：不支持的宿主同样在写之前失败。DSH 的卸载是
+ * `dsh plugin --profile <name> remove comem-dsh-plugin` 加删除 patch 条目，
+ * 不是改 settings 文件。
  *
  * @param {{ host?: string, settingsPath?: string }} [options]
  * @returns {Promise<{ settingsPath: string, backupPath: string | null, removed: number }>}
@@ -474,7 +451,7 @@ const USAGE = `用法：
   co-mem doctor
   co-mem uninstall --host <claude-code|codex> [--settings <path>]
 
---host dsh 不可用：DSH 没有 settings 里的 hook 面，见 integrations/README.md 的「DSH」一节。`;
+--host dsh 不走 install：DSH 用原生插件接入，见 integrations/dsh-plugin/README.md。`;
 
 async function main(argv) {
   const command = argv[0];

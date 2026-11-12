@@ -125,9 +125,9 @@ export function escapeInjectionText(text) {
 /**
  * 宿主对一次 hook 输出的字节上限的兜底值。
  *
- * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、
- * Codex 9,500、DSH 20,000）。**调用方不传时用最严的那个**：拿不准宿主是谁，
- * 就按会静默转存文件的那个来，不能赌。
+ * 逐宿主的值在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`（Claude Code 9,500、Codex
+ * 9,500）。**调用方不传时用最严的那个**：拿不准宿主是谁，就按会静默转存文件的那个
+ * 来，不能赌。DSH 插件是进程内注入、没有宿主输出上限，仍用这个默认值当保守上限。
  */
 export const DEFAULT_MAX_CONTEXT_BYTES = 9500;
 

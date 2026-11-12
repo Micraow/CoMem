@@ -53,8 +53,9 @@ const TABLE = Object.freeze(
 /**
  * 内部事件名 → 宿主事件名。
  *
- * 三个宿主（Claude Code / Codex / DSH）目前用同一组 PascalCase 名字，所以一张表
- * 够用；某个宿主哪天改名，改这里的一行，而不是复制三份适配器代码。
+ * 两个 hook 宿主（Claude Code / Codex）目前用同一组 PascalCase 名字，所以一张表
+ * 够用；某个宿主哪天改名，改这里的一行，而不是复制两份适配器代码。DSH 的原生插件
+ * 不经过这张表的宿主名一侧（它直接调 handler，用内部事件名上报）。
  *
  * @type {Readonly<Record<string, string>>}
  */

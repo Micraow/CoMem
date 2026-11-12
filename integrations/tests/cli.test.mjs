@@ -296,36 +296,27 @@ test('未知宿主报错并列出可用宿主', async () => {
   // 不传 settingsPath，让 settingsPathFor 走默认表并因未知宿主抛错。
   await assert.rejects(() => install({ host: 'cursor' }), (error) => {
     assert.match(error.message, /未知宿主/);
-    // `dsh` 曾经在这张表里，但它指向的 `~/.dsh/settings.json` 没有读者（见下一个
-    // 用例）。它不能出现在「可用」里，否则用户会以为装得上。
+    // `dsh` 不在「可用宿主」里：它不是 settings 里的 hook，接入物是原生插件
+    // （见下一个用例）。它不能出现在这里，否则用户会以为装得上。
     assert.doesNotMatch(error.message, /dsh/);
     return true;
   });
 });
 
-test('install --host dsh 在写第一个字节之前失败', async () => {
-  // 原实现的落点是 `~/.dsh/settings.json`（`DEFAULT_SETTINGS.dsh`）。DSH 0.2.2-rc.1
-  // 读的是 `$DSH_HOME/profiles/<name>/settings.yaml`，而且那个文件启动时就被
-  // `importLegacyDocument` 改名成 `.imported`——`settings.json` 一个读者都没有。
-  // 写它不报错，只是永远不生效：用户以为装好了，实际零个 hook 会跑。
-  //
-  // 这里断言三件事：失败、说明可操作、**一个字节都没写**。
+test('install --host dsh 在写第一个字节之前失败，并指向原生插件', async () => {
+  // DSH 没有 settings 里的 hook 面：生命周期点是同进程 Cordis 插件订阅的 typed
+  // 事件。install 不写任何 DSH 配置（给了 --settings 也不写），而是把用户指向
+  // `integrations/dsh-plugin/`。
   await withTempDir(async (dir) => {
     const settingsPath = join(dir, 'settings.json');
     await assert.rejects(
       () => install({ host: 'dsh', settingsPath, root: ROOT }),
       (error) => {
-        // 现状与「为什么」：文件没有读者。
-        assert.match(error.message, /没有读者/);
-        // 正解：hook 面由插件提供，用 configPath 挂载。
-        assert.match(error.message, /dsh-hooks-claude-code/);
+        // 正解：原生插件，不是「做不到」。
+        assert.match(error.message, /原生插件/);
+        assert.match(error.message, /integrations\/dsh-plugin\/README\.md/);
+        assert.match(error.message, /dsh plugin --profile/);
         assert.match(error.message, /cordis\.patch\.yml/);
-        assert.match(error.message, /configPath/);
-        // 不确定的部分必须说成不确定。
-        assert.match(error.message, /未端到端验证/);
-        // 两条桥都不支持的同样要点出来，否则用户接完发现少了两个事件。
-        assert.match(error.message, /PreCompact/);
-        assert.match(error.message, /SessionEnd/);
         return true;
       },
     );
@@ -335,7 +326,7 @@ test('install --host dsh 在写第一个字节之前失败', async () => {
 });
 
 test('uninstall --host dsh 对称失败，不碰 home', async () => {
-  await assert.rejects(() => uninstall({ host: 'dsh' }), /没有 settings 里的 hook 面/);
+  await assert.rejects(() => uninstall({ host: 'dsh' }), /原生插件/);
 });
 
 test('CLI：--host 缺值时失败，不退回到默认宿主', () => {

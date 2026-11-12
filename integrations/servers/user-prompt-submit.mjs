@@ -165,7 +165,7 @@ export function formatRecallBlock(hits, threshold) {
 
 /**
  * @param {{ event: string, sessionId: string, cwd: string, prompt: string | null }} event `event` 是内部事件名（`lib/events.json` 的键），上报时原样用
- * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void, maxContextBytes?: number }} deps `maxContextBytes` 来自宿主适配器（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）
+ * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient>, env?: NodeJS.ProcessEnv, warn?: (message: string, data: Record<string, unknown>) => void, maxContextBytes?: number, processStartMs?: () => number }} deps `maxContextBytes` 来自宿主适配器（`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`）；`processStartMs` 供进程内调用方（DSH 插件）覆盖「进程启动」这一段——那里没有起进程，值是 0
  * @returns {Promise<{ context?: string } | undefined>}
  */
 export async function handleUserPromptSubmit(event, deps) {
@@ -263,7 +263,12 @@ export async function handleUserPromptSubmit(event, deps) {
     {
       event: event.event,
       sessionId: event.sessionId,
-      phases: { processStartMs: processStartMs(), recallMs, serializeMs, captureMs: 0 },
+      phases: {
+        processStartMs: (deps.processStartMs ?? processStartMs)(),
+        recallMs,
+        serializeMs,
+        captureMs: 0,
+      },
     },
     { config: deps.config, http: deps.http },
   );

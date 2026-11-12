@@ -1,0 +1,18 @@
+{
+  "name": "comem-dsh-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CoMem 的 DSH 原生插件：会话召回、跨轮注入与会话采集",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1"
+  }
+}

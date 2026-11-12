@@ -226,10 +226,11 @@ rm /var/lib/comem/_meta/config.override.yaml
 是正文首行的副本。
 
 **还有一层宿主字节上限。** Claude Code / Codex 在 hook 输出超过约 10,000 字符时
-把整段转存成文件、只把预览放进上下文（9,500 是留余量的取值）；DSH 没有公开上限，
-取 20,000。超限时 Hook 按「画像 > 技能目录 > 偏好」丢块，并在 stderr 记一条
+把整段转存成文件、只把预览放进上下文（9,500 是留余量的取值）。超限时 Hook 按
+`CONTEXT_BLOCK_DROP_ORDER` 丢块（技能目录 → 召回 → 偏好 → 画像），记一条
 `注入上下文超过宿主字节上限` 的 `warn`——看到它说明这次注入少了块，不是正常状态。
-两个数字在 `integrations/hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**。
+数字在 `integrations/hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**。
+DSH 插件是进程内注入、不存在宿主输出上限，它仍用默认的 9,500 当保守上限。
 
 ### 没有可用 LLM 时
 
@@ -1348,6 +1349,13 @@ nice -n 10 taskset -c 0-5 .venv/bin/python server.py --device cpu --threads 6
   `llama.cpp` 的 worker 线程会跑到集合之外。
 - 启动后 `curl http://127.0.0.1:8089/health` 的 `ready` 为 `true` 才算就绪。它会先
   跑一次 `embed(["warmup"])`——不预热的话第一条真实请求要等几百毫秒。
+
+**本机源码部署时，控制台可以直接启停。** 设置页的「本地推理服务」卡片（系统管理员）
+调用 `/api/v1/inference/local/{start,stop}`，命令与 `pip` / `uv` 安装步骤由服务端生成；
+「一键填入」只改表单、不保存。它只管理**自己启动的**进程（pid 在
+`{dataDir}/_meta/local-inference.pid`），不会碰终端里手动启动的实例。核心镜像没有
+`local-inference/`，推理镜像的虚拟环境与模型也不在卡片检查的路径上，所以容器部署下
+卡片显示「本机不可用」，仍按上面的 `docker run` 启动。
 
 ### 接进 CoMem
 

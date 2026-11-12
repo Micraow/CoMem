@@ -27,7 +27,6 @@ import { FileEventDeduper } from '../lib/dedup.mjs';
 import { EVENT_NAMES, REPORTED_EVENT_NAMES, internalEventNameOf } from '../lib/events.mjs';
 import { normalizeEvent as normalizeClaudeCode } from '../hosts/claude-code.mjs';
 import { normalizeEvent as normalizeCodex } from '../hosts/codex.mjs';
-import { normalizeEvent as normalizeDsh } from '../hosts/dsh.mjs';
 import { handlePostToolUse } from '../servers/post-tool-use.mjs';
 import { handlePreCompact } from '../servers/pre-compact.mjs';
 import { handleSessionStart } from '../servers/session-start.mjs';
@@ -119,7 +118,7 @@ test('有上报点的事件是表的一个真子集：pre_tool_use 不报开销'
   assert.equal(Object.hasOwn(EVENT_NAMES, 'pre_tool_use'), true);
 });
 
-test('三个宿主适配器都从同一张表取名，没有各自的映射', () => {
+test('两个宿主适配器都从同一张表取名，没有各自的映射', () => {
   const hosts = [
     [
       'claude-code',
@@ -127,7 +126,6 @@ test('三个宿主适配器都从同一张表取名，没有各自的映射', ()
       (host) => ({ hook_event_name: host, session_id: 's1', cwd: '/repo' }),
     ],
     ['codex', normalizeCodex, (host) => ({ hook_event_name: host, session_id: 's1', cwd: '/repo' })],
-    ['dsh', normalizeDsh, (host) => ({ event: host, sessionId: 's1', cwd: '/repo' })],
   ];
   for (const [label, normalize, payload] of hosts) {
     for (const [internal, host] of Object.entries(EVENT_NAMES)) {
