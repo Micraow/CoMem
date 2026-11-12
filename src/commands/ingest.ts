@@ -45,6 +45,7 @@ import { IngestCursorRepository } from '../adapters/sqlite/ingest-cursor-reposit
 import type { TaskRow } from '../adapters/sqlite/task-repository.js';
 import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
+import { readFlag } from '../config/file.js';
 import type { ComemConfig } from '../config/index.js';
 import { USER_WILDCARD } from '../domain/acl.js';
 import { ComemError, comemErrorMessage } from '../domain/errors.js';
@@ -115,19 +116,6 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
-}
-
-function readFlag(argv: readonly string[], name: string): string | undefined {
-  const prefixed = `--${name}`;
-  for (const [index, arg] of argv.entries()) {
-    if (arg === prefixed) {
-      return argv[index + 1];
-    }
-    if (arg.startsWith(`${prefixed}=`)) {
-      return arg.slice(prefixed.length + 1);
-    }
-  }
-  return undefined;
 }
 
 function parsePositiveInteger(raw: string, flag: string): number {

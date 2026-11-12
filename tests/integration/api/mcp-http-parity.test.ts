@@ -25,7 +25,7 @@ import { Uri } from '../../../src/domain/uri.js';
 const ROOT = 'comem://user/local';
 const SUBJECT = 'user:local';
 
-/** 默认条数的契约值。source 见 `api/search-defaults.ts`。 */
+/** 默认条数的契约值。source 见 `services/retrieval/budget.ts`。 */
 const EXPECTED_DEFAULT_LIMIT = 10;
 
 /** 超过默认条数的命中数：默认值没有生效时，这里会露出来。 */

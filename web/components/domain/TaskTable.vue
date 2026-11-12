@@ -60,7 +60,7 @@ export function isLeaseExpired(task: TaskRowPayload, now: number = Date.now()): 
 </script>
 
 <script setup lang="ts">
-import { AlertTriangle, RotateCcw, ShieldAlert } from 'lucide-vue-next'
+import { AlertTriangle, RotateCcw } from 'lucide-vue-next'
 
 import { taskStatusLabelOf, taskTypeLabelOf } from '~/utils/taskLabels'
 
@@ -119,9 +119,7 @@ watch(
         <span class="caption">按创建时间升序，只含可认领的任务</span>
       </template>
 
-      <UiEmpty v-if="props.forbidden" v-slot="{ size }" title="需要管理员权限">
-        <ShieldAlert :size="size" :stroke-width="1.4" />
-      </UiEmpty>
+      <UiEmpty v-if="props.forbidden" forbidden />
 
       <div v-else-if="props.loading && props.tasks.length === 0" class="task-skeleton">
         <UiSkeleton v-for="index in 5" :key="index" :width="`${78 - index * 5}%`" height="14px" />

@@ -7,7 +7,7 @@
 
 import { LEVELS } from '../../../domain/level.js';
 import { CONTEXT_TYPES } from '../../../domain/node.js';
-import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 
 import {
   optionalContextType,

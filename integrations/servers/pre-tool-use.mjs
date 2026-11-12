@@ -22,9 +22,8 @@
  * `runHook` 的 catch 分支不会写 stdout，因此不存在「异常 → deny」的路径。
  */
 
-import { pathToFileURL } from 'node:url';
-
 import { resolveHost } from '../lib/config.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
 
 /** URI 方案（架构文档 §6.1）。 */
@@ -57,7 +56,7 @@ export function handlePreToolUse(event) {
 }
 
 /** 直接可执行时走宿主信封；被测试 import 时不执行。 */
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   await runMain('hook pre-tool-use', async () => {
     const host = await resolveHost();

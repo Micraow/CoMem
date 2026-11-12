@@ -120,13 +120,13 @@ const hasChecked = computed(() => checked.value.length > 0)
         </div>
       </div>
 
-      <div v-else-if="props.error !== null" class="aside-pad">
-        <UiCallout>
-          <template #icon><ClipboardCheck :size="15" :stroke-width="1.4" /></template>
-          <div>{{ props.error }}</div>
-        </UiCallout>
-        <UiButton variant="secondary" size="sm" @click="emit('refresh')">重试</UiButton>
-      </div>
+      <UiErrorRetry
+        v-else-if="props.error !== null"
+        :message="props.error"
+        @retry="emit('refresh')"
+      >
+        <template #icon><ClipboardCheck :size="15" :stroke-width="1.4" /></template>
+      </UiErrorRetry>
 
       <UiEmpty v-else-if="props.memories.length === 0" v-slot="{ size }" title="没有待复核的记忆">
         <ClipboardCheck :size="size" :stroke-width="1.4" />

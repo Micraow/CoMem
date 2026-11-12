@@ -12,7 +12,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { userScopeOf } from '../../../domain/acl.js';
-import { ComemError } from '../../../domain/errors.js';
+import { invalidArgument } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { SkillFileInput } from '../../../services/skill.js';
 import { ok } from '../envelope.js';
@@ -25,29 +25,25 @@ import type { HttpRouteServices } from './index.js';
 const READ = 1;
 const WRITE = 3;
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 function parseFile(value: unknown, index: number): SkillFileInput {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw invalid(`files[${index}] 必须是对象。`, { index });
+    throw invalidArgument(`files[${index}] 必须是对象。`, { index });
   }
   const record = requireRecord(value, `files[${index}]`);
   const path = record['path'];
   const content = record['content'];
 
   if (typeof path !== 'string' || path === '') {
-    throw invalid(`files[${index}].path 必须是非空字符串。`, { index });
+    throw invalidArgument(`files[${index}].path 必须是非空字符串。`, { index });
   }
   if (typeof content !== 'string') {
-    throw invalid(`files[${index}].content 必须是 base64 字符串。`, { index });
+    throw invalidArgument(`files[${index}].content 必须是 base64 字符串。`, { index });
   }
 
   // `Buffer.from(..., 'base64')` 对非法字符是静默跳过，不是报错。先按规范形态
   // 校验一遍：长度是 4 的倍数、字符集是 base64 字母表（含 padding）。
   if (content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(content)) {
-    throw invalid(`files[${index}].content 不是合法的 base64。`, { index });
+    throw invalidArgument(`files[${index}].content 不是合法的 base64。`, { index });
   }
 
   return {
@@ -58,7 +54,7 @@ function parseFile(value: unknown, index: number): SkillFileInput {
 
 function parseFiles(value: unknown): readonly SkillFileInput[] {
   if (!Array.isArray(value)) {
-    throw invalid('files 必须是数组。', { field: 'files' });
+    throw invalidArgument('files 必须是数组。', { field: 'files' });
   }
   return value.map((item, index) => parseFile(item, index));
 }
@@ -97,7 +93,7 @@ export function createSkillRoutes(services: HttpRouteServices): HttpRouteGroup {
         const parentUri = requireUri(body, 'parentUri');
         const name = body['name'];
         if (typeof name !== 'string' || name === '') {
-          throw invalid('name 必须是非空字符串。', { field: 'name' });
+          throw invalidArgument('name 必须是非空字符串。', { field: 'name' });
         }
         const files = parseFiles(body['files']);
 

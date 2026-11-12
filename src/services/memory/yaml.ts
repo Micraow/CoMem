@@ -13,7 +13,7 @@
  * YAML 解析器，也不需要锚点、标签、多文档这些能力。
  */
 
-import { invalidArgument } from './errors.js';
+import { invalidArgument } from '../../domain/errors.js';
 
 const SEQUENCE_ITEM_PREFIX = '  - ';
 /**

@@ -39,6 +39,7 @@ import {
   type EvalVariant,
 } from '../eval/runner.js';
 
+import { readFlag } from '../config/file.js';
 import { loadCommandConfig } from './config.js';
 
 export interface EvalCliOptions {
@@ -63,19 +64,6 @@ const ENGINES: readonly RetrievalEngine[] = ['fts5', 'vector', 'hybrid'];
 
 function isRetrievalEngine(value: string): value is RetrievalEngine {
   return (ENGINES as readonly string[]).includes(value);
-}
-
-function readFlag(argv: readonly string[], name: string): string | undefined {
-  const prefixed = `--${name}`;
-  for (const [index, arg] of argv.entries()) {
-    if (arg === prefixed) {
-      return argv[index + 1];
-    }
-    if (arg.startsWith(`${prefixed}=`)) {
-      return arg.slice(prefixed.length + 1);
-    }
-  }
-  return undefined;
 }
 
 /** `--engines` 的取值：逗号分隔，去重，非法值直接报错。 */

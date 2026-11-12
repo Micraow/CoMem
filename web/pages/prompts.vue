@@ -230,13 +230,9 @@ onMounted(() => {
             </div>
           </div>
 
-          <div v-else-if="error !== null" class="aside-pad">
-            <UiCallout>
-              <template #icon><FileText :size="15" :stroke-width="1.4" /></template>
-              <div>{{ error }}</div>
-            </UiCallout>
-            <UiButton variant="secondary" size="sm" @click="load">重试</UiButton>
-          </div>
+          <UiErrorRetry v-else-if="error !== null" :message="error" @retry="load">
+            <template #icon><FileText :size="15" :stroke-width="1.4" /></template>
+          </UiErrorRetry>
 
           <template v-else>
             <div class="group-label">已自定义</div>

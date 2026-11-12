@@ -50,11 +50,12 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import { DEFAULT_HOST_NAME, isBypassed, loadConfig, loadHost, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 import { withSessionLock } from '../lib/lock.mjs';
 import { advanceCursor, readCursor } from '../lib/cursor.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
@@ -402,7 +403,7 @@ async function main() {
   );
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   if (process.env[WORKER_FLAG] === '1') {
     const payloadFile = process.env[WORKER_PAYLOAD];

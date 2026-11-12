@@ -25,7 +25,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { WRITE_LEVEL } from '../../../domain/acl.js';
-import { ComemError } from '../../../domain/errors.js';
+import { invalidArgument } from '../../../domain/errors.js';
 import { isMessageRole, MESSAGE_ROLES, type MessageRole } from '../../../domain/session.js';
 import type { Uri } from '../../../domain/uri.js';
 import { stableMessageId } from '../../../services/session.js';
@@ -38,10 +38,6 @@ import {
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
 
 function requireRole(message: Record<string, unknown>, index: number): MessageRole {
   const value = message['role'];

@@ -254,7 +254,7 @@ describe('engine: fts5', () => {
       // 检索默认只看「现在有效」的节点（W98）。这个时刻由服务自己取，不接受调用方
       // 指定——只断言它存在且是 ISO 串，断言具体值等于把墙钟钉进测试。
       asOf: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
-      // 服务层默认与 MCP / HTTP 共用 `api/search-defaults.ts` 的 10。
+      // 服务层默认与 MCP / HTTP 共用 `services/retrieval/budget.ts` 的 10。
       limit: 10,
     });
   });

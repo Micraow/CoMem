@@ -48,3 +48,16 @@ export function segmentCjk(text: string): string {
   return text.replace(CJK_GLOBAL, (char) => ` ${char} `).replace(WHITESPACE_RUN, ' ').trim();
 }
 
+/**
+ * 严格 UTF-8 解码；不是合法 UTF-8（二进制附件）时返回空串。
+ *
+ * 空串是「没有可检索文本」的既有表示，调用方据此走 §13 的二进制分支；返回 `null`
+ * 会让每个调用点各判一次。
+ */
+export function decodeText(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return '';
+  }
+}

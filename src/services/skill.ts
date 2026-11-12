@@ -16,10 +16,11 @@
 import type { ContentStore, StoredStat } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
 import type { PermissionRepository } from '../adapters/sqlite/permission-repository.js';
-import { ComemError, errorMessage } from '../domain/errors.js';
+import { ComemError, errorMessage, invalidArgument } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest, type NodeStatus } from '../domain/node.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
+import { decodeText } from '../domain/text.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
 import type { Uri } from '../domain/uri.js';
 
@@ -101,18 +102,6 @@ interface ResolvedSkillFile {
   readonly text: string;
   /** 是否是根目录的 `SKILL.md` */
   readonly isEntry: boolean;
-}
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
-function decodeText(bytes: Uint8Array): string {
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    return '';
-  }
 }
 
 /** 去掉成对的单引号或双引号；YAML 的引用形式在技能文件里只用到这一种。 */

@@ -15,7 +15,7 @@
  * `adapters/llm/embedding-provider.ts`。
  */
 
-import { ComemError } from './errors.js';
+import { invalidArgument } from './errors.js';
 
 /**
  * 一次嵌入请求的结果。
@@ -57,10 +57,6 @@ export interface EmbeddingOptions {
   readonly timeoutMs?: number;
   /** 调用方取消（HTTP 断开、进程退出） */
   readonly signal?: AbortSignal;
-}
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
 }
 
 /**

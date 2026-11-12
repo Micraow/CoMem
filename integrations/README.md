@@ -17,6 +17,7 @@ integrations/
 │   ├── config.mjs        # 配置 + 宿主解析 + bypass
 │   ├── http.mjs          # 超时 / 重试 / 错误封套
 │   ├── hook-runner.mjs   # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── is-main.mjs       # 入口判定：被直接执行还是被测试 import（六个入口共用）
 │   ├── values.mjs        # 载荷取值：asRecord / text / renderToolOutput / describeEntry
 │   ├── events.json       # 事件名映射表（宿主 PascalCase ↔ 内部 snake_case）
 │   ├── events.mjs        # 读上面那张表，导出 EVENT_NAMES / REPORTED_EVENT_NAMES

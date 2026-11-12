@@ -378,7 +378,7 @@ export class ReconcileService {
   }
 }
 
-/** 严格 UTF-8 解码；二进制返回 `null`（与 `ResourceService.decodeText` 同一判定）。 */
+/** 严格 UTF-8 解码；二进制返回 `null`（与 `domain/text.ts` 的 `decodeText` 同一判定，只是失败值不同）。 */
 function decodeText(bytes: Uint8Array): string | null {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);

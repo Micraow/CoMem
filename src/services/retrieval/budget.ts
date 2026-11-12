@@ -10,8 +10,8 @@ import { ComemError } from '../../domain/errors.js';
  *
  * 10：`find` / `search` / `grep` 的返回直接进模型上下文，10 条摘要约 1–2k token，
  * 再多会挤占工作上下文。`services/` 不能 import `api/`（§4.2），所以值定义在这里，
- * `api/search-defaults.ts` 再导出给两个入口——服务层的 `resolveLimit` 与 MCP / HTTP
- * 的默认值必须是同一个数，否则「同一个能力」会按调用方式返回不同规模。
+ * 服务层的 `resolveLimit` 与 MCP / HTTP 直接 import 这一处——各写一份会让「同一个
+ * 能力」按调用方式返回不同规模。
  */
 export const DEFAULT_SEARCH_LIMIT = 10;
 

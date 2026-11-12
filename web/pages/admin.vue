@@ -27,7 +27,7 @@
  * 页内的「新建」按钮在 forbidden 时收起——页面已经说明了不能用，就不留一个注定
  * 失败的入口。
  */
-import { AlertTriangle, Copy, Plus, ShieldAlert } from 'lucide-vue-next'
+import { AlertTriangle, Copy, Plus } from 'lucide-vue-next'
 
 import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
@@ -501,9 +501,7 @@ onMounted(() => {
 
       <div class="mt-16">
         <UiCard v-if="forbidden" :title="tab === 'users' ? '用户' : '组'" panel flush>
-          <UiEmpty v-slot="{ size }" title="需要管理员权限">
-            <ShieldAlert :size="size" :stroke-width="1.4" />
-          </UiEmpty>
+          <UiEmpty forbidden />
         </UiCard>
 
         <DomainUserTable

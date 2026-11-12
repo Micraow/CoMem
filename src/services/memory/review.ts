@@ -11,12 +11,11 @@
  * 正文变了就该重新看一遍。
  */
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { getMemoryType } from '../../domain/memory-types/index.js';
 import type { Uri } from '../../domain/uri.js';
 import { serializeMemoryDocument } from './document.js';
-import { invalidArgument } from './errors.js';
 import { readMemoryDocument, type MemoryFileStore } from './ports.js';
 import { restoreSuperseded } from './versioning.js';
 

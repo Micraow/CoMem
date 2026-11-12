@@ -25,7 +25,6 @@ import {
   ChevronDown,
   PlugZap,
   RefreshCw,
-  ShieldAlert,
   Trash2,
 } from 'lucide-vue-next'
 
@@ -328,10 +327,7 @@ onMounted(() => {
       </UiCallout>
 
       <UiCard v-else-if="forbidden" panel>
-        <UiEmpty title="需要管理员权限">
-          <template #default="{ size }">
-            <ShieldAlert :size="size" :stroke-width="1.4" />
-          </template>
+        <UiEmpty forbidden>
           <template #extra>
             <span class="caption">设置只给系统管理员。让管理员把账号加进系统管理员名单后再打开。</span>
           </template>

@@ -15,7 +15,7 @@ import { CONTEXT_TYPES } from '../../../domain/node.js';
 import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
 import { isSearchMode, SEARCH_MODES, type SearchMode } from '../../search-mode.js';
-import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 import {
   asRecord,
   formatDegradations,

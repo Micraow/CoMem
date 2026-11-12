@@ -17,7 +17,7 @@
  */
 
 import { READ_LEVEL, parsePrincipal, userScopeOf } from '../../domain/acl.js';
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../domain/errors.js';
 import { isLevel, LEVELS, type Level } from '../../domain/level.js';
 import { CONTEXT_TYPES, isContextType, type ContextType } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
@@ -429,10 +429,6 @@ export async function readScopes(
 }
 
 // ── 输入校验 ──
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
 
 export function asRecord(input: unknown, tool: McpToolName): Record<string, unknown> {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {

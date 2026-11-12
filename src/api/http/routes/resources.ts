@@ -21,7 +21,7 @@
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
-import { ComemError } from '../../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../../domain/errors.js';
 import {
   DEFAULT_MAX_FILE_BYTES,
   type AddResourceResult,
@@ -45,34 +45,30 @@ interface ParsedFile {
   readonly summary?: string;
 }
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 function parseFile(value: unknown, index: number): ParsedFile {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw invalid(`files[${index}] 必须是对象。`, { index });
+    throw invalidArgument(`files[${index}] 必须是对象。`, { index });
   }
   const record = requireRecord(value, `files[${index}]`);
   const path = record['path'];
   if (typeof path !== 'string' || path === '') {
-    throw invalid(`files[${index}].path 必须是非空字符串。`, { index });
+    throw invalidArgument(`files[${index}].path 必须是非空字符串。`, { index });
   }
 
   const content = record['content'];
   const uploadId = record['uploadId'];
   const summary = record['summary'];
   if (content !== undefined && typeof content !== 'string') {
-    throw invalid(`files[${index}].content 必须是字符串。`, { index });
+    throw invalidArgument(`files[${index}].content 必须是字符串。`, { index });
   }
   if (uploadId !== undefined && typeof uploadId !== 'string') {
-    throw invalid(`files[${index}].uploadId 必须是字符串。`, { index });
+    throw invalidArgument(`files[${index}].uploadId 必须是字符串。`, { index });
   }
   if (summary !== undefined && typeof summary !== 'string') {
-    throw invalid(`files[${index}].summary 必须是字符串。`, { index });
+    throw invalidArgument(`files[${index}].summary 必须是字符串。`, { index });
   }
   if (content === undefined && uploadId === undefined) {
-    throw invalid(`files[${index}] 需要 content 或 uploadId。`, { index });
+    throw invalidArgument(`files[${index}] 需要 content 或 uploadId。`, { index });
   }
 
   return {
@@ -85,7 +81,7 @@ function parseFile(value: unknown, index: number): ParsedFile {
 
 function parseFiles(value: unknown): readonly ParsedFile[] {
   if (!Array.isArray(value)) {
-    throw invalid('files 必须是数组。', { field: 'files' });
+    throw invalidArgument('files 必须是数组。', { field: 'files' });
   }
   return value.map((item, index) => parseFile(item, index));
 }

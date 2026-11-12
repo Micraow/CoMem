@@ -8,7 +8,7 @@
  * 各字段在合并时用哪种策略（§11.2）。
  */
 
-import { ComemError } from './errors.js';
+import { invalidArgument } from './errors.js';
 import { isReservedIdentifier } from './identity.js';
 import type { MergeStrategy } from './merge-op.js';
 
@@ -51,10 +51,6 @@ const CONTROL_CHAR_UPPER_BOUND = 0x20;
 
 function containsControlChar(text: string): boolean {
   return [...text].some((char) => char.charCodeAt(0) < CONTROL_CHAR_UPPER_BOUND);
-}
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
 }
 
 function validateIdentityValue(value: string, fieldName: string): void {

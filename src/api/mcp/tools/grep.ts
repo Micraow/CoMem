@@ -11,7 +11,7 @@
 
 import { READ_LEVEL } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
-import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 import { Uri } from '../../../domain/uri.js';
 import {
   asRecord,

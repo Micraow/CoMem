@@ -13,7 +13,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { ComemError } from '../../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../../domain/errors.js';
 import type { Session, SessionMessage, SessionStatus } from '../../../domain/session.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -25,7 +25,7 @@ import {
 } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
-import { invalid, parseMessage, scopeFrom, sessionUriOf } from './sessions-request.js';
+import { parseMessage, scopeFrom, sessionUriOf } from './sessions-request.js';
 
 /** §12.1：read = 1、write = 3。 */
 const READ = 1;
@@ -119,7 +119,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         // 重投已确认的部分。数组长度为 1 是它的退化形式，不再单独支持单对象。
         const rawMessages = body['messages'];
         if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
-          throw invalid('messages 必须是非空数组。', { field: 'messages' });
+          throw invalidArgument('messages 必须是非空数组。', { field: 'messages' });
         }
         // §17.2 的 `capture`：`Stop` 在 hook 里只写 worker 载荷并 spawn，**真正落盘
         // 的是这个端点**。边界包住逐条 `addMessage`，授权与参数解析不算——它们是

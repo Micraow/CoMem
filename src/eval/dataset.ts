@@ -17,7 +17,7 @@
  * 数据集格式（YAML 或 JSON，解析后是同一个对象）见 `eval/README.md`。
  */
 
-import { ComemError } from '../domain/errors.js';
+import { invalidArgument } from '../domain/errors.js';
 import { isRecord } from '../domain/guards.js';
 import { Uri } from '../domain/uri.js';
 
@@ -54,13 +54,9 @@ export interface EvalDataset {
  */
 const MAX_GRADE = 3;
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string') {
-    throw invalid(`${field} 必须是字符串。`, { field, value });
+    throw invalidArgument(`${field} 必须是字符串。`, { field, value });
   }
   return value;
 }
@@ -70,7 +66,7 @@ function requireUri(value: string, field: string): string {
   try {
     return Uri.parse(value).toString();
   } catch (error) {
-    throw invalid(`${field} 不是合法的 comem:// URI：${value}`, {
+    throw invalidArgument(`${field} 不是合法的 comem:// URI：${value}`, {
       field,
       value,
       reason: error instanceof Error ? error.message : String(error),
@@ -80,7 +76,7 @@ function requireUri(value: string, field: string): string {
 
 function parseCorpus(raw: unknown): Readonly<Record<string, string>> {
   if (!isRecord(raw)) {
-    throw invalid('corpus 必须是「URI → 正文」的对象。', { field: 'corpus' });
+    throw invalidArgument('corpus 必须是「URI → 正文」的对象。', { field: 'corpus' });
   }
 
   const corpus: Record<string, string> = {};
@@ -89,21 +85,21 @@ function parseCorpus(raw: unknown): Readonly<Record<string, string>> {
     if (normalized !== uri) {
       // 规范化之后与原文不同，说明这条 key 会以另一个形态进索引；写入时又会
       // 用到规范化后的形态，标注却还是原文——两边对不上。
-      throw invalid(`corpus 的 key 不是规范形态：${uri}（应为 ${normalized}）`, {
+      throw invalidArgument(`corpus 的 key 不是规范形态：${uri}（应为 ${normalized}）`, {
         field: 'corpus',
         uri,
         normalized,
       });
     }
     if (typeof text !== 'string' || text.trim() === '') {
-      throw invalid(`corpus 里 ${uri} 的正文不能为空。`, { field: 'corpus', uri });
+      throw invalidArgument(`corpus 里 ${uri} 的正文不能为空。`, { field: 'corpus', uri });
     }
     corpus[uri] = text;
   }
 
   const uris = Object.keys(corpus);
   if (uris.length === 0) {
-    throw invalid('corpus 不能为空。', { field: 'corpus' });
+    throw invalidArgument('corpus 不能为空。', { field: 'corpus' });
   }
   return corpus;
 }
@@ -113,7 +109,7 @@ function parseGraded(raw: unknown, corpus: Readonly<Record<string, string>>, que
     return undefined;
   }
   if (!isRecord(raw)) {
-    throw invalid(`查询「${query}」的 graded 必须是「URI → 0–3 整数」的对象。`, {
+    throw invalidArgument(`查询「${query}」的 graded 必须是「URI → 0–3 整数」的对象。`, {
       field: 'cases.graded',
       query,
     });
@@ -123,7 +119,7 @@ function parseGraded(raw: unknown, corpus: Readonly<Record<string, string>>, que
   for (const [uri, relevance] of Object.entries(raw)) {
     requireUri(uri, `查询「${query}」的 graded key`);
     if (!(uri in corpus)) {
-      throw invalid(`查询「${query}」的 graded 引用了语料里没有的文档：${uri}`, {
+      throw invalidArgument(`查询「${query}」的 graded 引用了语料里没有的文档：${uri}`, {
         field: 'cases.graded',
         query,
         uri,
@@ -135,7 +131,7 @@ function parseGraded(raw: unknown, corpus: Readonly<Record<string, string>>, que
       relevance < 0 ||
       relevance > MAX_GRADE
     ) {
-      throw invalid(
+      throw invalidArgument(
         `查询「${query}」给 ${uri} 的相关度必须是 0–${MAX_GRADE} 的整数，实际是 ${String(relevance)}。`,
         { field: 'cases.graded', query, uri, relevance },
       );
@@ -148,28 +144,28 @@ function parseGraded(raw: unknown, corpus: Readonly<Record<string, string>>, que
 function parseCase(raw: unknown, corpus: Readonly<Record<string, string>>, index: number): EvalCase {
   const field = `cases[${index}]`;
   if (!isRecord(raw)) {
-    throw invalid(`${field} 必须是对象。`, { field });
+    throw invalidArgument(`${field} 必须是对象。`, { field });
   }
 
   const query = requireString(raw['query'], `${field}.query`).trim();
   if (query === '') {
-    throw invalid(`${field}.query 不能为空。`, { field });
+    throw invalidArgument(`${field}.query 不能为空。`, { field });
   }
 
   const relevantRaw = raw['relevant'];
   if (!Array.isArray(relevantRaw)) {
-    throw invalid(`${field}.relevant 必须是 URI 数组。`, { field });
+    throw invalidArgument(`${field}.relevant 必须是 URI 数组。`, { field });
   }
   // 去重保留首次出现的顺序：同一条文档标两次不应该让召回率的分母变大。
   const relevant: string[] = [];
   const seen = new Set<string>();
   for (const item of relevantRaw) {
     if (typeof item !== 'string') {
-      throw invalid(`${field}.relevant 里必须是字符串。`, { field, value: item });
+      throw invalidArgument(`${field}.relevant 里必须是字符串。`, { field, value: item });
     }
     requireUri(item, `${field}.relevant`);
     if (!(item in corpus)) {
-      throw invalid(`查询「${query}」标注了语料里没有的文档：${item}`, {
+      throw invalidArgument(`查询「${query}」标注了语料里没有的文档：${item}`, {
         field: `${field}.relevant`,
         query,
         uri: item,
@@ -202,12 +198,12 @@ function parseCase(raw: unknown, corpus: Readonly<Record<string, string>>, index
  */
 export function parseDataset(raw: unknown): EvalDataset {
   if (!isRecord(raw)) {
-    throw invalid('数据集顶层必须是对象。', {});
+    throw invalidArgument('数据集顶层必须是对象。', {});
   }
 
   const name = requireString(raw['name'], 'name').trim();
   if (name === '') {
-    throw invalid('name 不能为空。', { field: 'name' });
+    throw invalidArgument('name 不能为空。', { field: 'name' });
   }
 
   const descriptionRaw = raw['description'];
@@ -217,10 +213,10 @@ export function parseDataset(raw: unknown): EvalDataset {
 
   const casesRaw = raw['cases'];
   if (!Array.isArray(casesRaw)) {
-    throw invalid('cases 必须是数组。', { field: 'cases' });
+    throw invalidArgument('cases 必须是数组。', { field: 'cases' });
   }
   if (casesRaw.length === 0) {
-    throw invalid('cases 不能为空：没有查询的评估只会打印一张空表。', { field: 'cases' });
+    throw invalidArgument('cases 不能为空：没有查询的评估只会打印一张空表。', { field: 'cases' });
   }
 
   const cases = casesRaw.map((item, index) => parseCase(item, corpus, index));

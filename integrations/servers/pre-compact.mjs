@@ -24,11 +24,11 @@
  */
 
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
 import { createHttpClient } from '../lib/http.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
@@ -89,7 +89,7 @@ export async function handlePreCompact(event, deps) {
   return { message: `CoMem 已提交 ${result.captured} 条消息。` };
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   await runMain('hook pre-compact', async () => {
     const config = await loadConfig();

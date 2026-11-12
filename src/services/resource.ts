@@ -37,11 +37,12 @@ import { basename } from 'node:path';
 
 import type { ContentStore } from '../adapters/fs/content-store.js';
 import type { PathLockManager } from '../adapters/fs/lock.js';
-import { ComemError, errorMessage } from '../domain/errors.js';
+import { ComemError, errorMessage, invalidArgument } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import { stableDigest } from '../domain/node.js';
 import type { ReconcileEntry } from '../domain/reconcile.js';
 import type { IndexRecord, RetrievalIndex } from '../domain/retrieval.js';
+import { decodeText } from '../domain/text.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
@@ -186,23 +187,10 @@ const RESOURCE_LEVEL = 'L2';
 /** 附件目录名。它是**普通目录名**，不是保留名（§6.5）。 */
 const ATTACHMENTS_DIRECTORY = '.attachments';
 
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 /** 非负整数上限；配置错误时尽早报错，不把「负的上限」解释成「不限制」。 */
 function assertLimit(value: number, name: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw invalidArgument(`${name} 必须是正整数。`, { [name]: value });
-  }
-}
-
-/** 能按 UTF-8 严格解码就返回文本，否则返回空串（§13 的二进制分支）。 */
-function decodeText(bytes: Uint8Array): string {
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
-    return '';
   }
 }
 

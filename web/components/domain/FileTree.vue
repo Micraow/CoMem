@@ -136,13 +136,9 @@ watch([() => props.selected, state], () => {
         </div>
       </div>
 
-      <div v-else-if="error !== null" class="aside-pad">
-        <UiCallout>
-          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-          <div>{{ error }}</div>
-        </UiCallout>
-        <UiButton variant="secondary" size="sm" @click="refresh">重试</UiButton>
-      </div>
+      <UiErrorRetry v-else-if="error !== null" :message="error" @retry="refresh">
+        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
+      </UiErrorRetry>
 
       <UiEmpty
         v-else-if="rows.length === 0"

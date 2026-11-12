@@ -34,7 +34,7 @@ import { join } from 'node:path';
 
 import type { Container, createContainer } from '../bootstrap/container.js';
 import { USER_WILDCARD } from '../domain/acl.js';
-import { ComemError } from '../domain/errors.js';
+import { invalidArgument } from '../domain/errors.js';
 import type { Logger } from '../domain/log.js';
 import type { RetrievalEngine } from '../domain/retrieval.js';
 import { Uri } from '../domain/uri.js';
@@ -165,17 +165,13 @@ const FIXED_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
   COMEM_LOGGING_LEVEL: 'fatal',
 });
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 /** 语料的根必须是唯一的 `user` 根；执行器把它绑成服务图身份。 */
 function resolveScope(dataset: EvalDataset): { readonly subject: string; readonly scope: string } {
   const roots = new Set<string>();
   for (const uri of Object.keys(dataset.corpus)) {
     const parsed = Uri.parse(uri);
     if (parsed.scope !== 'user') {
-      throw invalid('评估语料的根必须是 user 作用域：group 作用域的权限依赖组成员关系，评估容器没有。', {
+      throw invalidArgument('评估语料的根必须是 user 作用域：group 作用域的权限依赖组成员关系，评估容器没有。', {
         field: 'corpus',
         uri,
       });
@@ -186,7 +182,7 @@ function resolveScope(dataset: EvalDataset): { readonly subject: string; readonl
   const ids = [...roots];
   const rootId = ids[0];
   if (ids.length !== 1 || rootId === undefined) {
-    throw invalid('评估语料必须属于同一个 user 根，实际跨越了多个根。', {
+    throw invalidArgument('评估语料必须属于同一个 user 根，实际跨越了多个根。', {
       field: 'corpus',
       roots: ids,
     });
@@ -200,16 +196,16 @@ function resolveVariants(options: EvalRunOptions): readonly EvalVariant[] {
     (options.engines ?? DEFAULT_ENGINES).map((engine): EvalVariant => ({ name: engine, engine }));
 
   if (variants.length === 0) {
-    throw invalid('至少需要一个变体。', { field: 'variants' });
+    throw invalidArgument('至少需要一个变体。', { field: 'variants' });
   }
 
   const names = new Set<string>();
   for (const variant of variants) {
     if (variant.name.trim() === '') {
-      throw invalid('变体名不能为空。', { field: 'variants' });
+      throw invalidArgument('变体名不能为空。', { field: 'variants' });
     }
     if (names.has(variant.name)) {
-      throw invalid(`变体名重复：${variant.name}`, { field: 'variants', name: variant.name });
+      throw invalidArgument(`变体名重复：${variant.name}`, { field: 'variants', name: variant.name });
     }
     names.add(variant.name);
 
@@ -220,14 +216,14 @@ function resolveVariants(options: EvalRunOptions): readonly EvalVariant[] {
     ) {
       // 与 `config/schema.ts` 的 `telemetry.hotness.weight` 值域一致（0–1）。
       // 在这里挡掉是为了给出「变体配置错了」而不是「配置文件校验失败」的报错。
-      throw invalid(`变体的 hotnessWeight 必须在 [0, 1] 内：${String(hotnessWeight)}`, {
+      throw invalidArgument(`变体的 hotnessWeight 必须在 [0, 1] 内：${String(hotnessWeight)}`, {
         field: 'variants.overrides.hotnessWeight',
         name: variant.name,
       });
     }
     for (const [level, weight] of Object.entries(variant.overrides?.levelWeights ?? {})) {
       if (!Number.isFinite(weight) || weight <= 0) {
-        throw invalid(`变体的层级权重必须是正数：${level} = ${String(weight)}`, {
+        throw invalidArgument(`变体的层级权重必须是正数：${level} = ${String(weight)}`, {
           field: 'variants.overrides.levelWeights',
           name: variant.name,
         });
@@ -374,7 +370,7 @@ export class EvalRunner {
   async run(options: EvalRunOptions): Promise<EvalReport> {
     const k = options.k ?? DEFAULT_K;
     if (!Number.isInteger(k) || k <= 0) {
-      throw invalid('k 必须是正整数。', { k });
+      throw invalidArgument('k 必须是正整数。', { k });
     }
     const variants = resolveVariants(options);
     const { subject, scope } = resolveScope(options.dataset);

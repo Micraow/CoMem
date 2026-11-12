@@ -48,5 +48,4 @@ export type { ScoredSearchHit } from './retrieval/types.js';
 export type { ScoredSearchResult } from './retrieval/types.js';
 export type { FindDiagnostics } from './retrieval/types.js';
 export type { ContextAssembly } from './retrieval/types.js';
-export { DEFAULT_SEARCH_LIMIT } from './retrieval/budget.js';
 export { SearchService } from './retrieval/service.js';

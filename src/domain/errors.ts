@@ -114,6 +114,15 @@ export class ComemError extends Error {
   }
 }
 
+/**
+ * 入参不合法的统一工厂：`code` 固定 `INVALID_ARGUMENT`，机器可读的上下文进 `details`。
+ *
+ * 只此一份：判定行写两遍以后，同一个参数错误会在不同入口落到不同的 code 或措辞。
+ */
+export function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
+  return new ComemError('INVALID_ARGUMENT', message, details);
+}
+
 /** 是否可重试。只认 code，不看 message。 */
 export function isRetryable(error: ComemError): boolean {
   return RETRYABLE_CODES.has(error.code);

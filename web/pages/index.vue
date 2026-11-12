@@ -20,7 +20,7 @@
  * 空白，没有任何错误说明。现在两个请求各带自己的加载态与错误，任务卡在 403 时
  * 直接说明需要管理员权限。
  */
-import { AlertTriangle, CheckCircle2, Plug, RefreshCw, ShieldAlert } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, Plug, RefreshCw } from 'lucide-vue-next'
 
 import {
   errorMessageOf,
@@ -184,9 +184,7 @@ const needsOnboarding = computed(() =>
           <span class="caption">最早创建优先，只含可认领的任务</span>
         </template>
 
-        <UiEmpty v-if="tasksForbidden" v-slot="{ size }" title="需要管理员权限">
-          <ShieldAlert :size="size" :stroke-width="1.4" />
-        </UiEmpty>
+        <UiEmpty v-if="tasksForbidden" forbidden />
 
         <UiEmpty v-else-if="tasksError !== null" v-slot="{ size }" title="任务列表没有取到" :text="tasksError">
           <AlertTriangle :size="size" :stroke-width="1.4" />

@@ -26,7 +26,7 @@ import {
   type AclLevel,
   type AclMode,
 } from '../../../domain/acl.js';
-import { ComemError } from '../../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../../domain/errors.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import { requireRecord, requireUri, type HttpRouteGroup } from '../server.js';
@@ -37,13 +37,9 @@ import type { HttpRouteServices } from './index.js';
 const MANAGE = 7;
 
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 function parseMode(value: unknown): AclMode {
   if (!isAclMode(value)) {
-    throw invalid(`mode 只能是 ${ACL_MODES.join(' / ')}。`, { mode: value });
+    throw invalidArgument(`mode 只能是 ${ACL_MODES.join(' / ')}。`, { mode: value });
   }
   return value;
 }
@@ -53,17 +49,17 @@ function parseEffect(value: unknown): AclEffect {
     return 'allow';
   }
   if (!isAclEffect(value)) {
-    throw invalid(`effect 只能是 ${ACL_EFFECTS.join(' / ')}。`, { effect: value });
+    throw invalidArgument(`effect 只能是 ${ACL_EFFECTS.join(' / ')}。`, { effect: value });
   }
   return value;
 }
 
 function parseLevel(value: unknown): AclLevel {
   if (typeof value !== 'number') {
-    throw invalid('level 必须是数字。', { level: value });
+    throw invalidArgument('level 必须是数字。', { level: value });
   }
   if (!isAclLevel(value)) {
-    throw invalid(`level 只能是 ${ACL_LEVELS.join(' / ')}（read / write / manage）。`, {
+    throw invalidArgument(`level 只能是 ${ACL_LEVELS.join(' / ')}（read / write / manage）。`, {
       level: value,
     });
   }
@@ -73,18 +69,18 @@ function parseLevel(value: unknown): AclLevel {
 function requirePrincipal(body: Record<string, unknown>): string {
   const value = body['principal'];
   if (typeof value !== 'string' || value === '') {
-    throw invalid('principal 必须是非空字符串。', { field: 'principal' });
+    throw invalidArgument('principal 必须是非空字符串。', { field: 'principal' });
   }
   return value;
 }
 
 function parseEntries(value: unknown): readonly AclEntry[] {
   if (!Array.isArray(value)) {
-    throw invalid('entries 必须是数组。', { field: 'entries' });
+    throw invalidArgument('entries 必须是数组。', { field: 'entries' });
   }
   return value.map((item, index) => {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw invalid(`entries[${index}] 必须是对象。`, { index });
+      throw invalidArgument(`entries[${index}] 必须是对象。`, { index });
     }
     const record = requireRecord(item, `entries[${index}]`);
     return {

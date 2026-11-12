@@ -15,7 +15,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { ComemError } from '../../../domain/errors.js';
+import { invalidArgument } from '../../../domain/errors.js';
 import type { HookOverheadReport } from '../../../services/observability.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -26,15 +26,11 @@ import type { HttpRouteServices } from './index.js';
 /** 报告里的四个阶段字段（§17.2 表格）。 */
 type PhaseField = 'processStartMs' | 'recallMs' | 'serializeMs' | 'captureMs';
 
-function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 /** 有限非负数；非有限值（NaN / ±Infinity）直接拒绝。 */
 function parsePhase(record: Record<string, unknown>, field: PhaseField): number {
   const value = record[field];
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw invalid(`phases.${field} 必须是有限数字。`, { field: `phases.${field}` });
+    throw invalidArgument(`phases.${field} 必须是有限数字。`, { field: `phases.${field}` });
   }
   // 时钟回拨会产生负耗时；按 0 记，不拒绝整份报告。
   return Math.max(0, value);

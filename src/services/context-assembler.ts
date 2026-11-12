@@ -41,6 +41,7 @@ import { skeletonOverview } from '../domain/summary.js';
 import { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
+import { elapsedMs } from './retrieval/budget.js';
 
 /**
  * 并发读上限（`local/notes/comparison.md` 第 1 条）。
@@ -53,11 +54,6 @@ import type { Authorizer } from './authorizer.js';
  * 没有调优到需要部署者改的场景。
  */
 const READ_CONCURRENCY = 8;
-
-/**
- * 1 毫秒 = 1e6 纳秒，用于把 `hrtime` 差值换算成毫秒。
- */
-const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
 export interface ContextAssemblerDeps {
   readonly store: ContentStore;
@@ -119,10 +115,6 @@ class Semaphore {
     }
     next();
   }
-}
-
-function elapsedMs(startedAt: bigint): number {
-  return Number(process.hrtime.bigint() - startedAt) / NANOSECONDS_PER_MILLISECOND;
 }
 
 export class ContextAssembler {

@@ -54,10 +54,9 @@
  * 或部署坏了。
  */
 
-import { pathToFileURL } from 'node:url';
-
 import { DEFAULT_PROFILE_BUDGET_TOKENS, isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
 import {
   DEFAULT_MAX_CONTEXT_BYTES,
@@ -412,7 +411,7 @@ export async function handleSessionStart(event, deps) {
   return context === undefined ? undefined : { context };
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   await runMain('hook session-start', async () => {
     const host = await resolveHost();

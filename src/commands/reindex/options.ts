@@ -5,6 +5,7 @@
  */
 
 import { ComemError } from '../../domain/errors.js';
+import { readFlag } from '../../config/file.js';
 
 export interface ReindexOptions {
   /** 数据根（测试注入用）；命令行传 `--data-dir` */
@@ -56,19 +57,6 @@ function parseOnly(raw: string): ReindexOptions['only'] {
     `--only 只支持 embeddings | index | links | all：${raw}`,
     { only: raw },
   );
-}
-
-function readFlag(argv: readonly string[], name: string): string | undefined {
-  const prefixed = `--${name}`;
-  for (const [index, arg] of argv.entries()) {
-    if (arg === prefixed) {
-      return argv[index + 1];
-    }
-    if (arg.startsWith(`${prefixed}=`)) {
-      return arg.slice(prefixed.length + 1);
-    }
-  }
-  return undefined;
 }
 
 /**

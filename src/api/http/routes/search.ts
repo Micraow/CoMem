@@ -42,7 +42,7 @@ import type {
 } from '../../../domain/retrieval.js';
 import type { ScoredHit } from '../../../services/search.js';
 import { API_CALL_DEADLINE_MS } from '../../deadline.js';
-import { DEFAULT_SEARCH_LIMIT } from '../../search-defaults.js';
+import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import {
@@ -74,12 +74,6 @@ const READ = 1;
  * `list` 是默认值，保持向后兼容；`context` 返回可直接注入模型的文本与分层明细。
  * 这是同一个 `search` 能力的出参变体，不是第 17 个 MCP 工具。
  */
-
-/**
- * §8.4 的默认条数。与 MCP 的 `find` / `search` / `grep` 共用 `api/search-defaults.ts`
- * 里的同一个值：默认值写两处会让同一个能力按入口返回不同规模。
- */
-const DEFAULT_LIMIT = DEFAULT_SEARCH_LIMIT;
 
 /** `find` 命中的响应形状（`uri` / 类别 / 层级 / 摘要 / 分数）。 */
 interface SerializedHit {
@@ -269,7 +263,7 @@ export function createSearchRoutes(
         const context = requestContextOf(request);
         const query = requireString(body, 'query');
         const scope = optionalStringArray(body, 'scopes') ?? [scopeOfSubject(context.subject)];
-        const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
+        const limit = optionalInteger(body, 'limit', DEFAULT_SEARCH_LIMIT, { min: 1 });
         // 参数校验放在计时之前：非法输入不是检索耗时，它该落进未归因间隙。
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
         const levels = parseLevels(optionalStringArray(body, 'levels'));
@@ -305,7 +299,7 @@ export function createSearchRoutes(
         const context = requestContextOf(request);
         const query = requireString(body, 'query');
         const scope = optionalStringArray(body, 'scopes') ?? [scopeOfSubject(context.subject)];
-        const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
+        const limit = optionalInteger(body, 'limit', DEFAULT_SEARCH_LIMIT, { min: 1 });
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
         const levels = parseLevels(optionalStringArray(body, 'levels'));
         // 记忆类型 / 更新时间范围：与 MCP `find` / `search` 同名、同类型、同为可选。
@@ -384,7 +378,7 @@ export function createSearchRoutes(
         const context = requestContextOf(request);
         const uri = requireUri(body, 'uri');
         const pattern = requireString(body, 'pattern');
-        const limit = optionalInteger(body, 'limit', DEFAULT_LIMIT, { min: 1 });
+        const limit = optionalInteger(body, 'limit', DEFAULT_SEARCH_LIMIT, { min: 1 });
         const contextLines = optionalInteger(body, 'contextLines', 3, { min: 0 });
 
         await authorizer.assert(uri, READ, context.principals);

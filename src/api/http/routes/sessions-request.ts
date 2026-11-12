@@ -6,7 +6,7 @@
  */
 
 import { userScopeOf } from '../../../domain/acl.js';
-import { ComemError } from '../../../domain/errors.js';
+import { invalidArgument } from '../../../domain/errors.js';
 import {
   isMessageRole,
   MESSAGE_ROLES,
@@ -17,10 +17,6 @@ import {
 import { Uri } from '../../../domain/uri.js';
 import { optionalString, requireRecord } from '../server.js';
 
-export function invalid(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
-}
-
 /** `user:alice` → `comem://user/alice`。 */
 function scopeOfSubject(subject: string): Uri {
   return userScopeOf(subject, '会话身份');
@@ -29,7 +25,7 @@ function scopeOfSubject(subject: string): Uri {
 /** 作用域根 + 会话 ID。ID 走 `Uri.child` 校验（保留名、空段、控制字符都会被拒）。 */
 export function sessionUriOf(scope: Uri, id: string): Uri {
   if (id === '') {
-    throw invalid('会话 ID 不能为空。', { field: 'id' });
+    throw invalidArgument('会话 ID 不能为空。', { field: 'id' });
   }
   return scope.child('sessions', id);
 }
@@ -43,17 +39,17 @@ export function scopeFrom(body: Record<string, unknown>, subject: string): Uri {
 function requireStringField(record: Record<string, unknown>, field: string, where: string): string {
   const value = record[field];
   if (typeof value !== 'string') {
-    throw invalid(`${where}.${field} 必须是字符串。`, { field });
+    throw invalidArgument(`${where}.${field} 必须是字符串。`, { field });
   }
   return value;
 }
 
 function parseRole(value: unknown): MessageRole {
   if (typeof value !== 'string') {
-    throw invalid('role 必须是字符串。', { field: 'role' });
+    throw invalidArgument('role 必须是字符串。', { field: 'role' });
   }
   if (!isMessageRole(value)) {
-    throw invalid(`role 只能是 ${MESSAGE_ROLES.join(' / ')}。`, { field: 'role' });
+    throw invalidArgument(`role 只能是 ${MESSAGE_ROLES.join(' / ')}。`, { field: 'role' });
   }
   return value;
 }
@@ -61,7 +57,7 @@ function parseRole(value: unknown): MessageRole {
 /** 一条 `ContentPart`。五种 kind 各自校验字段，不接受未校验的值进服务层。 */
 function parsePart(value: unknown, index: number): ContentPart {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw invalid(`parts[${index}] 必须是对象。`, { index });
+    throw invalidArgument(`parts[${index}] 必须是对象。`, { index });
   }
   const record = requireRecord(value, `parts[${index}]`);
   const where = `parts[${index}]`;
@@ -71,7 +67,7 @@ function parsePart(value: unknown, index: number): ContentPart {
     case 'image': {
       const alt = record['alt'];
       if (alt !== undefined && alt !== null && typeof alt !== 'string') {
-        throw invalid(`${where}.alt 必须是字符串或 null。`, { index });
+        throw invalidArgument(`${where}.alt 必须是字符串或 null。`, { index });
       }
       return {
         kind: 'image',
@@ -95,7 +91,7 @@ function parsePart(value: unknown, index: number): ContentPart {
     case 'tool_result': {
       const isError = record['isError'];
       if (typeof isError !== 'boolean') {
-        throw invalid(`${where}.isError 必须是布尔值。`, { index });
+        throw invalidArgument(`${where}.isError 必须是布尔值。`, { index });
       }
       return {
         kind: 'tool_result',
@@ -105,7 +101,7 @@ function parsePart(value: unknown, index: number): ContentPart {
       };
     }
     default:
-      throw invalid(`${where}.kind 只能是 text / image / context / tool_use / tool_result。`, {
+      throw invalidArgument(`${where}.kind 只能是 text / image / context / tool_use / tool_result。`, {
         index,
       });
   }
@@ -117,13 +113,13 @@ export function parseMessage(body: Record<string, unknown>): Omit<SessionMessage
   const createdAt = body['createdAt'];
   const parts = body['parts'];
   if (id !== undefined && typeof id !== 'string') {
-    throw invalid('id 必须是字符串。', { field: 'id' });
+    throw invalidArgument('id 必须是字符串。', { field: 'id' });
   }
   if (createdAt !== undefined && typeof createdAt !== 'string') {
-    throw invalid('createdAt 必须是字符串。', { field: 'createdAt' });
+    throw invalidArgument('createdAt 必须是字符串。', { field: 'createdAt' });
   }
   if (!Array.isArray(parts)) {
-    throw invalid('parts 必须是数组。', { field: 'parts' });
+    throw invalidArgument('parts 必须是数组。', { field: 'parts' });
   }
   return {
     id: typeof id === 'string' ? id : crypto.randomUUID(),

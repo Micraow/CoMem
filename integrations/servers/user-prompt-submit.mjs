@@ -33,12 +33,11 @@
  * 里伪造出一层新的注入边界。
  */
 
-import { pathToFileURL } from 'node:url';
-
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { applyQueryFilters } from '../lib/filter.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
 import { DEFAULT_MAX_CONTEXT_BYTES, escapeInjectionText, fitContext } from '../lib/injection.mjs';
+import { isMainModule } from '../lib/is-main.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { readDeliveredUris, recordDeliveredUris } from '../lib/recall.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
@@ -272,7 +271,7 @@ export async function handleUserPromptSubmit(event, deps) {
   return context === undefined ? undefined : { context };
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+const isMain = isMainModule(import.meta.url);
 if (isMain) {
   await runMain('hook user-prompt-submit', async () => {
     const host = await resolveHost();

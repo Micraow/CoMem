@@ -29,7 +29,7 @@
  * 调用方都不能在持有 `exact(uri)` 的同时再调这里的方法，否则等 5 秒后拿 `CONFLICT`。
  */
 
-import { ComemError } from '../../domain/errors.js';
+import { ComemError, invalidArgument } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { assertFieldTypes, assertMemoryIdentity, type MemoryTypeSchema } from '../../domain/memory-type.js';
 import { profileMemoryType } from '../../domain/memory-types/index.js';
@@ -44,7 +44,6 @@ import {
   serializeMemoryDocument,
   type MemoryStatus,
 } from './document.js';
-import { invalidArgument } from './errors.js';
 import { readMemoryDocument, type MemoryFileStore, type MemorySearchPort, type MemoryServicePorts } from './ports.js';
 import {
   listPendingMemories,

@@ -19,7 +19,7 @@ import {
 } from '../../domain/memory-type.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../../domain/summary.js';
 import type { Uri } from '../../domain/uri.js';
-import { invalidArgument } from './errors.js';
+import { invalidArgument } from '../../domain/errors.js';
 import { frontmatterFieldsOf, parseSources, parseSupersedes, splitFrontmatter } from './frontmatter.js';
 import { formatField, formatScalar } from './yaml.js';
 

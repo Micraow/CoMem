@@ -30,7 +30,7 @@
 |---|---|---|---|---|---|
 | find | 一句话找记忆 / 文件 | MCP `find`；`POST /search/find` | `services/retrieval/service.ts` `findWithDiagnostics`；工具 `tools/find.ts:63` | `node_fts` MATCH（bm25）或 `node_embedding`（vec0 余弦）或 hybrid RRF → `domain/ranking.ts:55` `applyLevelWeight` 层级加权 → `node_permission` 过滤（`permission-repository.ts:93`）→ 热度加权 | `tests/integration/services/search.test.ts:236`「中文双字词能命中」；`mcp/tools.test.ts:439` |
 | search（意图重写） | 「那它呢」要先解析指代 | MCP `search`；`POST /search/search` | `services/retrieval/intent.ts` `analyze` | 先调模型拆 0–5 条 `TypedQuery`（失败降级为原 query，`plan.analyzed=false`）→ 各跑一次 find → 按 URI 去重取最高分 | `mcp/tools.test.ts:1025`「search 末尾附 Query plan」；`tests/integration/services/search-intent.test.ts:233`「模型返回 2 条 → 两次 find，合并去重后按分数降序」 |
-| context 组装 | 注入模型的必须是预算内的正文 | MCP `search` 的 `mode=context`；`POST /search/search` 同 | `services/retrieval/service.ts` `context`；`services/context-assembler.ts:152`；预算 `domain/assembly.ts:381` | 命中 → 按 `assembly.maxTokens` / `quotaPreset` 升级到 L0/L1/L2 正文 → `<memory>` 块；投放后写召回账本 | `context-assembler.test.ts:114`「目录候选读自己的 .overview.md」；`api/http.test.ts:710` |
+| context 组装 | 注入模型的必须是预算内的正文 | MCP `search` 的 `mode=context`；`POST /search/search` 同 | `services/retrieval/service.ts` `context`；`services/context-assembler.ts:144`；预算 `domain/assembly.ts:381` | 命中 → 按 `assembly.maxTokens` / `quotaPreset` 升级到 L0/L1/L2 正文 → `<memory>` 块；投放后写召回账本 | `context-assembler.test.ts:114`「目录候选读自己的 .overview.md」；`api/http.test.ts:710` |
 | rule_search | 动手前取「必须遵守的规则」全文 | MCP `rule_search` | `tools/rule-search.ts:61` | 与 find 同一管道 + `contextTypes:['memory']`、`memoryTypes:['rules']` 下推；再按 `score >= top × threshold` 收窄、逐条读正文 | `mcp/tools.test.ts:1034`「rule_search 返回规则完整正文（默认阈值）」；hybrid 下仍召回 `:1049` |
 | grep | 按正则找行，带上下文 | MCP `grep`；`POST /search/grep` | `services/retrieval/paths.ts` `grep` | 候选集 = `index.glob`（`node` + 权限，上限 200）→ 逐文件读盘做行匹配 | `search.test.ts:331`「返回行号与前后文」；候选截断 `:417` |
 | glob | 按通配列文件 URI | MCP `glob`；`POST /search/glob` | `services/retrieval/paths.ts` `glob` | `node` 表 GLOB + 读权限过滤，服务层再过滤一遍（纵深防御） | `search.test.ts:451`「返回权限过滤后的 URI 列表」；`:458` |
@@ -88,7 +88,7 @@
 | 健康 | 一次拿到状态、身份、可寻址根 | MCP `health` | `tools/health.ts:45` | `ObservabilityService.health()` + `task` 计数 + 索引计数；状态判定与 HTTP 共用 `api/health-status.ts:37` | `mcp/tools.test.ts:899`「返回索引条数与摘要降级标记」；与 HTTP 一致 `mcp-http-parity.test.ts:170`「只有降级摘要时，MCP 与 HTTP 都给出 degraded」 |
 | 写文件 | 整份替换 / 追加 / 新建 | MCP `write` | `tools/write.ts:55` | `filesystem.write` → 观察者写 `node` + `node_permission` + 摘要失效 | `mcp/tools.test.ts:827`「三种 mode」；`:841` 逐字节快照 |
 | 改文件 | 行级替换，保留 frontmatter | MCP `edit` | `tools/edit.ts:38` | `filesystem.edit`（`applyPatch` + `expectedDigest` 乐观并发） | `mcp/tools.test.ts:850`「edit 默认唯一命中，replaceAll 替换全部」 |
-| 记对话 | 模型主动提交一段对话 | MCP `remember` | `tools/remember.ts:201` | 合成或复用会话 → `addMessage`（`stableMessageId` 去重）→ 阶段一 → 返回 `taskId` | `mcp/tools.test.ts:1187`「remember 走提交管线并返回 taskId」 |
+| 记对话 | 模型主动提交一段对话 | MCP `remember` | `tools/remember.ts:197` | 合成或复用会话 → `addMessage`（`stableMessageId` 去重）→ 阶段一 → 返回 `taskId` | `mcp/tools.test.ts:1187`「remember 走提交管线并返回 taskId」 |
 | 删节点 | 删文件 / 整棵子树 | MCP `forget` | `tools/forget.ts:32` | `filesystem.remove`（MANAGE 权）→ 观察者删 `node` / `node_permission` / `node_embedding` | `mcp/tools.test.ts:870`「非空目录需要 recursive」 |
 | 导入资料 | 附件 + 正文批量落成资源 | MCP `add_resource` | `tools/add-resource.ts:83` | 先 `POST /resources/temp-upload` 拿 `uploadId`；写 `resources/.../` + 同级 `.attachments/`，一次 `index.upsert` | `mcp/tools.test.ts:1304`；`http.test.ts:997` |
 | 装技能 | 技能包 = 目录 + `SKILL.md` | MCP `add_skill` | `tools/add-skill.ts:60` | 写 `skills/{name}/`，入口固定 `SKILL.md`（缺则 `INVALID_ARGUMENT`），一次 `index.upsert` | `mcp/tools.test.ts:1315`「add_skill 安装技能」；`tests/integration/services/skill.test.ts:128`「正常安装：入口与脚本落盘并进索引」 |
@@ -99,17 +99,17 @@
 |---|---|---|---|---|---|
 | 文件系统 | 控制台与脚本不用 MCP 也能列目录 | `GET /fs/ls`、`/fs/tree`、`/fs/stat`；`POST /fs/mkdir`、`/fs/mv`、`/fs/cp`；`DELETE /fs` | `routes/fs.ts:112` | 直接调 `FileSystemService`，与 MCP 同一条写路径 | `api/http.test.ts:377`「mkdir → write → ls → tree → stat → read → edit → mv → cp → delete」 |
 | 内容读写 | 附件下载、摘要、正文分页 | `GET /content/read`、`/abstract`、`/overview`、`/download`；`POST /content/write`、`/edit` | `routes/content.ts:78`；`routes/content-read.ts:35` / `routes/content-write.ts:26` | 文本 + frontmatter；`/abstract` 的文件级摘要来自索引的 `abstract` 列，目录来自 `.abstract.md` | `http.test.ts:449` 截断；`:526`「文件的 abstract 从索引读」 |
-| 检索 | 四个检索面（HTTP 侧） | `POST /search/find`、`/search/search`、`/search/grep`、`/search/glob` | `routes/search.ts:283`；上限包装 `:285` / `:322` | 前两个套 30 秒 `runWithDeadline`；后两个不套（见 §四） | `http.test.ts:575`「find / search / grep / glob 四个面」；上限只在两个路由上 `search-deadline.test.ts:207`「模型请求挂住时，三个端点都在预算内返回 503 超时错误」 |
+| 检索 | 四个检索面（HTTP 侧） | `POST /search/find`、`/search/search`、`/search/grep`、`/search/glob` | `routes/search.ts:277`；上限包装 `:285` / `:322` | 前两个套 30 秒 `runWithDeadline`；后两个不套（见 §四） | `http.test.ts:575`「find / search / grep / glob 四个面」；上限只在两个路由上 `search-deadline.test.ts:207`「模型请求挂住时，三个端点都在预算内返回 503 超时错误」 |
 | 会话 | 建会话、加消息、提交 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` | `routes/sessions.ts:177` | `SessionService`；`POST /sessions` 已存在返回 409（不重置） | `http.test.ts:812`「create → messages → get → list → commit → tasks」 |
 | 任务 | 运维查看与重试 | `GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry` | `routes/tasks.ts:89` | `task` 表；列表只返回 `claimable`（见 §四） | `admin-access-control.test.ts:583`「非管理员读 / retry 都是 403；系统管理员能读、能 retry」 |
-| ACL | 管理层改授权（不进 MCP） | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` | `routes/acl.ts:107` | `.acl.json` 真相 + `node_permission` / `acl_entry` 重算 | `http.test.ts:898`「get → grant → get → revoke」 |
+| ACL | 管理层改授权（不进 MCP） | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` | `routes/acl.ts:103` | `.acl.json` 真相 + `node_permission` / `acl_entry` 重算 | `http.test.ts:898`「get → grant → get → revoke」 |
 | 记忆 | 复核队列与合并 | `GET /memories/pending`、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`/reject`、`GET /memories/{uri}/links` | `routes/memories.ts:85` | `MemoryService` / `ConsolidationService` / `MemoryLinkService` 读端口 | `http.test.ts:934`；`consolidation-enabled.test.ts:105` |
-| 资源与技能 | MCP 两个 ingest 工具的 HTTP 面 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` | `routes/resources.ts:106`；`routes/skills.ts:78` | 临时上传落 `_meta/tmp/`；`GET /skills` 列已装技能 | `http.test.ts:985`–`:1058` |
+| 资源与技能 | MCP 两个 ingest 工具的 HTTP 面 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` | `routes/resources.ts:102`；`routes/skills.ts:74` | 临时上传落 `_meta/tmp/`；`GET /skills` 列已装技能 | `http.test.ts:985`–`:1058` |
 | 用户与组 | 管理面 | `/admin/users*`、`/admin/groups*`、`/admin/api-keys/{keyId}` | `routes/admin.ts:182` | `app_user` / `app_group` / `group_member` / `api_key`；跨主体操作认 `adminUserIds` | `admin.test.ts:161`「创建 → 列表 → 更新 → 删除」；`admin-access-control.test.ts:114`「A 改 B 的密码 → 403」 |
 | 认证 | 登录 / 登出 | `POST /auth/login`、`POST /auth/logout` | `routes/auth.ts:52` | `AuthService`；认证恒开，没有开关探测端点 | `api/auth.test.ts:132`；「回环信任」5 条 |
 | 提示词 | 内置提示词的可视化编辑（八条，含经验归纳两条） | `GET /prompts`、`GET /prompts/{id}`；`PUT` / `DELETE` / `POST /prompts/{id}/preview` | `routes/prompts.ts:105` | `prompt_override` 表覆盖仓库默认正文；渲染器进程级热替换 | `api/prompts.test.ts:92`「列出八条提示词，初始都没有覆盖」；`prompt-service.test.ts:61`「初始状态：每条提示词都使用默认值」 |
 | MCP 清单 | 控制台展示模型看到的那份说明 | `GET /mcp/tools` | `routes/mcp.ts:46` | 直接序列化 `ToolRegistry`（不重写文本） | `http.test.ts:1228`；`mcp/registry.test.ts:53` |
-| 遥测 | Hook 上报阻塞开销 | `POST /telemetry/hook` | `routes/telemetry.ts:63` | 进 `ObservabilityService` 的 `Map`（每事件最近一次）→ `/metrics` | `http.test.ts:1131`「telemetry/hook 上报后 /metrics 里能看到」 |
+| 遥测 | Hook 上报阻塞开销 | `POST /telemetry/hook` | `routes/telemetry.ts:59` | 进 `ObservabilityService` 的 `Map`（每事件最近一次）→ `/metrics` | `http.test.ts:1131`「telemetry/hook 上报后 /metrics 里能看到」 |
 | 运维 | 探活与抓取 | `GET /health`、`GET /metrics` | `routes/ops.ts:82` | `/health` 聚合 `ObservabilityService.health()` + 任务计数 + 重排健康度 | `http.test.ts:217`；`:1197` metrics 关闭时 404 |
 
 **CLI**
@@ -119,8 +119,8 @@
 | 重建索引 | 索引坏了要能从磁盘重建 | `pnpm reindex` | `commands/reindex/command.ts:58` `runReindex` | 只读磁盘 → 重写 `node` / `node_fts` / `node_embedding`，`--only=links` / `all` 时按 `sources` 整批替换 `memory_link` 的 `derived_from`；`--only` 分段、断点续跑 | `commands/reindex.test.ts:146`「磁盘有文件、索引为空 → reindex 后能检索到」 |
 | 设密码 | 没有注册页，账号靠命令行引导 | `pnpm password <uid>`（密码走 stdin） | `commands/password.ts:45` `setPassword` | `app_user.password_hash` + 轮换 `session_epoch`（旧 token 全失效） | `commands/password.test.ts:81`「--data-dir 覆盖 COMEM_DATA_DIR：密码写到 --data-dir 指向的数据根」 |
 | 指定组 owner | 组 owner 丢失时的恢复入口 | `pnpm group:owner <gid> <uid>` | `commands/group-owner.ts:63` `setGroupOwner` | `app_group.owner_user_id` + 组根 `.acl.json` 预置 | `commands/group-owner.test.ts:79` |
-| 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:519` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
-| 检索质量评估 | 改动检索要能量化前后 | `pnpm eval --dataset ...` | `commands/eval.ts:219` `runEval`；指标 `eval/metrics.ts` | 数据集跑 `find`，算 recall@k / MRR，输出报告 | `commands/eval.test.ts:25`「--config 坏 YAML 必须报错」；`unit/eval/metrics.test.ts:32`「recallAtK」用例 |
+| 导入本机对话 | 存量对话批量进系统 | `pnpm ingest --source ...` | `commands/ingest.ts:507` `runIngest` | 见 §一.5 本机会话导入 | `commands/ingest.test.ts:24`「--config 坏 YAML 必须报错，不能静默用默认值」 |
+| 检索质量评估 | 改动检索要能量化前后 | `pnpm eval --dataset ...` | `commands/eval.ts:207` `runEval`；指标 `eval/metrics.ts` | 数据集跑 `find`，算 recall@k / MRR，输出报告 | `commands/eval.test.ts:25`「--config 坏 YAML 必须报错」；`unit/eval/metrics.test.ts:32`「recallAtK」用例 |
 | 配置自检 | 加了配置项必须有人读 | `pnpm check:config` | `scripts/check-config.ts:295` `main` | L1 叶子被读 / L2 注入属性必填 / L3 与 `config.example.yaml` 双向一致；L4 变体差集在测试里 | `config-coverage.test.ts:132` |
 | 可达性检查 | 符号存在不等于有人调 | `pnpm check:reachability` | `scripts/check-reachability.ts` | 从 6 个进程入口沿值导入算模块与符号可达，再按成员方法调用点判 `method-no-caller` | `unit/scripts/check-reachability.test.ts` |
 | 形状检查 | 文件只能变短，结构不能回涨 | `pnpm check:shape` | `scripts/check-shape.ts` | 单文件行数（基线内按记录值，其余 250）、函数体 > 120 行个数、`src/` 总行数、禁用指令硬零 + `as any` / `: any` 计数，全部上限 ratchet | `unit/scripts/check-shape.test.ts` |
@@ -183,7 +183,7 @@
 | `scoreThreshold`（find / search 的绝对分数下限） | 四种引擎量纲不可比（`-bm25` 无界、余弦 `[-1,1]`、RRF 约 `0.016–0.033`、重排未归一化），同一个值在三种引擎里分别是清空 / 放行 / 随机；唯一接过它的调用点结果恒 0 条 | `domain/retrieval.ts:48` 起的 `SearchQuery` 无该字段；`services/retrieval/service.ts` `findWithDiagnostics` 的入参里没有阈值；`docs/architecture.md:1100` 记录了这条判断 |
 | `write` / `add_resource` 的 `wait` | 只写进日志、不改行为；写入本来就是同步完成的 | `tools/write.ts:55` 与 `tools/add-resource.ts:83` 的 schema 无 `wait`；`mcp/tools.test.ts:428`「write / add_resource 不再暴露 wait」 |
 | `tree.includeAbstract` 与恒 `null` 的 `TreeEntry.abstract` | 描述承诺「目录行后附 L0 摘要」，而 `StoredStat` 没有 `abstract`，转换函数恒返回 null —— 有消费者、没生产者 | `tools/tree.ts:32` 的 schema 只有 `uri` / `levelLimit`；`domain/node.ts` 的 `TreeEntry` 无该字段 |
-| `add_skill.files[].executable` | 描述承诺「加执行位」，schema 接收、`toFileInput` 透传，服务层明写不设置（MCP 与 HTTP 都删） | `services/skill.ts:301` 只调 `writeBytes`；`http.test.ts:1058`「skills 的 files[].executable 已不是参数」 |
+| `add_skill.files[].executable` | 描述承诺「加执行位」，schema 接收、`toFileInput` 透传，服务层明写不设置（MCP 与 HTTP 都删） | `services/skill.ts:290` 只调 `writeBytes`；`http.test.ts:1058`「skills 的 files[].executable 已不是参数」 |
 | `excludeDelivered` / `maxQueries` / `readConcurrency` / `quotaPreset` 的逐请求覆盖 | 与全局配置重复；逐请求覆盖那一半没有调用方 | `grep` 全仓无 `excludeDelivered` / `readConcurrency`；`quotaPreset` 只在 `config/schema.ts:194`（配置项保留）与 `domain/assembly.ts:85` 出现 |
 | `SessionStatus` 的 `committing` / `committed` / `failed` | 三个值没有写入点，会话本身从不进入这些状态（归档失败表达在 `task.status`） | `domain/session.ts:23` 收敛为 `open` / `archived` |
 | `ArchivePhaseStatus.failed` | 阶段二终态失败只写 `task.status=failed`，归档停在 `ready`（同时是已知限制） | `domain/archive.ts:20` 的 `ArchivePhaseStatus` 只有 `preparing` / `ready`；`services/commit/pipeline.ts:185` 起无失败写入 |
@@ -210,9 +210,9 @@
 | 缺口 | 事实 | file:line |
 |---|---|---|
 | `GET /tasks` 只列可认领任务 | 列表走 `claimable`（pending 或租约过期的 running），所以 `done` / `failed` 一条都不出现：`status=done` 的过滤恒空，控制台拿不到失败任务 id，`POST /tasks/{id}/retry` 只能手工给 id | `routes/tasks.ts:103`、`services/task.ts:180` |
-| HTTP 两条检索路径没有时间上限 | `/search/grep`、`/search/glob` 不套 `runWithDeadline`（MCP 的 16 个工具全部在 30 秒闸门下） | `routes/search.ts:397`、`:416`，对照 `:285` / `:322` |
+| HTTP 两条检索路径没有时间上限 | `/search/grep`、`/search/glob` 不套 `runWithDeadline`（MCP 的 16 个工具全部在 30 秒闸门下） | `routes/search.ts:391`、`:416`，对照 `:285` / `:322` |
 | 记忆合并没有墙上时钟上限 | `POST /memories/consolidate` 调模型且不套 deadline：上限是 10 轮 × 单次调用超时（默认 120 秒），最坏约 20 分钟无响应 | `routes/memories.ts:115`、`services/consolidation/service.ts:94`、`:48`（`DEFAULT_MAX_ITERATIONS`） |
-| 两个写路径只校验身份、没有目标资源求权 | `temp-upload` 只解析身份（没有目标）；`telemetry/hook` 同样只解析身份 | `routes/resources.ts:117`、`routes/telemetry.ts:66` |
+| 两个写路径只校验身份、没有目标资源求权 | `temp-upload` 只解析身份（没有目标）；`telemetry/hook` 同样只解析身份 | `routes/resources.ts:113`、`routes/telemetry.ts:62` |
 | 记忆关联边没有 HTTP 写入口 | 写 `derived_from` 的只有阶段二两个写点（补丁合并、经验归纳），重建走 CLI：`pnpm reindex --only=links`（`all` 也含）按 `sources` 整批替换这一类边，所以手工改 `sources` 之后可以修回来。仍然没有写端点；`references` / `related` 在 frontmatter 里没有真相，重建不动它们，写错的只能改 SQL | `routes/memories.ts:178`（只有读）、`memory-merge.ts:331`、`experience-distill.ts:220`、`services/memory-link.ts:94` `rebuildDerived` |
 | `request_log` 只写不读 | 没有查询端点，控制台只列指标名；裁剪挂在调度器上，四个开关全关时只剩启动清理一次 | `services/observability/request-record.ts:30`、`bootstrap/scheduler/maintenance.ts:67` `pruneRequestLog`、`bootstrap/container/background.ts:112` |
 | ~~切换检索引擎后存量记忆不回填~~（已解决） | 服务监听之后启动后台回填（`startVectorBackfill`，不 await，不阻塞 listen）：候选集按 `model` / `content_digest` 判定，正文与 digest 都从磁盘读（不拿 `node.body_digest` 当输入，否则会写出「digest 与向量来自不同次读盘」的行），分批嵌入，每批一行 info 带 embedded / skipped / failed / remaining；失败记 warn 跳过继续，关闭时先 abort 在途调用再等当前批收尾。启动那一行 warn 仍然保留，只是现在说的是「服务会在后台自动补齐」；`pnpm reindex` 是手工全量入口 | `bootstrap/main.ts:172` `startVectorBackfill`、`:214` `backfillMissingVectors`；用例 `tests/integration/bootstrap/missing-vectors.test.ts` |

@@ -10,7 +10,7 @@
 
 import type { Level } from './level.js';
 import type { ContextType, NodeKind, NodeStatus } from './node.js';
-import { ComemError } from './errors.js';
+import { invalidArgument } from './errors.js';
 import { applyLevelWeight, type LevelWeights } from './ranking.js';
 
 /** 索引里的一行 `node`（架构文档 §8.1）。 */
@@ -389,10 +389,6 @@ export interface RetrievalIndex {
   search(query: SearchQuery): Promise<SearchHit[]>;
   glob(query: GlobQuery): Promise<string[]>;
   stat(uri: string): Promise<NodeStat | null>;
-}
-
-function invalidArgument(message: string, details: Record<string, unknown>): ComemError {
-  return new ComemError('INVALID_ARGUMENT', message, details);
 }
 
 /** 查询的公共部分：`limit > 0`、`scopes` 与 `principals` 非空。 */

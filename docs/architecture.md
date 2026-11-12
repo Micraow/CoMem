@@ -225,7 +225,6 @@ CoMem/
 │   ├── api/                          # ① 接口层：协议转换
 │   │   ├── deadline.ts               # 30 秒调用上限（MCP 注册表与 HTTP 检索路由共用）
 │   │   ├── health-status.ts          # ok / degraded 判定（/health 与 MCP health 共用）
-│   │   ├── search-defaults.ts        # 检索默认条数（两个入口共用）
 │   │   ├── text-slice.ts             # 按码点分页（MCP read 与 HTTP content/read 共用）
 │   │   ├── http/
 │   │   │   ├── routes/
@@ -1176,7 +1175,7 @@ export interface RetrievalIndex {
 | `grep` | 正则 + 路径范围 | 行级命中，带行号与前后文 | 否 |
 | `glob` | 路径通配 | 文件 URI 列表 | 否 |
 
-**默认条数。** `find` / `search` / `grep` 默认返回 10 条，常量是 `src/services/retrieval/budget.ts` 的 `DEFAULT_SEARCH_LIMIT`（`src/services/search.ts` 只做转出），HTTP 的 `/search/*` 与 MCP 三个工具共用同一个值——各写一份（曾经是 MCP 10 / HTTP 20）会让同一个能力按调用方式返回不同规模。值定义在服务层而不是 `api/`：`services/` 不能 import `api/`（§4.2），而服务层的 `resolveLimit` 与两个入口的默认值必须是同一个数。`src/api/search-defaults.ts` 只是 `export { DEFAULT_SEARCH_LIMIT } from '../services/search.js'`，给 api 层一个稳定的导入路径，api 内部不必直接指向服务层文件。`glob` 默认 100 条，两个入口也一致，但用的是各自的常数（MCP 仍叫 `nodeLimit`）。
+**默认条数。** `find` / `search` / `grep` 默认返回 10 条，常量是 `src/services/retrieval/budget.ts` 的 `DEFAULT_SEARCH_LIMIT`，HTTP 的 `/search/*` 与 MCP 三个工具直接 import 这一处——各写一份（曾经是 MCP 10 / HTTP 20）会让同一个能力按调用方式返回不同规模。值定义在服务层而不是 `api/`：`services/` 不能 import `api/`（§4.2），而服务层的 `resolveLimit` 与两个入口的默认值必须是同一个数。`glob` 默认 100 条，两个入口也一致，但用的是各自的常数（MCP 仍叫 `nodeLimit`）。
 
 **`search` 与 `find` 的差别只有一条：`search` 在检索之前先问模型「这句话该拆成哪几个查询」。** 没有这一条，两个面就是同一份实现套两个名字。
 
