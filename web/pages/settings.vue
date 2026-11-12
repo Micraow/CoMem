@@ -293,8 +293,8 @@ onMounted(() => {
       </DomainPageHeader>
 
       <div v-if="saveResult !== null || saveError !== null" class="settings-notices">
-        <div v-if="saveResult !== null" class="callout callout--success" role="status">
-          <CheckCircle2 :size="15" :stroke-width="1.4" />
+        <UiCallout v-if="saveResult !== null" tone="success" role="status">
+          <template #icon><CheckCircle2 :size="15" :stroke-width="1.4" /></template>
           <div class="settings-restart">
             <p class="body-sm">{{ restartNoticeOf(saveResult.overridePath) }}</p>
             <div class="settings-restart__commands">
@@ -310,12 +310,9 @@ onMounted(() => {
               已写入 {{ saveResult.written }} 项。重启后再回到本页，来源徽章会变成「覆盖文件」。
             </p>
           </div>
-        </div>
-
-        <UiCallout v-if="saveError !== null">
-          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-          <div>{{ saveError }}</div>
         </UiCallout>
+
+        <UiErrorCallout v-if="saveError !== null" :message="saveError" />
       </div>
 
       <UiCallout v-if="loadError !== null">
@@ -341,10 +338,10 @@ onMounted(() => {
       </div>
 
       <div v-else class="stack-24">
-        <div class="callout callout--info">
-          <PlugZap :size="15" :stroke-width="1.4" />
+        <UiCallout tone="info">
+          <template #icon><PlugZap :size="15" :stroke-width="1.4" /></template>
           <div>{{ TEST_SCOPE_NOTE }}</div>
-        </div>
+        </UiCallout>
 
         <p v-if="!view.overrideWritable" class="caption">
           覆盖文件 {{ view.overridePath }} 不可写，保存会失败。容器部署不要把数据卷挂成只读。

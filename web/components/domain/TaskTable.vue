@@ -96,18 +96,15 @@ watch(
 
 <template>
   <div class="stack-16">
-    <UiCallout v-if="props.error !== null">
-      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-      <div>{{ props.error }}</div>
-    </UiCallout>
+    <UiErrorCallout v-if="props.error !== null" :message="props.error" />
 
-    <div v-if="expiredCount > 0" class="callout callout--warn">
-      <AlertTriangle :size="15" :stroke-width="1.4" />
+    <UiCallout v-if="expiredCount > 0" tone="warn">
+      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
       <div>
         <b>{{ expiredCount }} 个任务的租约已过期。</b>
         执行器不再续租，下次启动会重置为排队中并增加一次重试。
       </div>
-    </div>
+    </UiCallout>
 
     <UiCard
       v-if="props.forbidden || props.error === null || props.tasks.length > 0"

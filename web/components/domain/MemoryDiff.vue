@@ -202,17 +202,17 @@ function nameOf(uri: string): string {
             </div>
           </header>
 
-          <div v-if="replacesPrevious" class="callout callout--warn">
-            <History :size="15" :stroke-width="1.4" />
+          <UiCallout v-if="replacesPrevious" tone="warn">
+            <template #icon><History :size="15" :stroke-width="1.4" /></template>
             <div>通过后会替换掉上一版本，拒绝则恢复到覆盖前的值。</div>
-          </div>
+          </UiCallout>
 
-          <div v-if="props.baselineError !== null" class="callout callout--warn">
-            <GitCompare :size="15" :stroke-width="1.4" />
+          <UiCallout v-if="props.baselineError !== null" tone="warn">
+            <template #icon><GitCompare :size="15" :stroke-width="1.4" /></template>
             <div>
               读不到当前文件正文：{{ props.baselineError }}。下面只显示待生效内容。
             </div>
-          </div>
+          </UiCallout>
 
           <section>
             <div class="sec-head">

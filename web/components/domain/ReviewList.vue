@@ -20,7 +20,7 @@ export type { PendingListPayload, PendingMemoryPayload }
  * 多选用原生 checkbox + `accent-color`：自绘复选框要自己补「半选」态与键盘
  * 行为，收益为零。批量操作放在列表底部，勾选后才有意义。
  */
-import { ClipboardCheck, RefreshCw } from 'lucide-vue-next'
+import { ClipboardCheck } from 'lucide-vue-next'
 
 import { formatMonthDay } from '~/utils/format'
 import { memoryTypeLabelOf, memoryTypeVariantOf } from '~/utils/memoryTypeLabels'
@@ -101,15 +101,7 @@ const hasChecked = computed(() => checked.value.length > 0)
         {{ props.memories.length }}
       </UiBadge>
       <span class="spacer" />
-      <button
-        type="button"
-        class="iconbtn"
-        aria-label="重新拉取待复核队列"
-        :disabled="props.loading"
-        @click="emit('refresh')"
-      >
-        <RefreshCw :size="15" :stroke-width="1.5" />
-      </button>
+      <UiRefreshButton label="重新拉取待复核队列" :disabled="props.loading" @click="emit('refresh')" />
     </div>
 
     <div class="aside-scroll">

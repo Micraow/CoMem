@@ -228,10 +228,10 @@ async function revoke(principal: string): Promise<void> {
       <section class="split__main" aria-live="polite">
         <div class="doc-pane">
           <div class="doc-pane__inner">
-            <div v-if="selectedKind === 'file'" class="callout callout--info mb-16">
-              <AlertTriangle :size="15" :stroke-width="1.4" />
+            <UiCallout v-if="selectedKind === 'file'" tone="info" class="mb-16">
+              <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
               <div>文件本身不单独设权限，这里显示它所在目录的规则。</div>
-            </div>
+            </UiCallout>
 
             <DomainAclEditor
               :acl="acl"

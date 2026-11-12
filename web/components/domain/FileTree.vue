@@ -18,7 +18,6 @@ import {
   Circle,
   FileText,
   Folder,
-  RefreshCw,
   Search,
 } from 'lucide-vue-next'
 
@@ -105,15 +104,7 @@ watch([() => props.selected, state], () => {
     <div class="aside-head">
       <span class="aside-head__title">命名空间</span>
       <span class="spacer" />
-      <button
-        type="button"
-        class="iconbtn"
-        aria-label="刷新目录树"
-        :disabled="loading"
-        @click="refresh"
-      >
-        <RefreshCw :size="15" :stroke-width="1.5" />
-      </button>
+      <UiRefreshButton label="刷新目录树" :disabled="loading" @click="refresh" />
     </div>
 
     <div class="aside-tools">

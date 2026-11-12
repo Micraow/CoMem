@@ -15,7 +15,7 @@
  * （`src/adapters/sqlite/api-key-repository.ts`）。服务端从未记录过它，不是
  * 「记了但没出口」——补一列空值只会把「从不展示」变成「永远显示 —」。
  */
-import { AlertTriangle, Copy, KeyRound, Plus, Trash2 } from 'lucide-vue-next'
+import { Copy, KeyRound, Plus, Trash2 } from 'lucide-vue-next'
 
 import { errorMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
@@ -183,10 +183,7 @@ watch(createOpen, (open) => {
       </UiButton>
     </div>
 
-    <UiCallout v-if="error !== null">
-      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-      <div>{{ error }}</div>
-    </UiCallout>
+    <UiErrorCallout v-if="error !== null" :message="error" />
 
     <div v-else-if="loading && keys.length === 0" class="skeleton-block">
       <UiSkeleton v-for="index in 4" :key="index" :width="`${72 - index * 8}%`" height="14px" />
@@ -263,10 +260,10 @@ watch(createOpen, (open) => {
       </div>
 
       <div v-else class="stack-16">
-        <div class="callout callout--info">
-          <KeyRound :size="15" :stroke-width="1.4" />
+        <UiCallout tone="info">
+          <template #icon><KeyRound :size="15" :stroke-width="1.4" /></template>
           <div>完整 key 只显示这一次，关闭后只能看到前缀。</div>
-        </div>
+        </UiCallout>
         <code class="key">{{ created.key }}</code>
         <div class="rowflex">
           <span class="spacer" />

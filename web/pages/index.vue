@@ -166,10 +166,7 @@ const needsOnboarding = computed(() =>
         </template>
       </DomainPageHeader>
 
-      <UiCallout v-if="healthError !== null" class="mb-24">
-        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-        <div>{{ healthError }}</div>
-      </UiCallout>
+      <UiErrorCallout v-if="healthError !== null" class="mb-24" :message="healthError" />
 
       <div class="stats mb-24">
         <div v-for="stat in stats" :key="stat.key" class="stat rise">

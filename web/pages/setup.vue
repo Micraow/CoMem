@@ -16,7 +16,7 @@
  * 不带也能过。服务端说令牌不对（`INVALID_SETUP_TOKEN`）或这次请求不是本机发出的
  * （`NOT_LOOPBACK`）时，把焦点移到令牌输入框，提示从日志里复制。
  */
-import { AlertTriangle, UserPlus } from 'lucide-vue-next'
+import { UserPlus } from 'lucide-vue-next'
 
 import {
   ConsoleBootstrapError,
@@ -201,10 +201,7 @@ async function submit(): Promise<void> {
           </span>
         </div>
 
-        <UiCallout v-if="formError !== null">
-          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-          <div>{{ formError }}</div>
-        </UiCallout>
+        <UiErrorCallout v-if="formError !== null" :message="formError" />
 
         <UiButton variant="primary" type="submit" :disabled="submitting" class="setup__submit">
           <UserPlus :size="15" :stroke-width="1.6" />

@@ -57,7 +57,7 @@
 import { DEFAULT_PROFILE_BUDGET_TOKENS, isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { ComemHookError, createHttpClient } from '../lib/http.mjs';
 import { isMainModule } from '../lib/is-main.mjs';
-import { runMain } from '../lib/lifecycle.mjs';
+import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import {
   DEFAULT_MAX_CONTEXT_BYTES,
   elideMemoryIndex,
@@ -162,21 +162,8 @@ function readAbstractText(result) {
   return '';
 }
 
-/**
- * 诊断出口：stderr 一行 JSON。
- *
- * 为什么不写 stdout：那是注入协议的通道，混进一行 warn 会被宿主当成上下文。
- * 格式与 `mcp-proxy.mjs` 的 `log()` 一致，便于统一采集。
- */
-function warnToStderr(message, data) {
-  try {
-    process.stderr.write(
-      `${JSON.stringify({ level: 'warn', component: 'session-start', message, ...data })}\n`,
-    );
-  } catch {
-    // 写不了 stderr 就只能放弃诊断。
-  }
-}
+/** 降级诊断：一行 JSON 到 stderr，不含记忆正文。 */
+const warn = (message, data) => warnToStderr('session-start', message, data);
 
 /** 节点不存在 / 不可读 = 「没有这条记忆」。其余错误不是。 */
 function isMissingNode(error) {
@@ -211,7 +198,7 @@ async function readAbstract(uri, deps, warnMessage) {
     return readAbstractText(await deps.http.get(CONTENT_ABSTRACT_PATH, { uri }));
   } catch (error) {
     if (!isMissingNode(error)) {
-      (deps.warn ?? warnToStderr)(warnMessage, { uri, ...errorFields(error) });
+      (deps.warn ?? warn)(warnMessage, { uri, ...errorFields(error) });
     }
     return null;
   }
@@ -233,7 +220,7 @@ async function listPreferenceUris(preferencesUri, deps) {
     result = await deps.http.get(FS_LIST_PATH, { uri: preferencesUri });
   } catch (error) {
     if (!isMissingNode(error)) {
-      (deps.warn ?? warnToStderr)('读取偏好目录失败，本次不注入 <comem-preferences>。', {
+      (deps.warn ?? warn)('读取偏好目录失败，本次不注入 <comem-preferences>。', {
         uri: preferencesUri,
         ...errorFields(error),
       });
@@ -390,7 +377,7 @@ export async function handleSessionStart(event, deps) {
   // 超宿主字节上限时按 `CONTEXT_BLOCK_DROP_ORDER` 丢：技能目录 → 召回 → 偏好 → 画像。
   const { context: rendered, dropped, truncated } = fitContext(blocks, maxContextBytes);
   if (dropped.length > 0 || truncated.length > 0) {
-    (deps.warn ?? warnToStderr)('注入上下文超过宿主字节上限，已按优先级降级。', {
+    (deps.warn ?? warn)('注入上下文超过宿主字节上限，已按优先级降级。', {
       maxContextBytes,
       dropped,
       truncated,

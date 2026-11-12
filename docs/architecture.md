@@ -260,7 +260,9 @@ CoMem/
 │   └── assets/css/tokens.css         # 设计令牌，从静态 demo 落过来
 ├── integrations/                     # Hook 插件（独立交付物，装进宿主）
 │   ├── cli.mjs                       # co-mem install / doctor
-│   ├── scripts/  servers/  hosts/  lib/
+│   ├── servers/  hosts/  lib/        # Hook 入口 / 宿主适配 / 共享骨架
+│   ├── skills/                       # 给宿主的 skill 清单
+│   └── tests/                        # node --test
 │
 ├── scripts/                          # 质量闸门与运维脚本
 │   ├── check-config.ts               # 配置项必须有消费方（L1–L3）
@@ -3332,6 +3334,8 @@ integrations/
 │   ├── config.mjs             # 配置 + 宿主解析 + bypass
 │   ├── http.mjs               # 超时 / 重试 / 错误封套
 │   ├── hook-runner.mjs        # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── lifecycle.mjs          # 总预算 / stdin 上限 / 诊断与兜底退出
+│   ├── is-main.mjs            # 入口判定：被直接执行还是被测试 import（六个入口共用）
 │   ├── values.mjs             # 载荷取值：asRecord / text / renderToolOutput / describeEntry
 │   ├── events.json            # 事件名映射表（内部 snake_case ↔ 宿主 PascalCase）
 │   ├── events.mjs             # 读上面那张表，导出 EVENT_NAMES / REPORTED_EVENT_NAMES
@@ -3340,6 +3344,7 @@ integrations/
 │   ├── cursor.mjs             # 消息游标
 │   ├── recall.mjs             # 跨轮召回账本（已注入的 URI，防重复投喂）
 │   ├── sanitize.mjs           # 捕获侧剥离（去掉自己注入的块）
+│   ├── injection.mjs          # 注入侧渲染：转义 / 索引截断 / 字节上限
 │   ├── filter.mjs             # sed 风格查询过滤
 │   └── telemetry.mjs          # 四阶段开销上报
 ├── skills/                    # 提示词：装进宿主的技能目录

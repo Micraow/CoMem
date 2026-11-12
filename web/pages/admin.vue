@@ -27,7 +27,7 @@
  * 页内的「新建」按钮在 forbidden 时收起——页面已经说明了不能用，就不留一个注定
  * 失败的入口。
  */
-import { AlertTriangle, Copy, Plus } from 'lucide-vue-next'
+import { Copy, Plus } from 'lucide-vue-next'
 
 import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
@@ -640,10 +640,7 @@ onMounted(() => {
       <div class="stack-16 drawer-body">
         <p class="caption">共 {{ members.length }} 个成员</p>
 
-        <UiCallout v-if="membersError !== null">
-          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-          <div>{{ membersError }}</div>
-        </UiCallout>
+        <UiErrorCallout v-if="membersError !== null" :message="membersError" />
 
         <div v-else-if="membersLoading" class="stack-12">
           <UiSkeleton v-for="index in 4" :key="index" :width="`${70 - index * 6}%`" height="14px" />

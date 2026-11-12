@@ -171,23 +171,23 @@ watch(scopeRoot, () => {
                 label="自动采集安装"
                 copy-label="复制自动采集安装命令"
               />
-              <div v-else class="callout callout--warn">
-                <AlertTriangle :size="15" :stroke-width="1.4" />
+              <UiCallout v-else tone="warn">
+                <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
                 <div>
                   {{ hook.note }}
                   <a :href="docLink" target="_blank" rel="noreferrer">查看 DSH 接入步骤</a>
                 </div>
-              </div>
+              </UiCallout>
             </section>
 
-            <div class="callout callout--info">
-              <CheckCircle2 :size="15" :stroke-width="1.4" />
+            <UiCallout tone="info">
+              <template #icon><CheckCircle2 :size="15" :stroke-width="1.4" /></template>
               <div>
                 <b>{{ trust.title }}</b>
                 <br />
                 {{ trust.detail }}
               </div>
-            </div>
+            </UiCallout>
           </div>
         </UiCard>
 
@@ -212,10 +212,10 @@ watch(scopeRoot, () => {
             </li>
           </ul>
 
-          <div v-if="verification.allGreen" class="callout callout--success mt-16">
-            <CheckCircle2 :size="15" :stroke-width="1.4" />
+          <UiCallout v-if="verification.allGreen" tone="success" class="mt-16">
+            <template #icon><CheckCircle2 :size="15" :stroke-width="1.4" /></template>
             <div>接入完成。Agent 现在可以自动召回、采集，也能主动读写记忆。</div>
-          </div>
+          </UiCallout>
         </UiCard>
 
         <UiCard title="③ 写入第一条记忆" panel>

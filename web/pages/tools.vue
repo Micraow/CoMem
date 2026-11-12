@@ -9,7 +9,7 @@
  * 工具数是硬约束（16 个，不多不少，AGENTS.md）。这一页只是展示，不是第 17 个
  * 工具——它不执行任何工具，也不接收参数。
  */
-import { AlertTriangle, RefreshCw, Terminal } from 'lucide-vue-next'
+import { Terminal } from 'lucide-vue-next'
 
 import {
   errorMessageOf,
@@ -114,22 +114,11 @@ onMounted(() => {
       <DomainPageHeader title="工具">
         <template #actions>
           <span v-if="tools.length > 0" class="caption">共 {{ tools.length }} 个</span>
-          <button
-            type="button"
-            class="iconbtn"
-            aria-label="重新拉取工具清单"
-            :disabled="loading"
-            @click="load"
-          >
-            <RefreshCw :size="15" :stroke-width="1.5" />
-          </button>
+          <UiRefreshButton label="重新拉取工具清单" :disabled="loading" @click="load" />
         </template>
       </DomainPageHeader>
 
-      <UiCallout v-if="error !== null">
-        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-        <div>{{ error }}</div>
-      </UiCallout>
+      <UiErrorCallout v-if="error !== null" :message="error" />
 
       <div v-else-if="loading && tools.length === 0" class="stack-16" aria-busy="true">
         <div v-for="index in 4" :key="index" class="tool-skeleton">

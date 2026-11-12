@@ -18,7 +18,7 @@
  * 列表加载失败（`sessionsError` / `tasksError`）说明这一屏没有数据；提交失败
  * 说明**刚才那个动作**没生效，列表本身还是好的。混成一个错误会让用户以为整页坏了。
  */
-import { AlertTriangle, RefreshCw } from 'lucide-vue-next'
+import { RefreshCw } from 'lucide-vue-next'
 import { useIntervalFn } from '@vueuse/core'
 
 import type { SessionListPayload, SessionSummaryPayload } from '~/components/domain/SessionList.vue'
@@ -192,10 +192,7 @@ watch(scopeRoot, () => {
 
       <UiTabs v-model="tab" :items="TABS" aria-label="会话与任务" />
 
-      <UiCallout v-if="actionError !== null" class="mt-16">
-        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-        <div>{{ actionError }}</div>
-      </UiCallout>
+      <UiErrorCallout v-if="actionError !== null" class="mt-16" :message="actionError" />
 
       <div class="mt-16">
         <DomainSessionList

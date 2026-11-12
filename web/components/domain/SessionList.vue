@@ -128,7 +128,7 @@ function toDisplayPart(part: SessionPartPayload): DisplayPart {
 </script>
 
 <script setup lang="ts">
-import { AlertTriangle, CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
+import { CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
 
 import {
   ApiClientError,
@@ -247,10 +247,7 @@ function commitTitleOf(session: SessionSummaryPayload): string {
 
 <template>
   <div class="stack-16">
-    <UiCallout v-if="props.error !== null">
-      <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-      <div>{{ props.error }}</div>
-    </UiCallout>
+    <UiErrorCallout v-if="props.error !== null" :message="props.error" />
 
     <div v-if="props.loading && props.sessions.length === 0" class="session-skeleton">
       <UiSkeleton v-for="index in 4" :key="index" :width="`${72 - index * 6}%`" height="16px" />
@@ -313,10 +310,7 @@ function commitTitleOf(session: SessionSummaryPayload): string {
         </p>
 
         <div v-if="openId === session.id" class="session__body">
-          <UiCallout v-if="detailError !== null">
-            <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-            <div>{{ detailError }}</div>
-          </UiCallout>
+          <UiErrorCallout v-if="detailError !== null" :message="detailError" />
 
           <div v-else-if="detailLoadingId === session.id" class="stack-10" aria-busy="true">
             <UiSkeleton width="60%" height="14px" />

@@ -12,7 +12,7 @@
  * 刷新能让插件用新会话重新引导，避免「已经登录但页面还停在登录分支」。凭据在
  * `sessionStorage` 里，整页跳转不会丢。
  */
-import { AlertTriangle, CircleCheck, LockKeyhole } from 'lucide-vue-next'
+import { CircleCheck, LockKeyhole } from 'lucide-vue-next'
 
 import { ConsoleIdentityError, consoleIdentityState, loginConsole } from '~/composables/consoleIdentity'
 import { SERVICE_UNREACHABLE_MESSAGE } from '~/utils/errors'
@@ -102,10 +102,10 @@ async function submit(): Promise<void> {
       <h1 id="login-title" class="login__title">登录</h1>
       <p class="login__lead">使用 CoMem 用户账号登录控制台。</p>
 
-      <div v-if="accountCreated" class="callout callout--success login__created" role="status">
-        <CircleCheck :size="15" :stroke-width="1.4" />
+      <UiCallout v-if="accountCreated" tone="success" class="login__created" role="status">
+        <template #icon><CircleCheck :size="15" :stroke-width="1.4" /></template>
         <div>管理员账号已创建，请登录。</div>
-      </div>
+      </UiCallout>
 
       <form class="login__form" @submit.prevent="submit">
         <label class="field">
@@ -129,10 +129,7 @@ async function submit(): Promise<void> {
           />
         </label>
 
-        <UiCallout v-if="error !== null">
-          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-          <div>{{ error }}</div>
-        </UiCallout>
+        <UiErrorCallout v-if="error !== null" :message="error" />
 
         <UiButton variant="primary" type="submit" :disabled="submitting" class="login__submit">
           <LockKeyhole :size="15" :stroke-width="1.6" />

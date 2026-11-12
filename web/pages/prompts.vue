@@ -16,7 +16,7 @@
  * 切换提示词会丢掉草稿。加一个「确定放弃修改吗」的确认框需要额外的状态机，而这一
  * 页的草稿通常只有几十秒的工作量；保存失败的提示已经足够让用户知道没保存上。
  */
-import { FileText, RefreshCw } from 'lucide-vue-next'
+import { FileText } from 'lucide-vue-next'
 
 import { errorMessageOf, forbiddenMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
@@ -211,15 +211,7 @@ onMounted(() => {
             {{ overridden.length }}
           </UiBadge>
           <span class="spacer" />
-          <button
-            type="button"
-            class="iconbtn"
-            aria-label="重新拉取提示词"
-            :disabled="loading"
-            @click="load"
-          >
-            <RefreshCw :size="15" :stroke-width="1.5" />
-          </button>
+          <UiRefreshButton label="重新拉取提示词" :disabled="loading" @click="load" />
         </div>
 
         <div class="aside-scroll">

@@ -397,10 +397,7 @@ onBeforeUnmount(() => {
               <UiBadge v-if="degraded" variant="orange">摘要降级</UiBadge>
             </div>
 
-            <UiCallout v-if="error !== null">
-              <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-              <div>{{ error }}</div>
-            </UiCallout>
+            <UiErrorCallout v-if="error !== null" :message="error" />
 
             <div v-else class="detail-grid">
               <div>
@@ -411,10 +408,7 @@ onBeforeUnmount(() => {
                   <span>{{ LEVEL_TAB_NOTE[layer] }}</span>
                 </div>
 
-                <UiCallout v-if="layerError !== null">
-                  <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-                  <div>{{ layerError }}</div>
-                </UiCallout>
+                <UiErrorCallout v-if="layerError !== null" :message="layerError" />
 
                 <div v-else-if="loading || layerLoading" class="skeleton-block" aria-busy="true">
                   <UiSkeleton width="42%" height="14px" />
@@ -489,10 +483,10 @@ onBeforeUnmount(() => {
                 >
                   <div class="links__title">关联</div>
 
-                  <div v-if="linksError !== null" class="callout callout--warn">
-                    <AlertTriangle :size="15" :stroke-width="1.4" />
+                  <UiCallout v-if="linksError !== null" tone="warn">
+                    <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
                     <div>关联没有取到：{{ linksError }}</div>
-                  </div>
+                  </UiCallout>
 
                   <section v-if="outgoingRows.length > 0" class="links__group">
                     <div class="links__group-title">这条记忆指向</div>

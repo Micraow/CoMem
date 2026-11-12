@@ -363,10 +363,7 @@ onMounted(load)
         </template>
       </DomainPageHeader>
 
-      <UiCallout v-if="error !== null" class="mb-24">
-        <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-        <div>{{ error }}</div>
-      </UiCallout>
+      <UiErrorCallout v-if="error !== null" class="mb-24" :message="error" />
 
       <section class="section">
         <h2 class="section__title">记忆健康度</h2>
@@ -408,10 +405,10 @@ onMounted(load)
 
       <section class="section">
         <UiCard title="最近的请求" panel>
-          <div class="callout callout--info mb-16">
-            <AlertTriangle :size="15" :stroke-width="1.4" />
+          <UiCallout tone="info" class="mb-16">
+            <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
             <div>请求明细还没有查询端点。</div>
-          </div>
+          </UiCallout>
 
           <p class="requests__lead">指标里的聚合项：</p>
 
