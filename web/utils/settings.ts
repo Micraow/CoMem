@@ -95,6 +95,125 @@ export interface ConfigTestPayload {
   readonly detail: string
 }
 
+/** `GET /inference/local` 的响应体（架构文档 §18.2）。 */
+export interface LocalInferenceStatusPayload {
+  readonly available: boolean
+  readonly running: boolean
+  readonly endpoint: string
+  readonly dimension: number | null
+  readonly backend: string | null
+  readonly device: string | null
+  readonly model: string | null
+  /** 本机缺的依赖；`rerank-model` 不影响启动，只影响重排。 */
+  readonly missing: readonly string[]
+  readonly startCommand: string | null
+}
+
+/** `POST /inference/local/start` 成功时的响应体。 */
+export interface LocalInferenceStartPayload {
+  readonly started: true
+  readonly ready: true
+  readonly endpoint: string
+  readonly dimension: number | null
+}
+
+/** 本地推理服务的固定值。与 `local-inference/README.md` 的「与 CoMem 对接」一致。 */
+export const LOCAL_INFERENCE_BASE_URL = 'http://127.0.0.1:8089/v1'
+export const LOCAL_INFERENCE_EMBEDDING_MODEL = 'Qwen3-Embedding-0.6B'
+export const LOCAL_INFERENCE_RERANK_MODEL = 'Qwen3-Reranker-0.6B'
+/** 服务端只检查 Authorization 头存在，值不校验；空串会被当成没有头。 */
+export const LOCAL_INFERENCE_API_KEY = 'local'
+export const LOCAL_INFERENCE_DIMENSION = 1024
+
+/** 就绪后的提示。文案与保存成功后的重启提示保持同一句。 */
+export const LOCAL_INFERENCE_RESTART_NOTE = '保存后需要重启 CoMem 才生效。'
+
+/** 缺失项 → 界面文案。`venv` 这类内部词不进界面（AGENTS.md §11）。 */
+const LOCAL_INFERENCE_MISSING_LABELS: Readonly<Record<string, string>> = {
+  venv: 'Python 运行环境',
+  server: '服务程序',
+  'embedding-model': '向量模型',
+  'rerank-model': '重排模型',
+}
+
+export function inferenceMissingLabels(missing: readonly string[]): readonly string[] {
+  return missing.map((item) => LOCAL_INFERENCE_MISSING_LABELS[item] ?? item)
+}
+
+/** 状态徽章配色。文字同时表意，颜色不单独承载信息。 */
+export function inferenceToneOf(
+  status: LocalInferenceStatusPayload,
+): 'green' | 'gray' | 'orange' {
+  if (!status.available) {
+    return 'orange'
+  }
+  return status.running ? 'green' : 'gray'
+}
+
+/** 状态徽章文字。详细状态（维度 / 设备 / 模型、缺什么）另起一行。 */
+export function inferenceShortStatusOf(status: LocalInferenceStatusPayload): string {
+  if (!status.available) {
+    return '本机不可用'
+  }
+  return status.running ? '就绪' : '未运行'
+}
+
+/**
+ * 一行状态：`未运行` / `就绪（1024 维 · cpu · 模型名）` / `本机不可用（缺 …）`。
+ *
+ * 维度、设备、模型都来自 `/health`，不是界面写死的——服务实际加载的模型与配置里
+ * 想用的模型可能不是同一个，那正是这个状态要回答的问题。
+ */
+export function inferenceStatusText(status: LocalInferenceStatusPayload): string {
+  if (!status.available) {
+    return `本机不可用（缺 ${inferenceMissingLabels(status.missing).join('、')}）`
+  }
+  if (!status.running) {
+    return '未运行'
+  }
+  const parts: string[] = []
+  if (status.dimension !== null) {
+    parts.push(`${String(status.dimension)} 维`)
+  }
+  if (status.device !== null) {
+    parts.push(status.device)
+  }
+  if (status.model !== null) {
+    parts.push(status.model)
+  }
+  return parts.length === 0 ? '就绪' : `就绪（${parts.join(' · ')}）`
+}
+
+export type LocalInferenceFillKind = 'embedding' | 'rerank'
+
+/**
+ * 「一键填入」的草稿：只填表单，不保存。
+ *
+ * `type` 也一起写：默认值是 `disabled`，只填地址与模型名的话保存之后仍然不会产生
+ * 调用——那会做出一个「看起来配好了」的假状态。`retrieval.engine` /
+ * `retrieval.rerank.enabled` 不代填：前者是检索策略，后者默认关是刻意的。
+ */
+export function inferenceFillDrafts(
+  kind: LocalInferenceFillKind,
+  dimension: number = LOCAL_INFERENCE_DIMENSION,
+): Readonly<Record<string, string>> {
+  if (kind === 'rerank') {
+    return {
+      'providers.rerank.type': 'http',
+      'providers.rerank.baseUrl': LOCAL_INFERENCE_BASE_URL,
+      'providers.rerank.model': LOCAL_INFERENCE_RERANK_MODEL,
+      'providers.rerank.apiKey': LOCAL_INFERENCE_API_KEY,
+    }
+  }
+  return {
+    'providers.embedding.type': 'openai-compatible',
+    'providers.embedding.baseUrl': LOCAL_INFERENCE_BASE_URL,
+    'providers.embedding.model': LOCAL_INFERENCE_EMBEDDING_MODEL,
+    'providers.embedding.apiKey': LOCAL_INFERENCE_API_KEY,
+    'providers.embedding.dimension': String(dimension),
+  }
+}
+
 /** 分组标题。`memory` 等分组默认折叠，标题是唯一可见的那一行。 */
 const GROUP_LABELS = {
   llm: '模型',
@@ -253,14 +372,14 @@ export const SETTING_FIELDS = {
   'providers.embedding.baseUrl': {
     label: '网关地址',
     control: 'text',
-    hint: '本地推理服务填 http://127.0.0.1:8089/v1；远程供应商填其地址。',
+    hint: '本地推理服务填 http://127.0.0.1:8089/v1；上方卡片的「填入向量配置」会自动填好。',
   },
   'providers.embedding.model': { label: '模型名', control: 'text' },
   'providers.embedding.apiKey': { label: 'API 密钥', control: 'secret' },
   'providers.embedding.dimension': {
     label: '向量维度',
     control: 'number',
-    hint: '必须与模型一致；写错要到第一次嵌入时才报错。',
+    hint: '必须与模型一致；本地向量模型是 1024，写错要到第一次嵌入时才报错。',
   },
   'providers.embedding.maxBatchSize': { label: '单次请求条数上限', control: 'number' },
   'providers.embedding.timeoutSeconds': { label: '超时（秒）', control: 'number' },

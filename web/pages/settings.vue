@@ -33,6 +33,7 @@ import { useToast } from '~/composables/useToast'
 import {
   CONFIG_TEST_TARGETS,
   INITIALLY_EXPANDED_GROUPS,
+  LOCAL_INFERENCE_DIMENSION,
   RESTART_COMMANDS,
   TEST_SCOPE_NOTE,
   buildPatchValues,
@@ -44,6 +45,7 @@ import {
   fieldOptionsOf,
   fieldPathOfError,
   groupSettings,
+  inferenceFillDrafts,
   restartNoticeOf,
   sourceLabelOf,
   sourceNoteOf,
@@ -55,6 +57,9 @@ import {
   type ConfigTestPayload,
   type ConfigTestTarget,
   type ConfigViewPayload,
+  type LocalInferenceFillKind,
+  type LocalInferenceStartPayload,
+  type LocalInferenceStatusPayload,
 } from '~/utils/settings'
 
 useHead({ title: '设置 · CoMem 控制台' })
@@ -91,6 +96,18 @@ const probes = ref<Readonly<Record<ConfigTestTarget, ProbeState>>>(
     ProbeState
   >,
 )
+
+/**
+ * 本地推理卡片的状态与它自己的请求。
+ *
+ * 与 `/config` 分开取数：这一块失败不应挡住其余设置项，反之亦然（§16 的
+ * 「一个页面的多个区域各自取数」）。启动请求最长 25 秒，`useApi` 的 30 秒超时
+ * 覆盖得住。
+ */
+const inference = ref<LocalInferenceStatusPayload | null>(null)
+const inferenceLoading = ref(false)
+const inferenceAction = ref<'idle' | 'starting' | 'stopping'>('idle')
+const inferenceError = ref<string | null>(null)
 
 const items = computed<readonly ConfigItemView[]>(() => view.value?.items ?? [])
 const groups = computed(() => groupSettings(items.value))
@@ -268,8 +285,94 @@ async function test(target: ConfigTestTarget | null): Promise<void> {
   }
 }
 
+async function loadInference(): Promise<void> {
+  inferenceLoading.value = true
+  try {
+    inference.value = await api.get<LocalInferenceStatusPayload>('/inference/local')
+    inferenceError.value = null
+  } catch (caught) {
+    inferenceError.value = isForbidden(caught) ? '需要系统管理员权限。' : errorMessageOf(caught)
+  } finally {
+    inferenceLoading.value = false
+  }
+}
+
+async function startInference(): Promise<void> {
+  if (inferenceAction.value !== 'idle') {
+    return
+  }
+  inferenceAction.value = 'starting'
+  inferenceError.value = null
+  try {
+    const result = await api.post<LocalInferenceStartPayload>('/inference/local/start', {})
+    toast.show(
+      'success',
+      result.dimension === null
+        ? '本地推理服务已就绪'
+        : `本地推理服务已就绪（${String(result.dimension)} 维）`,
+    )
+  } catch (caught) {
+    // 409 表示进程起来了但没就绪；服务端消息里带原因，原样显示。
+    inferenceError.value = isForbidden(caught) ? '需要系统管理员权限。' : errorMessageOf(caught)
+  } finally {
+    inferenceAction.value = 'idle'
+    await loadInference()
+  }
+}
+
+async function stopInference(): Promise<void> {
+  if (inferenceAction.value !== 'idle') {
+    return
+  }
+  inferenceAction.value = 'stopping'
+  inferenceError.value = null
+  try {
+    await api.post<{ readonly stopped: true }>('/inference/local/stop', {})
+    toast.show('success', '本地推理服务已停止')
+  } catch (caught) {
+    inferenceError.value = isForbidden(caught) ? '需要系统管理员权限。' : errorMessageOf(caught)
+  } finally {
+    inferenceAction.value = 'idle'
+    await loadInference()
+  }
+}
+
+/**
+ * 「一键填入」：只改草稿，不保存。
+ *
+ * `dimension` 优先用 `/health` 读到的值；服务没启动时用 1024（本地模型的固定维度）。
+ * 不可编辑的字段不写；被环境变量遮住的字段由保存时的服务端错误点名（`details.field`
+ * 会把错误挂到对应输入框）。
+ */
+function fillInference(kind: LocalInferenceFillKind): void {
+  const dimension = inference.value?.dimension ?? LOCAL_INFERENCE_DIMENSION
+  const values = inferenceFillDrafts(kind, dimension)
+  const nextDrafts = { ...drafts.value }
+  const nextCleared = new Set(cleared.value)
+  const nextErrors = { ...fieldErrors.value }
+  let filled = 0
+  for (const [path, value] of Object.entries(values)) {
+    const item = items.value.find((candidate) => candidate.path === path)
+    if (item === undefined || !item.editable) {
+      continue
+    }
+    nextDrafts[path] = value
+    nextCleared.delete(path)
+    delete nextErrors[path]
+    filled += 1
+  }
+  drafts.value = nextDrafts
+  cleared.value = nextCleared
+  fieldErrors.value = nextErrors
+  const nextExpanded = new Set(expanded.value)
+  nextExpanded.add(kind === 'embedding' ? 'embedding' : 'rerank')
+  expanded.value = nextExpanded
+  toast.show('success', `已填入 ${String(filled)} 项，检查后点保存`)
+}
+
 onMounted(() => {
   void load()
+  void loadInference()
 })
 </script>
 
@@ -347,7 +450,20 @@ onMounted(() => {
           覆盖文件 {{ view.overridePath }} 不可写，保存会失败。容器部署不要把数据卷挂成只读。
         </p>
 
-        <UiCard v-for="group in groups" :key="group.group" :title="group.label" panel>
+        <template v-for="group in groups" :key="group.group">
+          <DomainLocalInferenceCard
+            v-if="group.group === 'embedding'"
+            :status="inference"
+            :loading="inferenceLoading"
+            :action="inferenceAction"
+            :error="inferenceError"
+            @refresh="loadInference"
+            @start="startInference"
+            @stop="stopInference"
+            @fill="fillInference"
+          />
+
+          <UiCard :title="group.label" panel>
           <template #actions>
             <span class="caption tnum">{{ group.items.length }} 项</span>
             <UiButton
@@ -527,6 +643,7 @@ onMounted(() => {
             </div>
           </div>
         </UiCard>
+        </template>
       </div>
     </div>
   </div>

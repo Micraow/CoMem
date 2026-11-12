@@ -41,7 +41,10 @@ import { createBootstrapRoutes, type BootstrapAccess } from './bootstrap.js';
 import { createConfigRoutes } from './config.js';
 import { createContentRoutes } from './content.js';
 import { createFsRoutes } from './fs.js';
+import { createInferenceRoutes } from './inference.js';
+import type { LocalInferencePort } from './inference.js';
 import { createMcpRoutes } from './mcp.js';
+import { createMemoryCreateRoutes } from './memories-create.js';
 import { createMemoryRoutes } from './memories.js';
 import { createOpsRoutes } from './ops.js';
 import { createPromptRoutes } from './prompts.js';
@@ -144,6 +147,13 @@ export interface HttpRouteServices {
    * 模型看到的那一份，硬编码一份等于给「界面说的」与「模型读到的」制造漂移。
    */
   readonly registry: ToolRegistry;
+  /**
+   * 本机推理服务的进程管理（§18.2）。
+   *
+   * 适配器在 `adapters/local-inference/`，这里只认 `status` / `start` / `stop`；
+   * 装配层构造它，路由层不碰 `child_process`。
+   */
+  readonly localInference: LocalInferencePort;
 }
 
 /** 按 §14 表格的顺序拼出全部路由分组。 */
@@ -157,6 +167,7 @@ export function createHttpRouteGroups(
     createSessionRoutes(services),
     createTaskRoutes(services),
     createAclRoutes(services),
+    createMemoryCreateRoutes(services),
     createMemoryRoutes(services),
     createResourceRoutes(services),
     createSkillRoutes(services),
@@ -164,6 +175,7 @@ export function createHttpRouteGroups(
     createAuthRoutes(services),
     createBootstrapRoutes(services),
     createConfigRoutes(services),
+    createInferenceRoutes(services),
     createPromptRoutes(services),
     createMcpRoutes(services),
     createOpsRoutes(services),
