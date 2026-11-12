@@ -16,7 +16,7 @@ integrations/
 ├── lib/                  # 与宿主无关的共享模块
 │   ├── config.mjs        # 配置 + 宿主解析 + bypass
 │   ├── http.mjs          # 超时 / 重试 / 错误封套
-│   ├── hook-runner.mjs   # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── hook-runner.mjs   # 入口骨架：stdin → 归一化 → 预算 → 信封（两个 hook 宿主共用）
 │   ├── lifecycle.mjs     # 总预算 / stdin 上限 / 诊断与兜底退出
 │   ├── is-main.mjs       # 入口判定：被直接执行还是被测试 import（六个入口共用）
 │   ├── values.mjs        # 载荷取值：asRecord / text / renderToolOutput / describeEntry
@@ -40,8 +40,11 @@ integrations/
 │   └── mcp-proxy.mjs     # stdio → POST /mcp 的 MCP 代理
 ├── hosts/                # 宿主适配（信封与载荷）
 │   ├── claude-code.mjs
-│   ├── codex.mjs
-│   └── dsh.mjs
+│   └── codex.mjs
+├── dsh-plugin/           # DSH 原生插件（独立包，装进 profile）
+│   ├── package.json      # main / engines.dsh
+│   ├── lib/index.js      # 五个接缝的订阅者
+│   └── README.md         # 安装、配置与已知限制
 ├── skills/               # 提示词（装进宿主的技能目录）
 │   ├── comem-memory/SKILL.md
 │   └── comem-rules/SKILL.md
@@ -66,7 +69,8 @@ co-mem uninstall --host claude-code
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径
 匹配到的、我们自己加的条目，别人的 hook 一个不动。
 
-**能装的是两个宿主**，`--host` 取 `claude-code` / `codex`：
+**能用 `install` 装的是两个宿主**，`--host` 取 `claude-code` / `codex`。DSH 用原生
+插件接入（`integrations/dsh-plugin/`），不走 `install`：
 
 ```bash
 co-mem install --host codex      # 写进 ~/.codex/hooks.json
@@ -77,55 +81,57 @@ co-mem uninstall --host codex
 |---|---|---|
 | `claude-code` | `~/.claude/settings.json` | `hooks` 是 matcher 组数组 |
 | `codex` | `~/.codex/hooks.json` | 见下节；**首次使用需在 Codex 里信任 Hook** |
-| `dsh` | —（`install` 直接失败） | 见「[DSH](#dsh)」：DSH 没有 settings 里的 hook 面 |
+| `dsh` | —（`install` 直接失败） | 见「[DSH](#dsh)」：接缝是 Cordis 插件，不是 settings 里的 hook |
 
 ### DSH
 
-**`co-mem install --host dsh` 会失败，这是刻意的。** DSH 0.2.2-rc.1 没有 settings
-里的 hook 面：
+**DSH 没有 hook 脚本面。** 它的生命周期点是**同一进程内 Cordis 插件订阅的 typed
+事件**（`agent/created`、`agent/pre-step`、`tools/*`、`session/event`、`agent/disposed`），
+宿主不会执行 `integrations/servers/*.mjs` 这样的命令。所以 CoMem 在 DSH 上的接入物
+是 `integrations/dsh-plugin/` 这个独立包，**不是** `install --host dsh`。
 
-- DSH 读的配置是 `$DSH_HOME/profiles/<name>/settings.yaml`，而它已经是遗留文件——
-  启动时 `@deepseek-ai/dsh-settings` 的 `importLegacyDocument` 把它一次性导入
-  profile、改名成 `settings.yaml.imported`（`lib/index.js:346-349`）。
-- `~/.dsh/settings.json` 一个读者都没有。写它不报错，只是永远不生效：用户会以为
-  装好了，实际一个 hook 都不会跑。
-- DSH 的 hook 面**完全由插件提供**：`@deepseek-ai/dsh-hooks-claude-code`（Claude
-  Code 方言）或 `@deepseek-ai/dsh-hooks-codex`（Codex 方言），挂在
-  `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里，用 `configPath` 指向一个
-  `hooks.json`，或指向一个 `hooks` 键里放着配置的 settings 文件。
-
-`install` 完不成这条链路：它要往 profile 里装插件、改一份 YAML，两件都不做。所以
-它选择失败，而不是写一个没人读的文件。
-
-**手动接**（这两步本仓库不替你做）：
+**`co-mem install --host dsh` 会在写第一个字节之前失败，这是刻意的。** 报错指向
+插件安装步骤，不再给桥接方案：把 Claude Code 的 `hooks.json` 翻译到 DSH 的
+`@deepseek-ai/dsh-hooks-claude-code` / `dsh-hooks-codex` 只实现 5 个事件
+（没有 `PreCompact` / `SessionEnd`），而且 `transcript_path` 恒空、`Stop` 采不到
+消息——接完看起来像成功，实际上两件事没工作。
 
 ```bash
-# 1. 用 Claude Code 方言生成 hooks 文件（DSH 的桥读的就是这个形状）
-node integrations/cli.mjs install --host claude-code --settings ~/.dsh/comem/hooks.json
+# 1. 装进 profile（link 到仓库，插件按相对路径引用 integrations/lib/）
+dsh plugin --profile web add "link:$PWD/integrations/dsh-plugin"
+
+# 2. 在 $DSH_HOME/profiles/web/cordis.patch.yml 里加一条 insert
 ```
 
 ```yaml
-# 2. 在 $DSH_HOME/profiles/<name>/cordis.patch.yml 里挂上桥
-- name: '@deepseek-ai/dsh-hooks-claude-code'
-  config:
-    configPath: ~/.dsh/comem/hooks.json
+- insert:
+    - id: comem
+      name: comem-dsh-plugin
+      config:
+        baseUrl: http://127.0.0.1:1933
+        token: ''            # 非回环时必须给
+        timeoutMs: 5000
 ```
 
-**未验证。** 本仓库没有安装这两个桥包，`configPath` 能否真的让 CoMem 的 hook 跑
-起来没有做端到端验证；上面的字段名来自两个包 0.2.2-rc.1 的 README，不是实测。
+```bash
+# 3. 不启动也能验证组合成功
+dsh --profile web --dump-config | grep -A6 'id: comem'
+```
 
-两个已知限制，接之前先知道：
+插件在五个接缝上做与 hook 等价的事：
 
-- **两个桥各只实现 5 个事件**，`PreCompact` 与 `SessionEnd` 的配置会被静默丢弃。
-  想要完整的七个事件，用 `--host claude-code` 或 `--host codex` 直连宿主。
-- **`Stop` 采集在 DSH 下采不到消息**：桥把 `transcript_path` 固定成空值（DSH 的
-  持久化层不暴露文件路径），也没有 Claude Code 的 transcript 可读。`hosts/dsh.mjs`
-  的 `parseTranscript` 本来就返回空数组并带一条 `note`，`Stop` 会把它写进
-  `comem-capture.log` 的 `reason: "no-messages"`，不是静默早退。
+| 接缝 | 等价于 | 行为 |
+|---|---|---|
+| `agent/created` | `SessionStart` | 调 `handleSessionStart`，把画像 / 偏好 / 技能索引 `agent.inject()` |
+| `agent/pre-step` | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则调 `handleUserPromptSubmit` 并把块折进 `decision.messages` |
+| `session/event` 的 `turn/end` | `Stop` | 本轮 user / assistant 消息过 `lib/sanitize.mjs` 剥离后 `POST /sessions/{id}/messages` + `/commit` |
+| `agent/disposed` | `SessionEnd` 的近似物 | 尽力把还没交出去的消息发一次（emit 模式，没人等它） |
+| `session/event` 的 `compaction/start` | `PreCompact` | **做不到**：压缩开始时才能观察到，只记一条 warn |
 
-**`--host dsh` 的适配器还在。** `hosts/dsh.mjs` 仍然可以通过 `COMEM_HOST=dsh`
-选中（测试也覆盖它），但 CoMem 自己没有「装进 DSH」这条路径。DSH 上跑的是桥，
-桥发的是 Claude Code 方言的载荷，所以用 `--host claude-code` 生成的命令。
+**已知限制**（细节见 `integrations/dsh-plugin/README.md`）：压缩前不能拦截；没有
+真正的 `SessionEnd`，进程被强杀时最后半轮会丢；工具调用/结果不采集；召回账本按
+进程共享一个文件，并发会话下去重变弱；采集缓冲只在内存里，DSH 重启即丢。子 agent
+会话（`header.origin === 'subagent'`）不注入、不采集。
 
 ### Codex
 
@@ -177,6 +183,10 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 都是「对话要没了，把手上的消息交出去」，但内部事件名不同（`pre_compact` /
 `session_end`）、预算也不同。`co-mem install` 默认把七个都写进宿主的配置。
 
+**这张表是「hook 脚本」这条路的七个事件。** DSH 上没有 hook 脚本，原生插件只覆盖
+其中五个接缝（没有 `PreToolUse` / `PostToolUse`，`PreCompact` 只能事后 warn），
+见「[DSH](#dsh)」。
+
 ### 事件名与开销上报
 
 两套事件名分居两侧，对应关系只写在 `lib/events.json`：
@@ -188,8 +198,9 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | `reportsOverhead` | 这个事件是否上报阻塞开销 |
 
 `lib/events.json` 是这张表的唯一一份，`lib/events.mjs` 从它导出 `EVENT_NAMES`（7 个）
-与 `REPORTED_EVENT_NAMES`（6 个）。三个宿主共享这张表——各写一份时，事件名对不上会
-让 `/metrics` 里的样本全部塌进 `event="other"`。
+与 `REPORTED_EVENT_NAMES`（6 个）。两个 hook 宿主共享这张表——各写一份时，事件名
+对不上会让 `/metrics` 里的样本全部塌进 `event="other"`。DSH 插件不经过这张表的
+宿主名一侧，它直接用内部事件名调 handler。
 
 **「宿主会调的事件」是 7 个，「进 `/metrics` 的事件」是 6 个。** `pre_tool_use` 的
 `reportsOverhead` 是 `false`：它的判定全在本地，没有 HTTP 往返可归因，上报一个
@@ -471,7 +482,7 @@ L0 在索引里，目录的 L0 是 `.abstract.md`），**不在 hook 里截断�
 | 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 索引只有一条记忆（一行），实际不触发 |
 | 偏好 token 预算 | 画像预算的 1/4，默认 500 | 按条目从后往前截，至少保留 1 条 + 「（已截断，共 M 条）」 |
 | 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
-| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 20,000 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能目录 → 召回 → 偏好 → 画像，stderr 记一条 `warn` |
+| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 插件 9,500 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能目录 → 召回 → 偏好 → 画像，记一条 `warn` |
 
 **只注入摘要 + URI。** 画像与偏好的正文不再进上下文：`profile.md` 的 YAML
 frontmatter 对模型是噪声，而正文按 157 字/归档增长。模型要细节时用 `read` 取
@@ -491,9 +502,11 @@ frontmatter 对模型是噪声，而正文按 157 字/归档增长。模型要�
 挡的是偏好目录异常增长与部署方调低宿主上限。
 
 **宿主字节上限的来源是宿主的实现细节，不是公开规范。** Claude Code / Codex 在 hook
-输出超过约 10,000 字符时转存文件、只放预览，这里取 9,500 留余量；DSH 没有公开上限，
-取 20,000 的保守值。两个数在 `hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**
-——真实上限更低时调小，不要指望宿主报错，它只会静默降级成预览。
+输出超过约 10,000 字符时转存文件、只放预览，这里取 9,500 留余量。两个数在
+`hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**——真实上限更低时调小，不要
+指望宿主报错，它只会静默降级成预览。**DSH 插件没有「hook 输出上限」这回事**（注入
+发生在进程内），它仍用 `DEFAULT_MAX_CONTEXT_BYTES`（9,500）当保守上限，让显式的
+降级顺序在偏好目录异常增长时照常生效。
 
 ### 为什么不用 `mcp-remote` 这类现成代理
 
@@ -586,11 +599,11 @@ queryFilters:
 两位小数会把两条都渲染成 `0.02`，既不携带「哪条更相关」，又暗示不存在的精度。
 
 **宿主名**：`co-mem install` 写进 hook 命令的 `--host` 参数（或 `COMEM_HOST`），
-`lib/config.mjs` 按名字动态 import `hosts/<name>.mjs`。加第三个宿主只加一个文件，
-`servers/` 里一行都不用改。宿主之间不互相 import（信封与 `parseTranscript` 各自
-独立），但**入口骨架与载荷取值共用 `lib/`**：`lib/hook-runner.mjs` 的
+`lib/config.mjs` 按名字动态 import `hosts/<name>.mjs`。加一个 hook 宿主只加一个
+文件，`servers/` 里一行都不用改。宿主之间不互相 import（信封与 `parseTranscript`
+各自独立），但**入口骨架与载荷取值共用 `lib/`**：`lib/hook-runner.mjs` 的
 `createRunHook` 拿宿主的 `normalizeEvent` / `formatOutput` 当参数，`lib/values.mjs`
-放四个取值助手。
+放四个取值助手。DSH 不在 `hosts/` 里——它是插件，不从 stdin 收载荷。
 
 **临时文件**：锁 `{tmpdir}/comem-{sessionId}.lock`、游标 `{tmpdir}/comem-cursors.json`、
 事件去重 `{tmpdir}/comem-events.json`、召回账本 `{tmpdir}/comem-recall-ledger.json`、
@@ -608,23 +621,11 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 
 ### DSH
 
-这一份是本插件定义并依赖的约定。**DSH 本身不派发 hook**——它没有 hook 面，hook
-由 `@deepseek-ai/dsh-hooks-claude-code` / `dsh-hooks-codex` 两个桥插件提供，桥发
-的是 Claude Code / Codex 方言的载荷（见上面的「[DSH](#dsh)」）。下面这个形状只有
-在手工用 `COMEM_HOST=dsh` 选中 `hosts/dsh.mjs` 时才会被用到：
-
-```json
-{
-  "event": "UserPromptSubmit",
-  "sessionId": "0b1c",
-  "eventId": "evt_7f3a",
-  "cwd": "/repo",
-  "data": { "prompt": "…", "toolName": "Read", "filePath": "comem://…", "messages": [] }
-}
-```
-
-返回 `{"status":"ok","result":{...}}`，`result.context` 注入、`result.block` +
-`result.reason` 拦截。同时兼容 Claude Code 的扁平形状。
+**没有「host 载荷」这一层。** DSH 不发 hook JSON、不读 `transcript_path`、没有
+返回信封；插件直接拿到 typed 事件（见上面的「[DSH](#dsh)」）。插件把事件翻成
+`handleSessionStart` / `handleUserPromptSubmit` / `ensureSession` 认识的事件形状，
+再把 `{context}` 折进 `agent.inject()` / `decision.messages`。所以 `hosts/dsh.mjs`
+不存在，`--host dsh` 也不会被任何脚本用到。
 
 ### transcript 格式与采集诊断
 
@@ -636,7 +637,7 @@ stdin 收 JSON，公共字段 `session_id` / `transcript_path` / `cwd` / `hook_e
 |---|---|---|
 | Claude Code | 载荷里的 `transcript_path` | 每行 `{uuid, type, message: {role, content: [{type: 'text', text}]}}`；`isSidechain`（子 agent）与工具调用跳过 |
 | Codex | `~/.codex/sessions/<日期>/rollout-*.jsonl` | 每行 `{timestamp, ordinal, type, payload}`；只取 `type: "response_item"` 且 `payload.type: "message"` 的行，`content[*].text`（`input_text` / `output_text`）按换行拼接；`developer`、空文本与 `function_call` / `reasoning` 跳过 |
-| DSH | 不读文件 | 会话累积列表在 hook 载荷的 `data.messages` 里；transcript 文件格式**未验证**。DSH 的桥插件把 `transcript_path` 固定成空值，也不填 `data.messages`，所以 **DSH 下 `Stop` 采不到消息**——`comem-capture.log` 会记 `reason: "no-messages"` |
+| DSH | 插件直接读事件 | 不走 transcript：插件的 `session/event` 监听器把本轮 `user/message` / `assistant/message` 收进内存缓冲，`turn/end` 时剥离并提交。没有文件路径，也没有 `comem-capture.log` 这条诊断（失败进 DSH 日志的 `comem:` warn） |
 
 **Codex 的 rollout 没有顶层 `message` 字段**，与 Claude Code 的 transcript 不是一种
 格式。只实现其中一种时，另一种宿主的每一行都被跳过，`Stop` 拿到空数组后直接返回——
@@ -728,11 +729,12 @@ transcript 时，它们与用户真的说过的话长得一模一样。原样处
 剥完变空（或只剩空白）的消息**整条丢弃**，不发空串给服务端。游标按剥离后的
 条数推进：下一轮同一份 transcript 会剥出同样的前缀，两个计数不会漂移。
 
-**两条入口走同一个函数。** `servers/stop.mjs` 的 `captureSession` 剥对话消息
+**三个入口走同一个函数。** `servers/stop.mjs` 的 `captureSession` 剥对话消息
 （两种来源：载荷里的累积列表、transcript 解析结果），`servers/post-tool-use.mjs`
 的 `toToolMessage` 剥工具输出——`cat` 一份 transcript 时，里面的注入块不是工具
-结果，原样落盘会让它以工具结果的身份回到记忆库。**不在三个宿主适配器里各剥
-一次**：宿主适配器只回答「怎么解析」，剥离是「发出去之前」的一件事。
+结果，原样落盘会让它以工具结果的身份回到记忆库；DSH 插件的 `turn/end` 也调同一个
+`sanitizeCapturedMessages`。**不在宿主适配器里各剥一次**：宿主适配器只回答「怎么
+解析」，剥离是「发出去之前」的一件事。
 
 **五个标签按完整名字列，不靠前缀。** `available-skills` 不带 `comem-` 前缀，靠
 `comem-*` 匹配兜不住它；注入侧的转义表（`INJECTION_TAG_PREFIXES`）必须与这里的
