@@ -14,18 +14,12 @@ importers:
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
-      clsx:
-        specifier: ^2.1.1
-        version: 2.1.1
       lucide-vue-next:
         specifier: ^1.0.0
         version: 1.0.0(vue@3.5.45(typescript@5.9.3))
       nuxt:
         specifier: ^3.21.11
         version: 3.21.11(@oxc-project/types@0.143.0)(@vue/compiler-sfc@3.5.45)(bare-buffer@3.7.1)(cac@6.7.14)(confbox@0.3.2)(db0@0.3.4)(dotenv@17.4.2)(esbuild@0.28.2)(giget@3.3.1)(ioredis@5.11.1(supports-color@10.2.2))(magicast@0.5.5)(rollup-plugin-visualizer@7.1.2(rollup@4.68.0))(rollup@4.68.0)(srvx@0.11.22)(supports-color@10.2.2)(terser@5.51.2)(typescript@5.9.3)(vite@7.3.7(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))(vue-tsc@3.3.14(typescript@5.9.3))(yaml@2.9.1)
-      tailwind-merge:
-        specifier: ^2.6.0
-        version: 2.6.1
       vue:
         specifier: ^3.5.45
         version: 3.5.45(typescript@5.9.3)
@@ -3261,9 +3255,6 @@ packages:
     hasBin: true
     peerDependencies:
       tailwindcss: 1 || 2 || 2.0.1-compat || 3
-
-  tailwind-merge@2.6.1:
-    resolution: {integrity: sha512-Oo6tHdpZsGpkKG88HJ8RR1rg/RdnEkQEfMoEk2x1XRI3F1AxeU+ijRXpiVUF4UbLfcxxRGw6TbUINKYdWVsQTQ==}
 
   tailwindcss@3.4.19:
     resolution: {integrity: sha512-3ofp+LL8E+pK/JuPLPggVAIaEuhvIz4qNcf3nA1Xn2o/7fb7s/TYpHhwGDv1ZU3PkBluUVaF8PyCHcm48cKLWQ==}
@@ -7313,8 +7304,6 @@ snapshots:
       tailwindcss: 3.4.19(yaml@2.9.1)
     transitivePeerDependencies:
       - supports-color
-
-  tailwind-merge@2.6.1: {}
 
   tailwindcss@3.4.19(yaml@2.9.1):
     dependencies:
