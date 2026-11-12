@@ -175,6 +175,9 @@ export class FileResourceStorage implements ResourceStorage {
  *   `FileSystemService` 的写入路径已经把文件写下去了，但物化表里没有行。一个拼错的
  *   URI 不会因为 GET 就在数据库里多一条权限行。
  * - 已经在缓存里的节点不会重复物化（第一次 `check` 就通过）。
+ * - MCP 的 `write` 与 HTTP `POST /content/write` 都在 mode 分派前按 write 求权
+ *   一次：`create` / `append` 的存在性预读是读操作，不先物化就会把写操作误报成
+ *   `需要 read（1）级别`。
  *
  * 这不是「绕过授权」：物化的结果就是 `effective(N)` 本身，与 `setAcl` 重算整棵子树
  * 用的是同一个纯函数。

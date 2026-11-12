@@ -10,6 +10,7 @@
  * `Index:` 行就是它的状态，不需要额外的「等待」参数。
  */
 
+import { WRITE_LEVEL } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import { WRITE_MODES, type WriteMode } from '../../write-mode.js';
@@ -54,6 +55,13 @@ export const writeTool: McpToolDefinition = {
     const uri = Uri.parse(requiredString(args, 'uri', 'write'));
     const content = requiredString(args, 'content', 'write');
     const mode = optionalEnum(args, 'mode', WRITE_MODES, 'replace', 'write');
+
+    // `create` / `append` 在写盘前要判断目标是否存在、读现有正文——那是读操作。
+    // 全新路径在物化表里没有行，而读路径只给「磁盘上已存在」的节点补物化，于是
+    // 写操作会先撞上 read 求权并被误报成「需要 read（1）级别」。先按 write 求权
+    // 一次（`InheritingAuthorizer` 会为写操作物化新节点），与 HTTP
+    // `POST /content/write` 的顺序一致。
+    await context.acl.assert(uri, WRITE_LEVEL, context.principals);
 
     const result = await writeWithMode(context, uri, content, mode);
     const index = await indexStatus(context, uri, 'indexed');

@@ -8,9 +8,9 @@
  *
  * 工具只调用 `check` / `assert` / `filterReadable` 三个方法，它们是
  * `services/authorizer.ts` 定义的端口（§12.4 的出口清单按这个端口数）。真实装配
- * 传入的 `AclService` 实现了这个端口；测试用 `DenyAllAuthorizer` 验证「每个出口
- * 都被挡」也不需要构造 ACL 的存储依赖。依赖方向仍然正确：`api/` 依赖
- * `services/`，不反向依赖。
+ * 传入的 `InheritingAuthorizer`（与 HTTP 路由同一个实例）实现了这个端口；测试用
+ * `DenyAllAuthorizer` 验证「每个出口都被挡」也不需要构造 ACL 的存储依赖。依赖
+ * 方向仍然正确：`api/` 依赖 `services/`，不反向依赖。
  */
 
 import type { ComemConfig } from '../../config/index.js';

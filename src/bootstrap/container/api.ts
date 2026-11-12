@@ -48,7 +48,7 @@ export function createApi(
   memoryStack: MemoryStack,
   background: Background,
 ): Api {
-  const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository } = core;
+  const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository, localInference } = core;
   const { memoryLink } = core;
   const { acl, subject, groups, identity: identityService, auth: authService } = access;
   const { summary, filesystem, task, session, assembler, ledger, search, indexObserver, llm, embedding } =
@@ -76,7 +76,9 @@ export function createApi(
       filesystem,
       search,
       summary,
-      acl,
+      // 与 HTTP 路由共用同一个写路径授权端口：MCP 工具对「物化表里还没有行」
+      // 的新节点求权时，同样先物化再判定（`InheritingAuthorizer`）。
+      acl: authorizer,
       session,
       memory,
       resource,
@@ -114,6 +116,7 @@ export function createApi(
 
   const routes = createHttpRouteGroups({
     config, configSnapshot, llm, embedding,
+    localInference,
     observability,
     filesystem,
     acl,

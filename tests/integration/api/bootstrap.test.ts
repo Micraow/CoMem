@@ -331,3 +331,60 @@ describe('重启后引导管理员仍有效', () => {
     }
   });
 });
+
+/**
+ * 回归：引导管理员用 MCP `write` 写全新路径。
+ *
+ * `create` / `append` 要先判断目标是否存在、读现有正文，而全新路径在
+ * `node_permission` 里没有行。读路径的 `InheritingAuthorizer` 只给**磁盘上已存在**
+ * 的节点补物化，于是写操作在自己的 write 求权之前先撞上一个 read 求权，被误报成
+ * `需要 read（1）级别`。写操作必须先按 write 求权（顺带物化新节点），与 HTTP
+ * `POST /content/write` 的顺序一致。
+ */
+describe('引导管理员通过 MCP write 写新路径', () => {
+  it('create / append 写全新路径都成功', async () => {
+    const harness = await start();
+    const created = await inject(harness, {
+      method: 'POST',
+      url: '/api/v1/bootstrap/admin',
+      payload: body('local'),
+    });
+    expect(created.statusCode, created.body).toBe(200);
+    const token = await login(harness, 'local');
+
+    const cases = [
+      { uri: 'comem://user/local/memories/agent-note.md', mode: 'create' },
+      { uri: 'comem://user/local/resources/agent-doc.md', mode: 'append' },
+      { uri: 'comem://user/local/skills/agent-skill.md', mode: 'create' },
+    ] as const;
+    for (const item of cases) {
+      const response = await inject(harness, {
+        method: 'POST',
+        url: '/mcp',
+        headers: {
+          ...bearer(token),
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        payload: {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'write',
+            arguments: { uri: item.uri, content: 'hello\n', mode: item.mode },
+          },
+        },
+      });
+
+      // MCP 的工具失败也是 HTTP 200（`isError: true`），所以只断言状态码不够。
+      expect(response.statusCode, response.body).toBe(200);
+      const result = json(response)['result'] as {
+        readonly isError?: boolean;
+        readonly content: readonly { readonly text?: string }[];
+      };
+      expect(result.isError, response.body).not.toBe(true);
+      expect(result.content[0]?.text ?? '', response.body).toContain('Wrote');
+    }
+  });
+});
