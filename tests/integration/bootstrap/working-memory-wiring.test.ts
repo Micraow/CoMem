@@ -25,7 +25,7 @@ import { startFakeLlmHttp, type FakeLlmHttp } from '../../helpers/fake-llm-http.
 const SCOPE = 'comem://user/local';
 const AUTH_PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
 
-/** 7 段工作记忆的固定输出（与架构文档 §10.5 的代码块同构）。 */
+/** 6 段工作记忆的固定输出（与架构文档 §10.5 的代码块同构）。 */
 const WORKING_MEMORY = [
   '# 会话工作记忆',
   '',
@@ -134,7 +134,7 @@ afterEach(async () => {
 });
 
 describe('memory.workingMemory.enabled = true（container → 管线 → 磁盘）', () => {
-  it('打开后归档目录的 .overview.md 是 7 段工作记忆，计算摘要来自它', async () => {
+  it('打开后归档目录的 .overview.md 是 6 段工作记忆，计算摘要来自它', async () => {
     const started = container;
     if (started === undefined) {
       throw new Error('容器没有启动。');

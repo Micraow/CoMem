@@ -25,6 +25,7 @@ import { normalizeVector } from '../../domain/embedding.js';
 import { ComemError } from '../../domain/errors.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, placeholders } from './node-repository.js';
+import { text } from './row.js';
 
 /** `node_embedding` 表的一行。 */
 export interface EmbeddingRow {
@@ -98,10 +99,6 @@ export function fromVectorBlob(value: unknown): number[] {
   }
   const floats = new Float32Array(value.buffer, value.byteOffset, value.byteLength / FLOAT_BYTES);
   return Array.from(floats);
-}
-
-function text(value: unknown): string {
-  return String(value);
 }
 
 function toEmbeddingRow(row: Record<string, unknown>): EmbeddingRow {

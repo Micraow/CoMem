@@ -25,7 +25,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { ApiKeyRepository } from '../../adapters/sqlite/api-key-repository.js';
-import { groupPrincipal, parsePrincipal } from '../../domain/acl.js';
+import { groupPrincipal, userScopeOf } from '../../domain/acl.js';
 import type { Principal } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 import { Uri } from '../../domain/uri.js';
@@ -87,12 +87,10 @@ export async function createAccess(
 
   // ── 身份与服务图 ──
   const subject = options.subject ?? config.server.subject;
-  const boundPrincipal = parsePrincipal(subject);
-  if (boundPrincipal.kind !== 'user') {
-    throw new ComemError('INVALID_ARGUMENT', `服务图身份必须是 user 主体：${subject}`, {
-      subject,
-    });
-  }
+  const boundPrincipal: Principal = {
+    kind: 'user',
+    id: userScopeOf(subject, '服务图身份').rootId,
+  };
 
   // 启动时确保配置的主体存在于用户目录（§12.6）。
   //

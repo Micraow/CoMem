@@ -36,7 +36,8 @@ import {
   type SummaryLayerPayload,
   type TreeEntryPayload,
 } from '~/composables/useApi'
-import { formatBytes } from '~/composables/useTree'
+import { copyToClipboard } from '~/utils/clipboard'
+import { formatBytes } from '~/utils/format'
 import { fsEntryDisplayName, fsEntryKindLabel, type FsEntryKind } from '~/utils/fsLabels'
 import {
   LEVEL_OF_TAB,
@@ -319,17 +320,16 @@ async function copyUri(): Promise<void> {
   if (uri === null) {
     return
   }
-  try {
-    await navigator.clipboard.writeText(uri)
-    copied.value = true
-    clearTimeout(copiedTimer)
-    copiedTimer = setTimeout(() => {
-      copied.value = false
-    }, 1600)
-  } catch {
+  if (!(await copyToClipboard(uri))) {
     // 浏览器拒绝写剪贴板（非安全上下文）：不弹假成功提示。
     copied.value = false
+    return
   }
+  copied.value = true
+  clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => {
+    copied.value = false
+  }, 1600)
 }
 
 watch(

@@ -2,25 +2,17 @@
  * ACL 求值（架构文档 §12）。
  *
  * 这一层是纯函数：给定「从根到目标节点」的链和主体标识，算出该主体在每个节点上的
- * 有效权限集合。owner、deny、restricted、继承四条规则全部在这里收口，调用方不需要
- * 再拼一遍。
+ * 有效权限集合。owner、deny、restricted、继承四条规则全部在这里收口。
  *
  * 链的顺序是硬约束：`chain[0]` 是根，`chain[chain.length - 1]` 是目标节点。
- * 求值从根向目标走，每一层把结果传给下一层。
  *
- * 三个不变量（§12.2）：
- *
- * 1. **owner 恒 manage。** owner 判断先于 ACL 求值，独立于 entries。即使 owner 自己
- *    在节点上被 `deny`，仍然得到 manage——否则存在「先收回 owner 权限、再借别人的
- *    路径提权」的可能。owner 节点上的结果直接替换继承来的集合。
- * 2. **同节点 deny 优先。** 同一主体在同一节点上既有 allow 又有 deny 时，deny 赢：
- *    该节点的结果直接是空集，allow 和祖先继承的权限都不再往下传。
- * 3. **restricted 切断继承。** 节点是 `restricted` 时只看本节点的直接授权，祖先的
- *    allow 不再生效；本节点自己的 deny 仍然生效（规则 2 先于规则 3 执行）。
+ * 三个不变量（§12.2）：owner 恒 manage，owner 判断先于 ACL 求值、独立于 entries
+ * （否则存在「先收回 owner 权限、再借别人的路径提权」的可能）；同节点 deny 优先；
+ * restricted 切断继承。各自的求值顺序见 `effectiveAcl`。
  */
 
 import { ComemError } from './errors.js';
-import type { Uri } from './uri.js';
+import { Uri } from './uri.js';
 
 export type PrincipalKind = 'user' | 'group';
 
@@ -160,6 +152,15 @@ export function userPrincipal(userId: string): string {
   return formatPrincipal({ kind: 'user', id: userId });
 }
 
+/** `user:{id}` → `comem://user/{id}`；拒绝非 user 主体。`label` 只进错误消息。 */
+export function userScopeOf(subject: string, label = '身份'): Uri {
+  const principal = parsePrincipal(subject);
+  if (principal.kind !== 'user') {
+    throw new ComemError('INVALID_ARGUMENT', `${label}必须是 user 主体：${subject}`, { subject });
+  }
+  return Uri.parse(`comem://user/${principal.id}`);
+}
+
 /**
  * 校验「组的 owner」只能是具体用户主体。
  *
@@ -286,17 +287,14 @@ export interface RootPreset {
 }
 
 /**
- * 根预置（§12.6）。
+ * 根预置（§12.6）：user 根的所有者得到 manage；group 根有 owner（如果存在）manage
+ * 与全组 write 两条。没有 owner 的组只有一条——成员可以读写，但没人能改 ACL，
+ * 这正是「这个组还没人管」的状态，由 `ownerMissing` 告诉调用方。
  *
- * user 根的所有者得到 manage。group 根有两条：owner（如果存在）得到 manage，
- * 全组得到 write。没有 owner 的组只有一条——成员之间可以读写，但没有人能改
- * ACL，这正是「这个组还没人管」的状态，由 `ownerMissing` 告诉调用方。
+ * 两个预置都是普通 ACL 条目，只有 user 根 owner 那一条例外（owner 恒 manage）。
+ * group 的 owner 条目必须真的写进 `.acl.json`，否则 `check(N, manage)` 只查物化表。
  *
- * 两个预置都是普通 ACL 条目，只有 user 根 owner 那一条例外（owner 恒 manage，
- * 改不了）。group 的 owner 条目不是隐式规则：它必须真的写进 `.acl.json`，
- * 否则 `check(N, manage)` 只查物化表，看不到 owner 这个身份。
- *
- * 调用方传入根 URI（`uri.isRoot` 为 true）；本函数只读取 scope 与 rootId。
+ * 调用方传入根 URI；本函数只读取 scope 与 rootId。
  */
 export function rootPreset(uri: Uri, options: RootPresetOptions = {}): RootPreset {
   if (uri.scope === 'user') {

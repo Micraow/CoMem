@@ -49,7 +49,7 @@ const CONFLICT_STATUS = 409;
  * 工具输出里的 CoMem 注入块在**这里**剥掉（`lib/sanitize.mjs` 的
  * `sanitizeCapturedText`，与 `Stop` 同一个实现）：`cat` 一份 transcript 时，
  * 里面的 `<comem-recall>` 不是工具结果，原样落盘会让注入块以工具结果的身份进
- * 记忆库。三个宿主适配器都经过这一处（`hosts/*.mjs` 的 `renderToolOutput` 已经把
+ * 记忆库。三个宿主适配器都经过这一处（`lib/values.mjs` 的 `renderToolOutput` 已经把
  * 任意形状渲染成字符串），所以剥一次就够。
  *
  * 非字符串原样透传：这个字段的形状由宿主决定，`toToolMessage` 不替它决定序列化

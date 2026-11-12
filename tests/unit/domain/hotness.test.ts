@@ -1,20 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
 import { ComemError } from '../../../src/domain/errors.js';
-import {
-  DEFAULT_HALF_LIFE_DAYS,
-  hotnessScore,
-} from '../../../src/domain/hotness.js';
+import { hotnessScore } from '../../../src/domain/hotness.js';
 import { MILLISECONDS_PER_DAY } from '../../../src/domain/time.js';
 
 /** 固定「现在」，让所有采样点的年龄是精确的整数天。 */
 const NOW = new Date('2026-11-08T12:00:00.000Z');
 
+/** 期望值独立于生产实现：不从配置或 `domain/hotness.ts` 读默认值。 */
+const HALF_LIFE_DAYS = 7;
+
 function daysAgo(days: number): string {
   return new Date(NOW.getTime() - days * MILLISECONDS_PER_DAY).toISOString();
 }
 
-function score(activeCount: number, ageDays = 0, halfLifeDays = DEFAULT_HALF_LIFE_DAYS): number {
+function score(activeCount: number, ageDays = 0, halfLifeDays = HALF_LIFE_DAYS): number {
   return hotnessScore({
     activeCount,
     lastAccessedAt: daysAgo(ageDays),
@@ -66,7 +66,7 @@ describe('hotnessScore 的衰减项', () => {
 
   it('恰好一个半衰期后分数减半（容差 1e-9）', () => {
     const fresh = score(4);
-    const afterHalfLife = score(4, DEFAULT_HALF_LIFE_DAYS);
+    const afterHalfLife = score(4, HALF_LIFE_DAYS);
 
     expect(Math.abs(afterHalfLife - fresh / 2)).toBeLessThan(1e-9);
   });
@@ -80,7 +80,7 @@ describe('hotnessScore 的衰减项', () => {
 
   it('两个半衰期后是四分之一', () => {
     const fresh = score(4);
-    const after = score(4, DEFAULT_HALF_LIFE_DAYS * 2);
+    const after = score(4, HALF_LIFE_DAYS * 2);
 
     expect(Math.abs(after - fresh / 4)).toBeLessThan(1e-9);
   });
@@ -90,7 +90,7 @@ describe('hotnessScore 的衰减项', () => {
       activeCount: 1000,
       lastAccessedAt: new Date(NOW.getTime() + 3 * MILLISECONDS_PER_DAY).toISOString(),
       now: NOW,
-      halfLifeDays: DEFAULT_HALF_LIFE_DAYS,
+      halfLifeDays: HALF_LIFE_DAYS,
     });
 
     expect(future).toBe(score(1000, 0));
@@ -106,7 +106,7 @@ describe('hotnessScore 的边界与校验', () => {
           activeCount,
           lastAccessedAt: null,
           now: NOW,
-          halfLifeDays: DEFAULT_HALF_LIFE_DAYS,
+          halfLifeDays: HALF_LIFE_DAYS,
         }),
       ).toBe(0);
     }
@@ -118,7 +118,7 @@ describe('hotnessScore 的边界与校验', () => {
         activeCount: 3,
         lastAccessedAt: 'not-a-date',
         now: NOW,
-        halfLifeDays: DEFAULT_HALF_LIFE_DAYS,
+        halfLifeDays: HALF_LIFE_DAYS,
       }),
     ).toThrowError(INVALID_ARGUMENT);
   });
@@ -153,13 +153,9 @@ describe('hotnessScore 的边界与校验', () => {
         activeCount: 1,
         lastAccessedAt: daysAgo(1),
         now: new Date(Number.NaN),
-        halfLifeDays: DEFAULT_HALF_LIFE_DAYS,
+        halfLifeDays: HALF_LIFE_DAYS,
       }),
     ).toThrowError(INVALID_ARGUMENT);
-  });
-
-  it('默认半衰期是 7 天', () => {
-    expect(DEFAULT_HALF_LIFE_DAYS).toBe(7);
   });
 
   it('抛出的错误是 ComemError 且带字段上下文', () => {

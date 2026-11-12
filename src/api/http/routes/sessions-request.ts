@@ -5,7 +5,7 @@
  * 函数体与拆分前逐字相同，只改了 import 与导出。
  */
 
-import { parsePrincipal } from '../../../domain/acl.js';
+import { userScopeOf } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import {
   isMessageRole,
@@ -23,11 +23,7 @@ export function invalid(message: string, details: Record<string, unknown>): Come
 
 /** `user:alice` → `comem://user/alice`。 */
 function scopeOfSubject(subject: string): Uri {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw invalid(`会话身份必须是 user 主体：${subject}`, { subject });
-  }
-  return Uri.parse(`comem://user/${principal.id}`);
+  return userScopeOf(subject, '会话身份');
 }
 
 /** 作用域根 + 会话 ID。ID 走 `Uri.child` 校验（保留名、空段、控制字符都会被拒）。 */

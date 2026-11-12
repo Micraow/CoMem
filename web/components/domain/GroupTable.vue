@@ -24,22 +24,6 @@ export interface GroupRowPayload {
   /** 删除确认要用的后果说明：这个组在多少个节点上有授权。 */
   readonly permissionCount: number
 }
-
-/** 绝对时间；与用户表同一格式。 */
-export function formatGroupTime(iso: string): string {
-  const time = new Date(iso)
-  if (Number.isNaN(time.getTime())) {
-    return iso
-  }
-  return time.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-}
 </script>
 
 <script setup lang="ts">

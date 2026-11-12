@@ -27,6 +27,8 @@
  * fetch，`useApi` 只读这里的结果。
  */
 
+import { isRecord } from '../utils/record'
+
 import {
   clearConsoleSession,
   isConsoleSessionExpired,
@@ -183,10 +185,6 @@ export function consoleScopeLabel(scope: string, subject: string): string {
     return `组 ${id}`
   }
   return scope
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function trimBase(baseUrl: string): string {

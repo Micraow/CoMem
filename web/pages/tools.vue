@@ -111,7 +111,7 @@ onMounted(() => {
 <template>
   <div class="content">
     <div class="page">
-      <PageHeader title="工具">
+      <DomainPageHeader title="工具">
         <template #actions>
           <span v-if="tools.length > 0" class="caption">共 {{ tools.length }} 个</span>
           <button
@@ -124,7 +124,7 @@ onMounted(() => {
             <RefreshCw :size="15" :stroke-width="1.5" />
           </button>
         </template>
-      </PageHeader>
+      </DomainPageHeader>
 
       <div v-if="error !== null" class="callout callout--danger">
         <AlertTriangle :size="15" :stroke-width="1.4" />

@@ -38,6 +38,13 @@ export const ACL_LEVEL_LABEL = {
   7: '管理',
 } satisfies Record<AclLevel, string>
 
+/** 级别 → 徽章配色。漏一个级别即编译失败，多一个键也是。管理级别统一用 `blue`。 */
+export const ACL_LEVEL_VARIANT = {
+  1: 'gray',
+  3: 'teal',
+  7: 'blue',
+} as const satisfies Record<AclLevel, 'gray' | 'teal' | 'blue'>
+
 /** 效果 → 文案。漏一个效果即编译失败，多一个键也是。 */
 export const ACL_EFFECT_LABEL = {
   allow: '允许',

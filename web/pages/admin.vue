@@ -31,6 +31,7 @@ import { AlertTriangle, Copy, Plus, ShieldAlert } from 'lucide-vue-next'
 
 import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
 import type { UserRowPayload } from '~/components/domain/UserTable.vue'
 import {
@@ -254,12 +255,11 @@ async function copyOwnerCommand(): Promise<void> {
   if (ownerInfo.value === null) {
     return
   }
-  try {
-    await navigator.clipboard.writeText(ownerCommand.value)
-    toast.show('success', '已复制恢复命令')
-  } catch {
-    toast.show('error', '浏览器拒绝写入剪贴板，请手动选择复制。')
+  if (!(await copyToClipboard(ownerCommand.value))) {
+    toast.show('error', CLIPBOARD_DENIED_MESSAGE)
+    return
   }
+  toast.show('success', '已复制恢复命令')
 }
 
 function openCreateUser(): void {

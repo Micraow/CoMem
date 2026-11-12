@@ -22,7 +22,8 @@ import {
   Search,
 } from 'lucide-vue-next'
 
-import { formatBytes, useTree, type TreeNode } from '~/composables/useTree'
+import { useTree, type TreeNode } from '~/composables/useTree'
+import { formatBytes } from '~/utils/format'
 import { fsEntryDisplayName } from '~/utils/fsLabels'
 
 const props = defineProps<{

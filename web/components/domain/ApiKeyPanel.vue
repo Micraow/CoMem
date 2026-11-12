@@ -19,6 +19,8 @@ import { AlertTriangle, Copy, KeyRound, Plus, Trash2 } from 'lucide-vue-next'
 
 import { errorMessageOf, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
+import { formatDateTime } from '~/utils/format'
 
 /** `GET /admin/users/{id}/api-keys` 的行。 */
 interface ApiKeyPayload {
@@ -74,21 +76,6 @@ const revokeOpen = computed({
   },
 })
 const revoking = ref(false)
-
-function formatTime(iso: string): string {
-  const time = new Date(iso)
-  if (Number.isNaN(time.getTime())) {
-    return iso
-  }
-  return time.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-}
 
 function statusOf(key: ApiKeyPayload): KeyStatus {
   if (key.revokedAt !== null) {
@@ -148,12 +135,11 @@ async function createKey(): Promise<void> {
 }
 
 async function copyText(text: string, label: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text)
-    toast.show('success', `已复制${label}`)
-  } catch {
-    toast.show('error', '浏览器拒绝写入剪贴板，请手动选择复制。')
+  if (!(await copyToClipboard(text))) {
+    toast.show('error', CLIPBOARD_DENIED_MESSAGE)
+    return
   }
+  toast.show('success', `已复制${label}`)
 }
 
 async function revoke(): Promise<void> {
@@ -221,8 +207,8 @@ watch(createOpen, (open) => {
           <td class="strong">{{ key.name }}</td>
           <td class="mono">comem_{{ key.prefix }}_…</td>
           <td>
-            <time class="mono" :title="formatTime(key.createdAt)">
-              {{ formatTime(key.createdAt) }}
+            <time class="mono" :title="formatDateTime(key.createdAt)">
+              {{ formatDateTime(key.createdAt) }}
             </time>
           </td>
           <td>

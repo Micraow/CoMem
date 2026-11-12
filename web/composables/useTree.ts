@@ -251,21 +251,3 @@ export function useTree(): UseTree {
     ancestorsOf,
   }
 }
-
-const SIZE_UNITS: readonly string[] = ['KB', 'MB', 'GB']
-
-/** 文件大小。不足 1 KB 显示字节，其余保留一位小数。 */
-export function formatBytes(size: number): string {
-  if (size < 1024) {
-    return `${size} B`
-  }
-
-  let value = size / 1024
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < SIZE_UNITS.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  const digits = value >= 10 ? 0 : 1
-  return `${value.toFixed(digits)} ${SIZE_UNITS[unitIndex] ?? 'KB'}`
-}

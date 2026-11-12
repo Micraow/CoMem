@@ -19,6 +19,8 @@
  * 24 小时过期（`auth.sessionTtlSeconds`）。
  */
 
+import { isRecord } from '../utils/record'
+
 /** 登录响应里控制台需要的字段。 */
 export interface ConsoleSession {
   /** `Authorization: Bearer` 后面的凭据。 */
@@ -46,10 +48,6 @@ const SCOPE_KEY = 'comem-console-scope'
  * 拿不到时才用它，让隐私模式下当前标签页仍能完成登录。
  */
 let memoryOnlySession: ConsoleSession | null = null
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * sessionStorage 的最小形状。

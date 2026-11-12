@@ -5,7 +5,7 @@
  * 函数体与拆分前逐字相同，只改了 import 与导出。
  */
 
-import { parsePrincipal } from '../../../domain/acl.js';
+import { userScopeOf } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import type { MemoryLink } from '../../../domain/memory-link.js';
 import { Uri } from '../../../domain/uri.js';
@@ -19,11 +19,7 @@ export function parseMemoryUri(raw: string): Uri {
 }
 
 export function scopeOfSubject(subject: string): string {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw new ComemError('INVALID_ARGUMENT', `记忆身份必须是 user 主体：${subject}`, { subject });
-  }
-  return `comem://user/${principal.id}`;
+  return userScopeOf(subject, '记忆身份').toString();
 }
 
 /**

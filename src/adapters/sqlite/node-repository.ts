@@ -17,6 +17,7 @@ import { TTL_EXEMPT_MEMORY_TYPES } from '../../domain/memory-types/index.js';
 import type { ContextType, NodeKind, NodeStatus } from '../../domain/node.js';
 import type { UriScope } from '../../domain/uri.js';
 import { withWriteTransaction } from './database.js';
+import { integer, nullableText, text } from './row.js';
 import { escapeGlobLiteral, notVersionFileSql } from './version-path.js';
 
 /** `node` 表的一行（架构文档 §8.1）。 */
@@ -137,18 +138,6 @@ export function globPrefixPattern(prefix: string): string {
 /** `IN (?, ?, ...)` 的占位符列表。`count` 由调用方按已校验的数组长度传入。 */
 export function placeholders(count: number): string {
   return new Array<string>(count).fill('?').join(', ');
-}
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function integer(value: SQLOutputValue | undefined): number {
-  return Number(value);
 }
 
 /**

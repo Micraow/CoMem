@@ -3,7 +3,8 @@
  *
  * DSH 的插件 hook 载荷没有公开规范，本文件定义插件所依赖的那一份（写进 README
  * 的「宿主载荷」一节）。为了让「加第三个宿主只加一个文件」（§15.8）成立，这里
- * 不 import 任何其它宿主适配器——信封与载荷解析都是独立的。
+ * 不 import 任何其它宿主适配器——信封与载荷解析都是独立的。共用 `lib/` 不违反
+ * 这条：入口骨架在 `lib/hook-runner.mjs`，它本来就没有宿主差异。
  *
  * ## 载荷
  *
@@ -38,16 +39,9 @@
 import { randomUUID } from 'node:crypto';
 
 import { EVENT_NAMES, internalEventNameOf } from '../lib/events.mjs';
+import { createRunHook } from '../lib/hook-runner.mjs';
 import { ComemHookError } from '../lib/http.mjs';
-import {
-  STDIN_READ_CAP_MS,
-  armHardDeadline,
-  budgetForEvent,
-  createDeadline,
-  diagnose,
-  readStdinText,
-  scheduleHardExit,
-} from '../lib/lifecycle.mjs';
+import { asRecord, renderToolOutput, text } from '../lib/values.mjs';
 
 /** 会话 ID 前缀（§15.5）。 */
 export const SESSION_ID_PREFIX = 'dsh-';
@@ -74,28 +68,6 @@ export { EVENT_NAMES };
 
 /** 需要拦截 `comem://` 路径的文件工具（任务书：只有这三个）。 */
 const FILE_TOOLS = new Set(['Read', 'Write', 'Edit']);
-
-function asRecord(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {};
-}
-
-function text(value) {
-  return typeof value === 'string' && value !== '' ? value : null;
-}
-
-function renderToolOutput(value) {
-  if (value === undefined || value === null) {
-    return null;
-  }
-  if (typeof value === 'string') {
-    return value;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
 
 /**
  * DSH 的消息形状：`{ role, text }` 或 `{ role, parts }`。
@@ -242,71 +214,13 @@ export function formatOutput(event, result) {
 }
 
 /**
- * 默认读 stdin：上限与总预算同源（`STDIN_READ_CAP_MS`）。
+ * 入口：stdin → 归一化 → 业务处理 → 宿主信封。
  *
- * 宿主不写也不关 stdin 时，`for await` 永远不会返回；这个上限把它变成
- * 「没有事件」（`HOOK_STDIN_TIMEOUT`），由 `runHook` 收敛成诊断 + 退出码 0。
+ * 骨架在 `lib/hook-runner.mjs`（与宿主无关）；这里只绑定本宿主的归一化与信封。
+ * 错误路径、总预算与 `hardExit` 语义在那里，三个宿主共用同一份。
  */
-async function readJsonStdin() {
-  const raw = (await readStdinText(STDIN_READ_CAP_MS)).trim();
-  if (raw === '') {
-    throw new ComemHookError('DSH hook 没有收到 stdin 载荷。', { code: 'HOOK_INVALID_ARGUMENT' });
-  }
-  return JSON.parse(raw);
-}
-
-/**
- * 入口。异常写 stderr 并正常退出——hook 是旁路，不能打断对话。
- *
- * @param {(event: ReturnType<typeof normalizeEvent>, context: { deadline: ReturnType<typeof createDeadline> }) => Promise<object | undefined>} handler
- * @param {{ read?: () => Promise<unknown>, write?: (line: string) => void, hardExit?: boolean }} [options]
- *   `hardExit` 只由真正的 hook 入口传：安排兜底退出（见 `lib/lifecycle.mjs`）
- */
-export async function runHook(handler, options = {}) {
-  const read = options.read ?? readJsonStdin;
-  // 写完再 resolve：`scheduleHardExit` 不会截断已经开始的 stdout 写入。
-  const write =
-    options.write ??
-    ((line) =>
-      new Promise((resolve) => {
-        process.stdout.write(`${line}\n`, resolve);
-      }));
-  // 默认不强制退出：测试用注入的 read/write 在同一个进程里跑多个用例。
-  // 真正的 hook 入口（`servers/*.mjs`）传 `hardExit: true`。
-  const hardExit = options.hardExit ?? false;
-
-  let event;
-  try {
-    event = normalizeEvent(await read());
-  } catch (error) {
-    await diagnose(`co-mem hook: ${error instanceof Error ? error.message : String(error)}`);
-    if (hardExit) {
-      scheduleHardExit();
-    }
-    return null;
-  }
-
-  // 总预算从进程启动算起：读 stdin 花掉的时间也从里面扣（`lib/lifecycle.mjs`）。
-  const deadline = createDeadline(budgetForEvent(event));
-  if (hardExit) {
-    // 硬上限：handler 不返回时也要退出（见 `armHardDeadline`）。
-    armHardDeadline(deadline);
-  }
-
-  try {
-    const result = await handler(event, { deadline });
-    const output = formatOutput(event, result);
-    if (output !== null) {
-      await write(JSON.stringify(output));
-    }
-  } catch (error) {
-    // 任何内部错误：stdout 一个字节都不写（宿主按「没有输出」放行），退出码 0。
-    await diagnose(
-      `co-mem hook ${event.event}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (hardExit) {
-    scheduleHardExit();
-  }
-  return event;
-}
+export const runHook = createRunHook({
+  hostLabel: 'DSH',
+  normalizeEvent,
+  formatOutput,
+});

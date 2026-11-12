@@ -26,8 +26,7 @@
  */
 
 import type { Dirent } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
-import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
+import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { parsePrincipal } from '../../domain/acl.js';
@@ -37,8 +36,9 @@ import { isRecord } from '../../domain/guards.js';
 import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
+import { writeFileAtomic } from './atomic-write.js';
 import { createFsErrorMapper } from './error-map.js';
-import { TEMP_FILE_PREFIX, isArtifactName, toDiskPath } from './path.js';
+import { isArtifactName, toDiskPath } from './path.js';
 
 /** 目录几何文件的名字（架构文档 §6.2 规则 6 的保留名之一）。 */
 export const ACL_FILE_NAME = '.acl.json';
@@ -83,15 +83,6 @@ export interface AclDirectoryScan {
   /** 是否因为达到 `maxDirectories` 而提前停止。 */
   readonly truncated: boolean;
 }
-
-/**
- * 临时文件后缀的随机位数（base36），与 `metadata-file.ts` / `content-store.ts`
- * 保持同一形态。
- *
- * 8 位 36 进制约 41 bit 随机性，同目录并发写撞名概率可以忽略；前缀里的进程号
- * 负责区分多进程。
- */
-const TEMP_SUFFIX_LENGTH = 8;
 
 /** 顶层已知键。序列化时其余键按升序排在后面，读回时原样保留。 */
 const TOP_LEVEL_KEYS = ['mode', 'entries'] as const;
@@ -282,12 +273,6 @@ function serializeAclFile(acl: AclFile, existing: Record<string, unknown> | null
   return `${JSON.stringify({ mode: acl.mode, entries, ...top }, null, 2)}\n`;
 }
 
-function randomTempSuffix(): string {
-  return `${process.pid.toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 2 + TEMP_SUFFIX_LENGTH)}`;
-}
-
 export class AclFileStore {
   readonly #dataDir: string;
   readonly #logger: Logger;
@@ -333,7 +318,7 @@ export class AclFileStore {
 
     const existing = await this.#readRawObject(absolute, directoryUri);
     const content = serializeAclFile(acl, existing);
-    await this.#writeAtomic(absolute, content, directoryUri);
+    await writeFileAtomic(absolute, content, (error) => mapFsError(error, directoryUri));
 
     this.#logger.debug('写入 ACL 文件', {
       uri: directoryUri.toString(),
@@ -456,35 +441,6 @@ export class AclFileStore {
     } catch {
       // 现有文件写坏了也要能覆盖：未知字段保留不了，但写入方不该被旧垃圾卡住。
       return null;
-    }
-  }
-
-  async #writeAtomic(absolute: string, content: string, directoryUri: Uri): Promise<void> {
-    const temp = join(dirname(absolute), `${TEMP_FILE_PREFIX}${randomTempSuffix()}`);
-    let handle: FileHandle;
-    try {
-      // `wx`：临时文件名撞上已存在的文件时直接失败，不复用别人的半成品。
-      handle = await open(temp, 'wx');
-    } catch (error) {
-      throw mapFsError(error, directoryUri);
-    }
-
-    try {
-      await handle.writeFile(content, 'utf8');
-      // 没有 fsync 的话，rename 之后断电可能留下空文件——「写了一半」的另一种形态。
-      await handle.sync();
-      await handle.close();
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw mapFsError(error, directoryUri);
-    }
-
-    try {
-      await rename(temp, absolute);
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw mapFsError(error, directoryUri);
     }
   }
 

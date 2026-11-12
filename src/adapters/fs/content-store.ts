@@ -16,8 +16,7 @@
  */
 
 import type { Dirent, Stats } from 'node:fs';
-import type { FileHandle } from 'node:fs/promises';
-import { cp, mkdir, open, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { ComemError, fsErrorCode } from '../../domain/errors.js';
@@ -26,9 +25,10 @@ import type { DocumentFrontmatter } from '../../domain/node.js';
 import { stableDigest } from '../../domain/node.js';
 import type { Uri } from '../../domain/uri.js';
 
+import { writeFileAtomic } from './atomic-write.js';
 import { createFsErrorMapper } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
-import { TEMP_FILE_PREFIX, isArtifactName, isReservedName, toDiskPath } from './path.js';
+import { isArtifactName, isReservedName, toDiskPath } from './path.js';
 
 export interface ContentStoreOptions {
   readonly dataDir: string;
@@ -58,12 +58,6 @@ export interface WriteTextOptions {
   /** 乐观并发：磁盘上正文的 digest 不等于它就抛 CONFLICT */
   readonly expectedDigest?: string;
 }
-
-/**
- * 临时文件后缀的随机位数（base36）。8 位 36 进制约 41 bit 随机性；同一目录
- * 并发写撞名概率可以忽略，同时保留进程号区分多进程。
- */
-const TEMP_SUFFIX_LENGTH = 8;
 
 /** 1 毫秒 = 1e6 纳秒，用于把 `hrtime` 差值换算成毫秒。 */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
@@ -103,12 +97,6 @@ export const mapFsError = createFsErrorMapper(
     INTERNAL: '文件系统操作失败',
   },
 );
-
-function randomTempSuffix(): string {
-  return `${process.pid.toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 2 + TEMP_SUFFIX_LENGTH)}`;
-}
 
 function compareNames(left: string, right: string): number {
   if (left < right) {
@@ -240,7 +228,7 @@ export class ContentStore {
     const content = serializeDocument(text, data);
 
     await this.#ensureParentDirectory(absolute, uri);
-    const stats = await this.#writeAtomically(absolute, content, uri);
+    const stats = await writeFileAtomic(absolute, content, (error) => mapFsError(error, uri));
 
     const durationMs =
       Number(process.hrtime.bigint() - startedAt) / NANOSECONDS_PER_MILLISECOND;
@@ -259,7 +247,7 @@ export class ContentStore {
 
     const absolute = toDiskPath(this.#dataDir, uri);
     await this.#ensureParentDirectory(absolute, uri);
-    const stats = await this.#writeAtomically(absolute, bytes, uri);
+    const stats = await writeFileAtomic(absolute, bytes, (error) => mapFsError(error, uri));
 
     return { uri, kind: 'file', size: stats.size, updatedAt: stats.mtime.toISOString() };
   }
@@ -522,35 +510,6 @@ export class ContentStore {
       // §7「写入需要先 mkdir」：write 内部自动建父目录，调用方不用关心。
       await mkdir(dirname(absolute), { recursive: true });
     } catch (error) {
-      throw mapFsError(error, uri);
-    }
-  }
-
-  /**
-   * 原子写：同目录临时文件 → `fsync` → `rename`。
-   *
-   * `open` 用 `wx`：临时文件名撞上已存在的文件时直接失败，不复用别人的半成品。
-   * 失败路径上清掉临时文件，不让它变成 `list` 里的垃圾。
-   */
-  async #writeAtomically(absolute: string, data: string | Uint8Array, uri: Uri): Promise<Stats> {
-    const temp = join(dirname(absolute), `${TEMP_FILE_PREFIX}${randomTempSuffix()}`);
-    let handle: FileHandle;
-    try {
-      handle = await open(temp, 'wx');
-    } catch (error) {
-      throw mapFsError(error, uri);
-    }
-    try {
-      await handle.writeFile(data);
-      // 没有 fsync 的话，rename 之后断电可能留下空文件——「写了一半」的另一种形态。
-      await handle.sync();
-      const stats = await handle.stat();
-      await handle.close();
-      await rename(temp, absolute);
-      return stats;
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(temp, { force: true }).catch(() => undefined);
       throw mapFsError(error, uri);
     }
   }

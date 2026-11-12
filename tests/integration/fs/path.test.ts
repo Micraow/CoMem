@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -8,14 +8,10 @@ import {
   LOCK_FILE_SUFFIX,
   RESERVED_NAMES,
   TEMP_FILE_PREFIX,
-  fromDiskPath,
   isArtifactName,
   isReservedName,
-  scopeRootOf,
-  toDiskLocation,
   toDiskPath,
 } from '../../../src/adapters/fs/path.js';
-import { ComemError } from '../../../src/domain/errors.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 let dataDir: string;
@@ -27,19 +23,6 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
-
-function expectInvalidUri(run: () => unknown): ComemError {
-  let caught: unknown;
-  try {
-    run();
-  } catch (error) {
-    caught = error;
-  }
-  expect(caught).toBeInstanceOf(ComemError);
-  const error = caught as ComemError;
-  expect(error.code).toBe('INVALID_URI');
-  return error;
-}
 
 /**
  * 架构文档 §6.2 规则 6 的六个保留名，硬编码一份：`path.ts` 现在是 `domain/uri.ts`
@@ -108,22 +91,6 @@ describe('isArtifactName', () => {
   });
 });
 
-describe('scopeRootOf', () => {
-  it('user 作用域', () => {
-    expect(scopeRootOf(dataDir, 'user', 'alice')).toBe(join(dataDir, 'user', 'alice'));
-  });
-
-  it('group 作用域', () => {
-    expect(scopeRootOf(dataDir, 'group', 'eng')).toBe(join(dataDir, 'group', 'eng'));
-  });
-
-  it('根标识可以是邮箱', () => {
-    expect(scopeRootOf(dataDir, 'user', 'alice@example.com')).toBe(
-      join(dataDir, 'user', 'alice@example.com'),
-    );
-  });
-});
-
 describe('toDiskPath', () => {
   it('镜像 URI 的层级', () => {
     const uri = Uri.parse('comem://user/alice/memories/preferences/code-style.md');
@@ -137,7 +104,6 @@ describe('toDiskPath', () => {
     const uri = Uri.parse('comem://group/eng');
 
     expect(toDiskPath(dataDir, uri)).toBe(join(dataDir, 'group', 'eng'));
-    expect(toDiskPath(dataDir, uri)).toBe(scopeRootOf(dataDir, 'group', 'eng'));
   });
 
   it('段里的空格、井号、问号、百分号原样保留', () => {
@@ -147,92 +113,3 @@ describe('toDiskPath', () => {
   });
 });
 
-describe('toDiskLocation', () => {
-  it('absolute 与 relative 同时给出，relative 固定用 /', () => {
-    const uri = Uri.parse('comem://user/alice/memories/foo.md');
-    const location = toDiskLocation(dataDir, uri);
-
-    expect(location.uri).toBe(uri);
-    expect(location.absolute).toBe(join(dataDir, 'user', 'alice', 'memories', 'foo.md'));
-    expect(location.relative).toBe('user/alice/memories/foo.md');
-  });
-
-  it('relative 不含平台分隔符', () => {
-    const location = toDiskLocation(dataDir, Uri.parse('comem://group/eng/resources/docs/spec.pdf'));
-
-    expect(location.relative).toBe('group/eng/resources/docs/spec.pdf');
-    expect(location.relative.split('/')).toHaveLength(5);
-  });
-});
-
-describe('fromDiskPath', () => {
-  const URIS = [
-    'comem://user/alice',
-    'comem://group/eng',
-    'comem://user/alice/memories/profile.md',
-    'comem://user/alice/memories/preferences/code-style.md',
-    'comem://user/alice/projects/comem/memories/entities/retrieval-pipeline.md',
-    'comem://group/eng/resources/docs/architecture.md',
-    'comem://user/alice@example.com/skills/code-review/SKILL.md',
-    // 特殊字符：中文、空格、#、?、%、emoji、全角标点。
-    'comem://user/alice/memories/中文 文件名.md',
-    'comem://user/alice/memories/a#b?c%d.md',
-    'comem://user/alice/memories/100% 完成.md',
-    'comem://user/alice/memories/😀/🎉.md',
-    'comem://user/alice/memories/．全角．点．.md',
-    'comem://user/alice/memories/a..b.md',
-    'comem://user/alice/memories/.隐藏文件.md',
-    'comem://user/alice/memories/with  space/and#hash.md',
-    'comem://user/alice/sessions/sess_7f3a91c2/history/archive_001/messages.jsonl',
-  ];
-
-  it('是 toDiskPath 的逆运算', () => {
-    for (const input of URIS) {
-      const uri = Uri.parse(input);
-      const restored = fromDiskPath(dataDir, toDiskPath(dataDir, uri));
-
-      expect(restored.toString(), input).toBe(uri.toString());
-      expect(restored.equals(uri), input).toBe(true);
-    }
-  });
-
-  it('接受带末尾斜杠的目录路径', () => {
-    const restored = fromDiskPath(dataDir, `${join(dataDir, 'user', 'alice', 'memories')}${sep}`);
-
-    expect(restored.toString()).toBe('comem://user/alice/memories');
-  });
-
-  it('规范化重复与尾部斜杠后再还原', () => {
-    const restored = fromDiskPath(dataDir, `${dataDir}${sep}user${sep}alice${sep}memories${sep}`);
-
-    expect(restored.toString()).toBe('comem://user/alice/memories');
-  });
-
-  it('数据根自身不是 URI', () => {
-    expectInvalidUri(() => fromDiskPath(dataDir, dataDir));
-  });
-
-  it('缺少根标识', () => {
-    expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, 'user')));
-  });
-
-  it('拒绝逃出数据根的 ..', () => {
-    expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, '..', 'etc', 'passwd')));
-    expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, 'user', '..', '..', 'etc')));
-  });
-
-  it('拒绝数据根之外的绝对路径', () => {
-    expectInvalidUri(() => fromDiskPath(dataDir, join(tmpdir(), 'comem-outside', 'user', 'alice')));
-  });
-
-  it('拒绝保留名路径段', () => {
-    for (const name of EXPECTED_RESERVED_NAMES) {
-      expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, 'user', 'alice', 'memories', name)));
-    }
-  });
-
-  it('拒绝反斜杠与控制字符（Uri 段规则）', () => {
-    expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, 'user', 'alice', 'a\\b.md')));
-    expectInvalidUri(() => fromDiskPath(dataDir, join(dataDir, 'user', 'alice', 'a\u0001b.md')));
-  });
-});

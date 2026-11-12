@@ -1692,7 +1692,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 ### 10.5 工作记忆（Working Memory）
 
-每次提交除了抽取长期记忆，还维护一份**工作记忆**——7 段结构化文档，写在归档目录的 `.overview.md`：
+每次提交除了抽取长期记忆，还维护一份**工作记忆**——6 段结构化文档，写在归档目录的 `.overview.md`：
 
 ```markdown
 # 会话工作记忆
@@ -3332,6 +3332,8 @@ integrations/
 ├── lib/                       # 与宿主无关的共享模块
 │   ├── config.mjs             # 配置 + 宿主解析 + bypass
 │   ├── http.mjs               # 超时 / 重试 / 错误封套
+│   ├── hook-runner.mjs        # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── values.mjs             # 载荷取值：asRecord / text / renderToolOutput / describeEntry
 │   ├── events.json            # 事件名映射表（内部 snake_case ↔ 宿主 PascalCase）
 │   ├── events.mjs             # 读上面那张表，导出 EVENT_NAMES / REPORTED_EVENT_NAMES
 │   ├── dedup.mjs              # 事件去重（500ms 窗口）
@@ -3347,7 +3349,7 @@ integrations/
 └── tests/                     # node:test
 ```
 
-宿主适配器只回答五个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**、**transcript 怎么解析**。
+宿主适配器只回答五个问题：**事件名怎么叫**、**返回信封长什么样**、**prompt 从 payload 哪里读**、**一轮结束怎么判定**、**transcript 怎么解析**。入口骨架（读 stdin → 归一化 → 总预算 → 写信封 → 退出）不属于这五个问题，也没有宿主差异，三个宿主共用 `integrations/lib/hook-runner.mjs` 的 `createRunHook`；「适配器之间不互相 import」约束的是信封与载荷解析，不是 `lib/`。
 
 第五个是踩过的坑：`Stop` 拿到的 `transcript_path` 是**宿主自己的格式**，不是通用格式。Claude Code 的 JSONL 每行有顶层 `message.{role,content}`；Codex 的 rollout 是 `{"type":"response_item","payload":{"type":"message","role":…,"content":[{"type":"input_text","text":…}]}}`，没有顶层 `message`。**共用一个解析器就等于只支持一个宿主**——被共用的那个会静默返回 0 条消息，hook 正常退出 0、什么都不报，整条被动捕获链路根本不会启动。所以解析下放到 `integrations/hosts/*.mjs` 的 `parseTranscript`，`stop.mjs` 只负责「拿路径 → 交给宿主 → 拿消息」。其余状态机由 `lib/` 承担：去重（`dedup.mjs`）、游标（`cursor.mjs`）、跨进程锁（`lock.mjs`）、超时与重试（`http.mjs`）。
 

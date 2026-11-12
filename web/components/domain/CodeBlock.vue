@@ -9,6 +9,7 @@
 import { Check, Copy } from 'lucide-vue-next'
 
 import { useToast } from '~/composables/useToast'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 
 const props = defineProps<{
   /** 原文，按原样渲染，不做换行 / 缩进重排。 */
@@ -25,19 +26,18 @@ const copied = ref(false)
 let resetTimer: ReturnType<typeof setTimeout> | null = null
 
 async function copy(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(props.code)
-    toast.show('success', '已复制')
-    copied.value = true
-    if (resetTimer !== null) {
-      clearTimeout(resetTimer)
-    }
-    resetTimer = setTimeout(() => {
-      copied.value = false
-    }, 1_500)
-  } catch {
-    toast.show('error', '浏览器拒绝写入剪贴板，请手动选择复制。')
+  if (!(await copyToClipboard(props.code))) {
+    toast.show('error', CLIPBOARD_DENIED_MESSAGE)
+    return
   }
+  toast.show('success', '已复制')
+  copied.value = true
+  if (resetTimer !== null) {
+    clearTimeout(resetTimer)
+  }
+  resetTimer = setTimeout(() => {
+    copied.value = false
+  }, 1_500)
 }
 
 onBeforeUnmount(() => {

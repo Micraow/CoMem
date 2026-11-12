@@ -16,15 +16,6 @@ import { ComemError } from './errors.js';
 import { MILLISECONDS_PER_DAY } from './time.js';
 
 /**
- * 默认半衰期：7 天。
- *
- * 来源：一周是一个自然的工作节奏，超过它的记忆需要主动回忆才会被访问。与架构文档
- * §17.5 的 `telemetry.hotness.halfLifeHours` 默认值（168 小时）是同一个数，两处
- * 必须同时改。
- */
-export const DEFAULT_HALF_LIFE_DAYS = 7;
-
-/**
  * 一条记忆的热度分，`[0, 1]`。
  *
  * `score = sigmoid(log1p(activeCount)) × exp(-ln2 × ageDays / halfLifeDays)`

@@ -35,6 +35,7 @@ import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { integer, nullableText, text } from './row.js';
 
 /** `task` 表的一行（架构文档 §8.1）。 */
 export interface TaskRow {
@@ -103,18 +104,6 @@ const LEASE_EXPIRED_SQL = '(lease_until IS NULL OR lease_until < ?)';
  * 给出同一个答案。带一个 `?`（当前时刻），与 `LEASE_EXPIRED_SQL` 同一个占位符。
  */
 const CLAIMABLE_SQL = `(status = 'pending' OR (status = 'running' AND ${LEASE_EXPIRED_SQL}))`;
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function integer(value: SQLOutputValue | undefined): number {
-  return Number(value);
-}
 
 function parseJsonColumn(raw: string, column: string, taskId: string): unknown {
   try {

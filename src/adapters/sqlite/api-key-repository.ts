@@ -24,6 +24,7 @@ import type { Logger } from '../../domain/log.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { isDuplicateKey, nullableText, text } from './row.js';
 
 export interface ApiKeyRepositoryDeps {
   readonly db: DatabaseSync;
@@ -73,31 +74,6 @@ const COLUMN_NAMES = [
 ] as const;
 
 const COLUMNS = COLUMN_NAMES.join(', ');
-
-/** SQLite 扩展错误码：1555 = PRIMARY KEY，2067 = UNIQUE。 */
-const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
-const SQLITE_CONSTRAINT_UNIQUE = 2067;
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function extendedErrorCode(error: unknown): number | null {
-  if (typeof error !== 'object' || error === null || !('errcode' in error)) {
-    return null;
-  }
-  const code = error.errcode;
-  return typeof code === 'number' ? code : null;
-}
-
-function isDuplicateKey(error: unknown): boolean {
-  const code = extendedErrorCode(error);
-  return code === SQLITE_CONSTRAINT_PRIMARYKEY || code === SQLITE_CONSTRAINT_UNIQUE;
-}
 
 function toRecord(row: Record<string, SQLOutputValue>): ApiKeyRecord {
   return {

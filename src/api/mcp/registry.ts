@@ -16,7 +16,7 @@
  * 用本文件的 helper 逐项校验并抛 `INVALID_ARGUMENT`，不把未校验的值传进服务层。
  */
 
-import { READ_LEVEL, parsePrincipal } from '../../domain/acl.js';
+import { READ_LEVEL, parsePrincipal, userScopeOf } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 import { isLevel, LEVELS, type Level } from '../../domain/level.js';
 import { CONTEXT_TYPES, isContextType, type ContextType } from '../../domain/node.js';
@@ -376,15 +376,7 @@ export async function indexStatus(
 
 /** 当前身份的个人根：`user:alice` → `comem://user/alice`。 */
 function subjectScope(context: McpToolContext): Uri {
-  const principal = parsePrincipal(context.subject);
-  if (principal.kind !== 'user') {
-    throw new ComemError(
-      'INVALID_ARGUMENT',
-      `MCP 请求身份必须是 user 主体：${context.subject}`,
-      { subject: context.subject },
-    );
-  }
-  return Uri.parse(`comem://user/${principal.id}`);
+  return userScopeOf(context.subject, 'MCP 请求身份');
 }
 
 /** 对个人根求权。`remember` / `health` 这类没有 URI 参数的工具用它。 */

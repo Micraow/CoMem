@@ -24,6 +24,8 @@
  * 「重启后生效」，不写「已应用」。
  */
 
+import { isRecord } from './record'
+
 /** `GET /config` 的 `source` 取值（`src/config/index.ts` 的 `ConfigSource`）。 */
 export const CONFIG_SOURCES = ['default', 'file', 'override', 'env'] as const
 
@@ -699,10 +701,6 @@ export function buildPatchValues(
   }
 
   return { values, errors }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**

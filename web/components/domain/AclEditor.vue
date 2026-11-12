@@ -21,6 +21,7 @@ import {
   ACL_EFFECT_LABEL,
   ACL_LEVELS,
   ACL_LEVEL_LABEL,
+  ACL_LEVEL_VARIANT,
   ACL_MODE_LABEL,
   type AclEffect,
   type AclLevel,
@@ -78,12 +79,6 @@ const EFFECT_OPTIONS = ACL_EFFECTS.map((effect) => ({
   value: effect,
   label: ACL_EFFECT_LABEL[effect],
 }))
-
-const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'blue'>> = {
-  1: 'gray',
-  3: 'teal',
-  7: 'blue',
-}
 
 const principalKind = ref<'user' | 'group'>('user')
 const principalId = ref('')
@@ -277,7 +272,7 @@ function confirm(): void {
             <tr v-for="entry in entries" :key="entry.principal">
               <td class="mono strong">{{ entry.principal }}</td>
               <td>
-                <UiBadge :variant="LEVEL_VARIANT[entry.level]">
+                <UiBadge :variant="ACL_LEVEL_VARIANT[entry.level]">
                   {{ ACL_LEVEL_LABEL[entry.level] }}
                 </UiBadge>
               </td>

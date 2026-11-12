@@ -23,6 +23,8 @@
  * `integrations/README.md` 的「DSH」一节。
  */
 
+import { formatMonthDayTime } from './format'
+
 /** 仓库的 GitHub 地址。文档锚点用它拼；仓库搬家时这里是唯一要改的地方。 */
 const REPO_BLOB_BASE = 'https://github.com/Micraow/CoMem/blob/master'
 
@@ -280,19 +282,6 @@ export interface VerificationResult {
 export const CURSOR_INSPECT_COMMAND =
   'cat "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-cursors.json"'
 
-function formatCheckTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
 function latestActivityOf(sessions: readonly VerificationSession[]): string | null {
   let latest: string | null = null
   for (const session of sessions) {
@@ -353,7 +342,7 @@ export function deriveVerification(input: VerificationInput): VerificationResult
       detail:
         latest === null
           ? `已采集 ${String(input.sessions.length)} 个会话`
-          : `已采集 ${String(input.sessions.length)} 个会话 · 最近 ${formatCheckTime(latest)}`,
+          : `已采集 ${String(input.sessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
       hint: null,
     }
   }

@@ -28,6 +28,8 @@
  * 服务端知道，控制台抄一份迟早会偏。
  */
 
+import { isRecord } from '../utils/record'
+
 import type { ConsoleRequest } from './consoleIdentity'
 
 /** `GET /bootstrap` 的 `result`。字段与响应体同形，缺一个就不猜。 */
@@ -79,10 +81,6 @@ export class ConsoleBootstrapError extends Error {
     this.name = 'ConsoleBootstrapError'
     this.code = code
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function trimBase(baseUrl: string): string {

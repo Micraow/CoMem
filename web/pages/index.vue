@@ -30,6 +30,7 @@ import {
   type TaskPayload,
 } from '~/composables/useApi'
 import { isFreshInstall } from '~/utils/connectGuide'
+import { formatMonthDayTime } from '~/utils/format'
 import { healthStatusLabel } from '~/utils/healthLabels'
 import {
   taskStatusLabelOf,
@@ -92,19 +93,6 @@ const stats = computed<readonly { key: string; label: string; value: string; ton
     },
   ],
 )
-
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
 
 async function loadHealth(): Promise<void> {
   loadingHealth.value = true
@@ -254,7 +242,7 @@ const needsOnboarding = computed(() =>
                 </UiBadge>
               </td>
               <td class="num">{{ task.attempts }}</td>
-              <td class="mono">{{ formatDateTime(task.updatedAt) }}</td>
+              <td class="mono">{{ formatMonthDayTime(task.updatedAt) }}</td>
             </tr>
           </tbody>
         </UiTable>

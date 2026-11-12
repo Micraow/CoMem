@@ -22,6 +22,7 @@ export type { PendingListPayload, PendingMemoryPayload }
  */
 import { ClipboardCheck, RefreshCw } from 'lucide-vue-next'
 
+import { formatMonthDay } from '~/utils/format'
 import { memoryTypeLabelOf, memoryTypeVariantOf } from '~/utils/memoryTypeLabels'
 
 const props = defineProps<{
@@ -76,7 +77,7 @@ function relativeTime(value: string): string {
   if (elapsed < 7 * DAY_MS) {
     return `${Math.floor(elapsed / DAY_MS)} 天前`
   }
-  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+  return formatMonthDay(value)
 }
 
 function isChecked(uri: string): boolean {

@@ -19,6 +19,7 @@ import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
 import type { PromptId } from '../../domain/prompt.js';
 
 import { withWriteTransaction } from './database.js';
+import { text } from './row.js';
 
 export interface PromptOverrideRow {
   readonly promptId: PromptId;
@@ -35,10 +36,6 @@ export interface PromptRepositoryDeps {
 const OVERRIDE_COLUMN_NAMES = ['prompt_id', 'body', 'base_digest', 'updated_at'] as const;
 
 const OVERRIDE_COLUMNS = OVERRIDE_COLUMN_NAMES.join(', ');
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
 
 /**
  * `prompt_id` 用 `as` 收窄：写入路径只接受 `PromptId`，表里出现的值一定是

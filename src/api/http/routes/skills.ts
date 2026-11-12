@@ -11,7 +11,7 @@
 
 import type { FastifyInstance } from 'fastify';
 
-import { parsePrincipal } from '../../../domain/acl.js';
+import { userScopeOf } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { SkillFileInput } from '../../../services/skill.js';
@@ -64,11 +64,7 @@ function parseFiles(value: unknown): readonly SkillFileInput[] {
 }
 
 function scopeOfSubject(subject: string): Uri {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw invalid(`技能身份必须是 user 主体：${subject}`, { subject });
-  }
-  return Uri.parse(`comem://user/${principal.id}`);
+  return userScopeOf(subject, '技能身份');
 }
 
 /** `GET /skills` 列表项：URI 与目录名（`SKILL.md` 的 description 暂缺，见路由注释）。 */

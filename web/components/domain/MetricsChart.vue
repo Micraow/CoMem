@@ -43,7 +43,7 @@ export interface MonitorUsage {
 <script setup lang="ts">
 import { BarChart3 } from 'lucide-vue-next'
 
-import { formatMilliseconds } from '~/components/domain/PhaseBreakdown.vue'
+import { formatMilliseconds } from '~/utils/format'
 
 const props = defineProps<{ usage: MonitorUsage | null }>()
 

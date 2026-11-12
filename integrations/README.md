@@ -16,6 +16,8 @@ integrations/
 ├── lib/                  # 与宿主无关的共享模块
 │   ├── config.mjs        # 配置 + 宿主解析 + bypass
 │   ├── http.mjs          # 超时 / 重试 / 错误封套
+│   ├── hook-runner.mjs   # 入口骨架：stdin → 归一化 → 预算 → 信封（三个宿主共用）
+│   ├── values.mjs        # 载荷取值：asRecord / text / renderToolOutput / describeEntry
 │   ├── events.json       # 事件名映射表（宿主 PascalCase ↔ 内部 snake_case）
 │   ├── events.mjs        # 读上面那张表，导出 EVENT_NAMES / REPORTED_EVENT_NAMES
 │   ├── dedup.mjs         # 事件去重（500ms 窗口）
@@ -582,7 +584,10 @@ queryFilters:
 
 **宿主名**：`co-mem install` 写进 hook 命令的 `--host` 参数（或 `COMEM_HOST`），
 `lib/config.mjs` 按名字动态 import `hosts/<name>.mjs`。加第三个宿主只加一个文件，
-`servers/` 里一行都不用改。
+`servers/` 里一行都不用改。宿主之间不互相 import（信封与 `parseTranscript` 各自
+独立），但**入口骨架与载荷取值共用 `lib/`**：`lib/hook-runner.mjs` 的
+`createRunHook` 拿宿主的 `normalizeEvent` / `formatOutput` 当参数，`lib/values.mjs`
+放四个取值助手。
 
 **临时文件**：锁 `{tmpdir}/comem-{sessionId}.lock`、游标 `{tmpdir}/comem-cursors.json`、
 事件去重 `{tmpdir}/comem-events.json`、召回账本 `{tmpdir}/comem-recall-ledger.json`、

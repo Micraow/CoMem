@@ -37,6 +37,7 @@ import type { Logger } from '../../domain/log.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { isDuplicateKey, nullableText, text } from './row.js';
 
 export interface GroupRepositoryDeps {
   readonly db: DatabaseSync;
@@ -67,31 +68,6 @@ const MEMBER_COLUMNS = MEMBER_COLUMN_NAMES.join(', ');
  * 控制台一页 100 个组已经要滚动。
  */
 const DEFAULT_LIST_LIMIT = 100;
-
-/** SQLite 扩展错误码：1555 = PRIMARY KEY，2067 = UNIQUE。两者都表示「主键已存在」。 */
-const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
-const SQLITE_CONSTRAINT_UNIQUE = 2067;
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function extendedErrorCode(error: unknown): number | null {
-  if (typeof error !== 'object' || error === null || !('errcode' in error)) {
-    return null;
-  }
-  const code = error.errcode;
-  return typeof code === 'number' ? code : null;
-}
-
-function isDuplicateKey(error: unknown): boolean {
-  const code = extendedErrorCode(error);
-  return code === SQLITE_CONSTRAINT_PRIMARYKEY || code === SQLITE_CONSTRAINT_UNIQUE;
-}
 
 function toGroupRow(row: Record<string, SQLOutputValue>): Group {
   return {

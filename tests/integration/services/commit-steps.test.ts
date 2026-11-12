@@ -255,7 +255,7 @@ describe('ArchiveSummaryStep', () => {
     expect(writeSummary).not.toHaveBeenCalled();
   });
 
-  it('开启工作记忆时生成 7 段并写归档目录的 .overview.md', async () => {
+  it('开启工作记忆时生成 6 段并写归档目录的 .overview.md', async () => {
     const overview = [
       '# 会话工作记忆',
       '',

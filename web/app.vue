@@ -46,9 +46,9 @@ function retry(): void {
     </p>
   </div>
 
-  <NuxtLayout v-else>
+  <DomainAppShell v-else>
     <NuxtPage />
-  </NuxtLayout>
+  </DomainAppShell>
 </template>
 
 <style scoped>

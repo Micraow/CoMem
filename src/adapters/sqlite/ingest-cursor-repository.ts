@@ -21,6 +21,7 @@ import type { Logger } from '../../domain/log.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { integer, text } from './row.js';
 
 export interface IngestCursorRow {
   readonly harness: IngestHarness;
@@ -49,14 +50,6 @@ const CURSOR_COLUMN_NAMES = [
 ] as const;
 
 const CURSOR_COLUMNS = CURSOR_COLUMN_NAMES.join(', ');
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function integer(value: SQLOutputValue | undefined): number {
-  return Number(value);
-}
 
 /**
  * `harness` / `cursor_kind` 用 `as` 收窄：写入路径只接受领域类型，表里出现的

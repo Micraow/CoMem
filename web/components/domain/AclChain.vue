@@ -34,6 +34,7 @@ import { AlertTriangle, Ban, CornerDownRight } from 'lucide-vue-next'
 import {
   ACL_EFFECT_LABEL,
   ACL_LEVEL_LABEL,
+  ACL_LEVEL_VARIANT,
   ACL_MODE_LABEL,
   type AclEffect,
   type AclLevel,
@@ -115,7 +116,7 @@ const hasGap = computed(() => props.levels.some((level) => level.error !== null)
 
 const finalVariant = computed<'gray' | 'blue' | 'teal'>(() => {
   const level = finalLevel.value
-  return level === 7 ? 'blue' : level === 3 ? 'teal' : 'gray'
+  return level === null ? 'gray' : ACL_LEVEL_VARIANT[level]
 })
 </script>
 

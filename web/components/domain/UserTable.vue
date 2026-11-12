@@ -21,27 +21,12 @@ export interface UserRowPayload {
   readonly updatedAt: string
   readonly permissionCount: number
 }
-
-/** 绝对时间。列表里同时给出 `title`，需要精确时刻时不用切到别处。 */
-export function formatUserTime(iso: string): string {
-  const time = new Date(iso)
-  if (Number.isNaN(time.getTime())) {
-    return iso
-  }
-  return time.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-}
 </script>
 
 <script setup lang="ts">
 import { Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
 
+import { formatDateTime } from '~/utils/format'
 import { userStatusLabel } from '~/utils/userLabels'
 
 const props = defineProps<{
@@ -107,8 +92,8 @@ const canNext = computed(() => props.offset + props.limit < props.total)
               </UiBadge>
             </td>
             <td>
-              <time class="mono" :title="formatUserTime(user.createdAt)">
-                {{ formatUserTime(user.createdAt) }}
+              <time class="mono" :title="formatDateTime(user.createdAt)">
+                {{ formatDateTime(user.createdAt) }}
               </time>
             </td>
             <td class="num">

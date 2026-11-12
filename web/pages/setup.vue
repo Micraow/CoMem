@@ -26,6 +26,7 @@ import {
   type SetupFormErrors,
 } from '~/composables/consoleBootstrap'
 import { consoleIdentityState } from '~/composables/consoleIdentity'
+import { SERVICE_UNREACHABLE_MESSAGE } from '~/utils/errors'
 
 useHead({ title: '初始化 · CoMem 控制台' })
 
@@ -55,7 +56,7 @@ function errorMessageOf(caught: unknown): string {
   if (caught instanceof ConsoleBootstrapError) {
     return bootstrapErrorNotice(caught.code, caught.message)
   }
-  return '无法连接 CoMem 服务，请确认后端已启动。'
+  return SERVICE_UNREACHABLE_MESSAGE
 }
 
 /** 把焦点移到令牌输入框，光标停在末尾方便直接粘贴。 */

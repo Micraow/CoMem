@@ -23,6 +23,7 @@ import { READ_LEVEL, type AclEffect, type AclLevel } from '../../domain/acl.js';
 import type { Logger } from '../../domain/log.js';
 import { withWriteTransaction } from './database.js';
 import { globPrefixPattern, placeholders } from './node-repository.js';
+import { integer, text } from './row.js';
 
 /**
  * `node_permission` 的一行：物化后的有效权限。
@@ -94,14 +95,6 @@ export function readablePredicateSql(principalList: string): string {
   return `(p.level & ${READ_LEVEL}) = ${READ_LEVEL}
       AND p.effect = 'allow'
       AND ${deniedPredicateSql(principalList)}`;
-}
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function integer(value: SQLOutputValue | undefined): number {
-  return Number(value);
 }
 
 function toAclEntryRow(row: Record<string, SQLOutputValue>): AclEntryRow {

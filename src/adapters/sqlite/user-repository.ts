@@ -32,6 +32,7 @@ import type { Logger } from '../../domain/log.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { isDuplicateKey, nullableText, text } from './row.js';
 
 export interface UserRepositoryDeps {
   readonly db: DatabaseSync;
@@ -57,31 +58,6 @@ const USER_COLUMNS = USER_COLUMN_NAMES.join(', ');
  * 100 个用户已经要滚动，再多不会有人读完。
  */
 const DEFAULT_LIST_LIMIT = 100;
-
-/** SQLite 扩展错误码：1555 = PRIMARY KEY，2067 = UNIQUE。两者都表示「主键已存在」。 */
-const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
-const SQLITE_CONSTRAINT_UNIQUE = 2067;
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function extendedErrorCode(error: unknown): number | null {
-  if (typeof error !== 'object' || error === null || !('errcode' in error)) {
-    return null;
-  }
-  const code = error.errcode;
-  return typeof code === 'number' ? code : null;
-}
-
-function isDuplicateKey(error: unknown): boolean {
-  const code = extendedErrorCode(error);
-  return code === SQLITE_CONSTRAINT_PRIMARYKEY || code === SQLITE_CONSTRAINT_UNIQUE;
-}
 
 /**
  * 数据库行 → `User`。

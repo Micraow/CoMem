@@ -12,6 +12,7 @@ import type { Logger } from '../../domain/log.js';
 import { mergeWeight, type MemoryLink } from '../../domain/memory-link.js';
 import { Uri } from '../../domain/uri.js';
 import { withWriteTransaction } from './database.js';
+import { text } from './row.js';
 
 const LINK_COLUMNS = 'from_uri, to_uri, link_type, weight, match_text, description';
 
@@ -28,10 +29,6 @@ export interface MemoryLinkRowInput {
 export interface MemoryLinkRepositoryDeps {
   readonly db: DatabaseSync;
   readonly logger: Logger;
-}
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
 }
 
 function toMemoryLink(row: Record<string, SQLOutputValue>): MemoryLink {

@@ -3,29 +3,11 @@
  *
  * 磁盘布局就是 URI 的镜像：`comem://user/alice/memories/foo` 落在
  * `<dataDir>/user/alice/memories/foo`。这一层只做形状转换，不碰文件系统。
- *
- * `fromDiskPath` 是「磁盘上的文件 → 索引记录」的方向，输入可能来自 `readdir`
- * 之外的任何地方，所以必须严格拒绝越界：权限按 URI 前缀匹配，一条指向数据根
- * 之外的 URI 会绕过作用域隔离。
  */
 
-import { isAbsolute, join, relative as relativePath, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 
-import { ComemError } from '../../domain/errors.js';
-import { RESERVED_SEGMENT_NAMES, Uri, type UriScope } from '../../domain/uri.js';
-
-export interface DiskLocation {
-  readonly uri: Uri;
-  /** 绝对路径 */
-  readonly absolute: string;
-  /** 相对数据根的路径，用 `/` 分隔，与平台无关 */
-  readonly relative: string;
-}
-
-const SCHEME_PREFIX = 'comem://';
-
-/** 与 `Uri.toString` / `UriParseOptions` 一致的段分隔符。 */
-const URI_SEGMENT_SEPARATOR = '/';
+import { RESERVED_SEGMENT_NAMES, Uri } from '../../domain/uri.js';
 
 /**
  * 元数据文件名（架构文档 §6.2 规则 6、§6.7）。判定与 `domain/uri.ts` 是**同一份集合**
@@ -48,11 +30,6 @@ export const TEMP_FILE_PREFIX = '.comem-tmp-';
  */
 export const LOCK_FILE_SUFFIX = '.comem-lock';
 
-/** 数据根本身不是合法 URI 时的提示（它连 scope 段都没有）。 */
-function invalidDiskPath(reason: string, diskPath: string): ComemError {
-  return new ComemError('INVALID_URI', `磁盘路径不合法：${reason}`, { diskPath, reason });
-}
-
 /** 是否保留名。只做集合查表，不做其它规范化。 */
 export function isReservedName(name: string): boolean {
   return RESERVED_NAMES.has(name);
@@ -70,11 +47,6 @@ export function isArtifactName(name: string): boolean {
   );
 }
 
-/** 数据根 + 作用域根 → 该作用域的绝对目录。如 `<dataDir>/user/alice`。 */
-export function scopeRootOf(dataDir: string, scope: UriScope, rootId: string): string {
-  return join(dataDir, scope, rootId);
-}
-
 /**
  * URI → 绝对磁盘路径。
  *
@@ -85,35 +57,3 @@ export function toDiskPath(dataDir: string, uri: Uri): string {
   return join(dataDir, uri.scope, uri.rootId, ...uri.segments);
 }
 
-export function toDiskLocation(dataDir: string, uri: Uri): DiskLocation {
-  return {
-    uri,
-    absolute: toDiskPath(dataDir, uri),
-    // `relative` 固定用 `/`，与平台无关；磁盘布局本身由 `toDiskPath` 决定。
-    relative: [uri.scope, uri.rootId, ...uri.segments].join(URI_SEGMENT_SEPARATOR),
-  };
-}
-
-/**
- * 绝对磁盘路径 → URI，`toDiskPath` 的逆运算。
- *
- * 三种越界一律拒绝：`relative` 里出现 `..`、绝对路径不在 `dataDir` 下、
- * 路径段是保留名。前三段的合法性（`user` / `group`、根标识字符集、段字符集、
- * NFC、长度）交给 `Uri.parse` 统一校验，避免两处规则各写一遍后走样。
- */
-export function fromDiskPath(dataDir: string, diskPath: string): Uri {
-  const base = resolve(dataDir);
-  const target = resolve(diskPath);
-  const relative = relativePath(base, target);
-
-  if (relative === '') {
-    throw invalidDiskPath('数据根自身不是 URI，至少需要 scope 与根标识两段', diskPath);
-  }
-  if (isAbsolute(relative) || relative === '..' || relative.startsWith(`..${sep}`)) {
-    throw invalidDiskPath('路径不在数据根下', diskPath);
-  }
-
-  const segments = relative.split(sep);
-  // 段里的保留名、控制字符、反斜杠等由 `Uri.parse` 拒绝；这里只负责拼回 URI 形状。
-  return Uri.parse(`${SCHEME_PREFIX}${segments.join(URI_SEGMENT_SEPARATOR)}`);
-}

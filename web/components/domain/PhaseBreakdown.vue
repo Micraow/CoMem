@@ -52,23 +52,12 @@ export interface HookEventBreakdown {
   readonly totalMs: number
   readonly phases: readonly HookPhase[]
 }
-
-const numberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 })
-
-/** 毫秒 → `38ms` / `12.4s`。超过 1 秒换成秒，读起来才有「后台很慢」的直觉。 */
-export function formatMilliseconds(ms: number): string {
-  if (!Number.isFinite(ms)) {
-    return '—'
-  }
-  if (ms < 1000) {
-    return `${numberFormat.format(Math.round(ms * 10) / 10)}ms`
-  }
-  return `${numberFormat.format(Math.round((ms / 1000) * 10) / 10)}s`
-}
 </script>
 
 <script setup lang="ts">
 import { Timer } from 'lucide-vue-next'
+
+import { formatMilliseconds } from '~/utils/format'
 
 const props = defineProps<{
   events: readonly HookEventBreakdown[]

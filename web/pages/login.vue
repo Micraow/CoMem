@@ -15,6 +15,7 @@
 import { AlertTriangle, CircleCheck, LockKeyhole } from 'lucide-vue-next'
 
 import { ConsoleIdentityError, consoleIdentityState, loginConsole } from '~/composables/consoleIdentity'
+import { SERVICE_UNREACHABLE_MESSAGE } from '~/utils/errors'
 
 useHead({ title: '登录 · CoMem 控制台' })
 
@@ -50,7 +51,7 @@ function errorMessageOf(caught: unknown): string {
   if (caught instanceof ConsoleIdentityError) {
     return caught.message
   }
-  return '无法连接 CoMem 服务，请确认后端已启动。'
+  return SERVICE_UNREACHABLE_MESSAGE
 }
 
 async function submit(): Promise<void> {

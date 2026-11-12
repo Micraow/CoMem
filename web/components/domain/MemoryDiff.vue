@@ -14,6 +14,7 @@
  */
 import { Check, GitCompare, History, X } from 'lucide-vue-next'
 
+import { formatMonthDayTime } from '~/utils/format'
 import { memoryTypeLabelOf } from '~/utils/memoryTypeLabels'
 
 import type { PendingMemoryPayload } from './ReviewList.vue'
@@ -125,27 +126,11 @@ const removedCount = computed(() => rows.value.filter((row) => row.kind === 'rem
 const hasDifference = computed(() => addedCount.value > 0 || removedCount.value > 0)
 
 /**
- * 本地时区的绝对时刻，格式与概览页的任务表一致（月/日 时:分）。
+ * 有效期一行，三个来源值都为 null 时整行不渲染。
  *
  * 有效期是「截止到哪一刻」，相对时间（「3 天后」）会随打开页面的时刻变化，复核者
  * 需要的是一个可以直接和记忆内容里的日期对比的值；服务端给的是 UTC 串，这里只做
  * 本地化，不改时刻。
- */
-function momentOf(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) {
-    return iso
-  }
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-/**
- * 有效期一行，三个来源值都为 null 时整行不渲染。
  *
  * `validFrom` 与 `updatedAt` 相同表示这就是最近一次写入产生的版本，「自 X 起生效」
  * 不携带额外信息，省掉。两个时间串都由同一个序列化函数产出（ISO 8601 UTC 毫秒），
@@ -162,10 +147,10 @@ const validityText = computed<string | null>(() => {
 
   const parts: string[] = []
   if (memory.validFrom !== null && memory.validFrom !== memory.updatedAt) {
-    parts.push(`自 ${momentOf(memory.validFrom)} 起生效`)
+    parts.push(`自 ${formatMonthDayTime(memory.validFrom)} 起生效`)
   }
   if (memory.validUntil !== null) {
-    parts.push(`有效期截止 ${momentOf(memory.validUntil)}`)
+    parts.push(`有效期截止 ${formatMonthDayTime(memory.validUntil)}`)
   }
   return parts.length === 0 ? null : parts.join('，')
 })

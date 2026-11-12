@@ -96,7 +96,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.ttl.retentionDays` | `0` | 归档后保留多少天才物理删除文件与索引行。`0` = 永不物理删除（默认），只软归档 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
 | `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
-| `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（7 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
+| `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（6 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `auth.trustLoopback` | `true` | 回环信任（§12.7）：没有凭据、来源是回环地址、且 `Host` 指向本机的请求被认证成 `server.subject`。**只允许在 `server.host` 是回环地址时打开**（否则启动期拒绝）；容器部署必须设成 `false`。它不是「关闭认证」——认证恒开，见「认证与账号」 |
 | `auth.sessionSecret` | `""` | session token 的 HMAC 密钥。空串 = 进程随机值（重启失效）。要跨重启保持登录就配一个随机串 |
@@ -2363,8 +2363,8 @@ COMEM_SERVER_PORT=8080 pnpm dev
     上升。单账号部署默认关闭是对的；多账号环境打开前先确认抓取端能承受。
 
 36. **悬空符号链接会被写入替换掉。** `ContentStore` 用 `stat` 判断目标是否存在（跟随
-    符号链接），用「同目录临时文件 + `rename`」落盘（`src/adapters/fs/content-store.ts`
-    的 `exists` 与 `#writeAtomically`）。目标是一个指向不存在路径的符号链接时，`stat`
+    符号链接），用「同目录临时文件 + `rename`」落盘（`ContentStore` 自己的 `exists`，
+    与 `src/adapters/fs/atomic-write.ts` 的 `writeFileAtomic`）。目标是一个指向不存在路径的符号链接时，`stat`
     返回 `ENOENT`，被当成「这里没有文件」，随后的 `rename` 把链接**本身**换成普通文件：
     目录里原本那个链接静默消失。丢掉的只是一个本来就指向虚无的链接，没有覆盖任何真实
     内容；但「这里有个链接」这件事无法从写入结果里看出来。`write` 与 `add_resource` 都走

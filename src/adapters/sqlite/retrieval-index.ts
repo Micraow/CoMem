@@ -19,7 +19,7 @@
  * 漂移，同一次请求里 `search` 与 `grep` 就会给出不同的可见集合。
  */
 
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 
 import type { ContextType } from '../../domain/node.js';
 import type { Level } from '../../domain/level.js';
@@ -37,6 +37,7 @@ import {
 } from '../../domain/retrieval.js';
 import { segmentCjk } from '../../domain/text.js';
 import { withWriteTransaction } from './database.js';
+import { nullableText, text } from './row.js';
 import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
 import { notVersionFileSql } from './version-path.js';
 import { readablePredicateSql } from './permission-repository.js';
@@ -75,14 +76,6 @@ interface GlobAlternative {
   readonly sqlPattern: string;
   /** 精确匹配用的正则，在 SQL 结果上再过滤一遍 */
   readonly exact: RegExp;
-}
-
-function text(value: SQLOutputValue | undefined): string {
-  return String(value);
-}
-
-function nullableText(value: SQLOutputValue | undefined): string | null {
-  return value === null || value === undefined ? null : String(value);
 }
 
 /**

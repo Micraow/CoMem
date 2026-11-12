@@ -32,59 +32,13 @@
  * 「会话与任务」页从这个组件导入它。
  */
 import type { TaskPayload } from '~/composables/useApi'
+import { formatDateTimeWithSeconds, formatRelativeTime } from '~/utils/format'
 
 export type TaskRowPayload = TaskPayload
 
 export interface TaskListPayload {
   readonly tasks: readonly TaskRowPayload[]
   readonly total: number
-}
-
-const MINUTE_MS = 60_000
-const HOUR_MS = 60 * MINUTE_MS
-const DAY_MS = 24 * HOUR_MS
-
-/**
- * 相对时间（§16 的要求：相对时间 + `title` 给绝对时间）。
- *
- * 超过 30 天回落到日期：这时候「37 天前」不会比日期更好读，而日期还能直接比对。
- */
-export function formatRelativeTime(iso: string): string {
-  const time = new Date(iso).getTime()
-  if (Number.isNaN(time)) {
-    return '—'
-  }
-  const delta = Date.now() - time
-  if (delta < MINUTE_MS) {
-    return '刚刚'
-  }
-  if (delta < HOUR_MS) {
-    return `${Math.floor(delta / MINUTE_MS)} 分钟前`
-  }
-  if (delta < DAY_MS) {
-    return `${Math.floor(delta / HOUR_MS)} 小时前`
-  }
-  if (delta < 30 * DAY_MS) {
-    return `${Math.floor(delta / DAY_MS)} 天前`
-  }
-  return new Date(time).toLocaleDateString('zh-CN')
-}
-
-/** 绝对时间，给 `title` 用。 */
-export function formatAbsoluteTime(iso: string): string {
-  const time = new Date(iso)
-  if (Number.isNaN(time.getTime())) {
-    return iso
-  }
-  return time.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  })
 }
 
 /**
@@ -215,7 +169,7 @@ function depthOf(status: string): string {
               </span>
             </td>
             <td>
-              <time class="mono" :title="formatAbsoluteTime(task.createdAt)">
+              <time class="mono" :title="formatDateTimeWithSeconds(task.createdAt)">
                 {{ formatRelativeTime(task.createdAt) }}
               </time>
             </td>
@@ -226,7 +180,7 @@ function depthOf(status: string): string {
               <time
                 v-else-if="task.leaseUntil !== null"
                 class="mono"
-                :title="formatAbsoluteTime(task.leaseUntil)"
+                :title="formatDateTimeWithSeconds(task.leaseUntil)"
               >
                 {{ formatRelativeTime(task.leaseUntil) }}
               </time>

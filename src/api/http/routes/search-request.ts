@@ -5,7 +5,7 @@
  * 不碰响应形状——响应 DTO 在 `search.ts` 顶部。函数体与拆分前逐字相同。
  */
 
-import { parsePrincipal } from '../../../domain/acl.js';
+import { userScopeOf } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { isLevel, LEVELS, type Level } from '../../../domain/level.js';
 import { CONTEXT_TYPES, isContextType, type ContextType } from '../../../domain/node.js';
@@ -54,11 +54,7 @@ export function parseMode(value: string | undefined): SearchMode {
 
 /** `user:alice` → `comem://user/alice`（不带末尾斜杠）。 */
 export function scopeOfSubject(subject: string): string {
-  const principal = parsePrincipal(subject);
-  if (principal.kind !== 'user') {
-    throw new ComemError('INVALID_ARGUMENT', `检索身份必须是 user 主体：${subject}`, { subject });
-  }
-  return `comem://user/${principal.id}`;
+  return userScopeOf(subject, '检索身份').toString();
 }
 
 /**

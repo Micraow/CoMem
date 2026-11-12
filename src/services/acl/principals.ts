@@ -6,21 +6,14 @@
  * 主体生效（§12.1），单独追加在末尾。
  */
 
-import { USER_WILDCARD, parsePrincipal } from '../../domain/acl.js';
+import { USER_WILDCARD, parsePrincipal, userScopeOf } from '../../domain/acl.js';
 import { ComemError } from '../../domain/errors.js';
 
 export function resolvePrincipals(
   subject: string,
   groups: readonly string[],
 ): readonly string[] {
-  const parsed = parsePrincipal(subject);
-  if (parsed.kind !== 'user') {
-    throw new ComemError(
-      'INVALID_ARGUMENT',
-      `调用方身份必须是 user 主体：${subject}`,
-      { subject },
-    );
-  }
+  userScopeOf(subject, '调用方身份');
 
   const principals: string[] = [subject];
   for (const group of groups) {

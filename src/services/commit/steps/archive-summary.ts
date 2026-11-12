@@ -7,7 +7,7 @@
  *
  * ## 工作记忆（§10.5）
  *
- * `memory.workingMemory.enabled` 为真时，除了目录摘要，还要维护一份 7 段结构化
+ * `memory.workingMemory.enabled` 为真时，除了目录摘要，还要维护一份 6 段结构化
  * 工作记忆，写在归档目录的 `.overview.md`。它的作用是「让下一次提交的抽取知道上次
  * 聊到哪了」——没有它，每次提交都是孤立的一次抽取，判断不了「这个偏好是延续还是
  * 改变」。
@@ -48,7 +48,7 @@ export interface ArchiveSummaryStepDeps {
   readonly logger: Logger;
 }
 
-/** 7 段工作记忆的结构（架构文档 §10.5 的代码块，逐字对应）。 */
+/** 6 段工作记忆的结构（架构文档 §10.5 的代码块，逐字对应）。 */
 const WORKING_MEMORY_SECTIONS = [
   '## 分析',
   '## 主要请求与意图',

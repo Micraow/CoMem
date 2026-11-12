@@ -9,8 +9,8 @@
  * 的待刷新比例，这里改成「未知 / 已生成」加全站计数——百分比没有分母就是假数据。
  */
 import type { AclPayload, FsStatPayload, HealthPayload } from '~/composables/useApi'
-import { formatBytes } from '~/composables/useTree'
-import { ACL_LEVEL_LABEL, ACL_MODE_LABEL, type AclLevel } from '~/utils/aclLabels'
+import { ACL_LEVEL_LABEL, ACL_LEVEL_VARIANT, ACL_MODE_LABEL, type AclLevel } from '~/utils/aclLabels'
+import { formatBytes, formatDateTime } from '~/utils/format'
 import { fsEntryKindLabel, fsEntryLevelsLabel } from '~/utils/fsLabels'
 
 const props = withDefaults(
@@ -36,12 +36,6 @@ const props = withDefaults(
     loading: false,
   },
 )
-
-const LEVEL_VARIANT: Readonly<Record<AclLevel, 'gray' | 'teal' | 'purple'>> = {
-  1: 'gray',
-  3: 'teal',
-  7: 'purple',
-}
 
 const effectiveRows = computed<readonly { principal: string; level: AclLevel }[]>(() => {
   const effective = props.acl?.effective
@@ -81,17 +75,7 @@ const updatedLabel = computed(() => {
   if (props.stat === null) {
     return '未知'
   }
-  const date = new Date(props.stat.updatedAt)
-  if (Number.isNaN(date.getTime())) {
-    return props.stat.updatedAt
-  }
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return formatDateTime(props.stat.updatedAt)
 })
 </script>
 
@@ -158,7 +142,7 @@ const updatedLabel = computed(() => {
         <div v-else class="acl-mini">
           <div v-for="row in effectiveRows" :key="row.principal" class="acl-mini__row">
             <span class="acl-mini__p">{{ row.principal }}</span>
-            <UiBadge :variant="LEVEL_VARIANT[row.level]">{{ ACL_LEVEL_LABEL[row.level] }}</UiBadge>
+            <UiBadge :variant="ACL_LEVEL_VARIANT[row.level]">{{ ACL_LEVEL_LABEL[row.level] }}</UiBadge>
           </div>
         </div>
       </template>

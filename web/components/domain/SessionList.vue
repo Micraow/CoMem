@@ -137,10 +137,7 @@ import {
   useScopeRoot,
 } from '~/composables/useApi'
 
-import {
-  formatAbsoluteTime,
-  formatRelativeTime,
-} from '~/components/domain/TaskTable.vue'
+import { formatDateTimeWithSeconds, formatRelativeTime } from '~/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -292,7 +289,7 @@ function commitTitleOf(session: SessionSummaryPayload): string {
           <time
             v-if="sessionActivityAt(session) !== null"
             class="session__time mono"
-            :title="formatAbsoluteTime(sessionActivityAt(session) ?? '')"
+            :title="formatDateTimeWithSeconds(sessionActivityAt(session) ?? '')"
           >
             {{ formatRelativeTime(sessionActivityAt(session) ?? '') }}
           </time>
@@ -345,7 +342,7 @@ function commitTitleOf(session: SessionSummaryPayload): string {
             >
               <div class="message__head">
                 <span class="message__role">{{ messageRoleLabel(message.role) }}</span>
-                <time class="message__time mono" :title="formatAbsoluteTime(message.createdAt)">
+                <time class="message__time mono" :title="formatDateTimeWithSeconds(message.createdAt)">
                   {{ formatRelativeTime(message.createdAt) }}
                 </time>
               </div>

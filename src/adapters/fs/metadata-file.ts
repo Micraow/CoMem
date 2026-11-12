@@ -31,9 +31,8 @@
  *    `readSummary` 里被吞掉。
  */
 
-import type { FileHandle } from 'node:fs/promises';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import type {
   ArchiveMeta,
@@ -50,9 +49,10 @@ import type { SessionMeta } from '../../domain/session.js';
 import { isSessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
+import { writeFileAtomic, writeFileStaged } from './atomic-write.js';
 import { createFsErrorMapper } from './error-map.js';
 import { parseDocument, serializeDocument } from './frontmatter.js';
-import { TEMP_FILE_PREFIX, toDiskPath } from './path.js';
+import { toDiskPath } from './path.js';
 
 /** L0 摘要文件名（架构文档 §6.2 规则 6 的保留名之一）。 */
 export const ABSTRACT_FILE_NAME = '.abstract.md';
@@ -99,14 +99,6 @@ export interface MetadataFileStoreDeps {
   readonly logger: Logger;
 }
 
-/**
- * 临时文件后缀的随机位数（base36），与 `content-store.ts` 保持同一形态。
- *
- * 8 位 36 进制约 41 bit 随机性，同目录并发写撞名概率可以忽略；前缀里的进程号
- * 负责区分多进程。
- */
-const TEMP_SUFFIX_LENGTH = 8;
-
 /** 磁盘键名。YAML 惯例用 snake_case，TypeScript 用 camelCase，映射只发生在这里。 */
 const FRONTMATTER_KEYS = {
   generatedBy: 'generated_by',
@@ -139,12 +131,6 @@ export const mapFsError = createFsErrorMapper(
     INTERNAL: '摘要文件系统操作失败',
   },
 );
-
-function randomTempSuffix(): string {
-  return `${process.pid.toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2, 2 + TEMP_SUFFIX_LENGTH)}`;
-}
 
 /**
  * 从 frontmatter 回填生成信息；没有任何生成键时返回 `null`。
@@ -452,27 +438,8 @@ export class MetadataFileStore {
     await this.#ensureDirectory(directory, directoryUri);
 
     const absolute = join(directory, META_FILE_NAME);
-    const temp = join(directory, `${TEMP_FILE_PREFIX}${randomTempSuffix()}`);
-    let handle: FileHandle;
-    try {
-      // `wx`：临时文件名撞上已存在的文件时直接失败，不复用别人的半成品。
-      handle = await open(temp, 'wx');
-    } catch (error) {
-      throw mapFsError(error, directoryUri);
-    }
-
-    try {
-      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
-      // 没有 fsync 的话，rename 之后断电可能留下空文件——「写了一半」的另一种形态。
-      await handle.sync();
-      await handle.close();
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw mapFsError(error, directoryUri);
-    }
-
-    await this.#rename(temp, absolute, directoryUri);
+    const content = `${JSON.stringify(value, null, 2)}\n`;
+    await writeFileAtomic(absolute, content, (error) => mapFsError(error, directoryUri));
   }
 
   /** 读一个摘要文件的正文与生成信息；不存在返回 `null`。 */
@@ -524,26 +491,7 @@ export class MetadataFileStore {
       generation === undefined ? existing : { ...existing, ...toGenerationRecord(generation) };
     const content = serializeDocument(body, data);
 
-    const temp = join(dirname(absolute), `${TEMP_FILE_PREFIX}${randomTempSuffix()}`);
-    let handle: FileHandle;
-    try {
-      // `wx`：临时文件名撞上已存在的文件时直接失败，不复用别人的半成品。
-      handle = await open(temp, 'wx');
-    } catch (error) {
-      throw mapFsError(error, directoryUri);
-    }
-
-    try {
-      await handle.writeFile(content, 'utf8');
-      // 没有 fsync 的话，rename 之后断电可能留下空文件——「写了一半」的另一种形态。
-      await handle.sync();
-      await handle.close();
-      return temp;
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw mapFsError(error, directoryUri);
-    }
+    return writeFileStaged(absolute, content, (error) => mapFsError(error, directoryUri));
   }
 
   async #rename(temp: string, absolute: string, directoryUri: Uri): Promise<void> {

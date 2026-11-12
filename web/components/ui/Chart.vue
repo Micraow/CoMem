@@ -13,6 +13,8 @@
  * 值为 0 的行保留文字、不画条：§17.2 的示例里「序列化 0ms」是要被看见的，
  * 藏掉会让四阶段少一行，读者以为漏了。
  */
+import { formatOneDecimal } from '~/utils/format'
+
 export interface ChartDatum {
   readonly label: string
   readonly value: number
@@ -44,18 +46,11 @@ function widthOf(value: number): string {
   return `${Math.min(100, (value / scale.value) * 100)}%`
 }
 
-/**
- * 千分位 + 最多一位小数。
- *
- * Token 用量是六位数，不加分隔符读不出量级；毫秒与秒到一位就够，再多是噪声。
- */
-const numberFormat = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 })
-
 function textOf(value: number): string {
   if (!Number.isFinite(value)) {
     return '—'
   }
-  return `${numberFormat.format(value)}${props.unit}`
+  return `${formatOneDecimal(value)}${props.unit}`
 }
 </script>
 

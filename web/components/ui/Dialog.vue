@@ -2,9 +2,9 @@
 /**
  * 对话框 / 抽屉（shadcn-vue 的 Dialog）。
  *
- * 只做控制台需要的三件事：遮罩、Esc 关闭、打开时把焦点移进面板并锁住背景滚动。
- * 焦点陷阱没有手写：面板本身 `tabindex="-1"` 且内容都是可聚焦元素，浏览器 Tab
- * 顺序在单个面板内已经闭合；再手写一套反而会和浏览器行为打架。
+ * 遮罩、Esc 关闭、焦点移进面板并在面板内循环、关闭时把焦点还给触发元素。
+ * 没换原生 `<dialog>`：`showModal()` 把面板放进 top layer，压过 `.toast-stack`
+ * 的 `z-index: 80`，对话框里触发的 toast 会被遮住且点不到关闭。
  *
  * `placement="left"` 是移动端的导航抽屉：同一份侧边栏内容，不重复维护。
  */
@@ -26,6 +26,12 @@ const props = withDefaults(
 const model = defineModel<boolean>({ default: false })
 const panel = ref<HTMLElement | null>(null)
 
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/** 打开前的焦点位置，关闭时还回去。 */
+let restoreFocusTo: HTMLElement | null = null
+
 function close(): void {
   model.value = false
 }
@@ -33,6 +39,30 @@ function close(): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     close()
+    return
+  }
+
+  const el = panel.value
+  if (event.key !== 'Tab' || el === null) {
+    return
+  }
+
+  const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)]
+  const first = items.at(0)
+  const last = items.at(-1)
+  if (first === undefined || last === undefined) {
+    event.preventDefault()
+    return
+  }
+
+  // 面板自己（刚打开时）与首元素之前都回绕到末尾，末尾之后回绕到首元素。
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || active === el)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault()
+    first.focus()
   }
 }
 
@@ -43,11 +73,16 @@ watch(model, async (open) => {
 
   document.body.style.overflow = open ? 'hidden' : ''
   if (open) {
+    restoreFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
     document.addEventListener('keydown', onKeydown)
     await nextTick()
     panel.value?.focus()
   } else {
     document.removeEventListener('keydown', onKeydown)
+    if (restoreFocusTo?.isConnected === true) {
+      restoreFocusTo.focus()
+    }
+    restoreFocusTo = null
   }
 })
 

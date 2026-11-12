@@ -26,6 +26,9 @@ import type { ClaimableTaskStatus, TaskType } from '~/utils/taskLabels'
 import type { McpToolKind } from '~/utils/toolLabels'
 import type { Ref } from 'vue'
 
+import { SERVICE_UNREACHABLE_MESSAGE } from '../utils/errors'
+import { isRecord } from '../utils/record'
+
 import { clearConsoleSession, readStoredScope, writeStoredScope } from './consoleAuth'
 import {
   consoleIdentityOrThrow,
@@ -65,10 +68,6 @@ export class ApiClientError extends Error {
     this.statusCode = statusCode
     this.details = details
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isOkEnvelope<T>(payload: unknown): payload is ApiOk<T> {
@@ -211,7 +210,7 @@ async function request<T>(
       )
     }
     throw new ApiClientError(
-      '无法连接 CoMem 服务，请确认后端已启动。',
+      SERVICE_UNREACHABLE_MESSAGE,
       'NETWORK_ERROR',
       0,
     )
