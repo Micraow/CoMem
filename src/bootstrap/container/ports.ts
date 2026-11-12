@@ -11,9 +11,10 @@ import { dirname, join } from 'node:path';
 
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import { ReconcileLog } from '../../adapters/fs/reconcile-log.js';
+import { READ_LEVEL, WRITE_LEVEL } from '../../domain/acl.js';
 import type { Uri } from '../../domain/uri.js';
 import type { AclService } from '../../services/acl.js';
-import { permissionDenied } from '../../services/authorizer.js';
+import { notFound, permissionDenied } from '../../services/authorizer.js';
 import type { AclAction, Authorizer } from '../../services/authorizer.js';
 import type {
   ReconcileEntry,
@@ -174,6 +175,9 @@ export class FileResourceStorage implements ResourceStorage {
  * - 读操作只在**节点确实存在于磁盘**时物化：批量摄取、会话、技能这些绕过
  *   `FileSystemService` 的写入路径已经把文件写下去了，但物化表里没有行。一个拼错的
  *   URI 不会因为 GET 就在数据库里多一条权限行。
+ * - 读的目标不存在、但**祖先链对调用方可读**时抛 `NOT_FOUND`：此时调用方问的是
+ *   「这条记忆在哪」，不是「我有没有权限」。祖先链也不可读时仍然是
+ *   `PERMISSION_DENIED`——跨作用域探测不能靠错误码判断节点是否存在。
  * - 已经在缓存里的节点不会重复物化（第一次 `check` 就通过）。
  * - MCP 的 `write` 与 HTTP `POST /content/write` 都在 mode 分派前按 write 求权
  *   一次：`create` / `append` 的存在性预读是读操作，不先物化就会把写操作误报成
@@ -209,12 +213,19 @@ export class InheritingAuthorizer implements Authorizer {
     // 写操作的目标可能还不存在（新建节点），读操作只有「磁盘上有、物化表里没有」
     // （批量写入 / 会话 / 技能这些绕过 `FileSystemService` 的路径）才值得物化。
     // `store.stat` 不求权，所以这个判断本身不会触发权限检查。
-    const exists = action >= 3 ? true : (await this.#store.stat(uri)) !== null;
+    const exists = action >= WRITE_LEVEL ? true : (await this.#store.stat(uri)) !== null;
     if (exists) {
       await this.#acl.materializeNode(uri);
       if (await this.#acl.check(uri, action, principals)) {
         return;
       }
+    } else if (
+      action === READ_LEVEL &&
+      (await this.#acl.hasAncestorPermission(uri, action, principals))
+    ) {
+      // 节点不存在，但祖先链可读：这是 404，不是 403。祖先链也不可读时落到下面
+      // 的 `permissionDenied`，保持「跨作用域探测看不出节点是否存在」。
+      throw notFound(uri);
     }
     throw permissionDenied(uri, action);
   }

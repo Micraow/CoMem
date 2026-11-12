@@ -243,6 +243,29 @@ describe('权限与参数', () => {
     expect(errorOf(other)['code']).toBe('PERMISSION_DENIED');
   });
 
+  it('读不存在的节点返回 404；别人的命名空间仍是一律 403', async () => {
+    // 自己的根有 read（owner 恒 manage）：缺失路径应该是「不存在」，不是「没有权限」。
+    const missingOwn = `${ROOT}/memories/missing.md`;
+    const own = await inject({
+      method: 'GET',
+      url: `/api/v1/content/read?uri=${encode(missingOwn)}`,
+    });
+    expect(own.statusCode).toBe(404);
+    expect(errorOf(own)['code']).toBe('NOT_FOUND');
+
+    // 跨作用域探测不能泄露存在性：别人命名空间里「有」与「没有」必须给出同一种拒绝。
+    const foreignExisting = 'comem://user/other/memories/real.md';
+    await container.vectorBackfill.store.writeText(Uri.parse(foreignExisting), '# real\n');
+    for (const target of [foreignExisting, 'comem://user/other/memories/missing.md']) {
+      const denied = await inject({
+        method: 'GET',
+        url: `/api/v1/content/read?uri=${encode(target)}`,
+      });
+      expect(denied.statusCode, target).toBe(403);
+      expect(errorOf(denied)['code'], target).toBe('PERMISSION_DENIED');
+    }
+  });
+
   it('非回环来源没有凭据时 401', async () => {
     const response = await inject({
       method: 'GET',

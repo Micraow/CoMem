@@ -68,3 +68,13 @@ export function permissionDenied(uri: Uri, action: AclAction): ComemError {
     { uri: uri.toString(), action },
   );
 }
+
+/**
+ * `assert` 在「路径不存在」时的标准错误。
+ *
+ * 读路径用它与 `permissionDenied` 分开：调用方对自己的作用域有 read、只是节点没
+ * 写下来时，回答「不存在」；祖先链也不可读时仍然回答「没有权限」。
+ */
+export function notFound(uri: Uri): ComemError {
+  return new ComemError('NOT_FOUND', `节点不存在：${uri.toString()}。`, { uri: uri.toString() });
+}

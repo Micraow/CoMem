@@ -17,7 +17,7 @@ import type { Logger } from '../../domain/log.js';
 import type { Uri } from '../../domain/uri.js';
 
 import { permissionDenied, type AclAction, type Authorizer } from '../authorizer.js';
-import { assertDirectory, filterReadable as filterReadableUris } from './guard.js';
+import { assertDirectory, filterReadable as filterReadableUris, hasAncestorPermission as ancestorPermission } from './guard.js';
 import { materializeNode as materializeOneNode } from './materialize.js';
 import { resolvePrincipals as expandPrincipals } from './principals.js';
 import {
@@ -205,6 +205,11 @@ export class AclService implements Authorizer {
     await materializeOneNode(this.#ports(), uri);
   }
 
+  /** 目标（可能不存在）沿祖先链的权限。实现见 `./acl/guard.ts`。 */
+  async hasAncestorPermission(uri: Uri, action: AclAction, principals: readonly string[]): Promise<boolean> {
+    return ancestorPermission(this.#ports(), uri, action, principals);
+  }
+
   // ── 内部 ──
 
   /** 各模块显式接收的端口；状态留在类里，不变成 public 字段。 */
@@ -219,12 +224,7 @@ export class AclService implements Authorizer {
     };
   }
 
-  /**
-   * 单节点求权：物化表里该主体集合拿到的级别 → `levelSatisfies` 位测试。
-   *
-   * 查询在 `PermissionRepository.maxLevel`，与 `readableUris` 共用同一份 deny
-   * 谓词；这一层只保留「级别 → 是否满足 action」的规则。
-   */
+  /** 单节点求权：物化表里的级别 → `levelSatisfies` 位测试。查询与 deny 谓词在 `PermissionRepository`。 */
   async #checkPrincipals(
     uri: Uri,
     action: AclAction,

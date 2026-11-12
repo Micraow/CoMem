@@ -54,7 +54,7 @@ interface SerializedTree {
   readonly truncated: boolean;
 }
 
-/** `GET /fs/stat` 的 stat 字段；目标不存在时整个字段是 `null`。 */
+/** `GET /fs/stat` 的 stat 字段；目标不存在时授权层返回 404（`NOT_FOUND`），`null` 只用于并发删除。 */
 interface FsStat {
   readonly kind: 'file' | 'directory';
   readonly size: number;
