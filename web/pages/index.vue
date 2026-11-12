@@ -20,7 +20,7 @@
  * 空白，没有任何错误说明。现在两个请求各带自己的加载态与错误，任务卡在 403 时
  * 直接说明需要管理员权限。
  */
-import { AlertTriangle, CheckCircle2, Plug, RefreshCw } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, Plug, Plus, RefreshCw } from 'lucide-vue-next'
 
 import {
   errorMessageOf,
@@ -30,6 +30,7 @@ import {
   type TaskPayload,
 } from '~/composables/useApi'
 import { isFreshInstall } from '~/utils/connectGuide'
+import { fileRouteOf } from '~/utils/fileRoute'
 import { formatMonthDayTime } from '~/utils/format'
 import { healthStatusLabel } from '~/utils/healthLabels'
 import {
@@ -44,6 +45,7 @@ useHead({ title: '概览 · CoMem 控制台' })
 const TASK_PREVIEW_LIMIT = 8
 
 const api = useApi()
+const router = useRouter()
 
 const health = useState<HealthPayload | null>('comem-health', () => null)
 const tasks = useState<readonly TaskPayload[] | null>('comem-tasks', () => null)
@@ -144,6 +146,13 @@ onMounted(load)
 const needsOnboarding = computed(() =>
   isFreshInstall(health.value, tasks.value === null ? null : tasks.value.length),
 )
+
+/** 新建记忆对话框。创建成功后直接进文件详情——「保存了然后什么都没发生」不算反馈。 */
+const createOpen = ref(false)
+
+function onCreated(uri: string): void {
+  void router.push(fileRouteOf(uri))
+}
 </script>
 
 <template>
@@ -201,9 +210,15 @@ const needsOnboarding = computed(() =>
               <Plug :size="size" :stroke-width="1.4" />
             </template>
             <template #extra>
-              <NuxtLink to="/connect" class="btn btn--primary btn--sm connect-cta">
-                接入 Agent
-              </NuxtLink>
+              <div class="empty-actions">
+                <UiButton variant="primary" size="sm" @click="createOpen = true">
+                  <Plus :size="14" :stroke-width="1.8" />
+                  新建记忆
+                </UiButton>
+                <NuxtLink to="/connect" class="btn btn--secondary btn--sm connect-cta">
+                  接入 Agent
+                </NuxtLink>
+              </div>
             </template>
           </UiEmpty>
           <UiEmpty v-else v-slot="{ size }" title="队列是空的">
@@ -236,12 +251,21 @@ const needsOnboarding = computed(() =>
           </tbody>
         </UiTable>
       </UiCard>
+
+      <DomainMemoryCreateDialog v-model="createOpen" @created="onCreated" />
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 空态里的入口是链接，不是按钮：锚点默认带下划线，改成按钮外观后要显式去掉。 */
+/* 空态里的入口是链接与按钮并排；链接要显式去掉锚点的下划线。 */
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
 .connect-cta {
   text-decoration: none;
 }

@@ -18,6 +18,7 @@ import {
   Circle,
   FileText,
   Folder,
+  Plus,
   Search,
 } from 'lucide-vue-next'
 
@@ -50,6 +51,19 @@ const scopeRoot = useScopeRoot()
 
 const SKELETON_ROWS = 8
 const scrollArea = ref<HTMLElement | null>(null)
+const createOpen = ref(false)
+
+/**
+ * 新建成功后：重拉当前根 → 展开到新节点 → 选中它。
+ *
+ * 顺序不能换。`refresh()` 会把展开状态清空；先选中再刷新，新文件会因为父目录没展开
+ * 而不在 `rows` 里，看起来像「保存了但没出现」。
+ */
+async function onCreated(uri: string): Promise<void> {
+  await refresh()
+  await expandAncestors(uri)
+  emit('select', uri)
+}
 
 function isMetaFile(name: string): boolean {
   return name.startsWith('.')
@@ -104,6 +118,15 @@ watch([() => props.selected, state], () => {
     <div class="aside-head">
       <span class="aside-head__title">命名空间</span>
       <span class="spacer" />
+      <UiButton
+        variant="secondary"
+        size="sm"
+        aria-label="新建记忆"
+        @click="createOpen = true"
+      >
+        <Plus :size="14" :stroke-width="1.8" />
+        新建
+      </UiButton>
       <UiRefreshButton label="刷新目录树" :disabled="loading" @click="refresh" />
     </div>
 
@@ -193,5 +216,7 @@ watch([() => props.selected, state], () => {
       <span><FileText :size="13" :stroke-width="1.4" aria-hidden="true" />文档</span>
       <span><Circle :size="9" :stroke-width="1.4" aria-hidden="true" />元数据</span>
     </div>
+
+    <DomainMemoryCreateDialog v-model="createOpen" @created="onCreated" />
   </section>
 </template>

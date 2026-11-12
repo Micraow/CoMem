@@ -37,6 +37,7 @@ import {
   type TreeEntryPayload,
 } from '~/composables/useApi'
 import { copyToClipboard } from '~/utils/clipboard'
+import { fileRouteOf } from '~/utils/fileRoute'
 import { formatBytes } from '~/utils/format'
 import { fsEntryDisplayName, fsEntryKindLabel, type FsEntryKind } from '~/utils/fsLabels'
 import {
@@ -306,13 +307,7 @@ async function loadLayer(): Promise<void> {
 }
 
 function selectNode(uri: string): void {
-  const relative = uri.startsWith(URI_PREFIX) ? uri.slice(URI_PREFIX.length) : uri
-  const encoded = relative
-    .split('/')
-    .filter((segment) => segment !== '')
-    .map((segment) => encodeURIComponent(segment))
-    .join('/')
-  void router.push(`/files/${encoded}`)
+  void router.push(fileRouteOf(uri))
 }
 
 async function copyUri(): Promise<void> {
