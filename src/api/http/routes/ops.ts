@@ -40,6 +40,7 @@ import { ComemError } from '../../../domain/errors.js';
 import { Uri } from '../../../domain/uri.js';
 import type { AclService } from '../../../services/acl.js';
 import type { ProfileFormatHealth } from '../../../services/observability/profile-format.js';
+import type { RetrievalEngine } from '../../../domain/retrieval.js';
 import type { RerankFailure } from '../../../services/retrieval/types.js';
 import { healthStatus, type HealthStatus } from '../../health-status.js';
 import { ok } from '../envelope.js';
@@ -96,6 +97,10 @@ interface HealthResponse {
     readonly degraded: boolean;
     readonly pendingDirs: number;
     readonly degradedDirs: number;
+  };
+  /** 实际生效的检索策略（`retrieval.engine`）。控制台据此如实标注「关键词 / 向量 / 混合」。 */
+  readonly retrieval: {
+    readonly engine: RetrievalEngine;
   };
   /** 归档提交的记忆抽取是否被跳过（`providers.llm.default.type = disabled`）。 */
   readonly memoryExtract: {
@@ -159,6 +164,7 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             pendingDirs: health.staleSummaries,
             degradedDirs: health.degradedSummaries,
           },
+          retrieval: { engine: config.retrieval.engine },
           // 归档提交的记忆抽取。形状与 `ingest` 报告的 `extraction` 一致
           // （`{ skipped, reason }`），两边说的是同一件事。
           memoryExtract: {

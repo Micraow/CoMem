@@ -51,6 +51,7 @@ import {
   sourceNoteOf,
   sourceToneOf,
   testSummaryOf,
+  testTypePathOf,
   valueDisplayOf,
   type ConfigGroup,
   type ConfigItemView,
@@ -65,7 +66,7 @@ import {
 useHead({ title: '设置 · CoMem 控制台' })
 
 interface ProbeState {
-  readonly status: 'idle' | 'running' | 'done'
+  readonly status: 'idle' | 'running' | 'done' | 'skipped'
   readonly result: ConfigTestPayload | null
   readonly error: string | null
 }
@@ -89,6 +90,20 @@ const saveError = ref<string | null>(null)
 const saveResult = ref<{ readonly written: number; readonly overridePath: string } | null>(null)
 const saving = ref(false)
 
+/**
+ * 已写进覆盖文件、但还没成为运行值的项。`value` 是按配置类型转换后的值，
+ * `draft` 是保存时输入框里的原文——用户再改它，这一项就重新算「待保存」。
+ *
+ * 保存后**不重新 GET**：`GET /config` 回的是启动快照，重新拉取会把刚填的值
+ * 覆盖回旧值。表单继续用用户填的值，等重启（或用户点「重新读取运行中配置」）。
+ */
+interface PendingSave {
+  readonly draft: string
+  readonly value: unknown
+}
+
+const pending = ref<Readonly<Record<string, PendingSave>>>({})
+
 const expanded = ref<ReadonlySet<ConfigGroup>>(new Set(INITIALLY_EXPANDED_GROUPS))
 const probes = ref<Readonly<Record<ConfigTestTarget, ProbeState>>>(
   Object.fromEntries(CONFIG_TEST_TARGETS.map((target) => [target, idleProbe()])) as Record<
@@ -111,8 +126,64 @@ const inferenceError = ref<string | null>(null)
 
 const items = computed<readonly ConfigItemView[]>(() => view.value?.items ?? [])
 const groups = computed(() => groupSettings(items.value))
-const preview = computed(() => buildPatchValues(items.value, drafts.value, cleared.value))
-const dirtyCount = computed(() => Object.keys(preview.value.values).length)
+
+/** 判断两个配置值是否相同（数组与标量都走 JSON 序列化）。 */
+function sameValueOf(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * 一项待生效的保存是否已经在运行值里。
+ *
+ * 密钥没有明文可比，用「是否已设置 + 末 4 位掩码」判断；其余项直接比类型化值。
+ * 重启后 `GET /config` 返回覆盖文件里的值，这项就自动从待生效里消失。
+ */
+function isApplied(item: ConfigItemView, saved: PendingSave): boolean {
+  if (item.secret) {
+    // 密钥没有明文可比：来源必须是覆盖文件，再用末 4 位确认掩码。
+    if (item.source !== 'override') {
+      return false
+    }
+    if (saved.value === '') {
+      return !item.configured
+    }
+    return (
+      item.configured &&
+      item.masked !== null &&
+      item.masked.endsWith(String(saved.value).slice(-4))
+    )
+  }
+  return sameValueOf(item.value, saved.value)
+}
+
+/**
+ * 把待生效的值当成比较基线：`buildPatchValues` 只提交相对覆盖文件的改动。
+ *
+ * 没有这一层，保存后草稿仍相对运行值有差异，页头会一直显示「待保存」。
+ */
+const baselineItems = computed<readonly ConfigItemView[]>(() =>
+  items.value.map((item) => {
+    const saved = pending.value[item.path]
+    return saved === undefined ? item : { ...item, value: saved.value }
+  }),
+)
+
+const preview = computed(() =>
+  buildPatchValues(baselineItems.value, drafts.value, cleared.value),
+)
+
+/** 这一项的草稿是否就是上次成功保存的原文。 */
+function pendingSavedOf(path: string): boolean {
+  const saved = pending.value[path]
+  return saved !== undefined && drafts.value[path] === saved.draft
+}
+
+const pendingCount = computed(() => Object.keys(pending.value).length)
+
+const dirtyCount = computed(() =>
+  Object.keys(preview.value.values).filter((path) => !pendingSavedOf(path)).length,
+)
+
 const canSave = computed(
   () =>
     !saving.value &&
@@ -164,8 +235,22 @@ function describedByOf(item: ConfigItemView): string | undefined {
   return ids.length === 0 ? undefined : ids.join(' ')
 }
 
+/**
+ * 改掉某组供应商的 `type` 后，上一轮「已停用」的测试结论就不再对应当前表单。
+ * 这里只清掉这一组的测试状态，结果区不会顶着旧结论。
+ */
+function clearProbeForTypePath(path: string): void {
+  for (const target of CONFIG_TEST_TARGETS) {
+    if (testTypePathOf(target) !== path || probes.value[target].status === 'idle') {
+      continue
+    }
+    probes.value = { ...probes.value, [target]: idleProbe() }
+  }
+}
+
 function setDraft(path: string, value: string): void {
   drafts.value = { ...drafts.value, [path]: value }
+  clearProbeForTypePath(path)
   if (fieldErrors.value[path] !== undefined) {
     const next = { ...fieldErrors.value }
     delete next[path]
@@ -201,8 +286,16 @@ function toggleGroup(group: ConfigGroup): void {
   expanded.value = next
 }
 
-function resetDrafts(next: readonly ConfigItemView[]): void {
-  drafts.value = Object.fromEntries(next.map((item) => [item.path, draftOf(item)]))
+function resetDrafts(
+  next: readonly ConfigItemView[],
+  saved: Readonly<Record<string, PendingSave>> = {},
+): void {
+  drafts.value = Object.fromEntries(
+    next.map((item) => {
+      const entry = saved[item.path]
+      return [item.path, entry === undefined ? draftOf(item) : entry.draft]
+    }),
+  )
   cleared.value = new Set()
   fieldErrors.value = {}
 }
@@ -213,8 +306,23 @@ async function load(): Promise<void> {
   forbidden.value = false
   try {
     const payload = await api.get<ConfigViewPayload>('/config')
+    // 重启后已经生效的项从待生效里移除；重启前仍保留，表单继续显示用户填的值。
+    const nextPending = Object.fromEntries(
+      Object.entries(pending.value).filter(([path, saved]) => {
+        const item = payload.items.find((candidate) => candidate.path === path)
+        return item !== undefined && !isApplied(item, saved)
+      }),
+    )
+    const hadPending = Object.keys(pending.value).length > 0
+    const appliedAll = hadPending && Object.keys(nextPending).length === 0
+    pending.value = nextPending
     view.value = payload
-    resetDrafts(payload.items)
+    resetDrafts(payload.items, nextPending)
+    if (appliedAll) {
+      // 重启后所有待生效项都成为运行值，旧的成功提示不再成立。
+      saveResult.value = null
+      saveError.value = null
+    }
   } catch (caught) {
     view.value = null
     if (isForbidden(caught)) {
@@ -227,12 +335,33 @@ async function load(): Promise<void> {
   }
 }
 
+/**
+ * 放弃本地修改并回到正在运行的配置。
+ *
+ * 保存过的值仍在覆盖文件里；这里只是不再把它们当表单基线，避免用户以为
+ * 「不重启也能看到保存的旧值」。
+ */
+async function reloadRunning(): Promise<void> {
+  pending.value = {}
+  saveResult.value = null
+  saveError.value = null
+  await load()
+}
+
 async function save(): Promise<void> {
   if (saving.value) {
     return
   }
 
-  const { values, errors } = buildPatchValues(items.value, drafts.value, cleared.value)
+  const { values: previewValues, errors } = buildPatchValues(
+    baselineItems.value,
+    drafts.value,
+    cleared.value,
+  )
+  // 上一轮已经保存、这次没再改的密钥不要重复提交（非密钥项已由基线排除）。
+  const values = Object.fromEntries(
+    Object.entries(previewValues).filter(([path]) => !pendingSavedOf(path)),
+  )
   if (Object.keys(errors).length > 0 || Object.keys(values).length === 0) {
     return
   }
@@ -246,10 +375,20 @@ async function save(): Promise<void> {
       readonly overridePath: string
       readonly restartRequired: true
     }>('/config', { values })
+    const nextPending = { ...pending.value }
+    for (const [path, value] of Object.entries(values)) {
+      const item = items.value.find((candidate) => candidate.path === path)
+      if (item !== undefined && !item.secret && sameValueOf(item.value, value)) {
+        // 改回了运行值：覆盖文件里写的值与运行值相同，没有「待生效」可言。
+        delete nextPending[path]
+      } else {
+        nextPending[path] = { draft: drafts.value[path] ?? '', value }
+      }
+    }
+    pending.value = nextPending
     saveResult.value = { written: result.written, overridePath: result.overridePath }
     toast.show('success', `已写入 ${result.written} 项设置，重启后生效`)
-    // 重新取一次：来源徽章要从「默认值」变成「覆盖文件」。
-    await load()
+    // **不要重新 GET `/config`**：它回的是启动快照，会把刚填的值覆盖回旧值。
   } catch (caught) {
     const message = errorMessageOf(caught)
     const details = caught instanceof ApiClientError ? caught.details : undefined
@@ -268,8 +407,37 @@ async function save(): Promise<void> {
   }
 }
 
+/**
+ * 这一组的类型是不是「停用」。用正在运行的配置判断：连接测试测的是运行中的配置，
+ * 不是刚改、还没保存的草稿。类型停用时没有供应商可连，发请求只会得到参数错误。
+ */
+function typeDisabledOf(target: ConfigTestTarget): boolean {
+  const path = testTypePathOf(target)
+  return items.value.find((item) => item.path === path)?.value === 'disabled'
+}
+
+/** 把「去启用」落到该组的类型选择框上：展开分组、聚焦并滚到它。 */
+function revealTypeField(target: ConfigTestTarget): void {
+  const next = new Set<ConfigGroup>(expanded.value)
+  next.add(target)
+  expanded.value = next
+  void nextTick(() => {
+    const element = document.getElementById(inputIdOf(testTypePathOf(target)))
+    element?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    element?.focus()
+  })
+}
+
 async function test(target: ConfigTestTarget | null): Promise<void> {
   if (target === null || probeOf(target).status === 'running') {
+    return
+  }
+
+  if (typeDisabledOf(target)) {
+    probes.value = {
+      ...probes.value,
+      [target]: { status: 'skipped', result: null, error: null },
+    }
     return
   }
 
@@ -384,7 +552,17 @@ onMounted(() => {
           <UiBadge v-if="view !== null && !view.overrideWritable" variant="orange">
             覆盖文件不可写
           </UiBadge>
+          <span v-if="pendingCount > 0" class="caption tnum">有 {{ pendingCount }} 项待重启生效</span>
           <span v-if="dirtyCount > 0" class="caption tnum">待保存 {{ dirtyCount }} 项</span>
+          <UiButton
+            v-if="dirtyCount > 0 || pendingCount > 0"
+            variant="plain"
+            size="sm"
+            title="放弃本地修改，按正在运行的配置重填表单"
+            @click="reloadRunning"
+          >
+            重新读取运行中配置
+          </UiButton>
           <UiButton variant="secondary" size="sm" :disabled="loading" @click="load">
             <RefreshCw :size="14" :stroke-width="1.5" />
             {{ loading ? '加载中' : '重新加载' }}
@@ -410,7 +588,8 @@ onMounted(() => {
               />
             </div>
             <p class="caption">
-              已写入 {{ saveResult.written }} 项。重启后再回到本页，来源徽章会变成「覆盖文件」。
+              已写入 {{ saveResult.written }} 项，表单保留了你刚填的值。重启后再回到本页，
+              来源徽章会变成「来自网页保存」。
             </p>
           </div>
         </UiCallout>
@@ -466,6 +645,16 @@ onMounted(() => {
           <UiCard :title="group.label" panel>
           <template #actions>
             <span class="caption tnum">{{ group.items.length }} 项</span>
+            <template
+              v-if="group.testTarget !== null && probeOf(group.testTarget).status === 'skipped'"
+            >
+              <UiBadge variant="gray" title="这一组没有配置供应商，不会发出连接请求。">
+                已停用，无需测试
+              </UiBadge>
+              <UiButton variant="plain" size="sm" @click="revealTypeField(group.testTarget)">
+                去启用
+              </UiButton>
+            </template>
             <UiButton
               v-if="group.testTarget !== null"
               variant="secondary"
@@ -510,6 +699,9 @@ onMounted(() => {
                 <div class="settings-row__badges">
                   <UiBadge :variant="sourceToneOf(item.source)" :title="sourceNoteOf(item.source)">
                     {{ sourceLabelOf(item.source) }}
+                  </UiBadge>
+                  <UiBadge v-if="pendingSavedOf(item.path)" variant="teal">
+                    已保存，重启后生效
                   </UiBadge>
                   <UiBadge v-if="!item.editable" variant="gray">不可编辑</UiBadge>
                 </div>

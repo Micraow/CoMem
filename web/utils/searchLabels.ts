@@ -1,5 +1,5 @@
 /**
- * 检索界面的两张文案表：查询计划的意图、命中的上下文类型（检索调试页）。
+ * 检索界面的两张文案表：查询计划的意图、命中的上下文类型（检索页）。
  *
  * ## 为什么取值也在这里声明一份
  *
@@ -66,3 +66,35 @@ export const CONTEXT_LABEL = {
   session: '会话',
 } satisfies Record<ContextType, string>
 
+/**
+ * `retrieval.engine` 的取值，来自 `src/domain/retrieval.ts` 的 `RETRIEVAL_ENGINES`。
+ *
+ * 控制台从 `GET /health` 的 `retrieval.engine` 读实际生效的配置。界面上写的是
+ * 「关键词匹配 / 向量检索 / 混合检索」：`fts5` 是词法召回，叫「语义检索」等于说谎。
+ */
+export const RETRIEVAL_ENGINES = ['fts5', 'vector', 'hybrid'] as const
+
+export type RetrievalEngine = (typeof RETRIEVAL_ENGINES)[number]
+
+/** 引擎 → 界面文案。漏一个引擎即编译失败，多一个键也是。 */
+const ENGINE_LABEL = {
+  fts5: '关键词匹配',
+  vector: '向量检索',
+  hybrid: '混合检索',
+} satisfies Record<RetrievalEngine, string>
+
+export function retrievalEngineLabel(engine: RetrievalEngine): string {
+  return ENGINE_LABEL[engine]
+}
+
+/**
+ * 0 命中时对当前引擎边界的说明。
+ *
+ * `fts5` 的查询是「查询里每个词都要在正文里出现」的词法匹配；自然语言长句几乎
+ * 一定 0 命中。向量 / 混合检索没有这条限制，返回 `null`（空态里不再补一句废话）。
+ */
+export function retrievalEngineLimit(engine: RetrievalEngine): string | null {
+  return engine === 'fts5'
+    ? '当前按关键词匹配：查询里的词需要同时出现在记忆里，长句子往往一个词都对不上。'
+    : null
+}

@@ -1,17 +1,25 @@
 <script setup lang="ts">
 /**
- * 检索调试（架构文档 §16 的第二页）。
+ * 检索（架构文档 §16 的第二页）。
  *
  * 一条 query 选 `find` 或 `search` 执行，结果按分数降序；`search` 额外展示服务端
  * 返回的查询计划（§8.4）。
+ *
+ * **引擎标签是实际配置，不是页面自称。** `/health` 的 `retrieval.engine` 决定右上
+ * 角写「关键词匹配 / 向量检索 / 混合检索」；`fts5` 是词法召回，不叫「语义检索」。
+ *
+ * **自然语言不在这里拆词。** 服务端的查询重写在 `search` 模式里（`IntentStage`），
+ * 没有「只返回计划、不检索」的端点；前端再拆一次词就有两份分叉的分词规则。所以
+ * 长句 0 命中时只提示改用更短的关键词 / 换模式，不在浏览器里重写查询。
  *
  * **查询状态与 URL 同步。** 检索条件放在 `?q=...&mode=...` 里：控制台是排查工具，
  * 贴一条「我这样查没命中」的链接比自己复述条件有用。恢复只在挂载时做一次，
  * 之后由面板的防抖驱动，不做双向绑定——路由变化再回写表单会在浏览器的前进/后退
  * 上产生一次多余的检索。
  *
- * **没检索过与没命中是两件事。** 前者是空状态文案「输入关键词开始检索」，后者是
- * 「没有找到匹配的内容」，由 `searched` 区分。
+ * **没检索过与没命中是两件事。** 前者是空状态「还没有检索」；后者按「库空」与
+ * 「有数据但没匹配」分两种文案（`index.totalNodes === 0` 时提示先写入一条记忆），
+ * 由 `searched` 区分。
  */
 import type {
   SearchContextType,
@@ -22,9 +30,10 @@ import type {
   SearchPlanPayload,
   SearchSearchPayload,
 } from '~/components/domain/HitList.vue'
-import { typedQueryIntentLabel } from '~/utils/searchLabels'
+import { useApi, type HealthPayload } from '~/composables/useApi'
+import { retrievalEngineLabel, typedQueryIntentLabel } from '~/utils/searchLabels'
 
-useHead({ title: '检索调试 · CoMem 控制台' })
+useHead({ title: '检索 · CoMem 控制台' })
 
 const DEFAULT_LIMIT = '20'
 
@@ -70,6 +79,26 @@ const plan = ref<SearchPlanPayload | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const searched = ref(false)
+
+/**
+ * `/health` 只用于两件事：如实显示引擎，以及区分「库空」与「无匹配」。
+ *
+ * 取不到时保持 `null`：不猜一个默认引擎（那与「配置改了不生效」是同一类假状态），
+ * 空态退回不带引擎说明的版本。检索本身不依赖它。
+ */
+const health = ref<HealthPayload | null>(null)
+const engine = computed(() => health.value?.retrieval.engine ?? null)
+const libraryEmpty = computed(
+  () => health.value !== null && health.value.index.totalNodes === 0,
+)
+
+async function loadHealth(): Promise<void> {
+  try {
+    health.value = await api.get<HealthPayload>('/health')
+  } catch {
+    health.value = null
+  }
+}
 
 function buildBody(): Record<string, unknown> {
   const body: Record<string, unknown> = { query: query.value.trim() }
@@ -150,6 +179,7 @@ const resultCaption = computed(() =>
 )
 
 onMounted(() => {
+  void loadHealth()
   if (query.value.trim() !== '') {
     void runSearch()
   }
@@ -167,10 +197,10 @@ watch(scopeRoot, (root) => {
 <template>
   <div class="content">
     <div class="page">
-      <DomainPageHeader title="检索调试">
+      <DomainPageHeader title="检索">
         <template #actions>
-          <UiBadge :variant="mode === 'search' ? 'blue' : 'gray'">
-            {{ mode === 'search' ? 'search · 含查询计划' : 'find · 语义检索' }}
+          <UiBadge v-if="engine !== null" variant="outline">
+            {{ retrievalEngineLabel(engine) }}
           </UiBadge>
         </template>
       </DomainPageHeader>
@@ -198,6 +228,8 @@ watch(scopeRoot, (root) => {
           :searched="searched"
           :mode="mode"
           :error="error"
+          :engine="engine"
+          :library-empty="libraryEmpty"
         />
       </UiCard>
 
@@ -216,7 +248,7 @@ watch(scopeRoot, (root) => {
         <template v-else>
           <!-- 降级不是错误，但必须可见：静默降级等于骗人（§17.9 的同一原则）。 -->
           <p v-if="!plan.analyzed" class="plan__degraded">
-            意图分析没有完成，已用原查询检索。{{ plan.reason }}
+            意图分析没有完成，已用原查询检索。
           </p>
 
           <p v-else-if="plan.queries.length === 0" class="caption plan__empty">
@@ -233,6 +265,17 @@ watch(scopeRoot, (root) => {
               </span>
             </li>
           </ul>
+
+          <!-- 引擎名、失败原因这类排障信息放折叠区：主文案说「为什么没结果」，这里说「具体是什么」。 -->
+          <details class="plan__advanced">
+            <summary>高级信息</summary>
+            <p v-if="engine !== null" class="plan__advanced-line">
+              检索引擎：{{ engine }}（{{ retrievalEngineLabel(engine) }}）
+            </p>
+            <p v-if="!plan.analyzed && plan.reason !== null" class="plan__advanced-line">
+              {{ plan.reason }}
+            </p>
+          </details>
         </template>
       </section>
     </div>
@@ -323,5 +366,21 @@ watch(scopeRoot, (root) => {
 .plan__empty {
   margin: 0;
   padding: 0 16px 16px;
+}
+
+.plan__advanced {
+  padding: 0 16px 14px;
+  font-size: 13px;
+  color: var(--label-3);
+}
+
+.plan__advanced summary {
+  cursor: pointer;
+  color: var(--label-2);
+}
+
+.plan__advanced-line {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
 }
 </style>

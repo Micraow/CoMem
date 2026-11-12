@@ -44,7 +44,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { to: '/connect', label: '接入 Agent', icon: 'plug' },
       { to: '/', label: '概览', icon: 'dashboard' },
       { to: '/files', label: '文件树', icon: 'tree' },
-      { to: '/search', label: '检索调试', icon: 'search' },
+      { to: '/search', label: '检索', icon: 'search' },
       { to: '/review', label: '记忆复核', icon: 'review' },
       { to: '/tools', label: '工具', icon: 'tools' },
     ],

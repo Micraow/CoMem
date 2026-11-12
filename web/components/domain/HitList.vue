@@ -78,7 +78,7 @@ export interface SearchSearchPayload extends SearchFindPayload {
 
 <script setup lang="ts">
 /**
- * 命中列表（检索调试页的结果区）。
+ * 命中列表（检索页的结果区）。
  *
  * 三种状态互斥且必须分开：**未检索**（还没输入）、**空结果**（检索了但没有）、
  * **加载中**（骨架屏）。把「未检索」和「空结果」画成同一个空状态，用户会以为
@@ -90,7 +90,11 @@ import { ChevronRight, SearchX, Sparkles } from 'lucide-vue-next'
 
 import { LEVEL_REASON } from '~/utils/levelLabels'
 import { memoryTypeLabelOf } from '~/utils/memoryTypeLabels'
-import { CONTEXT_LABEL } from '~/utils/searchLabels'
+import {
+  CONTEXT_LABEL,
+  retrievalEngineLimit,
+  type RetrievalEngine,
+} from '~/utils/searchLabels'
 
 const props = defineProps<{
   hits: readonly SearchHitPayload[] | null
@@ -99,6 +103,10 @@ const props = defineProps<{
   searched: boolean
   mode: SearchMode
   error: string | null
+  /** 全库索引为空（`GET /health` 的 `index.totalNodes === 0`）。 */
+  libraryEmpty: boolean
+  /** 实际生效的检索引擎；`/health` 没取到时为 null。 */
+  engine: RetrievalEngine | null
 }>()
 
 const URI_PREFIX = 'comem://'
@@ -114,6 +122,51 @@ function filePathOf(uri: string): string {
     .map((segment) => encodeURIComponent(segment))
     .join('/')
 }
+
+/**
+ * 主标题：文件的摘要优先，目录与无摘要节点用文件名。
+ *
+ * URI 是地址不是标题——`comem://user/local/memories/preferences/...md` 既占宽度
+ * 又说不出这条记忆是什么。URI 仍然显示，但降为第二行小字。
+ *
+ * 目录的 L0 摘要可能是整棵子树的拼接（规则摘要把子项连成一段），拿它当标题既长
+ * 又不像「一条记忆的名字」；目录命中一律退回文件名。文件（L2）的摘要是这一条
+ * 记忆自己的摘要，有就优先用。
+ */
+function titleOf(hit: SearchHitPayload): string {
+  const isFile = hit.level === 'L2'
+  if (isFile) {
+    const abstract = hit.abstract?.trim() ?? ''
+    if (abstract !== '') {
+      return abstract
+    }
+  }
+  const relative = hit.uri.startsWith(URI_PREFIX) ? hit.uri.slice(URI_PREFIX.length) : hit.uri
+  const name = relative.split('/').filter((segment) => segment !== '').at(-1) ?? relative
+  let decoded = name
+  try {
+    decoded = decodeURIComponent(name)
+  } catch {
+    // 保持原样：URI 段解析失败时显示编码前的名字，不把整条结果藏掉。
+  }
+  // 目录命中以 `/` 结尾，和文件标题区分开（层级徽章之外的第二条线索）。
+  return isFile ? decoded : `${decoded}/`
+}
+
+/** 0 命中的标题：库空与「有数据但没匹配」是两件事。 */
+const emptyTitle = computed(() => (props.libraryEmpty ? '还没有记忆' : '没有匹配'))
+
+/**
+ * 0 命中的正文。库空时告诉用户下一步；有数据时给出当前引擎的边界，而不是一句
+ * 通用的「无结果」。`engine === null`（/health 没取到）不猜引擎，只给关键词提示。
+ */
+const emptyText = computed(() => {
+  if (props.libraryEmpty) {
+    return '先写入一条记忆，或接入 agent 之后再来检索。'
+  }
+  const limit = props.engine === null ? null : retrievalEngineLimit(props.engine)
+  return limit === null ? '换个说法或更短的关键词再试一次。' : `试试更短的关键词。${limit}`
+})
 </script>
 
 <template>
@@ -134,7 +187,12 @@ function filePathOf(uri: string): string {
       <Sparkles :size="size" :stroke-width="1.4" />
     </UiEmpty>
 
-    <UiEmpty v-else-if="props.hits === null || props.hits.length === 0" v-slot="{ size }" title="没有找到匹配的内容">
+    <UiEmpty
+      v-else-if="props.hits === null || props.hits.length === 0"
+      v-slot="{ size }"
+      :title="emptyTitle"
+      :text="emptyText"
+    >
       <SearchX :size="size" :stroke-width="1.4" />
     </UiEmpty>
 
@@ -147,16 +205,12 @@ function filePathOf(uri: string): string {
         <span class="hit__level" :data-level="hit.level">{{ hit.level }}</span>
 
         <div class="hit__body">
-          <div class="hit__top">
-            <NuxtLink class="hit__uri mono" :to="`/files/${filePathOf(hit.uri)}`">
-              {{ hit.uri }}
-              <ChevronRight :size="12" :stroke-width="1.6" aria-hidden="true" />
-            </NuxtLink>
-          </div>
+          <NuxtLink class="hit__title" :to="`/files/${filePathOf(hit.uri)}`">
+            {{ titleOf(hit) }}
+            <ChevronRight :size="12" :stroke-width="1.6" aria-hidden="true" />
+          </NuxtLink>
 
-          <p class="hit__abstract" :class="{ 'is-empty': hit.abstract === null }">
-            {{ hit.abstract ?? '（无摘要）' }}
-          </p>
+          <p class="hit__uri mono">{{ hit.uri }}</p>
 
           <div class="hit__meta">
             <UiBadge variant="outline">{{ CONTEXT_LABEL[hit.contextType] }}</UiBadge>
@@ -245,39 +299,35 @@ function filePathOf(uri: string): string {
   min-width: 0;
 }
 
-.hit__uri {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--label);
-  text-decoration: none;
-  word-break: break-all;
-}
-
-.hit__uri:hover {
-  color: var(--accent-ink);
-}
-
-.hit__uri > svg {
-  flex: none;
-  color: var(--label-4);
-}
-
-.hit__abstract {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--label-2);
+.hit__title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  font-size: 15px;
+  font-weight: 550;
+  line-height: 1.45;
+  color: var(--label);
+  text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
-.hit__abstract.is-empty {
+.hit__title:hover {
+  color: var(--accent-ink);
+}
+
+.hit__title > svg {
+  flex: none;
   color: var(--label-4);
+  vertical-align: -1px;
+}
+
+.hit__uri {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--label-3);
+  overflow-wrap: anywhere;
 }
 
 .hit__meta {

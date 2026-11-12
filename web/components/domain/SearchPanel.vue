@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 检索条件面板（检索调试页的顶部）。
+ * 检索条件面板（检索页的顶部）。
  *
  * 输入时自动检索（防抖 300ms），按钮点击立即检索：两种入口共用一个 `submit`
  * 事件，页面只实现一次「发请求 + 同步 URL」。
@@ -9,7 +9,8 @@
  * 300ms 是「停手了」与「还没想好」之间的经验值，短于此会打出一串必然作废的
  * 检索，长于此会让人觉得输入没反应。
  *
- * `find` / `search` 的差别靠选项标签表达（「带查询计划」），不写说明段落。
+ * `find` / `search` 的差别靠选项标签表达（「直接查找」/「先理解再检索」），不写
+ * 说明段落。
  */
 import { useDebounceFn } from '@vueuse/core'
 
@@ -29,8 +30,8 @@ const emit = defineEmits<{ submit: [] }>()
 const DEBOUNCE_MS = 300
 
 const MODE_OPTIONS = [
-  { value: 'find', label: 'find · 语义检索' },
-  { value: 'search', label: 'search · 带查询计划' },
+  { value: 'find', label: '直接查找' },
+  { value: 'search', label: '先理解再检索（需要模型）' },
 ] as const
 
 const LIMIT_OPTIONS = [
