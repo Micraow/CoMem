@@ -1311,3 +1311,139 @@ describe('授权', () => {
     }
   });
 });
+
+/**
+ * 建账号时的密码与 `hasPassword`。
+ *
+ * 没有密码的账号是死账号：它占着 `app_user` 一行、可以被授 ACL，却登不进来。
+ * 所以创建入口要么不收口令（账号先当 ACL 主体，列表里能看出来），要么一次完成
+ * 「建账号 + 设密码」，不能先建一个半成品再让操作者去详情抽屉里补。
+ */
+describe('建用户的密码', () => {
+  const PASSWORD = 'alice-password';
+
+  function hasPasswordOf(created: Record<string, unknown>): unknown {
+    return (created['user'] as Record<string, unknown>)['hasPassword'];
+  }
+
+  it('带合规密码：hasPassword 为 true，能直接用该密码登录', async () => {
+    const created = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/admin/users',
+        payload: { id: 'alice', displayName: 'Alice', password: PASSWORD },
+      }),
+    );
+    expect(hasPasswordOf(created)).toBe(true);
+
+    const login = await inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'alice', password: PASSWORD },
+    });
+    expect(login.statusCode).toBe(200);
+    expect((json(login)['result'] as Record<string, unknown>)['subject']).toBe('user:alice');
+  });
+
+  it('不带密码：hasPassword 为 false，账号建出来但登录 401', async () => {
+    const created = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/admin/users',
+        payload: { id: 'bob', displayName: 'Bob' },
+      }),
+    );
+    expect(hasPasswordOf(created)).toBe(false);
+
+    const login = await inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'bob', password: 'bob-password' },
+    });
+    expect(login.statusCode).toBe(401);
+  });
+
+  it('密码不合规：400，且 app_user 里没有新增行', async () => {
+    const before = countRows('SELECT COUNT(*) AS total FROM app_user');
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      // 7 个字符：低于策略下界，且账号信息本身完全合法——失败只可能来自口令。
+      payload: { id: 'carol', displayName: 'Carol', password: '1234567' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
+    // 只断状态码不够：先建账号再校验口令也会回 400，但会留下一行。
+    expect(countRows('SELECT COUNT(*) AS total FROM app_user')).toBe(before);
+    expect(
+      countRows('SELECT COUNT(*) AS total FROM app_user WHERE id = ?', 'carol'),
+    ).toBe(0);
+  });
+
+  it('列表的 hasPassword 与真实状态一致，且不回哈希', async () => {
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      payload: { id: 'alice', displayName: 'Alice', password: PASSWORD },
+    });
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      payload: { id: 'bob', displayName: 'Bob' },
+    });
+
+    const response = await inject({ method: 'GET', url: '/api/v1/admin/users' });
+    const listed = resultOf(response);
+    const hasPasswordById = new Map(
+      (listed['users'] as Record<string, unknown>[]).map((row) => [row['id'], row['hasPassword']]),
+    );
+    expect(hasPasswordById.get('alice')).toBe(true);
+    expect(hasPasswordById.get('bob')).toBe(false);
+    expect(hasPasswordById.get('local')).toBe(false);
+    // 只回布尔：哈希串的编码前缀不能出现在任何响应里。
+    expect(response.body).not.toContain('scrypt$');
+  });
+
+  it('两个设密码入口共用同一份策略：边界口径一致', async () => {
+    const created = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      payload: { id: 'dave', displayName: 'Dave', password: '12345678' },
+    });
+    expect(created.statusCode).toBe(200);
+
+    // 同一个 8 字符口令在「设密码」入口同样被接受。
+    const setEight = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users/dave/password',
+      payload: { password: '12345678' },
+    });
+    expect(setEight.statusCode).toBe(200);
+
+    // 同一个 7 字符口令在两个入口都拒绝，且错误消息逐字相同——这是同一份策略
+    // 被调用的直接证据；各写一份时两条消息会在措辞或边界上漂移。
+    const viaCreate = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users',
+      payload: { id: 'erin', displayName: 'Erin', password: '1234567' },
+    });
+    const viaSet = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users/dave/password',
+      payload: { password: '1234567' },
+    });
+    expect(viaCreate.statusCode).toBe(400);
+    expect(viaSet.statusCode).toBe(400);
+    expect(errorOf(viaCreate)['code']).toBe('INVALID_ARGUMENT');
+    expect(errorOf(viaSet)['code']).toBe('INVALID_ARGUMENT');
+    expect(errorOf(viaCreate)['message']).toBe(errorOf(viaSet)['message']);
+
+    // 被拒绝的口令没有落到 dave 身上：仍是原来那个 8 字符口令。
+    const oldLogin = await inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'dave', password: '12345678' },
+    });
+    expect(oldLogin.statusCode).toBe(200);
+  });
+});

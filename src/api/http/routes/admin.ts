@@ -83,8 +83,16 @@ export type {
   AdminRouteServices,
 } from './admin-request.js';
 
-/** 用户列表项：用户资料 + 该主体在 `node_permission` 里的行数。 */
-interface SerializedUser extends User {
+/**
+ * 用户视图：资料 + 是否设过密码。
+ *
+ * `hasPassword` 只回布尔，`app_user.password_hash` 不进任何响应。列表、创建、更新
+ * 共用这一份形状：少给一处，控制台换行渲染时就会把这个字段丢掉。
+ */
+type UserView = User & { readonly hasPassword: boolean };
+
+/** 用户列表项：用户视图 + 该主体在 `node_permission` 里的行数。 */
+interface SerializedUser extends UserView {
   readonly permissionCount: number;
 }
 
@@ -105,7 +113,7 @@ interface UserListResponse {
 
 /** `POST /admin/users`、`PATCH /admin/users/{id}` 的响应体。 */
 interface UserResponse {
-  readonly user: User;
+  readonly user: UserView;
 }
 
 /** `DELETE /admin/users/{id}`、`DELETE /admin/groups/{id}` 的响应体。 */

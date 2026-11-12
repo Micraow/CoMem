@@ -1,20 +1,22 @@
 /**
  * 用户目录（`/admin/users*`）。
  *
- * 函数体与拆分前逐字相同，只加了 `ok` 的类型实参与 import。
+ * 每个端点只做请求解析与响应形状；建用户带可选口令，顺序约束见文件尾 `createUser`。
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import { userPrincipal } from '../../../domain/acl.js';
 import { ComemError } from '../../../domain/errors.js';
 import { assertValidUserId } from '../../../domain/identity.js';
 import { Uri } from '../../../domain/uri.js';
+import { assertPasswordPolicy } from '../../../services/password.js';
 import { scopeKeyOf } from '../../../services/recall-ledger.js';
 import { ok } from '../envelope.js';
-import { assertSystemAdmin, requestContextOf } from '../middleware.js';
+import { assertSystemAdmin, requestContextOf, type SystemAdminPolicy } from '../middleware.js';
 import {
   optionalQueryInteger,
+  optionalString,
   requireRecord,
   requireString,
   type HttpRouteGroup,
@@ -34,6 +36,7 @@ import {
   optionalNullableString,
   parseStatus,
   userRootOf,
+  type AdminIdentity,
   type AdminRouteServices,
 } from './admin-request.js';
 
@@ -62,6 +65,7 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           users: users.map((user) => ({
             ...user,
             permissionCount: counts.get(userPrincipal(user.id)) ?? 0,
+            hasPassword: identity.hasPassword(user.id),
           })),
           total: adminAccess.userCount(),
           limit,
@@ -69,23 +73,9 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
         });
       });
 
-      app.post<{ Body: unknown }>('/users', async (request) => {
-        const body = requireRecord(request.body, 'admin/users');
-        const id = requireString(body, 'id');
-        const displayName = requireString(body, 'displayName');
-        const email = optionalNullableString(body, 'email');
-        assertSystemAdmin(request, systemAdmin);
-
-        const user = identity.createUser({
-          id,
-          displayName,
-          ...(email === undefined ? {} : { email }),
-        });
-        // 新账号的根与四个上下文目录要立刻预置：不预置的话，第一次登录看到的是
-        // 403 而不是空列表（`ensureUserNamespace` 的注释）。
-        await identity.ensureUserNamespace(id);
-        return ok<UserResponse>({ user });
-      });
+      app.post<{ Body: unknown }>('/users', async (request) =>
+        ok(await createUser(identity, systemAdmin, request)),
+      );
 
       app.patch<{ Params: { id: string }; Body: unknown }>('/users/:id', async (request) => {
         const id = assertValidUserId(request.params.id);
@@ -100,7 +90,9 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           ...(email === undefined ? {} : { email }),
           ...(status === undefined ? {} : { status }),
         });
-        return ok<UserResponse>({ user });
+        return ok<UserResponse>({
+          user: { ...user, hasPassword: identity.hasPassword(id) },
+        });
       });
 
       app.delete<{ Params: { id: string } }>('/users/:id', async (request) => {
@@ -140,10 +132,55 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           const password = requireString(body, 'password');
           await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
+          // 与 `POST /admin/users` 同一个策略函数：两处各写一条长度规则必然漂移，
+          // 结果是同一个口令在一个入口能设、另一个入口不能设。
+          assertPasswordPolicy(password);
+
           await identity.setPassword(id, password);
           return ok<UserPasswordResponse>({ id, passwordSet: true });
         },
       );
     },
   };
+}
+
+/**
+ * 建用户（`POST /admin/users`）。
+ *
+ * `password` 可选：不传就只建目录行——账号可以先当 ACL 主体用，列表里
+ * `hasPassword: false` 能看出它登不进来；传了就一次完成建账号 + 设密码。
+ *
+ * **口令策略必须先于建账号**：不合规时整件事不发生。反过来会让一次 400 的请求
+ * 留下一个永远登不进来的账号（`app_user` 已有行、没有 `password_hash`），而它
+ * 可能已经被授了 ACL。
+ */
+async function createUser(
+  identity: AdminIdentity,
+  systemAdmin: SystemAdminPolicy,
+  request: FastifyRequest,
+): Promise<UserResponse> {
+  const body = requireRecord(request.body, 'admin/users');
+  const id = requireString(body, 'id');
+  const displayName = requireString(body, 'displayName');
+  const email = optionalNullableString(body, 'email');
+  const password = optionalString(body, 'password');
+  assertSystemAdmin(request, systemAdmin);
+
+  if (password !== undefined) {
+    assertPasswordPolicy(password);
+  }
+
+  const user = identity.createUser({
+    id,
+    displayName,
+    ...(email === undefined ? {} : { email }),
+  });
+  // 密码紧跟建账号，不能停在「账号在、密码没设」的中间态。
+  if (password !== undefined) {
+    await identity.setPassword(id, password);
+  }
+  // 新账号的根与四个上下文目录要立刻预置：不预置的话，第一次登录看到的是 403
+  // 而不是空列表（`ensureUserNamespace` 的注释）。
+  await identity.ensureUserNamespace(id);
+  return { user: { ...user, hasPassword: password !== undefined } };
 }

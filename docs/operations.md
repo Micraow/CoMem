@@ -587,7 +587,7 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   不在 HTTP 管理面）。
 - **召回账本是缓存，删账号 / 组时一起删。** `_meta/recall/*.recall_log.json` 记的是
   「这个作用域投过哪些 URI」。`DELETE /admin/users/{id}` 与 `/admin/groups/{id}` 在撤权
-  之前先删对应账本（`src/api/http/routes/admin-users.ts:122`、`src/api/http/routes/admin-groups.ts:181`），同 ID 重建的账号不会继承
+  之前先删对应账本（`src/api/http/routes/admin-users.ts:114`、`src/api/http/routes/admin-groups.ts:181`），同 ID 重建的账号不会继承
   去重状态。账本是缓存，删除的代价只是「多投一次」；先删它，失败时什么都没动。
 - **`node_embedding` 按 URI 留旧向量。** 向量行带 `content_digest`：正文变了就重算，
   正文没变就复用。它只回答「这段正文的向量是什么」，不携带授权信息，所以删账号不清

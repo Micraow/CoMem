@@ -507,12 +507,12 @@ export class IdentityService {
     this.#logger.info('用户密码已设置', { userId });
   }
 
-  /**
-   * 签发一把 API Key。明文只在这里返回一次，库里只有哈希与前缀。
-   *
-   * `name` 用来区分用途（控制台「CI 用的 key」），不是权限范围——`api_key` 表没有
-   * scope 列。
-   */
+  /** `app_user.password_hash` 非空。管理面只回布尔，哈希不出服务层。 */
+  hasPassword(userId: string): boolean {
+    return (this.#users.getPasswordHash(userId) ?? '') !== '';
+  }
+
+  /** 签发一把 API Key。明文只返回一次，库里只有哈希与前缀；`name` 区分用途，不是权限范围。 */
   async createApiKey(
     userId: string,
     input: { readonly name: string; readonly expiresAt?: string | null },

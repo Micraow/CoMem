@@ -2,8 +2,15 @@
 /**
  * 用户表（架构文档 §16 的用户与组页、§14 的 `/admin/users`）。
  *
- * 状态徽章只表达「能不能登录」：`active` 绿、`disabled` 灰。文字同时写出，
+ * 状态徽章只表达「账号状态」：`active` 绿、`disabled` 灰。文字同时写出，
  * 颜色不单独表意（§16.1）。
+ *
+ * ## 密码状态是独立的一列
+ *
+ * `hasPassword` 回答的是「这个账号现在能不能用密码登录」，与 `status` 是两件事：
+ * 禁用但设过密码的账号重新启用即可登录，启用但没设密码的账号只能走 API Key。
+ * 没设密码的行给一枚浅色警示徽章与一个行内「设密码」入口——建完账号就去登录、
+ * 结果只看到「用户名或密码错误」，是这一列存在的理由。
  *
  * 删除按钮的确认文案由页面负责：它需要同时知道用户的授权节点数，而那个数字是
  * 列表响应的一部分（`permissionCount`），表格只负责把动作抛上去。
@@ -17,6 +24,8 @@ export interface UserRowPayload {
   readonly email: string | null
   /** 取值与领域层一致（`utils/userLabels.ts` 的 `UserStatus`）。 */
   readonly status: UserStatus
+  /** 账号有没有登录密码。`false` 时密码登录必然失败（服务端 `resolve` 的分支）。 */
+  readonly hasPassword: boolean
   readonly createdAt: string
   readonly updatedAt: string
   readonly permissionCount: number
@@ -24,7 +33,7 @@ export interface UserRowPayload {
 </script>
 
 <script setup lang="ts">
-import { Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
+import { KeyRound, Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
 
 import { formatDateTime } from '~/utils/format'
 import { userStatusLabel } from '~/utils/userLabels'
@@ -41,6 +50,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   detail: [user: UserRowPayload]
   edit: [user: UserRowPayload]
+  password: [user: UserRowPayload]
   delete: [user: UserRowPayload]
   page: [offset: number]
 }>()
@@ -69,6 +79,7 @@ const emit = defineEmits<{
             <th>显示名</th>
             <th>邮箱</th>
             <th>状态</th>
+            <th>登录密码</th>
             <th>创建时间</th>
             <th class="num">操作</th>
           </tr>
@@ -85,6 +96,23 @@ const emit = defineEmits<{
               <UiBadge :variant="user.status === 'active' ? 'green' : 'gray'">
                 {{ userStatusLabel(user.status) }}
               </UiBadge>
+            </td>
+            <td>
+              <div class="password-cell">
+                <UiBadge :variant="user.hasPassword ? 'gray' : 'orange'">
+                  {{ user.hasPassword ? '已设密码' : '未设密码' }}
+                </UiBadge>
+                <UiButton
+                  v-if="!user.hasPassword"
+                  variant="plain"
+                  size="sm"
+                  :disabled="props.loading"
+                  @click="emit('password', user)"
+                >
+                  <KeyRound :size="13" :stroke-width="1.5" />
+                  设密码
+                </UiButton>
+              </div>
             </td>
             <td>
               <time class="mono" :title="formatDateTime(user.createdAt)">
@@ -147,5 +175,13 @@ const emit = defineEmits<{
 <style scoped>
 .rowflex--end {
   justify-content: flex-end;
+}
+
+/* 徽章与补救入口同一行：看到「未设密码」的位置就能点「设密码」。 */
+.password-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 </style>

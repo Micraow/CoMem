@@ -14,7 +14,17 @@
  * ## 错误分两层
  *
  * 列表加载失败说明这一屏没有数据；创建、编辑、删除、加成员失败只说明**刚才那个
- * 动作**没生效。前者进页面内的提示条，后者走 toast，不把整页标成坏的。
+ * 动作**没生效。前者进页面内的提示条，后者走 toast，不把整页标成坏的。口令不合规
+ * 是例外：它属于「密码」这个字段，原文挂在该字段旁，不要求用户再看一眼 toast。
+ *
+ * ## 给账号设密码有三条路
+ *
+ * 新建时直接填（可选）、列表行内「设密码」、详情抽屉的「密码」页签。后者两个入口
+ * 共用 `UserPasswordForm.vue`，校验与错误落点只有一份；新建对话框要把密码和账号
+ * 信息一起提交，单独一套字段。
+ *
+ * 密码留空是合法状态：账号可以作为 ACL 主体存在、用 API Key 接入，只是不能登录。
+ * 列表的「登录密码」列把这件事写出来，否则用户只会看到「用户名或密码错误」。
  *
  * ## 权限不足不是故障
  *
@@ -29,9 +39,10 @@
  */
 import { Copy, Plus } from 'lucide-vue-next'
 
-import { errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
+import { ApiClientError, errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
+import { isRecord } from '~/utils/record'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
 import type { UserRowPayload } from '~/components/domain/UserTable.vue'
 import {
@@ -116,6 +127,17 @@ const userDialogOpen = ref(false)
 const editingUser = ref<UserRowPayload | null>(null)
 const detailUser = ref<UserRowPayload | null>(null)
 
+/** 行内「设密码」打开的小对话框；为空表示关闭。 */
+const passwordUser = ref<UserRowPayload | null>(null)
+const passwordOpen = computed({
+  get: () => passwordUser.value !== null,
+  set: (open: boolean) => {
+    if (!open) {
+      passwordUser.value = null
+    }
+  },
+})
+
 const detailUserOpen = computed({
   get: () => detailUser.value !== null,
   set: (open: boolean) => {
@@ -137,8 +159,19 @@ const ownerOpen = computed({
 const ownerCommand = computed(() =>
   ownerInfo.value === null ? '' : `pnpm group:owner ${ownerInfo.value.id} <用户 ID>`,
 )
-const userForm = reactive({ id: '', displayName: '', email: '', status: 'active' as UserStatus })
+const userForm = reactive({
+  id: '',
+  displayName: '',
+  email: '',
+  status: 'active' as UserStatus,
+  /** 只在新建时有值：编辑走 `PATCH`，不携带密码。 */
+  password: '',
+  confirmPassword: '',
+})
 const userSaving = ref(false)
+
+/** 新建对话框的字段级错误。只有密码相关字段会在本地校验。 */
+const userErrors = ref<{ password?: string; confirmPassword?: string }>({})
 
 const groupDialogOpen = ref(false)
 const editingGroup = ref<GroupRowPayload | null>(null)
@@ -179,6 +212,25 @@ const deleteOpen = computed({
 })
 
 const createLabel = computed(() => (tab.value === 'users' ? '新建用户' : '新建组'))
+
+const passwordDialogTitle = computed(() =>
+  passwordUser.value === null ? '设密码' : `为 ${passwordUser.value.id} 设密码`,
+)
+
+/** 新建对话框里密码字段的说明与错误 id；错误出现后才把错误 id 加进去。 */
+const newUserPasswordDescribedBy = computed(() => {
+  const ids = ['create-user-password-hint']
+  if (userErrors.value.password !== undefined) {
+    ids.push('create-user-password-error')
+  }
+  return ids.join(' ')
+})
+
+const newUserPasswordConfirmDescribedBy = computed(() =>
+  userErrors.value.confirmPassword === undefined
+    ? undefined
+    : 'create-user-password-confirm-error',
+)
 
 const deleteTitle = computed(() =>
   pendingDelete.value?.kind === 'group' ? '删除组' : '删除用户',
@@ -251,6 +303,38 @@ function openUserDetail(user: UserRowPayload): void {
   detailUser.value = user
 }
 
+function openUserPassword(user: UserRowPayload): void {
+  passwordUser.value = user
+}
+
+/**
+ * 改完密码刷新列表里的状态徽章。
+ *
+ * 详情抽屉也走这条路：`detailUser` 是列表行的一份快照，不换掉的话同一个用户在
+ * 抽屉里与表格里会显示两种状态。
+ */
+async function refreshUserRow(userId: string): Promise<void> {
+  await loadUsers()
+  if (detailUser.value !== null && detailUser.value.id === userId) {
+    detailUser.value = users.value.find((user) => user.id === userId) ?? null
+  }
+}
+
+async function onDialogPasswordSaved(): Promise<void> {
+  const userId = passwordUser.value?.id
+  passwordUser.value = null
+  if (userId !== undefined) {
+    await refreshUserRow(userId)
+  }
+}
+
+async function onDetailPasswordSaved(): Promise<void> {
+  const userId = detailUser.value?.id
+  if (userId !== undefined) {
+    await refreshUserRow(userId)
+  }
+}
+
 async function copyOwnerCommand(): Promise<void> {
   if (ownerInfo.value === null) {
     return
@@ -262,12 +346,55 @@ async function copyOwnerCommand(): Promise<void> {
   toast.show('success', '已复制恢复命令')
 }
 
+function clearUserError(field: 'password' | 'confirmPassword'): void {
+  if (userErrors.value[field] === undefined) {
+    return
+  }
+  const next = { ...userErrors.value }
+  delete next[field]
+  userErrors.value = next
+}
+
+/**
+ * 新建对话框的密码校验。
+ *
+ * 密码整体可选（留空 = 只作为 ACL 主体的账号），所以「两个都空」不是错误。
+ * 填了一个就必须填另一个并保持一致——本地只能判断这两件事，强度由服务端判。
+ */
+function validateNewUserPassword(): boolean {
+  const errors: { password?: string; confirmPassword?: string } = {}
+  if (userForm.password !== '' && userForm.confirmPassword === '') {
+    errors.confirmPassword = '请再次输入新密码。'
+  } else if (userForm.confirmPassword !== userForm.password) {
+    errors.confirmPassword = '两次输入的密码不一致。'
+  }
+  userErrors.value = errors
+  return Object.keys(errors).length === 0
+}
+
+/**
+ * 服务端把口令不合规标在 `details.field = 'password'` 上（`assertPasswordPolicy`）。
+ * 400 且消息里点名密码是退路：没有 `details` 的实现也应该把原文放在字段旁。
+ */
+function passwordFieldErrorOf(caught: unknown): string | null {
+  if (!(caught instanceof ApiClientError)) {
+    return null
+  }
+  if (isRecord(caught.details) && caught.details['field'] === 'password') {
+    return caught.message
+  }
+  return caught.statusCode === 400 && caught.message.includes('密码') ? caught.message : null
+}
+
 function openCreateUser(): void {
   editingUser.value = null
   userForm.id = ''
   userForm.displayName = ''
   userForm.email = ''
   userForm.status = 'active'
+  userForm.password = ''
+  userForm.confirmPassword = ''
+  userErrors.value = {}
   userDialogOpen.value = true
 }
 
@@ -277,6 +404,9 @@ function openEditUser(user: UserRowPayload): void {
   userForm.displayName = user.displayName
   userForm.email = user.email ?? ''
   userForm.status = user.status
+  userForm.password = ''
+  userForm.confirmPassword = ''
+  userErrors.value = {}
   userDialogOpen.value = true
 }
 
@@ -284,18 +414,30 @@ async function saveUser(): Promise<void> {
   if (userSaving.value) {
     return
   }
+  const editing = editingUser.value
+  if (editing === null && !validateNewUserPassword()) {
+    return
+  }
+
   userSaving.value = true
   try {
     const email = userForm.email.trim()
-    if (editingUser.value === null) {
+    const password = userForm.password
+    if (editing === null) {
       await api.post('/admin/users', {
         id: userForm.id.trim(),
         displayName: userForm.displayName.trim(),
         email: email === '' ? null : email,
+        ...(password === '' ? {} : { password }),
       })
-      toast.show('success', '用户已创建')
+      toast.show(
+        'success',
+        password === ''
+          ? '用户已创建。尚未设置密码，该账号暂时不能登录。'
+          : '用户已创建，可以用密码登录。',
+      )
     } else {
-      await api.patch(`/admin/users/${encodeURIComponent(editingUser.value.id)}`, {
+      await api.patch(`/admin/users/${encodeURIComponent(editing.id)}`, {
         displayName: userForm.displayName.trim(),
         email: email === '' ? null : email,
         status: userForm.status,
@@ -305,7 +447,12 @@ async function saveUser(): Promise<void> {
     userDialogOpen.value = false
     await loadUsers()
   } catch (caught) {
-    toast.show('error', errorMessageOf(caught))
+    const fieldMessage = editing === null ? passwordFieldErrorOf(caught) : null
+    if (fieldMessage === null) {
+      toast.show('error', errorMessageOf(caught))
+    } else {
+      userErrors.value = { password: fieldMessage }
+    }
   } finally {
     userSaving.value = false
   }
@@ -514,6 +661,7 @@ onMounted(() => {
           :error="usersError"
           @detail="openUserDetail"
           @edit="openEditUser"
+          @password="openUserPassword"
           @delete="requestDeleteUser"
           @page="pageUsers"
         />
@@ -566,6 +714,51 @@ onMounted(() => {
           <span class="field__label">状态</span>
           <UiSelect v-model="userForm.status" :options="STATUS_OPTIONS" aria-label="用户状态" />
         </label>
+        <template v-else>
+          <div class="field">
+            <label class="field__label" for="create-user-password">密码</label>
+            <UiInput
+              id="create-user-password"
+              v-model="userForm.password"
+              type="password"
+              autocomplete="new-password"
+              :disabled="userSaving"
+              :aria-describedby="newUserPasswordDescribedBy"
+              @update:model-value="clearUserError('password')"
+            />
+            <span id="create-user-password-hint" class="field__hint">
+              留空则账号暂时不能登录，之后可以在详情里设置密码。
+            </span>
+            <span
+              v-if="userErrors.password !== undefined"
+              id="create-user-password-error"
+              class="field__error"
+              role="alert"
+            >
+              {{ userErrors.password }}
+            </span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="create-user-password-confirm">确认密码</label>
+            <UiInput
+              id="create-user-password-confirm"
+              v-model="userForm.confirmPassword"
+              type="password"
+              autocomplete="new-password"
+              :disabled="userSaving"
+              :aria-describedby="newUserPasswordConfirmDescribedBy"
+              @update:model-value="clearUserError('confirmPassword')"
+            />
+            <span
+              v-if="userErrors.confirmPassword !== undefined"
+              id="create-user-password-confirm-error"
+              class="field__error"
+              role="alert"
+            >
+              {{ userErrors.confirmPassword }}
+            </span>
+          </div>
+        </template>
         <div class="rowflex">
           <span class="spacer" />
           <UiButton variant="secondary" @click="userDialogOpen = false">取消</UiButton>
@@ -576,7 +769,22 @@ onMounted(() => {
       </form>
     </UiDialog>
 
-    <DomainUserDetail v-model="detailUserOpen" :user="detailUser" />
+    <DomainUserDetail
+      v-model="detailUserOpen"
+      :user="detailUser"
+      @password-saved="onDetailPasswordSaved"
+    />
+
+    <UiDialog v-model="passwordOpen" :title="passwordDialogTitle">
+      <DomainUserPasswordForm
+        v-if="passwordUser !== null"
+        :user-id="passwordUser.id"
+        submit-label="设密码"
+        cancel-label="取消"
+        @saved="onDialogPasswordSaved"
+        @cancel="passwordUser = null"
+      />
+    </UiDialog>
 
     <UiDialog v-model="ownerOpen" title="恢复组的所有者">
       <div class="stack-16">
@@ -723,6 +931,13 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.4;
   color: var(--label-3);
+}
+
+.field__error {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--red-ink);
+  word-break: break-word;
 }
 
 .member-input {

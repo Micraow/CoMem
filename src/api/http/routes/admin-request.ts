@@ -40,6 +40,7 @@ export type AdminIdentity = Pick<
   HttpRouteServices['identity'],
   | 'createUser'
   | 'getUser'
+  | 'hasPassword'
   | 'listUsers'
   | 'updateUser'
   | 'deleteUser'

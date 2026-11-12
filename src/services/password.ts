@@ -21,10 +21,10 @@
  * 逐字节比较会在第一个不同的字节提前返回，攻击者能据此逐位试探哈希。比较前先
  * 比长度——长度不同直接 false，不需要常数时间。
  *
- * ## 这个模块不是密码强度策略
+ * ## 口令策略与哈希分开
  *
- * 长度 / 字符集校验在路由层（请求体校验），这里只回答「怎么哈希、怎么比对」。
- * 两者混在一起会让「换哈希参数」和「换密码策略」变成同一次改动。
+ * 策略是文件末尾的 `assertPasswordPolicy`（调用点在路由）；哈希函数只回答「怎么哈希、
+ * 怎么比对」。两者分开，换 scrypt 参数和换密码策略才不是同一次改动。
  */
 
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
@@ -144,7 +144,9 @@ export async function verifySecret(secret: string, stored: string): Promise<bool
 }
 
 /**
- * 密码强度策略（唯一入口，路由与命令都调它）。
+ * 密码强度策略（唯一入口：引导端点、建用户、设密码三个入口都调它）。
+ *
+ * `pnpm password` 还没有接入，命令只拒绝空串——这是已知缺口，不是第二份策略。
  *
  * 之前仓库里没有策略：`POST /admin/users/{id}/password` 只要求非空串，
  * `pnpm password` 也只拒绝空串。这里补一条**下界**，不引入大小写 / 数字 / 符号的

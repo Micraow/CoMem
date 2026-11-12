@@ -3011,7 +3011,9 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 | 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `boundSubject` / `adminConfigured`。控制台在拿到身份之前调它；`needsSetup` 就是「`app_user` 里没有任何密码哈希」。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
-| 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4） |
+| 建用户 | `POST /api/v1/admin/users` | `{id, displayName, email?, password?}`，系统管理员（§12.4）。`password` 省略时建出无密码账号（先当 ACL 主体用），传了则**先过口令策略再建账号**、一次完成建账号 + 设密码；响应带 `hasPassword` |
+| 列用户 | `GET /api/v1/admin/users` | 每一项带 `hasPassword`：只由 `app_user.password_hash` 非空派生，不回哈希或其任何派生值 |
+| 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4）；口令策略与建用户同一份 |
 | 签发 key | `POST /api/v1/admin/users/{id}/api-keys` | 对目标用户根 `manage`，或系统管理员；明文只在创建响应里出现一次 |
 | 列出 key | `GET /api/v1/admin/users/{id}/api-keys` | 同上；只回 `prefix`，永不回哈希 |
 | 撤销 key | `DELETE /api/v1/admin/api-keys/{keyId}` | 先反查持有者，再对持有者的根求 `manage`，或系统管理员；幂等 |
