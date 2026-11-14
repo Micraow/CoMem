@@ -47,6 +47,7 @@ import type { Logger } from '../../../domain/log.js';
 import type { MemoryLinkType } from '../../../domain/memory-link.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
 import { experiencesMemoryType } from '../../../domain/memory-types/experiences.js';
+import { entitiesMemoryType } from '../../../domain/memory-types/entities.js';
 import type { Uri } from '../../../domain/uri.js';
 
 import type { MemoryRecord, MemoryWrite, MemoryWriteResult } from '../../memory.js';
@@ -110,6 +111,7 @@ export interface ExperienceDistillStepDeps {
  * 不带运行时信息（与 `memory-extract.ts` 的 `extractOutputSchema` 同一份理由）。
  */
 const experienceSchema = z.object({
+  entityPages: z.array(z.number().int().positive()).optional(),
   topic: z.string(),
   content: z.string(),
 });
@@ -155,11 +157,13 @@ export class ExperienceDistillStep extends CommitStep {
     const messages = stripToolParts(context.messages);
     if (messages.length === 0) return;
     const existing = await this.#prefetchExisting(context);
+    const entities = await this.#memory.prefetch(context.scopeUri, entitiesMemoryType, retrievalQuery(context.messages), DEFAULT_PREFETCH_TOP_N);
 
     const output = await this.#llm.generateJson(
       buildExperiencePrompt({
         messages,
         existing,
+        entities: entities.map((record, index) => ({ pageId: index + 1, content: pageContent(record), aliases: record.fields['aliases'] })),
         today: localDate(new Date()),
       }),
       distillOutputSchema,
@@ -206,8 +210,12 @@ export class ExperienceDistillStep extends CommitStep {
         continue;
       }
 
+      const invalidEntity = experience.entityPages?.some((page) => entities[page - 1]?.entityId === undefined) ?? false;
+      if (invalidEntity) this.#logger.warn('经验引用了未提供的实体页面，保留原有引用。', { topic, entityPages: experience.entityPages });
       const write = await this.#memory.upsertMemory(context.scopeUri, experiencesMemoryType, {
         uri,
+        ...(experience.entityPages === undefined || invalidEntity ? {} :
+          { structure: { entityRefs: experience.entityPages.flatMap((page) => entities[page - 1]?.entityId ?? []) } }),
         provenance: { sources, evidenceAt: evidenceTime(context.messages) },
         update: (current) => ({ ...current, topic, content, updatedAt: now }),
       }).catch((error: unknown) => {
@@ -219,7 +227,7 @@ export class ExperienceDistillStep extends CommitStep {
       written.push(write);
 
       try {
-        this.#links.addLinks(uri, [{ toUri: context.archiveUri, linkType: DERIVED_FROM }]);
+        await this.#links.addLinks(uri, [{ toUri: context.archiveUri, linkType: DERIVED_FROM }]);
       } catch (error) {
         this.#logger.error('记忆关联边写入失败，已忽略：记忆已落盘，可从 sources 重建。', {
           archive: context.archiveUri.toString(),

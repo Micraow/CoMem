@@ -1495,8 +1495,8 @@ $COMEM_DATA_DIR/
 | `_meta/recall/*.recall_log.json`（丢了只多投一次） | `.abstract.md` / `.overview.md`（重算要调模型，花钱） |
 | `request_log` 表（只是观测数据） | `_meta/comem.sqlite`（**见下面的警告**） |
 
-> **警告：`reindex` 只重建检索索引、向量与关联边，不重建物化权限。** 它从磁盘重新遍历
-> 全部节点，重写 `node` / `node_fts` / `node_embedding` 与 `memory_link` 的 `derived_from`
+> **警告：`reindex` 只重建检索与结构索引、向量与关联边，不重建物化权限。** 它从磁盘重新遍历
+> 全部节点，重写 `node` / `node_fts` / `node_embedding`、实体引用索引与 `memory_link` 的 `derived_from`
 > （`--only=links` 或 `all`）；物化权限（`node_permission`）
 > 由 `.acl.json` 与所有者推导，归属 `AclService` 的写路径，不在这个命令的职责里
 > （`src/commands/reindex.ts` 的文件头）。所以**删掉 `comem.sqlite` 之后**：
@@ -1507,7 +1507,7 @@ $COMEM_DATA_DIR/
 
 ```bash
 pnpm reindex --dry-run                                   # 只遍历磁盘报数，不打开数据库
-pnpm reindex --only=index                                # 只重建 node / node_fts
+pnpm reindex --only=index                                # 重建检索与文件结构索引
 pnpm reindex --only=embeddings                           # 只回填 node_embedding
 pnpm reindex --only=links                                # 只按 sources 重建 memory_link 的 derived_from
 pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
@@ -1522,12 +1522,23 @@ pnpm reindex --config /etc/comem/config.yaml --data-dir /var/lib/comem
   之后概览正文照样能被 `find` 命中，不需要先等一次摘要重算。`reindex` 不清理孤儿
   行（删掉的 `.overview.md` 留下的 L1 行会一直到下次摘要重算或删除该节点为止）——
   与它本来就不清理「文件已删除」的孤儿节点是同一条边界，删除走 `deleteByUri`。
-- **`--only=links` 只重建 `derived_from`。** 从每份记忆文件的 `sources` 整批重算：先清空
+- **`--only=links` 重建文件关联并重算 `derived_from`。** 为解析 Markdown 中的 `memory_links`
+  与 `sources`，会重写节点与结构索引；`derived_from` 按每份记忆文件的 `sources` 整批重算：先清空
   这一类边再依次写入，一个事务，重跑得到同一份边（读盘不在事务内）。`references` /
   `related` 在 frontmatter 里没有真相，重建不动它们。归档目录已被 TTL 清理时照写边、不查
-  存在性——`sources` 是真相，查存在性会让同一份输入因磁盘现状不同得到不同的边。`sources`
-  上限 20：一条记忆的 `sources` 被截断过时，重建会删掉写路径累积下来的更早的边（架构文档
-  §11.10）。
+  存在性——`sources` 是真相，查存在性会让同一份输入因磁盘现状不同得到不同的边。
+- **`sources` 上限 20。** 一条记忆的 `sources` 被截断过时，重建会删掉写路径累积下来的更早的边
+  （架构文档 §11.10）。
+
+- **旧 `references` / `related` 迁移。** 首次启动与 reindex 会先把旧表完整导出到
+  `_meta/migration/memory-links-*.json`，再按起点写入该 Markdown 文件的 `memory_links`。
+  文件成功后记录逐 URI 的迁移完成标记，启动重试不会把旧值覆盖回用户后续的修改。迁移
+  失败时查看日志中的 URI；原数据库行与 JSON 导出保留。孤立起点不会丢，但需要人工把导出
+  条目处置到合适的文件。迁移导出不是运行时关系库。
+- **实体结构索引。** `--only=index` 不需 embedding 或生成模型，可从文件恢复稳定 ID、别名、
+  实体引用、显式关联和 sources。服务内文件更新由索引观察者更新；手工外部编辑后运行
+  `pnpm reindex --only=index` 让文件变化可检索。SQLite 同时承载 ACL、账号和组等服务状态，
+  所以这不代表可以删除 `_meta/comem.sqlite` 而只留 Markdown。
 - **只从磁盘读，不信任 SQLite。** 索引坏了才是要重建的理由，拿 `node` 表当输入
   等于假设「坏掉的东西还能用」。
 - **断点续跑。** 按 URI 升序幂等 upsert；嵌入按 `content_digest` 判定「没变」直接

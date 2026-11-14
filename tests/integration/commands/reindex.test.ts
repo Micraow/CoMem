@@ -463,7 +463,7 @@ describe('links 重建（memory_link 的 derived_from）', () => {
 
     const db = openDb();
     try {
-      new MemoryLinkService({
+      await new MemoryLinkService({
         repository: new MemoryLinkRepository({ db, logger }),
         logger,
       }).addLinks(Uri.parse(MEMORY_A), [

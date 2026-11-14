@@ -3,6 +3,7 @@ import type { SessionMessage } from '../../domain/session.js';
 import type { MemoryDocument } from './document.js';
 import type { ForgetBarriers } from '../../adapters/fs/forget-barriers.js';
 import type { Uri } from '../../domain/uri.js';
+import type { MemoryStructure } from '../../domain/memory-structure.js';
 
 export function evidenceTime(messages: readonly SessionMessage[]): string | undefined {
   const times = messages.filter((message) => message.role !== 'system')
@@ -23,9 +24,11 @@ export function assertCurrentEvidence(existing: MemoryDocument | null, incoming:
   }
 }
 
-export async function assertRememberable(barriers: ForgetBarriers | undefined, uri: Uri, provenance: { readonly evidenceAt?: string } | undefined): Promise<void> {
+export async function assertRememberable(barriers: ForgetBarriers | undefined, uri: Uri, provenance: { readonly evidenceAt?: string } | undefined, structure?: MemoryStructure): Promise<void> {
   if (provenance === undefined) return;
-  const cutoff = await barriers?.cutoff(uri);
+  const cutoffs = await Promise.all([barriers?.cutoff(uri), ...[structure?.entityId, ...structure?.entityRefs ?? []]
+    .filter((id): id is string => id !== undefined).map((id) => barriers?.entityCutoff(id))]);
+  const cutoff = cutoffs.filter((value): value is string => value != null).sort().at(-1);
   if (cutoff != null && (provenance.evidenceAt === undefined || Date.parse(provenance.evidenceAt) <= Date.parse(cutoff))) {
     throw invalidArgument('已删除的记忆不能由删除前的材料重新生成。', { reason: 'forgotten_evidence' });
   }

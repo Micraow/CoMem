@@ -201,6 +201,7 @@ export function createRetrieval(
   });
 
   const search = new SearchService({
+    memoryStructure: core.memoryStructure,
     index,
     readableScopes: (principals) => permissions.readableScopes(principals),
     filesystem,

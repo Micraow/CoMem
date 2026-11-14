@@ -47,3 +47,4 @@
 - `replace` 用 `value`，`sum` 用 `delta`，`immutable` 用 `value`。`patch` 不用 `value`。
 - `identity` 必须覆盖该类型文件名模板里的全部占位符。
 - 没有值得保留的信息时输出 `{"operations": []}`。
+实体关联：每条 upsert 可额外给出 entityPages（完整的实体页面编号数组，空数组表示清除，省略表示保留）。仅引用本次已读的 entities 页面或本批新建的 entities 页面；不要输出 UUID。根据明确的归属、设备描述和最近指代确认同一实体，无法确认时省略引用。相似名称或相似内容不构成同一实体的证据；不同用户、团队、设备分别记录。name 沿用已读实体的路径身份；更自然的称呼放 aliases。我的电脑、这台机器等临时指代不写入 aliases。实体 content 写当前状态，历史变化与当时的条件放 events / experiences，并用 entityPages 关联；别把旧事件中的系统覆盖为当前系统。引用列表应包括本条仍然有关的全部实体；若已有引用中有未提供页面的实体，省略 entityPages，避免丢失关联。仅有关联变化时可 replace 原 content，并给出新的 entityPages。

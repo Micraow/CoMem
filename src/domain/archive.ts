@@ -130,6 +130,8 @@ export interface ArchiveTaskPayload {
  * 也没有回滚价值。
  */
 export interface MemoryDiffEntry {
+  readonly entityId?: string;
+  readonly entityRefs?: readonly string[];
   readonly uri: string;
   readonly memoryType: string;
   readonly before?: string;
@@ -178,6 +180,7 @@ export interface MemoryDiff {
  * `__proto__` 这类原型链属性。
  */
 export interface MemoryOperationsFile {
+  readonly structures?: readonly (readonly [string, import('./memory-structure.js').MemoryStructure])[];
   readonly archiveUri: string;
   /** ISO 8601 */
   readonly extractedAt: string;
@@ -206,6 +209,10 @@ export function isMemoryOperationsFile(value: unknown): value is MemoryOperation
     return false;
   }
   const memoryTypes = record['memoryTypes'];
+  const structures = record['structures'];
+  if (structures !== undefined && (!Array.isArray(structures) || !structures.every((entry) =>
+    Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' &&
+    typeof entry[1] === 'object' && entry[1] !== null))) return false;
   if (!Array.isArray(memoryTypes)) {
     return false;
   }

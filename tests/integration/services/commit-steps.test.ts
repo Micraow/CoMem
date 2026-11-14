@@ -56,6 +56,7 @@ import {
   type MemoryServicePorts,
 } from '../../../src/services/memory.js';
 import { MemoryLinkService } from '../../../src/services/memory-link.js';
+import { entitiesMemoryType } from '../../../src/domain/memory-types/entities.js';
 
 const SCOPE = 'comem://user/alice';
 const ARCHIVE = `${SCOPE}/sessions/sess_1/history/archive_001`;
@@ -234,6 +235,37 @@ function extracted(context: StepContext): MemoryExtractResult {
   }
   return value;
 }
+
+describe('实体抽取产物', () => {
+  it('先分配同批实体编号，再保存经验引用，归档恢复使用同一个编号', async () => {
+    const { step, written } = createExtractStep(new FakeLlmProvider([{ json: { operations: [
+      { kind: 'upsert', pageId: 101, type: 'experiences', identity: { topic: 'install' }, entityPages: [100], operations: [{ kind: 'replace', field: 'content', value: '安装时关闭 RAID。' }] },
+      { kind: 'upsert', pageId: 100, type: 'entities', identity: { name: 'laptop' }, operations: [{ kind: 'replace', field: 'content', value: '用户的主力笔记本。' }] },
+    ] } }]));
+    const context = createContext();
+    await step.run(context);
+    const structures = new Map(extracted(context).structures);
+    const entity = structures.get(`${SCOPE}/memories/entities/laptop.md`);
+    expect(entity?.entityId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(structures.get(`${SCOPE}/memories/experiences/install.md`)?.entityRefs).toEqual([entity?.entityId]);
+    expect(written[0]?.structures).toEqual([...structures]);
+    const retry = createContext();
+    await step.rehydrate(retry);
+    expect(extracted(retry).structures).toEqual(extracted(context).structures);
+  });
+
+  it('未知实体编号保留原引用并给出诊断，重复页面编号不污染其它目标', async () => {
+    const { step } = createExtractStep(new FakeLlmProvider([{ json: { operations: [
+      { kind: 'upsert', pageId: 100, type: 'entities', identity: { name: 'first' }, entityPages: [999], operations: [{ kind: 'replace', field: 'content', value: '第一台' }] },
+      { kind: 'upsert', pageId: 100, type: 'entities', identity: { name: 'second' }, operations: [{ kind: 'replace', field: 'content', value: '第二台' }] },
+    ] } }]));
+    const context = createContext();
+    await step.run(context);
+    expect(extracted(context).skipped.map((item) => item.reasonCode)).toContain('invalid_entity_page');
+    expect(extracted(context).skipped.map((item) => item.reasonCode)).toContain('duplicate_page_id');
+    expect(extracted(context).structures).toHaveLength(1);
+  });
+});
 
 describe('ArchiveSummaryStep', () => {
   it('工作记忆关闭时只重建归档目录摘要', async () => {
@@ -1251,6 +1283,23 @@ describe('MemoryMergeStep', () => {
 
 describe('ExperienceDistillStep', () => {
   const EXPERIENCE = `${SCOPE}/memories/experiences/monorepo-migration.md`;
+
+  it('经验归纳可将新经验关联到已预取的设备实体', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), entitiesMemoryType, {
+      name: 'laptop', aliases: ['ThinkBook'], kind: 'device', content: '主力笔记本运行 Arch Linux。',
+    });
+    const record = await memory.read(Uri.parse(`${SCOPE}/memories/entities/laptop.md`));
+    const searched: ExperienceDistillStepDeps['memory'] = {
+      upsertMemory: (...args) => memory.upsertMemory(...args),
+      prefetch: async () => [record!],
+    };
+    const provider = new FakeLlmProvider([{ json: { experiences: [
+      { topic: 'monorepo-migration', content: '笔记本上安装时需先关闭 RAID。', entityPages: [1] },
+    ] } }]);
+    await createDistillStep(provider, { memory: searched }).run(createContext());
+    expect((await memory.read(Uri.parse(EXPERIENCE)))?.entityRefs).toEqual([record?.entityId]);
+    expect(provider.calls[0]?.prompt.messages[0]?.content).toContain('ThinkBook');
+  });
 
   it('归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接', async () => {
     const provider = new FakeLlmProvider([

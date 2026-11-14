@@ -24,6 +24,7 @@ import type { FileSystemService } from '../filesystem.js';
 import type { LlmService } from '../llm.js';
 import type { RecallLedger } from '../recall-ledger.js';
 import type { SessionService } from '../session.js';
+import type { MemoryStructureIndex } from '../../adapters/sqlite/memory-structure.js';
 
 /**
  * 服务层需要的检索配置（§18 的 `retrieval` 段）。
@@ -94,6 +95,7 @@ export interface RerankHealth {
 }
 
 export interface SearchServiceDeps {
+  readonly memoryStructure?: Pick<MemoryStructureIndex, 'neighborhood'>;
   readonly index: RetrievalIndex;
   readonly filesystem: FileSystemService;
   readonly authorizer: Authorizer;
@@ -307,6 +309,7 @@ export interface ScoredSearchResult {
 
 /** 一次 `find` 的内部产物：命中 + 各上游的降级原因。 */
 export interface RetrieveOutcome {
+  readonly queryVector?: readonly number[];
   readonly hits: readonly RankedScoredHit[];
   /** 向量后端降级原因；`null` 表示这次没有降级 */
   readonly degradation: string | null;

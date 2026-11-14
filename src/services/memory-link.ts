@@ -15,6 +15,7 @@ import type { MemoryLinkRepository, MemoryLinkRowInput } from '../adapters/sqlit
 import type { Uri } from '../domain/uri.js';
 
 export interface MemoryLinkServiceDeps {
+  readonly persist?: (rows: readonly MemoryLinkRowInput[]) => Promise<void>;
   readonly repository: MemoryLinkRepository;
   readonly logger: Logger;
 }
@@ -42,10 +43,12 @@ function normalizeWeight(weight: number | undefined): number {
 export class MemoryLinkService {
   readonly #repository: MemoryLinkRepository;
   readonly #logger: Logger;
+  readonly #persist: MemoryLinkServiceDeps['persist'];
 
   constructor(deps: MemoryLinkServiceDeps) {
     this.#repository = deps.repository;
     this.#logger = deps.logger;
+    this.#persist = deps.persist;
   }
 
   /**
@@ -54,10 +57,10 @@ export class MemoryLinkService {
    * 同一批里重复的边（同 to + 同 matchText）由仓储的 weight=max 处理，不在这里
    * 去重——保持「一批就是一个事务」的语义，仓储是唯一知道去重键的地方。
    */
-  addLinks(
+  async addLinks(
     fromUri: Uri,
     links: readonly MemoryLinkInput[],
-  ): { inserted: number; merged: number } {
+  ): Promise<{ inserted: number; merged: number }> {
     if (links.length === 0) {
       return { inserted: 0, merged: 0 };
     }
@@ -69,6 +72,8 @@ export class MemoryLinkService {
       matchText: link.matchText ?? '',
       description: link.description ?? '',
     }));
+    const explicit = rows.filter((row) => row.linkType !== DERIVED_FROM);
+    if (explicit.length > 0 && this.#persist !== undefined) await this.#persist(explicit);
     const result = this.#repository.upsertMany(rows);
     this.#logger.debug('记忆关联边已写入', {
       from: fromUri.toString(),

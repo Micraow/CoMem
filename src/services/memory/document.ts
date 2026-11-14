@@ -23,6 +23,7 @@ import { invalidArgument } from '../../domain/errors.js';
 import { frontmatterFieldsOf, parseSources, parseSupersedes, splitFrontmatter } from './frontmatter.js';
 import { formatField, formatScalar } from './yaml.js';
 import { evidenceTimestamp } from './evidence.js';
+import { memoryStructure, type MemoryStructure } from '../../domain/memory-structure.js';
 
 /**
  * 记忆的状态。
@@ -33,7 +34,7 @@ import { evidenceTimestamp } from './evidence.js';
  */
 export type MemoryStatus = NodeStatus;
 
-export interface MemoryDocument {
+export interface MemoryDocument extends MemoryStructure {
   readonly memoryType: string;
   readonly status: MemoryStatus;
   readonly createdAt: string;
@@ -124,6 +125,7 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
   VALID_UNTIL_KEY,
   SUPERSEDES_KEY,
   'evidence_at',
+  'entity_id', 'entity_refs', 'memory_links',
 ]);
 
 const FRONTMATTER_DELIMITER = '---';
@@ -195,7 +197,7 @@ function abstractOfContent(content: unknown): string | null {
     : truncateToChars(firstLine.trim(), ABSTRACT_MAX_CHARS);
 }
 
-export function serializeMemoryDocument(input: {
+export function serializeMemoryDocument(input: MemoryStructure & {
   readonly uri: Uri;
   readonly memoryType: string;
   readonly status: MemoryStatus;
@@ -227,6 +229,9 @@ export function serializeMemoryDocument(input: {
     `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
   ];
   if (input.evidenceAt != null) header.push(`evidence_at: ${formatScalar(input.evidenceAt)}`);
+  if (input.entityId !== undefined) header.push(`entity_id: ${formatScalar(input.entityId)}`);
+  if (input.entityRefs !== undefined) header.push(formatField('entity_refs', input.entityRefs));
+  if (input.links !== undefined) header.push(formatField('memory_links', input.links));
 
   if (input.validFrom !== null) {
     header.push(`${VALID_FROM_KEY}: ${formatScalar(input.validFrom)}`);
@@ -306,6 +311,7 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
   fields[UPDATED_AT_FIELD] = updatedAt;
 
   return {
+    ...memoryStructure(document.data),
     memoryType: frontmatter.memoryType,
     status,
     createdAt,

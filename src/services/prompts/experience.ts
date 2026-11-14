@@ -37,6 +37,7 @@ export interface ExistingExperience {
 }
 
 export interface ExperiencePromptInput {
+  readonly entities?: readonly { readonly pageId: number; readonly content: string; readonly aliases: unknown }[];
   /** 会话消息（§10.1 的 part 渲染成文本后的结果）。 */
   readonly messages: readonly LlmMessage[];
   /** 预取到的已有经验（§11.3）。 */
@@ -102,7 +103,7 @@ export function buildExperiencePrompt(input: ExperiencePromptInput): LlmPrompt {
       {
         role: 'user',
         content: renderer.render('experience-user', {
-          existingExperiences: renderExistingExperiences(input.existing),
+          existingExperiences: `${renderExistingExperiences(input.existing)}\n\n实体候选（仅明确属于同一实体时引用）：\n${JSON.stringify(input.entities ?? [])}`,
           messages: renderMessages(input.messages),
         }),
       },

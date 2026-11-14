@@ -28,6 +28,7 @@ import { openDatabase, runMigrations } from '../../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../../adapters/sqlite/embedding-repository.js';
 import { GroupRepository } from '../../adapters/sqlite/group-repository.js';
 import { MemoryLinkRepository } from '../../adapters/sqlite/memory-link-repository.js';
+import { MemoryStructureIndex } from '../../adapters/sqlite/memory-structure.js';
 import { NodeRepository } from '../../adapters/sqlite/node-repository.js';
 import { PermissionRepository } from '../../adapters/sqlite/permission-repository.js';
 import { PromptRepository } from '../../adapters/sqlite/prompt-repository.js';
@@ -40,6 +41,7 @@ import { loadConfigSnapshot } from '../../config/index.js';
 import type { ComemConfig, ConfigSnapshot } from '../../config/index.js';
 import type { Logger } from '../../domain/log.js';
 import { MemoryLinkService } from '../../services/memory-link.js';
+import { persistMemoryLinks } from '../../adapters/fs/memory-links.js';
 import { PromptService } from '../../services/prompt-service.js';
 import { bindPromptRenderer } from '../../services/prompts/registry.js';
 import { META_DIRECTORY, metaPath } from './support.js';
@@ -49,6 +51,7 @@ const DATABASE_FILE = 'comem.sqlite';
 
 /** 适配器、仓储与进程级单例。后续每个阶段都收这一份，不再各自 `new`。 */
 export interface Foundation {
+  readonly memoryStructure: MemoryStructureIndex;
   readonly forgetBarriers: ForgetBarriers;
   readonly config: ComemConfig;
   /** 配置的四层输入与来源：`GET /config` 读它，避免请求时重读磁盘。 */
@@ -109,6 +112,7 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   const nodes = new NodeRepository({ db, logger });
   // 记忆关联边（§11.10）：存一张 `memory_link` 表，不进检索索引。
   const memoryLink = new MemoryLinkService({
+    persist: (rows) => persistMemoryLinks(store, locks, rows),
     repository: new MemoryLinkRepository({ db, logger }),
     logger,
   });
@@ -137,6 +141,7 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   });
 
   return {
+    memoryStructure: new MemoryStructureIndex(db),
     forgetBarriers: new ForgetBarriers(dataDir),
     config,
     configSnapshot,

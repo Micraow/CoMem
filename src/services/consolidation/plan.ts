@@ -72,6 +72,7 @@ export async function planOperations(
     if (operation.kind === 'delete') {
       // 记录在这里读到，来源也跟着取走：删除之后磁盘上只剩它的归档历史。
       const record = assertActive(await requireRecord(memory, operation.uri, uri));
+      if (record.entityId !== undefined) throw new ComemError('INVALID_ARGUMENT', '有稳定身份的实体不能由自动合并删除，请先明确纠正其关联。', { uri: operation.uri });
       // 来源要并进保留者，就得在**写盘之前**确认它能被写成 URI。frontmatter 可以
       // 被手工改坏（`sources: [not-a-uri]`，`parseSources` 只挑非空字符串），留到
       // 写回时才 `Uri.parse` 会在删除已经应用之后抛错——没有回滚。

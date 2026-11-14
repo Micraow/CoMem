@@ -10,6 +10,7 @@ import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 import { isVersionFile } from '../../domain/node.js';
 import { Uri } from '../../domain/uri.js';
 import { renderMemoryUri, type MemoryStatus } from './document.js';
+import type { MemoryStructure } from '../../domain/memory-structure.js';
 import {
   listDirectoryOrEmpty,
   readMemoryDocument,
@@ -28,7 +29,7 @@ const MEMORIES_DIRECTORY = 'memories';
  */
 const PREFETCH_MIN_LIMIT = 5;
 
-export interface MemoryRecord {
+export interface MemoryRecord extends MemoryStructure {
   readonly uri: Uri;
   readonly memoryType: string;
   /** 字段 → 值。identity 字段必填 */
@@ -72,6 +73,9 @@ export async function readMemoryRecord(
     return null;
   }
   return {
+    entityId: document.entityId,
+    entityRefs: document.entityRefs,
+    links: document.links,
     uri,
     memoryType: document.memoryType,
     fields: document.fields,
@@ -145,6 +149,7 @@ export async function prefetchMemories(
   schema: MemoryTypeSchema,
   query: string,
   topN: number,
+  entityUris: readonly string[] = [],
 ): Promise<readonly MemoryRecord[]> {
   const limit = Math.max(PREFETCH_MIN_LIMIT, topN);
 
@@ -161,7 +166,7 @@ export async function prefetchMemories(
   const hits = await search.find(query, { scopes: [directory], limit });
 
   const records: MemoryRecord[] = [];
-  for (const hit of hits) {
+  for (const hit of [...entityUris.map((uri) => ({ uri })), ...hits].filter((hit, index, all) => all.findIndex((other) => other.uri === hit.uri) === index)) {
     if (records.length >= limit) {
       break;
     }

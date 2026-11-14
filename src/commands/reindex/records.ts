@@ -148,6 +148,9 @@ export async function buildRecords(
       // 有效期**不保留索引旧值**：磁盘是真相，缺键就是无界（与写路径同一个口径）。
       validFrom: fields.validFrom,
       validUntil: fields.validUntil,
+      entityId: fields.entityId, entityRefs: fields.entityRefs, links: fields.links,
+      entityName: fields.entityName, entityKind: fields.entityKind, aliases: fields.aliases,
+      sources: fields.sources,
     },
   ];
 }

@@ -525,6 +525,8 @@ updated_at: 2026-11-05T16:40:00Z
 
 **`sources` 为空时不写这个键。** 没有溯源信息的记忆（W97 之前的存量、不由归档产生的写入）与改动前逐字节相同。
 
+实体文件可增加服务端分配的 `entity_id` 与用户可纠正的 `aliases`；任意记忆可有 `entity_refs`，指向相关实体 ID。非 `derived_from` 的显式关联写作 JSON 字符串数组 `memory_links`，每项带 `toUri`、`linkType`、`weight`、`matchText` 与 `description`。它们随正文以外的 frontmatter 一起写入 Markdown、可手工检查；不把实体编号放进 URI，也不把设备现状拆成三元组。普通编辑、复核、版本、合并、移动和索引重建均保留这些键。`memory_links` 的确切编码由 `src/domain/stored-memory-link.ts` 校验。
+
 **`valid_from` / `valid_until` / `supersedes` 是三个保留键，只能由服务端写。** 它们不在
 `schema.fields` 里，值来自 `MemoryDocument` 的元数据：
 
@@ -993,6 +995,8 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 | 0005 | `0005_sliding_ttl.sql` | 删 `node.expires_at` 与 `idx_node_expires`：TTL 判据改为清扫时现算（§11.7） |
 | 0006 | `0006_drop_request_log_indexes.sql` | 删 `request_log` 的 `status_code` / `request_id` / `subject` 索引：这张表没有读出口（§17.6） |
 | 0007 | `0007_node_validity.sql` | `node.valid_from` / `node.valid_until`：记忆的有效区间，NULL = 无界（§11.11） |
+| 0008 | `0008_bootstrap_admin.sql` | 首个管理员引导令牌 |
+| 0009 | `0009_memory_structure.sql` | `memory_entity` / `memory_alias` / `memory_entity_ref` 与旧链接逐起点迁移标记 |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -2002,13 +2006,13 @@ export const preferencesMemoryType = {
 - **循环**：让模型先调 `search` 再调 `read`，然后输出操作（reAct，最多 3 轮）。质量最好，token 最贵。
 - **预取**：先按 schema 的目录做一次检索，把 top-N 命中直接塞进 prompt，然后单次输出。省 token，质量略低。
 
-v1 用预取。每个多文件类型的 schema 做一次检索，`limit = max(5, prefetchTopN)`；单文件类型（`profile` / `identity` / `soul`）直接读该文件。检索结果的 `page_id` 标注随正文一起给模型，不另建映射表。
+v1 用预取。每个多文件类型的 schema 做一次检索，`limit = max(5, prefetchTopN)`；单文件类型（`profile` / `identity` / `soul`）直接读该文件。检索结果的 `page_id` 标注随正文一起给模型，不另建映射表。实体页额外提供稳定 ID 的别名与已有实体关联的页码投影；模型只能输出页码，同批新增实体由服务端先分配 ID 再解析引用。归档产物同时持久化这些结构，任务重放不重分实体号。实体候选预取由名称/别名与作用域检索提供，不调用额外模型；embedding 不作身份合并依据。
 
 提示词的静态骨架在 `prompts/extract-system.md` 与 `prompts/extract-user.md`；记忆类型清单、页面列表与会话记录由 `services/prompts/extract.ts` 渲染后注入。**空列表必须渲染成一句明确的话**（「（这次没有预取到已读记忆。）」），否则模型会自己编造编号——这条判断留在代码里，模板没有条件语法（§18「提示词」）。
 
 ### 11.4 抽取与 page_id
 
-LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_id）。输出里的操作引用 page_id，服务端再映射回 URI。
+LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_id）。输出里的操作引用 page_id，服务端再映射回 URI。`entityPages` 是可选的实体 page_id 数组：完整数组替换关联，空数组清除；省略保留当前引用。目标须为本次读取或同批成功写入的实体页。
 
 让模型直接输出 URI 会引入拼写错误和幻觉路径；page_id 是它刚刚亲眼读到的编号。新建项用 ≥ 100 的编号，避免和已读项冲突。起始编号是代码里的常量（`NEW_PAGE_ID_START`），模板通过 `{{newPageIdStart}}` / `{{newPageIdExamples}}` 引用——写死在 `.md` 里会让「改常量」与「改提示词」漂移。
 
@@ -2321,9 +2325,9 @@ TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删
 
 #### 溯源
 
-被合并掉的记忆删除之后只剩磁盘历史，所以**本批被删除记忆的 `sources` 会并进本批写出
-的每一条**：保留者自己的在前（顺序不变），被删的按操作顺序追加，去重与 20 条上限沿用
-§11.1 的同一套规则（同一批里两组互不相关的合并会互相带上来源，取舍也在那里）。
+被合并掉的记忆删除之后只剩磁盘历史，所以**本批被删除记忆的 `sources` 会并进本批写出的
+每一条**：保留者自己的在前（顺序不变），被删的按操作顺序追加，去重与 20 条上限沿用
+§11.1 的同一套规则。`entity_refs` 与 `memory_links` 属于各自文件，自动 consolidation 不转移它们；如需保留已删除记忆的关联，应在删除前显式纠正目标文件。
 
 **已知限制：`add` 一条「参考了现有多条、但把原条目留着」的新记忆，不会继承它们的
 来源。** 模型输出里没有「我参考了哪几条」这个信号，按正文猜就是编。这类记忆的溯源从
@@ -2603,11 +2607,11 @@ ingest:
 
 ### 11.10 记忆关联边（links / backlinks）
 
-**关系建模的边界。** `entities` 已按 URI 表示项目、人物、设备与环境，`sources` 与 `memory_link` 提供溯源关系。当前不另建知识图谱或图数据库，不将 `derived_from` 的会话邻居自动注入；溯源边不能证明实体间的业务关系。多跳检索和模型自动生成实体关系尚未实现。
+**关系建模的边界。** 实体身份、别名与记忆到实体的关联已经在文件 frontmatter 闭合；SQLite 的 `memory_entity`、`memory_alias`、`memory_entity_ref` 是派生索引。它们支持一跳实体邻域，不是通用图数据库。`sources` 与 `memory_link` 仍提供溯源；`derived_from` 的归档邻居不自动注入。跨实体的业务谓词关系、任意多跳检索与图服务器未实现。
 
-**实体与关系的持久化方向：文件是真相，数据库是可重建索引。** 后续增加实体别名、「设备属于用户」「项目使用技术」「决策依赖资源」等关系时，实体身份、别名、关系事实、来源和适用时间必须保存在记忆文件中。图描述的是文件中实体与关系的查询方式，不改变主要记忆数据的存储介质。写入先保存文件，再更新 SQLite；反向关系从索引查询，不要求每次扫描文件。验收标准是仅凭记忆文件能够恢复实体与关系，删除派生关系索引后可以重建。具体文件格式和迁移尚未实现；扩展上下文必须两端求权、限制跳数及预算。
+**文件优先与迁移。** 所有实体引用和显式 URI 关联均随起点 Markdown 原子更新，结构索引由 `0009_memory_structure.sql` 所建表从文件离线重建；不提供全库边文件。首次服务启动和 `reindex` 会把旧数据库中的 `references` / `related` 先导出到 `_meta/migration/memory-links-*.json`，再迁入起点文件。失败时保留导出和原表并报告；缺失起点无法成为正常 Markdown 记忆，仍留在导出以供人工处置。实体邻域只对问题明确提及且可读、未冲突的具体实体展开，名称匹配要求文本边界；候选按原查询 FTS 和已生成的 query embedding 过滤，最后仍经现有预算、ACL、融合、重排与上下文装配。
 
-进一步的文件格式、实体身份、实体辅助召回和迁移取舍见[文件实体记忆设计提案](design/file-first-memory.md)，该提案尚未实施。
+文件结构、用户目录示例、召回边界与迁移取舍见[文件实体记忆设计说明](design/file-first-memory.md)。
 
 记忆之间可以有**关联边**：一条记忆指向另一条记忆（谁引用了谁、一条结论从哪条资源
 推出来）。这一节定义它的存储、产生端与查询面。**它不是多跳检索**——`links` 不参与

@@ -37,6 +37,7 @@ export type MemoryDirectoryEntry = {
  * 两个用例的必需能力。`FileSystemService` 结构上同时满足这四个方法。
  */
 export interface MemoryServicePorts {
+  readonly entityCandidates?: (scope: Uri, query: string, limit: number) => readonly string[];
   readonly forgetBarriers?: ForgetBarriers;
   /**
    * 记忆文件的路径锁（§18「并发控制」）。

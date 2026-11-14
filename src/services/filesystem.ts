@@ -51,6 +51,7 @@ import type { Uri } from '../domain/uri.js';
 import type { Authorizer } from './authorizer.js';
 import { assertNotVersionTarget } from './version-directory.js';
 import type { ForgetBarriers } from '../adapters/fs/forget-barriers.js';
+import { updateMovedMemory } from './memory/moved.js';
 
 /**
  * `tree` 的默认深度。来源：架构文档 §13.2 的 `tree` 工具契约 `levelLimit=3`。
@@ -375,7 +376,7 @@ export class FileSystemService {
     assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, MANAGE_LEVEL, principals);
     return this.#locks.withLock(uri, 'tree', async () => {
-      if (reason === 'explicit') await this.#forgetBarriers?.record(uri);
+      if (reason === 'explicit') await this.#forgetBarriers?.record(uri, this.#store);
       const removedFiles = await this.#store.remove(uri, { recursive: true });
       await this.#notifyRemoved(uri);
       return { removedFiles };
@@ -414,6 +415,8 @@ export class FileSystemService {
     await this.#locks.withLock(ordered.first, 'tree', () =>
       this.#locks.withLock(ordered.second, 'tree', async () => {
         await this.#store.move(from, to);
+        try { await updateMovedMemory(this.#store, to); }
+        catch (error) { this.#logger.error('移动完成，记忆路径字段未更新，请检查目标文件并重建索引。', { uri: to.toString(), error: String(error) }); }
         // 移动 = 源路径消失 + 目标路径出现。**一次**通知：源路径的整棵子树要清掉，
         // 目标路径的整棵子树要重建，拆成两次通知会让子项全部丢失（见
         // `NodeWriteObserver.onNodeMoved`）。

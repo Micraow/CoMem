@@ -176,6 +176,6 @@ export function serializeDocument(body: string, data: Readonly<Record<string, un
     return body;
   }
   // `lineWidth: 0` 关掉折行：长 URI、长摘要被折断后，读回来是另一个字符串。
-  const yamlText = stringifyYaml(data, { lineWidth: 0 });
+  const yamlText = stringifyYaml(data, { lineWidth: 0, singleQuote: false, doubleQuotedAsJSON: true });
   return `${DELIMITER}${LINE_BREAK}${yamlText}${DELIMITER}${LINE_BREAK}${LINE_BREAK}${body}`;
 }

@@ -54,6 +54,8 @@ import {
 import { approveMemory, rejectMemory, type MemoryRejectResult } from './review.js';
 import { writeVersionSnapshot } from './versioning.js';
 import { assertCurrentEvidence, assertRememberable, evidenceTimestamp } from './evidence.js';
+import type { MemoryStructure } from '../../domain/memory-structure.js';
+import { nextMemoryStructure } from './structure.js';
 
 export interface MemoryWriteResult {
   readonly uri: Uri;
@@ -91,6 +93,7 @@ export type MemoryUpdate = (current: MemoryFields) => MemoryFields | null;
  * 比对，补丁改掉 identity 时直接拒绝，不做隐式 move。
  */
 export interface MemoryUpdateInput {
+  readonly structure?: MemoryStructure | ((current: MemoryStructure) => MemoryStructure);
   readonly uri: Uri;
   readonly update: MemoryUpdate;
   /**
@@ -138,6 +141,7 @@ export class MemoryService {
   /** 需要复核的记忆类型。来自 `memory.reviewRequired`，不是写死的。 */
   readonly #reviewRequired: ReadonlySet<string>;
   readonly #forgetBarriers: MemoryServicePorts['forgetBarriers'];
+  readonly #entityCandidates: MemoryServicePorts['entityCandidates'];
 
   constructor(ports: MemoryServicePorts) {
     this.#filesystem = ports.filesystem;
@@ -146,6 +150,7 @@ export class MemoryService {
     this.#logger = ports.logger;
     this.#reviewRequired = new Set(ports.reviewRequired ?? DEFAULT_REVIEW_REQUIRED);
     this.#forgetBarriers = ports.forgetBarriers;
+    this.#entityCandidates = ports.entityCandidates;
   }
 
   /** 读一条记忆；不存在返回 `null`。 */
@@ -185,8 +190,10 @@ export class MemoryService {
       target.uri,
       'exact',
       async () => {
-        await assertRememberable(this.#forgetBarriers, target.uri, target.provenance);
         const existing = await readMemoryDocument(this.#filesystem, this.#logger, target.uri);
+        const structure = nextMemoryStructure(schema.type, existing,
+          typeof target.structure === 'function' ? target.structure(existing ?? {}) : target.structure);
+        await assertRememberable(this.#forgetBarriers, target.uri, target.provenance, structure);
         assertCurrentEvidence(existing, target.provenance?.evidenceAt);
         const current = existing?.fields ?? {};
         const next = target.update(current);
@@ -231,8 +238,9 @@ export class MemoryService {
         // 覆盖写之前先把旧值留一份版本文件（W98）。判据用**正文有没有变**而不是
         // 「是不是覆盖写」：同一份正文再写一遍（重放、补 sources）没有旧值可丢，
         // 快照只会凭空多出五份一模一样的文件。
-        const contentChanged =
-          existing !== null && existing.fields[CONTENT_FIELD] !== merged[CONTENT_FIELD];
+        const valuesOf = (values: MemoryFields) => Object.entries(values).filter(([key]) => key !== UPDATED_AT_FIELD);
+        const contentChanged = existing !== null && (JSON.stringify(valuesOf(existing.fields)) !== JSON.stringify(valuesOf(merged)) ||
+          JSON.stringify(existing.entityRefs) !== JSON.stringify(structure.entityRefs) || JSON.stringify(existing.links) !== JSON.stringify(structure.links));
         // `addOnly` 已在上面抛错，`operationMode === 'upsert'` 这个判据在这里是显式
         // 的语义声明（只有「可覆盖写」的类型才有「被顶替的旧值」）。
         const snapshot =
@@ -265,6 +273,7 @@ export class MemoryService {
         );
 
         const text = serializeMemoryDocument({
+          ...structure,
           uri: target.uri,
           memoryType: schema.type,
           status,
@@ -360,7 +369,7 @@ export class MemoryService {
     query: string,
     topN: number,
   ): Promise<readonly MemoryRecord[]> {
-    return await prefetchMemories(
+    const records = await prefetchMemories(
       this.#filesystem,
       this.#logger,
       this.#search,
@@ -368,7 +377,23 @@ export class MemoryService {
       schema,
       query,
       topN,
+      schema.type === 'entities' ? this.#entityCandidates?.(scopeUri, query, Math.max(5, topN)) : undefined,
     );
+    if (schema.type !== 'entities') return records;
+    const result: MemoryRecord[] = [];
+    for (const record of records) {
+      if (record.entityId === undefined) {
+        await this.#locks.withLock(record.uri, 'exact', async () => {
+          const document = await readMemoryDocument(this.#filesystem, this.#logger, record.uri);
+          if (document === null || document.entityId !== undefined) return;
+          await this.#filesystem.write(record.uri, serializeMemoryDocument({ ...document,
+            ...nextMemoryStructure('entities', document), uri: record.uri, schema }));
+        });
+      }
+      const current = await this.read(record.uri);
+      if (current !== null) result.push(current);
+    }
+    return result;
   }
 
   /**

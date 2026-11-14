@@ -41,6 +41,7 @@ import { nullableText, text } from './row.js';
 import { globPrefixPattern, nodeSelfRowSql, placeholders } from './node-repository.js';
 import { notVersionFileSql } from './version-path.js';
 import { readablePredicateSql } from './permission-repository.js';
+import { replaceMemoryStructure, deleteMemoryStructure } from './memory-structure.js';
 
 export interface SqliteFtsIndexOptions {
   readonly db: DatabaseSync;
@@ -373,6 +374,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
       );
 
       for (const record of records) {
+        replaceMemoryStructure(this.#db, record);
         upsertNode.run(
           record.uri,
           record.parentUri,
@@ -399,6 +401,9 @@ export class SqliteFtsIndex implements RetrievalIndex {
       }
     });
     this.#logger.debug('FTS5 索引写入', { count: records.length });
+    if (records.some((record) => record.entityId !== undefined)) for (const row of this.#db.prepare('SELECT entity_id, group_concat(uri) AS uris FROM memory_entity GROUP BY entity_id HAVING count(*) > 1').all()) {
+      this.#logger.error('实体编号重复，已停止该身份的关联召回。请为独立副本分配新编号。', { entityId: text(row['entity_id']), uris: text(row['uris']) });
+    }
   }
 
   /**
@@ -413,6 +418,7 @@ export class SqliteFtsIndex implements RetrievalIndex {
     const clause = recursive ? `uri = ? OR uri GLOB ?` : 'uri = ?';
     const params: SQLInputValue[] = recursive ? [uri, globPrefixPattern(uri)] : [uri];
     const deleted = withWriteTransaction(this.#db, () => {
+      deleteMemoryStructure(this.#db, clause, params.map(String));
       this.#db.prepare(`DELETE FROM node_fts WHERE ${clause}`).run(...params);
       return Number(this.#db.prepare(`DELETE FROM node WHERE ${clause}`).run(...params).changes);
     });

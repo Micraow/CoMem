@@ -83,6 +83,7 @@ export function createMemory(
   const principals = [subject, ...groups, USER_WILDCARD];
 
   const memory = new MemoryService({
+    entityCandidates: (scope, query, limit) => core.memoryStructure.candidates(query, scope.toString(), principals, limit),
     forgetBarriers: core.forgetBarriers,
     // 配置项必须真的生效：写死的复核列表让 `memory.reviewRequired` 变成假配置。
     reviewRequired: config.memory.reviewRequired,

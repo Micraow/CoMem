@@ -12,6 +12,7 @@ export const entitiesMemoryType = {
   filename: '{name}.md',
   operationMode: 'upsert',
   fields: [
+    { name: 'aliases', type: 'string[]', merge: 'replace', description: '明确、稳定的专有称呼；不能把我的电脑、这台机器等上下文指代或用户、软件、Linux等类别和技术名当作具体设备的别名' },
     {
       name: 'name',
       type: 'string',

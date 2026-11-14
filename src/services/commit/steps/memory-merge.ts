@@ -255,6 +255,7 @@ export class MemoryMergeStep extends CommitStep {
       let write: MemoryWriteResult;
       try {
         write = await this.#memory.upsertMemory(context.scopeUri, schema, {
+          structure: new Map(extracted.structures ?? []).get(uriString),
           uri,
           // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
           provenance: { sources, evidenceAt: evidenceTime(context.messages) },
@@ -306,6 +307,7 @@ export class MemoryMergeStep extends CommitStep {
         continue;
       }
       const entry: MemoryDiffEntry = {
+        ...new Map(extracted.structures ?? []).get(uriString),
         uri: write.uri.toString(),
         memoryType,
         ...(write.before === null ? {} : { before: write.before }),
@@ -327,7 +329,7 @@ export class MemoryMergeStep extends CommitStep {
       // `links` 里已经有一条指向不存在来源的边。
       //
       try {
-        this.#links.addLinks(
+        await this.#links.addLinks(
           write.uri,
           sources.map((toUri) => ({ toUri, linkType: DERIVED_FROM })),
         );

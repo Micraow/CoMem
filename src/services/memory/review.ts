@@ -62,21 +62,11 @@ export async function approveMemory(
   await filesystem.write(
     uri,
     serializeMemoryDocument({
+      ...document,
       uri,
-      memoryType: document.memoryType,
       status: 'active',
-      createdAt: document.createdAt,
       updatedAt: now,
       schema,
-      fields: document.fields,
-      // 复核也是**一次完整重写**：不把读到的溯源带过来，approve 会在用户
-      // 点下「通过」的那一刻把 `sources` 抹掉。有效期与 `supersedes` 同理：
-      // 通过一次复核不改「这条记忆从哪一刻开始有效、顶替了谁」。
-      sources: document.sources,
-      validFrom: document.validFrom,
-      validUntil: document.validUntil,
-      supersedes: document.supersedes,
-      evidenceAt: document.evidenceAt,
     }),
   );
   logger.info('记忆复核通过', {

@@ -379,7 +379,7 @@ describe('记忆 frontmatter 解析矩阵', () => {
 
     // 1) 观察者字段：期望表写死。
     const fields = parseFrontmatterFields(raw);
-    expect(fields).toEqual(entry.fields);
+    expect({ memoryType: fields.memoryType, status: fields.status, validFrom: fields.validFrom, validUntil: fields.validUntil }).toEqual(entry.fields);
 
     // 2) 记忆文档：不是可解析记忆时返回 null；否则字段与观察者同一份。
     const memory = parseMemoryDocument(raw);

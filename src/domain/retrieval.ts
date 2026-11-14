@@ -12,9 +12,14 @@ import type { Level } from './level.js';
 import type { ContextType, NodeKind, NodeStatus } from './node.js';
 import { invalidArgument } from './errors.js';
 import { applyLevelWeight, type LevelWeights } from './ranking.js';
+import type { MemoryStructure } from './memory-structure.js';
 
 /** 索引里的一行 `node`（架构文档 §8.1）。 */
-export interface IndexRecord {
+export interface IndexRecord extends MemoryStructure {
+  readonly entityName?: string;
+  readonly entityKind?: string;
+  readonly aliases?: readonly string[];
+  readonly sources?: readonly string[];
   readonly uri: string;
   readonly parentUri: string;
   readonly scope: 'user' | 'group';

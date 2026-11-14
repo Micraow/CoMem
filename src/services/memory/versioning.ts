@@ -115,18 +115,11 @@ export async function writeVersionSnapshot(
   await filesystem.write(
     versionUri,
     serializeMemoryDocument({
+      ...document,
       uri: versionUri,
-      memoryType: document.memoryType,
-      status: document.status,
-      createdAt: document.createdAt,
-      updatedAt: document.updatedAt,
       schema,
-      fields: document.fields,
-      sources: document.sources,
       validFrom: document.validFrom ?? (document.createdAt === '' ? null : document.createdAt),
       validUntil: now,
-      supersedes: document.supersedes,
-      evidenceAt: document.evidenceAt,
     }),
   );
   await truncateVersions(filesystem, logger, directory, name);
@@ -240,18 +233,11 @@ export async function restoreSuperseded(
   await filesystem.write(
     uri,
     serializeMemoryDocument({
+      ...previous,
       uri,
-      memoryType: previous.memoryType,
-      status: previous.status,
-      createdAt: previous.createdAt,
-      updatedAt: previous.updatedAt,
       schema,
-      fields: previous.fields,
-      sources: previous.sources,
-      validFrom: previous.validFrom,
+      fields: { ...previous.fields, ...(schema.type === 'entities' ? document.fields['name'] === undefined ? {} : { name: document.fields['name'] } : {}) },
       validUntil: null,
-      supersedes: previous.supersedes,
-      evidenceAt: previous.evidenceAt,
     }),
   );
   return previousUri;

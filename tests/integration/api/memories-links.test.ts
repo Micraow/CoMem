@@ -261,11 +261,11 @@ describe('GET /memories/{uri}/links：另一端也要可读', () => {
     );
     await started.services.indexObserver.drain();
 
-    started.services.memoryLink.addLinks(Uri.parse(MEMORY_A), [
+    await started.services.memoryLink.addLinks(Uri.parse(MEMORY_A), [
       { toUri: Uri.parse(ARCHIVE_A), linkType: 'derived_from' },
       { toUri: Uri.parse(MEMORY_B), linkType: 'references' },
     ]);
-    started.services.memoryLink.addLinks(Uri.parse(MEMORY_B), [
+    await started.services.memoryLink.addLinks(Uri.parse(MEMORY_B), [
       { toUri: Uri.parse(ARCHIVE_A), linkType: 'derived_from' },
     ]);
   }

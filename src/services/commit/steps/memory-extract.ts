@@ -45,6 +45,8 @@ import { assertMemoryIdentity, renderMemoryUri } from '../../memory.js';
 import { buildExtractPrompt, NEW_PAGE_ID_START, type ExtractPage } from '../../prompts/extract.js';
 import { CommitStep, type StepContext } from '../pipeline.js';
 import { extractionMaterial } from './extract-material.js';
+import { resolveEntityAssignments, reuseEntityIdentities } from './extract-entities.js';
+import type { MemoryStructure } from '../../../domain/memory-structure.js';
 
 /** 跨步骤传递产物的键（`memory_merge` 消费）。 */
 export const EXTRACT_RESULT_KEY = 'memory_extract.result';
@@ -56,6 +58,7 @@ export const EXTRACT_RESULT_KEY = 'memory_extract.result';
  * URI，而合并与写 `memory_diff.json` 都要知道类型。
  */
 export interface MemoryExtractResult {
+  readonly structures?: readonly (readonly [string, MemoryStructure])[];
   readonly operations: readonly BatchOperation[];
   readonly skipped: readonly SkippedMemoryOperation[];
   readonly memoryTypes: ReadonlyMap<string, string>;
@@ -63,6 +66,7 @@ export interface MemoryExtractResult {
 
 export interface MemoryExtractStepDeps {
   readonly memory: {
+    readonly read?: (uri: Uri) => Promise<MemoryRecord | null>;
     prefetch(
       scopeUri: Uri,
       schema: MemoryTypeSchema,
@@ -142,6 +146,7 @@ const extractOperationSchema = z.discriminatedUnion('kind', [
     type: z.string(),
     identity: z.record(z.string(), z.string()),
     operations: z.array(mergeOperationSchema),
+    entityPages: z.array(z.number().int().positive()).optional(),
   }),
   z.object({ kind: z.literal('delete'), pageId: z.number() }),
 ]);
@@ -234,6 +239,8 @@ function resolveOperations(
   const operations: BatchOperation[] = [];
   const skipped: SkippedMemoryOperation[] = [];
   const memoryTypes = new Map<string, string>();
+  const accepted: ExtractOutput['operations'] = [];
+  const newPages = new Set<number>();
 
   for (const operation of output.operations) {
     if (operation.kind === 'delete') {
@@ -280,6 +287,9 @@ function resolveOperations(
       continue;
     }
     const uriString = uri.toString();
+    if (!Number.isInteger(operation.pageId) || operation.pageId <= 0 || newPages.has(operation.pageId)) {
+      skipped.push(skip(operation.type, 'duplicate_page_id', `编号 ${operation.pageId} 非法或重复，跳过。`)); continue;
+    }
 
     const page = pages.get(operation.pageId);
     if (operation.pageId < NEW_PAGE_ID_START) {
@@ -352,9 +362,11 @@ function resolveOperations(
       operations.push({ kind: 'upsert', uri: uriString, operation: resolved });
     }
     memoryTypes.set(uriString, operation.type);
+    accepted.push(operation);
+    if (operation.pageId >= NEW_PAGE_ID_START) newPages.add(operation.pageId);
   }
 
-  return { operations, skipped, memoryTypes };
+  return { operations, skipped, memoryTypes, structures: resolveEntityAssignments([...accepted, ...output.operations.filter((op) => op.kind === 'delete')], pages, memoryTypes, skipped, scopeUri) };
 }
 
 /** `state` 里的抽取结果；`memory_merge` 用它做类型收窄，不用断言。 */
@@ -383,6 +395,7 @@ function toMemoryOperationsFile(
     operations: [...result.operations],
     skipped: [...result.skipped],
     memoryTypes: [...result.memoryTypes],
+    structures: result.structures,
   };
 }
 
@@ -392,6 +405,7 @@ function fromMemoryOperationsFile(file: MemoryOperationsFile): MemoryExtractResu
     operations: file.operations,
     skipped: file.skipped,
     memoryTypes: new Map(file.memoryTypes),
+    structures: file.structures,
   };
 }
 
@@ -416,6 +430,9 @@ export class MemoryExtractStep extends CommitStep {
   }
 
   async run(context: StepContext): Promise<void> {
+    if (await this.#archive.readMemoryOperations(context.archiveUri) !== null) {
+      await this.rehydrate(context); return;
+    }
     const messages = extractionMaterial(context.messages);
     const pages = messages.length === 0 ? new Map<number, ExtractPage>() : await this.#prefetchPages(context);
 
@@ -429,7 +446,8 @@ export class MemoryExtractStep extends CommitStep {
     });
 
     const output = messages.length === 0 ? { operations: [] } : await this.#llm.generateJson(prompt, extractOutputSchema);
-    const result = resolveOperations(output, context.scopeUri, pages);
+    const resolved = resolveOperations(output, context.scopeUri, pages);
+    const result = { ...resolved, structures: await reuseEntityIdentities(resolved.structures ?? [], this.#memory.read?.bind(this.#memory)) };
 
     // 先落盘再进 `state`：`state` 只是本次运行的缓存，重放时靠的是归档目录里的
     // 产物。反过来的话，写盘失败会留下一个「步骤已完成、产物不存在」的归档。
@@ -488,6 +506,9 @@ export class MemoryExtractStep extends CommitStep {
           uri: record.uri.toString(),
           content: pageContent(record),
           memoryType: record.memoryType,
+          entityId: record.entityId,
+          aliases: Array.isArray(record.fields['aliases']) ? record.fields['aliases'].filter((value): value is string => typeof value === 'string') : [],
+          entityRefs: record.entityRefs,
         });
         nextPageId += 1;
       }

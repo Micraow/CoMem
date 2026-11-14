@@ -50,6 +50,7 @@ import { createBackground } from './background.js';
 import { createFoundation } from './foundation.js';
 import { createMemory } from './memory.js';
 import { createModels } from './models.js';
+import { migrateMemoryLinks } from './migrate-memory-links.js';
 import { createRetrieval } from './retrieval.js';
 import type { Container, CreateContainerOptions } from './types.js';
 
@@ -63,6 +64,7 @@ export async function createContainer(
   options: CreateContainerOptions = {},
 ): Promise<Container> {
   const foundation = createFoundation(options);
+  await migrateMemoryLinks(foundation.db, foundation.dataDir, foundation.store, foundation.locks, foundation.logger);
   const models = createModels(foundation);
   const access = await createAccess(foundation, options);
   const retrieval = createRetrieval(foundation, models, access);

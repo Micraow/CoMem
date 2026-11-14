@@ -33,6 +33,9 @@ import { buildRecords } from './records.js';
 import { progress, progressVectors } from './report.js';
 import { embedMissingNodes } from './vectors.js';
 import { walkDataDir } from './walk.js';
+import { createPathLockManager } from '../../adapters/fs/lock.js';
+import { migrateMemoryLinks } from '../../bootstrap/container/migrate-memory-links.js';
+import { MemoryStructureIndex } from '../../adapters/sqlite/memory-structure.js';
 
 /** 数据库文件在数据根下的位置（§6.5 的 `_meta/comem.sqlite`）。 */
 const META_DIRECTORY = '_meta';
@@ -108,6 +111,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
       createReindexServices(db, config, logger, embeddingConfig);
 
     const model = embedding.model;
+    if (needsIndex || needsLinks) await migrateMemoryLinks(db, config.dataDir, store, createPathLockManager({ dataDir: config.dataDir, logger }), logger);
     let vectors = 0;
     let links = 0;
     let skipped = 0;
@@ -118,6 +122,9 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     /** 按 `sources` 收集到的 `derived_from` 边；循环结束后一次整批替换。 */
     const derivedEdges: DerivedEdge[] = [];
     const seenEdges = new Set<string>();
+    if (needsIndex) for (const row of db.prepare('SELECT uri FROM memory_entity UNION SELECT uri FROM memory_entity_ref').all()) {
+      if (!nodes.some((node) => node.uri.toString() === row['uri'])) await index.deleteByUri(String(row['uri']));
+    }
 
     // 维度变了要整表重建：`vec0` 的维度固定在 `CREATE VIRTUAL TABLE` 时，旧表里的
     // 向量一条都用不了。先备份，回填成功后再删；中途抛错就回滚到旧维度。
@@ -150,6 +157,7 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
 
           // 2) 关联边：只收集，结束前一次整批替换（见循环后的 `rebuildDerived`）。
           if (needsLinks && document !== null) {
+            if (!needsIndex) await index.upsert(await buildRecords(store, metadata, logger, node, existing, document, text));
             collectDerivedEdges(
               node.uri,
               parseSources(document.data[SOURCES_KEY]),
@@ -208,6 +216,10 @@ export async function runReindex(options: ReindexOptions = {}): Promise<ReindexR
     if (needsLinks) {
       links = memoryLink.rebuildDerived(derivedEdges).inserted;
       logger.info('记忆关联边已重建。', { edges: links, memories: nodes.length });
+    }
+    if (needsIndex) for (const conflict of new MemoryStructureIndex(db).conflicts()) {
+      for (const uri of conflict.uris) failedUris.add(uri);
+      logger.error('实体编号重复，关联召回已停用，请为独立副本分配新编号。', { entityId: conflict.id, uris: conflict.uris });
     }
 
     progress(nodes.length, nodes.length, rewrittenUris.size, skipped, failedUris.size);

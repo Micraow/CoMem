@@ -30,6 +30,9 @@ export const NEW_PAGE_ID_START = 100;
 
 /** 一条「已读过」的记忆。`pageId` 是给模型看的编号，不是 URI。 */
 export interface ExtractPage {
+  readonly entityId?: string;
+  readonly aliases?: readonly string[];
+  readonly entityRefs?: readonly string[];
   readonly pageId: number;
   readonly uri: string;
   readonly content: string;
@@ -93,10 +96,14 @@ function renderPages(pages: readonly ExtractPage[]): string {
   if (pages.length === 0) {
     return '（这次没有预取到已读记忆。）';
   }
+  const entityPages = new Map(pages.filter((page) => page.entityId !== undefined).map((page) => [page.entityId, page.pageId]));
   return pages
-    .map((page) =>
-      [`<page_id: ${page.pageId}>`, `uri: ${page.uri}`, '正文：', page.content].join('\n'),
-    )
+    .map((page) => {
+      const refs = page.entityRefs ?? [];
+      return [`<page_id: ${page.pageId}>`, `uri: ${page.uri}`, `type: ${page.memoryType}`, `aliases: ${JSON.stringify(page.aliases ?? [])}`,
+        `entityPages: ${JSON.stringify(refs.flatMap((id) => entityPages.get(id) ?? []))}`,
+        `未提供页面的已有实体引用数: ${refs.filter((id) => !entityPages.has(id)).length}`, '正文：', page.content].join('\n');
+    })
     .join('\n\n');
 }
 

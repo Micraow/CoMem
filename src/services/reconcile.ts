@@ -48,6 +48,7 @@ import { Uri } from '../domain/uri.js';
 
 import type { AclService } from './acl.js';
 import { parseFrontmatterFields } from './index-observer.js';
+import { frontmatterFieldsOf } from './memory/frontmatter.js';
 import { skillIndexRecord } from './skill.js';
 
 /** 资源文件的索引层级（与 `ResourceService` 一致，§9.1）。 */
@@ -361,10 +362,12 @@ export class ReconcileService {
 
     const document = await this.#store.readText(uri);
     // 只有记忆文件 frontmatter 里才有 `valid_*`；其它文件读原始字节没有意义。
-    const validity = contextType === 'memory' ? parseFrontmatterFields(text) : null;
+    const validity = contextType === 'memory' ? parseFrontmatterFields(text) : frontmatterFieldsOf(document.data ?? {});
     await this.#index.upsert([
       {
         ...base,
+        memoryType: contextType === 'memory' ? validity.status.kind === 'invalid' ? null : validity.memoryType : base.memoryType,
+        status: contextType === 'memory' ? validity.status.kind === 'value' ? validity.status.value : 'active' : base.status,
         abstract: document.frontmatter?.summary ?? null,
         content: document.text,
         bodyDigest: stableDigest(document.text),
@@ -372,6 +375,9 @@ export class ReconcileService {
         updatedAt: document.stat.updatedAt,
         validFrom: validity?.validFrom ?? null,
         validUntil: validity?.validUntil ?? null,
+        entityId: validity?.entityId, entityRefs: validity?.entityRefs, links: validity?.links,
+        entityName: validity?.entityName, entityKind: validity?.entityKind, aliases: validity?.aliases,
+        sources: validity?.sources,
       },
     ]);
     return { kind: 'indexed' };

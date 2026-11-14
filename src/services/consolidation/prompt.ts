@@ -60,6 +60,8 @@ function buildSystemPrompt(input: ConsolidationPromptInput): string {
     '- 每条操作必须有 `reason`，说明为什么合并、为什么删除。没有理由的删除不可接受。',
     '- 判断依据是语义：两条记忆讲同一件事，或者一条已经被另一条取代。字面相似度不是依据。',
     '- 不确定时先 `read` 正文，不要凭摘要猜。',
+    '- `entity_refs` 与 `memory_links` 属于各自文件；不要假定删除的记忆与某个保留项有关联，自动合并不会转移它们。',
+    '- 实体只能更新，不能自动删除或合并身份。每批有删除操作时，只保留一个 add/update 目标，以便保留被合并记忆的引用。',
     '- 没有需要改的，输出 `{"action": "finish", "operations": []}`。',
     `- 最多 ${input.maxIterations} 轮。第 ${input.maxIterations} 轮必须结束，否则整次合并失败。`,
   ].join('\n');

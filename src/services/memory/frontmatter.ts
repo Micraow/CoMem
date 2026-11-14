@@ -27,6 +27,7 @@
 import { parseStatusField, type StatusField } from '../../domain/node.js';
 import { parseValidityInstant } from '../../domain/retrieval.js';
 import { parseFrontmatterLines } from './yaml.js';
+import { memoryStructure, type MemoryStructure } from '../../domain/memory-structure.js';
 
 /** 记忆文件的 frontmatter 分隔符。 */
 const FRONTMATTER_DELIMITER = '---';
@@ -46,7 +47,11 @@ const VALID_FROM_KEY = 'valid_from';
 const VALID_UNTIL_KEY = 'valid_until';
 
 /** 观察者与 `reindex` 要的最小字段集。 */
-export interface FrontmatterFields {
+export interface FrontmatterFields extends MemoryStructure {
+  readonly entityName?: string;
+  readonly entityKind?: string;
+  readonly aliases?: readonly string[];
+  readonly sources?: readonly string[];
   readonly memoryType: string | null;
   /** `status` 的三档结果：缺键 / 合法 / 键存在但非法（见 `domain/node.ts`）。 */
   readonly status: StatusField;
@@ -127,6 +132,11 @@ export function splitFrontmatter(raw: string): SplitFrontmatter {
 export function frontmatterFieldsOf(data: Readonly<Record<string, unknown>>): FrontmatterFields {
   const memoryType = data[MEMORY_TYPE_KEY];
   return {
+    ...memoryStructure(data),
+    entityName: typeof data['name'] === 'string' ? data['name'] : undefined,
+    entityKind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
+    aliases: parseSources(data['aliases']),
+    sources: parseSources(data['sources']),
     memoryType: typeof memoryType === 'string' && memoryType !== '' ? memoryType : null,
     // YAML 的 `null`（`status:` / `status: null`）与数字、布尔、非法字符串一样
     // 都是「键存在但不可用」，不是缺键——缺键才是 `undefined`。

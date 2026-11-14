@@ -16,6 +16,7 @@ import type { GrepHit, RetrievalEngine, SearchPlan } from '../../domain/retrieva
 import type { ContextAssembler } from '../context-assembler.js';
 import { Arms } from './arms.js';
 import { AutomaticContext, type AutomaticContextOptions } from './automatic.js';
+import { entityCandidates } from './entities.js';
 import { userScopeOf, parsePrincipal } from '../../domain/acl.js';
 import { Uri } from '../../domain/uri.js';
 import { elapsedMs, resolveLimit } from './budget.js';
@@ -108,6 +109,10 @@ export class SearchService {
       levelWeights: deps.config.levelWeights, filesystem: deps.filesystem,
     });
     this.#arms = new Arms({
+      expand: async (query, options, hits, limit, vector) => {
+        try { return await entityCandidates(deps, query, options, hits, limit, vector); }
+        catch (error) { deps.logger.warn('实体辅助检索失败，保留基础检索结果。', { error: String(error) }); return hits; }
+      },
       index: deps.index, engine: this.#engine, vector,
       levelWeights: deps.config.levelWeights, rerank: this.#rerankStage,
       hotness: {

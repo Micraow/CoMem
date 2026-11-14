@@ -31,6 +31,7 @@ import {
   parseFrontmatterFields,
   type FrontmatterFields,
 } from './frontmatter.js';
+import { frontmatterFieldsOf } from '../memory/frontmatter.js';
 import { errorMessage } from '../../domain/errors.js';
 
 import type { IndexObserverDeps } from './ports.js';
@@ -100,7 +101,8 @@ export async function documentRecord(
   updatedAt: string,
 ): Promise<IndexRecord> {
   const document = await ports.store.readText(uri);
-  const fields = await readFrontmatterFields(ports.store, uri, contextType);
+  const fields = contextType === 'memory' ? await readFrontmatterFields(ports.store, uri, contextType) :
+    { ...EMPTY_FRONTMATTER_FIELDS, links: frontmatterFieldsOf(document.data ?? {}).links };
   const existing = ports.nodes.get(uri.toString());
   // 记忆文件的 `status` 键存在但值非法：整份文档按不可解析的记忆处理。
   // **不能保留索引旧值**：那会让索引与文件永久分叉（文件读作不存在、`find`
@@ -114,6 +116,7 @@ export async function documentRecord(
   }
 
   return {
+    ...fields,
     uri: uri.toString(),
     parentUri: uri.parent()?.toString() ?? '',
     scope: uri.scope,

@@ -45,6 +45,7 @@ export interface StoredStat {
 }
 
 export interface TextDocument {
+  readonly data?: Readonly<Record<string, unknown>>;
   /** 正文，不含 frontmatter */
   readonly text: string;
   /** 没有 frontmatter 时为 null */
@@ -169,6 +170,7 @@ export class ContentStore {
 
     return {
       text: document.body,
+      data: document.data,
       frontmatter: document.hasFrontmatter ? toFrontmatter(document.data) : null,
       stat: {
         uri,

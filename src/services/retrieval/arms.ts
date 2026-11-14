@@ -18,7 +18,7 @@ import { budgetExceeded, remainingBudget, withBudget } from './budget.js';
 import { enrichVectorHits } from './enrich.js';
 import { applyHotness, rankHits, type HotnessSettings } from './merge.js';
 import type { RerankStage } from './rerank.js';
-import type { FindOptions, RetrieveOutcome, VectorRetrievalDeps } from './types.js';
+import type { FindOptions, PreHotnessHit, RetrieveOutcome, VectorRetrievalDeps } from './types.js';
 
 /**
  * 向量检索的候选集：`scope` 下全部可读节点。
@@ -51,6 +51,7 @@ const QUERY_EMBED_TIMEOUT_MS = 6_000;
 
 /** 三臂的执行依赖。`vector` 在 `engine === 'fts5'` 时是 `null`（构造期已保证）。 */
 export interface ArmsDeps {
+  readonly expand?: (text: string, options: FindOptions, hits: readonly PreHotnessHit[], limit: number, queryVector?: readonly number[]) => Promise<readonly PreHotnessHit[]>;
   readonly index: RetrievalIndex;
   readonly engine: RetrievalEngine;
   readonly vector: VectorRetrievalDeps | null;
@@ -60,6 +61,7 @@ export interface ArmsDeps {
 }
 
 export class Arms {
+  readonly #expand: ArmsDeps['expand'];
   readonly #index: RetrievalIndex;
   readonly #engine: RetrievalEngine;
   /**
@@ -73,6 +75,7 @@ export class Arms {
   readonly #hotness: HotnessSettings;
 
   constructor(deps: ArmsDeps) {
+    this.#expand = deps.expand;
     this.#index = deps.index;
     this.#engine = deps.engine;
     this.#vector = deps.vector;
@@ -130,12 +133,7 @@ export class Arms {
         ...hit,
         ranks: null,
       }));
-      const reranked = await this.#rerank.apply(text, ranked, options);
-      return {
-        hits: applyHotness(this.#hotness, reranked.hits.slice(0, limit)),
-        degradation: null,
-        rerankFailure: reranked.failure,
-      };
+      return this.#finish(text, options, limit, ranked, null);
     }
 
     const vector = this.#vector;
@@ -192,12 +190,7 @@ export class Arms {
         ranks: { fts5: null, vector: index + 1, hybrid: null },
       }),
     );
-    const reranked = await this.#rerank.apply(text, ranked, options);
-    return {
-      hits: applyHotness(this.#hotness, reranked.hits.slice(0, limit)),
-      degradation: null,
-      rerankFailure: reranked.failure,
-    };
+    return this.#finish(text, options, limit, ranked, null, queryVector);
   }
 
   /**
@@ -278,12 +271,13 @@ export class Arms {
       ranks: hit.ranks,
     }));
 
-    const reranked = await this.#rerank.apply(text, scored, options);
-    return {
-      hits: applyHotness(this.#hotness, reranked.hits.slice(0, limit)),
-      degradation,
-      rerankFailure: reranked.failure,
-    };
+    return this.#finish(text, options, limit, scored, degradation, queryVector);
+  }
+
+  async #finish(text: string, options: FindOptions, limit: number, base: readonly PreHotnessHit[], degradation: string | null, queryVector?: readonly number[]): Promise<RetrieveOutcome> {
+    const hits = await this.#expand?.(text, options, base, Math.max(limit, this.#rerank.candidateFloor), queryVector) ?? base;
+    const reranked = await this.#rerank.apply(text, hits, options);
+    return { hits: applyHotness(this.#hotness, reranked.hits.slice(0, limit)), degradation, rerankFailure: reranked.failure, queryVector };
   }
 
   /**
