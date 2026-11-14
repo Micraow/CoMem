@@ -3,15 +3,14 @@
  * 设置（架构文档 §18 的配置模型、`docs/operations.md` 的「在控制台里改设置」）。
  *
  * 页面把 `GET /api/v1/config` 的 84 个叶子按 `group` 分组，首屏只展开「模型 /
- * 向量 / 重排」三组，其余折叠。每一项都显示中文名、路径、当前值与**来源徽章**
+ * 向量」两组，其余折叠，高级参数另行展开。每一项显示中文名、当前值与**来源徽章**
  * （默认值 / 配置文件 / 覆盖文件 / 环境变量）——来源是本页最有价值的一列，它回答
  * 「为什么我改了不生效」。不可编辑项不隐藏，显示原因并禁用控件。
  *
  * ## 保存不等于生效
  *
  * 服务端只在启动时读一次配置，`PATCH` 只写覆盖文件。保存成功后显示不可关闭的提示条
- * 与两条重启命令；页面任何地方都不写「已应用」。连接测试同样标注「测的是当前正在
- * 运行的配置」，否则「保存 + 测试通过」会被当成已生效。
+ * 与两条重启命令；连接测试使用未保存的表单草稿，不代表运行配置已生效。
  *
  * ## 环境变量遮住的项
  *
@@ -105,6 +104,12 @@ interface PendingSave {
 const pending = ref<Readonly<Record<string, PendingSave>>>({})
 
 const expanded = ref<ReadonlySet<ConfigGroup>>(new Set(INITIALLY_EXPANDED_GROUPS))
+const showAdvanced = ref(false)
+const basicProviderFields = new Set(['type', 'baseUrl', 'model', 'apiKey', 'dimension'])
+function visibleItems(group: { readonly group: ConfigGroup; readonly items: readonly ConfigItemView[] }) {
+  return showAdvanced.value || !['llm', 'embedding'].includes(group.group)
+    ? group.items : group.items.filter((item) => basicProviderFields.has(item.path.split('.').at(-1) ?? ''))
+}
 const probes = ref<Readonly<Record<ConfigTestTarget, ProbeState>>>(
   Object.fromEntries(CONFIG_TEST_TARGETS.map((target) => [target, idleProbe()])) as Record<
     ConfigTestTarget,
@@ -241,7 +246,7 @@ function describedByOf(item: ConfigItemView): string | undefined {
  */
 function clearProbeForTypePath(path: string): void {
   for (const target of CONFIG_TEST_TARGETS) {
-    if (testTypePathOf(target) !== path || probes.value[target].status === 'idle') {
+    if (!path.startsWith(testTypePathOf(target).replace(/type$/, '')) || probes.value[target].status === 'idle') {
       continue
     }
     probes.value = { ...probes.value, [target]: idleProbe() }
@@ -408,12 +413,11 @@ async function save(): Promise<void> {
 }
 
 /**
- * 这一组的类型是不是「停用」。用正在运行的配置判断：连接测试测的是运行中的配置，
- * 不是刚改、还没保存的草稿。类型停用时没有供应商可连，发请求只会得到参数错误。
+ * 按当前表单判断是否停用，连接测试与草稿使用同一个供应商类型。
  */
 function typeDisabledOf(target: ConfigTestTarget): boolean {
   const path = testTypePathOf(target)
-  return items.value.find((item) => item.path === path)?.value === 'disabled'
+  return (drafts.value[path] ?? items.value.find((item) => item.path === path)?.value) === 'disabled'
 }
 
 /** 把「去启用」落到该组的类型选择框上：展开分组、聚焦并滚到它。 */
@@ -443,7 +447,12 @@ async function test(target: ConfigTestTarget | null): Promise<void> {
 
   probes.value = { ...probes.value, [target]: { status: 'running', result: null, error: null } }
   try {
-    const result = await api.post<ConfigTestPayload>('/config/test', { target })
+    const candidate = buildPatchValues(items.value, drafts.value, cleared.value)
+    if (Object.keys(candidate.errors).length > 0) throw new Error('请先修正表单中的配置错误。')
+    const result = await api.post<ConfigTestPayload & { dimension?: number }>('/config/test', { target, values: candidate.values })
+    if (target === 'embedding' && result.ok && result.dimension !== undefined) {
+      drafts.value = { ...drafts.value, 'providers.embedding.dimension': String(result.dimension) }
+    }
     probes.value = { ...probes.value, [target]: { status: 'done', result, error: null } }
   } catch (caught) {
     probes.value = {
@@ -645,6 +654,9 @@ onMounted(() => {
           <UiCard :title="group.label" panel>
           <template #actions>
             <span class="caption tnum">{{ group.items.length }} 项</span>
+            <UiButton v-if="group.group === 'llm' || group.group === 'embedding'" variant="plain" size="sm" :aria-pressed="showAdvanced" @click="showAdvanced = !showAdvanced">
+              {{ showAdvanced ? '收起高级设置' : '高级设置' }}
+            </UiButton>
             <template
               v-if="group.testTarget !== null && probeOf(group.testTarget).status === 'skipped'"
             >
@@ -690,7 +702,7 @@ onMounted(() => {
             :id="`settings-group-${group.group}`"
             class="settings-rows"
           >
-            <div v-for="item in group.items" :key="item.path" class="settings-row">
+            <div v-for="item in visibleItems(group)" :key="item.path" class="settings-row">
               <div class="settings-row__meta">
                 <label :for="inputIdOf(item.path)" class="settings-row__label">
                   {{ fieldLabelOf(item.path) }}

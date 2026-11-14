@@ -1,13 +1,6 @@
 /**
  * Vercel AI SDK 嵌入适配器（架构文档 §4.4、§18 的 `providers` 段）。
  *
- * 与 `ai-sdk-provider.ts` 并列而不是合并：两者都用 `ai`，但一个做生成、一个做
- * 嵌入。合并之后 `LlmProvider` 的每个实现都要实现两套方法，而 `FakeLlmProvider`
- * 之类只关心生成的替身会被迫带上一个永远不用的 `embed`。
- *
- * 这一层只做三件事：把 `texts` 切成供应商能接受的批、把 SDK 的 usage 映射回契约、
- * 把 SDK 的错误收敛成 `ComemError`。
- *
  * **不重试。** 与 `ai-sdk-provider.ts` 同一条理由：重试策略在上层，SDK 默认的 2 次
  * 重试会绕过「认证失败不重试」「维度不匹配不重试」的判断，所以调用时显式
  * `maxRetries: 0`。
@@ -28,6 +21,7 @@ import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import { OPENAI_DEFAULT_BASE_URL } from './provider-defaults.js';
+import { assertValidVector } from '../../domain/embedding.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -105,6 +99,17 @@ function createEmbeddingModel(options: AiSdkEmbeddingProviderOptions): Embedding
     apiKey: options.apiKey,
   });
   return provider.embeddingModel(options.model);
+}
+
+export async function detectEmbeddingDimension(options: AiSdkEmbeddingProviderOptions): Promise<number> {
+  const result = await embedMany({
+    model: createEmbeddingModel(options), values: ['CoMem connection test'], maxRetries: 0,
+    abortSignal: AbortSignal.timeout((options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * MILLISECONDS_PER_SECOND),
+  });
+  const vector = result.embeddings[0];
+  if (vector === undefined) throw new ComemError('PROVIDER_UNAVAILABLE', '嵌入供应商未返回向量。');
+  assertValidVector(vector, vector.length);
+  return vector.length;
 }
 
 export class AiSdkEmbeddingProvider implements EmbeddingProvider {

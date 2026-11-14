@@ -2,20 +2,21 @@
  * CoMem 的 DSH 原生插件（架构文档 §15.7）。
  *
  * DSH 没有 hook 脚本面：它的事件是**同进程 Cordis 插件订阅的 typed 事件**（`ctx.on`）。
- * 所以这个插件不是「把 stdin 的 JSON 转成 CoMem 的请求」的进程，而是五个接缝上的
+ * 所以这个插件不是「把 stdin 的 JSON 转成 CoMem 的请求」的进程，而是宿主事件上的
  * 订阅者：
  *
  * | 接缝 | 等价于 | 做什么 |
  * |---|---|---|
- * | `agent/created` | `SessionStart` | `handleSessionStart` 拼画像 / 偏好 / 技能索引，`agent.inject()` |
+ * | `agent/created` | `SessionStart` | `handleSessionStart` 取背景正文与技能目录，`agent.inject()` |
  * | `agent/pre-step`（waterfall） | `UserPromptSubmit` | `handleUserPromptSubmit` 检索，块折进 `decision.messages` |
+ * | `tools/post-execute` | `PostToolUse` | 采集工具调用与结果，保留执行 decision |
  * | `session/event` 的 `turn/end` | `Stop` | 本轮 user / assistant 消息剥离后 `POST /sessions/{id}/messages` + `/commit` |
  * | `agent/disposed` | `SessionEnd` 的近似物 | 尽力把还没提交的缓冲发出去 |
  * | `session/event` 的 `compaction/start` | `PreCompact` | **做不到**：只记一条 warn，压缩前不归档 |
  *
  * ## 这个文件只做适配，不做第二份实现
  *
- * 渲染、预算、转义、剥离、跨轮账本、HTTP 都在 `integrations/lib/`。这里只做三件
+ * 预算与账本在服务端；宿主协议、剥离与 HTTP 在公共 handlers/lib。这里只做三件
  * 事：把 DSH 的载荷翻译成 handler 已经接受的事件形状、把 handler 的输出放进 DSH
  * 的接缝、把 DSH 的消息形状翻译成 CoMem 的采集形状。**没有一个块是在这里拼的。**
  *
@@ -57,6 +58,8 @@ import { sanitizeCapturedMessages } from '../../lib/sanitize.mjs';
 import { handleSessionStart } from '../../servers/session-start.mjs';
 import { handleUserPromptSubmit } from '../../servers/user-prompt-submit.mjs';
 import { ensureSession } from '../../servers/stop.mjs';
+import { toToolMessage } from '../../servers/post-tool-use.mjs';
+import { captureSource } from '../../lib/source.mjs';
 
 /**
  * @typedef {object} PluginContext
@@ -79,7 +82,6 @@ const SESSIONS_PATH = '/api/v1/sessions';
  */
 const SOURCE_KIND = 'comem';
 
-/** 采集只收这两种角色（工具调用由 `PostToolUse` 那类接缝负责，DSH 上没接）。 */
 const CAPTURE_ROLES = new Set(['user', 'assistant']);
 
 /**
@@ -210,7 +212,6 @@ export function apply(ctx, rawConfig) {
 }
 
 /**
- * 注册五个接缝。
  *
  * @param {PluginContext} ctx
  * @param {{ baseUrl?: string, token?: string, timeoutMs?: number }} rawConfig
@@ -224,8 +225,6 @@ function start(ctx, rawConfig) {
     return;
   }
 
-  // 插件 config 是 HTTP 三件事的权威来源；其余（userId、检索参数、查询过滤、
-  // 临时目录）继续读 `~/.config/comem/config.yaml` 与环境变量——与 hook 同一套。
   // 只有显式给了的键才覆盖：`token` / `timeoutMs` 不写时沿用配置文件与环境变量，
   // 写了（包括空串）就以这里为准。`baseUrl` 必填，永远覆盖。
   const overrides = { baseUrl };
@@ -243,26 +242,23 @@ function start(ctx, rawConfig) {
       return fallbackConfig;
     });
 
-  let warnedNoUserId = false;
   /** 每一轮最多等多久：沿用 hook 的总预算（召回 2s、开局 4s）。 */
   const clientFor = (config, budgetMs) =>
     createHttpClient({ ...config, deadline: createDeadline(budgetMs, Date.now()) });
+  const epochs = new Map();
+  const epochOf = (id) => {
+    if (!epochs.has(id)) epochs.set(id, randomUUID());
+    return epochs.get(id);
+  };
 
-  /** SessionStart：拼三个索引块，排队给下一步。 */
   async function injectSessionStart(agent, source) {
     const config = await settings;
-    if (config.userId === '') {
-      if (!warnedNoUserId) {
-        warnedNoUserId = true;
-        ctx.logger.warn('comem: 没有 userId（配置文件里写 userId: <你的用户名>），不注入画像与偏好。');
-      }
-      return;
-    }
     const event = {
       event: 'session_start',
-      sessionId: comemSessionId(agent.id),
+      sessionId: comemSessionId(agent.session.id),
       cwd: cwdOf(agent.session),
       source,
+      contextEpoch: epochOf(agent.session.id),
     };
     const result = await handleSessionStart(event, {
       config,
@@ -290,7 +286,7 @@ function start(ctx, rawConfig) {
     const decision = await next();
     try {
       // 同一轮里后续 tool step 的批次是空的：不重复注入（文件头）。
-      if (messages.length === 0 || decision.kind !== 'enter') {
+      if (isSubagentSession(agent.session) || messages.length === 0 || decision.kind !== 'enter') {
         return decision;
       }
       const prompt = promptTextOf(messages);
@@ -299,9 +295,10 @@ function start(ctx, rawConfig) {
       }
       const event = {
         event: 'user_prompt_submit',
-        sessionId: comemSessionId(agent.id),
+        sessionId: comemSessionId(agent.session.id),
         cwd: cwdOf(agent.session),
         prompt,
+        contextEpoch: epochOf(agent.session.id),
       };
       const config = await settings;
       const result = await handleUserPromptSubmit(event, {
@@ -335,6 +332,24 @@ function start(ctx, rawConfig) {
     return entry;
   }
 
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next();
+    try {
+      const session = exec.agent?.session;
+      if (session !== undefined && !isSubagentSession(session)) {
+        bufferOf(session).messages.push(toToolMessage({
+          host: 'dsh', cwd: cwdOf(session), toolName: exec.name, toolUseId: exec.callId,
+          toolInput: exec.arguments,
+          toolOutput: Array.isArray(result.content) ? result.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n') : '',
+          isError: result.isError,
+        }));
+      }
+    } catch (error) {
+      ctx.logger.warn('comem: 采集工具结果失败。%o', errorFields(error));
+    }
+    return decision;
+  });
+
   /** 把缓冲里的消息发出去；成功才从缓冲里摘掉快照。失败留着重投。 */
   async function flushOnce(session, dropOnFailure) {
     const entry = pending.get(session.id);
@@ -346,7 +361,9 @@ function start(ctx, rawConfig) {
       return;
     }
     const snapshot = entry.messages.slice();
-    const messages = sanitizeCapturedMessages(snapshot);
+    const messages = sanitizeCapturedMessages(snapshot).map((message) => ({
+      ...message, source: message.source ?? captureSource({ host: 'dsh', cwd: cwdOf(session) }),
+    }));
     // 一条都没剩下（整轮只有注入块）：不是错误，也不必发空数组。
     if (messages.length === 0) {
       entry.messages = entry.messages.slice(snapshot.length);
@@ -394,6 +411,7 @@ function start(ctx, rawConfig) {
 
   ctx.on('session/event', (session, event) => {
     if (event.type === 'compaction/start') {
+      epochs.set(session.id, randomUUID());
       ctx.logger.warn(
         'comem: DSH 的压缩只有 compaction/start 这个观察点，无法在压缩前拦截。CoMem 的 pre-compact 钩子在 DSH 上不可用，压缩前不会额外归档（会话 %s）。',
         session.id,
@@ -429,6 +447,7 @@ function start(ctx, rawConfig) {
   });
 
   ctx.on('agent/disposed', ({ agent }) => {
+    epochs.delete(agent.session.id);
     // emit 模式，返回值没人等。最后一次机会：失败就丢（会话已经没了）。
     void scheduleFlush(agent.session, true);
   });

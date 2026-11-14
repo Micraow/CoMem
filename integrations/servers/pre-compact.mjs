@@ -27,6 +27,7 @@ import { join } from 'node:path';
 
 import { isBypassed, loadConfig, resolveHost } from '../lib/config.mjs';
 import { FileEventDeduper } from '../lib/dedup.mjs';
+import { contextEpoch } from '../lib/context-epoch.mjs';
 import { createHttpClient } from '../lib/http.mjs';
 import { isMainModule } from '../lib/is-main.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
@@ -56,6 +57,11 @@ export async function handlePreCompact(event, deps) {
   }
   if (isBypassed({ cwd: event.cwd }, env)) {
     return undefined;
+  }
+  if (event.event === 'pre_compact') {
+    await contextEpoch(deps.config, event.sessionId, true).catch((error) => {
+      (deps.warn ?? warn)('重置召回上下文失败，继续提交消息。', { code: error.code ?? 'UNKNOWN' });
+    });
   }
 
   const captureStartedAt = process.hrtime.bigint();

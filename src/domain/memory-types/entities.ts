@@ -7,7 +7,7 @@ import type { MemoryTypeSchema } from '../memory-type.js';
  */
 export const entitiesMemoryType = {
   type: 'entities',
-  description: '项目、组织、人物等实体的稳定描述',
+  description: '项目、组织、人物、设备与运行环境的稳定描述。设备写明属于谁、哪台机器；远程服务器、容器、当前执行环境与用户主力电脑分别记录，不凭当前工具环境推定个人设备。用户明确纠正同一实体属性时更新原条目，不同设备不得合并。',
   directory: 'memories/entities',
   filename: '{name}.md',
   operationMode: 'upsert',
@@ -23,7 +23,7 @@ export const entitiesMemoryType = {
       name: 'kind',
       type: 'string',
       merge: 'replace',
-      description: '实体类别：project / organization / person',
+      description: '实体类别：project / organization / person / device / environment',
     },
     {
       name: 'content',

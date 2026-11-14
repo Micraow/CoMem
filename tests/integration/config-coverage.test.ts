@@ -98,7 +98,7 @@ const options = { scopes: SCOPES, subject: SUBJECT, principals: PRINCIPALS };
 async function runEntryPoints(service: Container['services']['search']): Promise<void> {
   await service.find('代码风格', options);
   await service.search('代码风格', options);
-  await service.context('代码风格', options);
+  await service.contextWithDiagnostics('代码风格', options);
   await service.grep('代码', options);
   await service.glob('**/*.md', options);
 }

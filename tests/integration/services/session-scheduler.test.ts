@@ -51,6 +51,7 @@ async function startContainer(yaml: string): Promise<Container> {
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,
+      COMEM_RETRIEVAL_ENGINE: 'fts5',
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
     },

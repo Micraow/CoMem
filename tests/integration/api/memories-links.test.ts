@@ -114,6 +114,7 @@ beforeEach(async () => {
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,
+      COMEM_RETRIEVAL_ENGINE: 'fts5',
       COMEM_LOGGING_LEVEL: 'error',
     },
   });

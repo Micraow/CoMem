@@ -60,6 +60,7 @@ import { withSessionLock } from '../lib/lock.mjs';
 import { advanceCursor, readCursor } from '../lib/cursor.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
 import { sanitizeCapturedMessages } from '../lib/sanitize.mjs';
+import { captureSource } from '../lib/source.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -209,7 +210,6 @@ export async function ensureSession(event, deps) {
   try {
     await deps.http.post(SESSIONS_PATH, {
       sessionId: event.sessionId,
-      userId: deps.config.userId,
     });
   } catch (error) {
     if (error.status !== CONFLICT_STATUS) {
@@ -256,7 +256,7 @@ export async function captureSession(event, deps) {
       //
       // 游标按剥离后的条数推进：下一轮同一份 transcript 会剥出同样的前缀，两个
       // 计数不会漂移。
-      const messages = sanitizeCapturedMessages(rawMessages);
+      const messages = sanitizeCapturedMessages(rawMessages).map((message) => ({ ...message, source: captureSource(event) }));
       const pending = messages.slice(cursor);
       if (pending.length === 0) {
         // 「0 条」不是正常返回：整条阶段二（建会话 → 写消息 → 提交 → 建任务）

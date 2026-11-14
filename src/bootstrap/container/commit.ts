@@ -21,6 +21,7 @@ import type { Foundation } from './foundation.js';
 import type { MemoryStack } from './memory.js';
 import type { Models } from './models.js';
 import type { Retrieval } from './retrieval.js';
+import { llmSkipReason } from '../../config/readiness.js';
 
 /**
  * 阶段二执行器（§10.1、§10.3、§10.4）。端口绑定归档目录，所以管线按任务现造
@@ -30,8 +31,7 @@ import type { Retrieval } from './retrieval.js';
  * 没有可用模型时跳过调模型的三步：`DisabledLlmProvider` 抛 `INVALID_ARGUMENT`，而它
  * 是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一不
  * 依赖模型，缺模型只让阶段二的产物消失。判据与 `ingest` 的
- * `{ skipped: true, reason: 'llm_disabled' }` 相同，装配层从
- * `providers.llm.default.type` 推出（`services/` 不 import `config/`）。
+ * `{ skipped, reason }` 相同，显式停用与占位地址分别记录原因。
  */
 export function createCommitRunner(
   core: Foundation,
@@ -45,12 +45,13 @@ export function createCommitRunner(
   const { summary, task } = retrieval;
   const { memory } = memoryStack;
 
+  const skipReason = llmSkipReason(config);
   const commitSkippedSteps =
-    config.providers.llm.default.type === 'disabled'
+    skipReason !== null
       ? new Map<CommitStepName, CommitStepSkipReason>([
-          ['memory_extract', 'llm_disabled'],
-          ['memory_merge', 'llm_disabled'],
-          ['experience_distill', 'llm_disabled'],
+          ['memory_extract', skipReason],
+          ['memory_merge', skipReason],
+          ['experience_distill', skipReason],
         ])
       : new Map<CommitStepName, CommitStepSkipReason>();
 

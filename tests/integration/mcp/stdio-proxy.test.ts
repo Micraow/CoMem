@@ -82,6 +82,7 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
   return {
     filesystem: {} as unknown as FileSystemService,
     search: {
+      defaultScopes: async () => ['comem://user/alice'],
       rerankHealth: { configured: false, degraded: false, failures: 0, lastFailure: null },
     } as unknown as SearchService,
     summary: {} as unknown as SummaryService,
@@ -245,7 +246,7 @@ describe('stdio 代理', () => {
     const result = await client.callTool({ name: 'health', arguments: {} });
     expect(result.isError).toBeUndefined();
     const text = (result.content as { type: string; text: string }[])[0]?.text ?? '';
-    expect(text).toContain('status: ok');
+    expect(text).toContain('status: degraded');
     expect(text).toContain('subject: user:alice');
   }, 30_000);
 });

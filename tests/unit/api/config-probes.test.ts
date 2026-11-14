@@ -16,6 +16,7 @@ import { loadConfigSnapshot } from '../../../src/config/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { EmbedOutcome } from '../../../src/services/embedding.js';
 import type { LlmResult } from '../../../src/domain/llm.js';
+import { createDraftProbe } from '../../../src/bootstrap/container/config-probe.js';
 
 let tempDir: string;
 let configPath: string;
@@ -103,6 +104,36 @@ function resultOf(response: { readonly body: string }): Record<string, unknown> 
   expect(body['status']).toBe('ok');
   return body['result'] as Record<string, unknown>;
 }
+
+it('草稿连接测试使用表单地址、模型和密钥，识别维度且不修改运行配置', async () => {
+  const network = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+    object: 'list', model: 'draft-embed', data: [{ object: 'embedding', index: 0, embedding: [0.1, 0.2, 0.3] }],
+    usage: { prompt_tokens: 1, total_tokens: 1 },
+  }), { headers: { 'content-type': 'application/json' } }));
+  vi.stubGlobal('fetch', network);
+  const logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+  const services = servicesWith(async () => { throw new Error('running provider must not be used'); }, async () => { throw new Error('running embedding must not be used'); });
+  const instance = await createApp({ ...services, draftProbe: createDraftProbe(logger) });
+  const response = await inject(instance, { method: 'POST', url: '/config/test', payload: {
+    target: 'embedding', values: { 'providers.embedding.baseUrl': 'http://draft.invalid/v1',
+      'providers.embedding.model': 'draft-embed', 'providers.embedding.apiKey': 'synthetic-key' },
+  } });
+  expect(resultOf(response)).toMatchObject({ ok: true, dimension: 3 });
+  const call = network.mock.calls[0];
+  expect(String(call?.[0])).toBe('http://draft.invalid/v1/embeddings');
+  expect(JSON.parse(String(call?.[1]?.body)).model).toBe('draft-embed');
+  expect(new Headers(call?.[1]?.headers).get('authorization')).toBe('Bearer synthetic-key');
+  expect(services.config.providers.embedding.dimension).toBe(2);
+  expect(response.body).not.toContain('synthetic-key');
+});
+
+it('供应商错误正文里的秘密不返回给设置页', async () => {
+  const services = servicesWith(async () => { throw new Error('synthetic-secret-from-provider'); }, async () => ({ vectors: [], degraded: true, reason: 'offline' }));
+  const instance = await createApp(services);
+  const response = await inject(instance, { method: 'POST', url: '/config/test', payload: { target: 'llm' } });
+  expect(resultOf(response)['ok']).toBe(false);
+  expect(response.body).not.toContain('synthetic-secret-from-provider');
+});
 
 describe('POST /config/test：LLM', () => {
   it('成功时 ok:true，发的是 maxTokens: 1 的普通 completion', async () => {

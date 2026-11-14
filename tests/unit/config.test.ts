@@ -79,7 +79,7 @@ function expectedDefaults(dataDir: string): unknown {
     },
     summary: { generator: 'llm', abstractMaxChars: 256, overviewMaxChars: 4000 },
     retrieval: {
-      engine: 'fts5',
+      engine: 'hybrid',
       candidateMultiplier: 4,
       levelWeights: { l0: 1.15, l1: 1.05, l2: 1 },
       queryFilters: [],
@@ -270,8 +270,8 @@ describe('loadConfig', () => {
           },
         },
         embedding: {
-          type: 'openai-compatible',
-          baseUrl: 'https://api.example.com/v1',
+          type: 'disabled',
+          baseUrl: '',
           model: 'BAAI/bge-m3',
           apiKey: '',
           dimension: 1024,
@@ -455,15 +455,14 @@ describe('loadConfig', () => {
       expect(error.details).toMatchObject({ fields: ['server.port'] });
     });
 
-    it('retrieval.engine 非 fts5 而 providers.embedding 未配置时抛 INVALID_ARGUMENT', () => {
-      const error = loadError({
+    it('未配置 embedding 时仍可加载配置', () => {
+      const config = loadConfig({
         path: writeConfig('retrieval:\n  engine: vector\n'),
         env: testEnv(),
       });
 
-      expect(error.code).toBe('INVALID_ARGUMENT');
-      expect(error.message).toContain('providers.embedding');
-      expect(error.details).toMatchObject({ field: 'providers.embedding', engine: 'vector' });
+      expect(config.retrieval.engine).toBe('vector');
+      expect(config.providers.embedding.type).toBe('disabled');
     });
 
     it('配了 providers.embedding 之后 vector / hybrid 引擎可用', () => {
@@ -569,6 +568,10 @@ describe('loadConfig', () => {
             '  consolidation:',
             '    enabled: true',
             '    maxIterations: 3',
+            'providers:',
+            '  llm:',
+            '    default:',
+            '      baseUrl: http://model.invalid/v1',
           ].join('\n'),
         ),
         env: testEnv(),
@@ -584,9 +587,9 @@ describe('loadConfig', () => {
       expect(config.memory.consolidation).toEqual({ enabled: false, maxIterations: 10 });
     });
 
-    it('workingMemory.enabled 在有 LLM 时合法（默认 provider 不是 disabled）', () => {
+    it('workingMemory.enabled 在配置真实 LLM 地址时合法', () => {
       const config = loadConfig({
-        path: writeConfig('memory:\n  workingMemory:\n    enabled: true\n'),
+        path: writeConfig('memory:\n  workingMemory:\n    enabled: true\nproviders:\n  llm:\n    default:\n      baseUrl: http://model.invalid/v1\n'),
         env: testEnv(),
       });
 

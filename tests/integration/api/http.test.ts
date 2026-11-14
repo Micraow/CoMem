@@ -60,6 +60,7 @@ beforeEach(async () => {
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,
+      COMEM_RETRIEVAL_ENGINE: 'fts5',
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: UNREACHABLE_LLM_BASE_URL,
@@ -752,7 +753,7 @@ describe('检索 mode = context', () => {
       }),
     );
 
-    expect(Object.keys(result).sort()).toEqual(['dropped', 'items', 'rendered', 'usedTokens']);
+    expect(Object.keys(result).sort()).toEqual(['degradation', 'dropped', 'items', 'rendered', 'rerankFailure', 'usedTokens']);
     const items = result['items'] as Record<string, unknown>[];
     expect(items.map((item) => item['uri'])).toContain(FILE);
     // 预算允许时会从 abstract 升到 full（§8.6 的三轮升级）；关键是拿到了正文。
@@ -1205,6 +1206,7 @@ describe('指标开关', () => {
       env: {
         ...process.env,
         COMEM_DATA_DIR: dir,
+        COMEM_RETRIEVAL_ENGINE: 'fts5',
         COMEM_SUMMARY_GENERATOR: 'rule',
         COMEM_LOGGING_LEVEL: 'error',
         ...env,
@@ -1299,6 +1301,7 @@ describe('重排接线', () => {
         COMEM_SUMMARY_GENERATOR: 'rule',
         COMEM_LOGGING_LEVEL: 'error',
         COMEM_RETRIEVAL_RERANK_ENABLED: 'true',
+        COMEM_RETRIEVAL_ENGINE: 'fts5',
         COMEM_PROVIDERS_RERANK_TYPE: 'http',
         COMEM_PROVIDERS_RERANK_BASE_URL: 'https://rerank.example.test/v1',
         COMEM_PROVIDERS_RERANK_MODEL: 'test-reranker',

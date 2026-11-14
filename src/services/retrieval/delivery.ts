@@ -158,6 +158,7 @@ export class DeliveryTracker {
   /** 跨轮去重：账本里 `dedupTurns` 轮内投过的 URI（§8.7）。 */
   async excluded(
     clock: DeliveryClock | undefined,
+    items?: readonly AssembledItem[],
   ): Promise<ReadonlySet<string> | undefined> {
     if (clock === undefined) {
       return undefined;
@@ -172,6 +173,6 @@ export class DeliveryTracker {
     return this.#ledger.recentlyDelivered(clock.scopeKey, clock.sessionId, clock.turn, {
       dedupTurns: this.#dedupTurns,
       maxEntries: DEFAULT_RECALL_LEDGER_OPTIONS.maxEntries,
-    });
+    }, items);
   }
 }

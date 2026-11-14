@@ -145,7 +145,7 @@ function createContext(overrides: Partial<StepContext> = {}): StepContext {
   return {
     archiveUri: Uri.parse(ARCHIVE),
     scopeUri: Uri.parse(SCOPE),
-    messages: [],
+    messages: [message('source', 'user', [{ kind: 'text', text: '我偏好 TypeScript。' }])],
     meta: createMeta(),
     latestArchiveOverview: null,
     state: new Map<string, unknown>(),
@@ -351,6 +351,22 @@ describe('ArchiveSummaryStep', () => {
 });
 
 describe('MemoryExtractStep', () => {
+  it('没有可抽取材料时不调用模型或预取，仍写可重放的空操作产物', async () => {
+    const provider = new FakeLlmProvider([]);
+    const { step, fakeMemory, written } = createExtractStep(provider);
+    const context = createContext({ messages: [message('tools', 'tool', [
+      { kind: 'tool_use', toolUseId: 'one', name: 'Bash', input: { command: 'env' } },
+      { kind: 'tool_result', toolUseId: 'one', output: 'SECRET=private', isError: false },
+    ])] });
+    await step.run(context);
+    expect(fakeMemory.calls).toEqual([]);
+    expect(written[0]?.operations).toEqual([]);
+    expect(extracted(context).operations).toEqual([]);
+    const replay = createContext({ state: new Map() });
+    await step.rehydrate(replay);
+    expect(extracted(replay).operations).toEqual([]);
+  });
+
   it('把预取记忆编号成 page_id，并把输出解析回 URI', async () => {
     const provider = new FakeLlmProvider([
       {

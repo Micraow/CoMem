@@ -203,6 +203,7 @@ export function inferenceFillDrafts(
       'providers.rerank.baseUrl': LOCAL_INFERENCE_BASE_URL,
       'providers.rerank.model': LOCAL_INFERENCE_RERANK_MODEL,
       'providers.rerank.apiKey': LOCAL_INFERENCE_API_KEY,
+      'retrieval.rerank.enabled': 'true',
     }
   }
   return {
@@ -211,6 +212,7 @@ export function inferenceFillDrafts(
     'providers.embedding.model': LOCAL_INFERENCE_EMBEDDING_MODEL,
     'providers.embedding.apiKey': LOCAL_INFERENCE_API_KEY,
     'providers.embedding.dimension': String(dimension),
+    'retrieval.engine': 'hybrid',
   }
 }
 
@@ -379,7 +381,7 @@ export const SETTING_FIELDS = {
   'providers.embedding.dimension': {
     label: '向量维度',
     control: 'number',
-    hint: '必须与模型一致；本地向量模型是 1024，写错要到第一次嵌入时才报错。',
+    hint: '必须与模型一致。「测试连接」会识别实际维度并填入表单，保存后重启生效。',
   },
   'providers.embedding.maxBatchSize': { label: '单次请求条数上限', control: 'number' },
   'providers.embedding.timeoutSeconds': { label: '超时（秒）', control: 'number' },
@@ -406,7 +408,7 @@ export const SETTING_FIELDS = {
     label: '检索引擎',
     control: 'select',
     options: RETRIEVAL_ENGINE_OPTIONS,
-    hint: '语义与混合需要先配置向量供应商，否则启动期校验失败。',
+    hint: '默认混合检索。语义与混合需要配置嵌入模型，未配置时检索会提示待配置。',
   },
   'retrieval.candidateMultiplier': { label: '候选倍数', control: 'number' },
   'retrieval.levelWeights.l0': { label: 'L0 层级权重', control: 'number' },
@@ -617,7 +619,6 @@ export function sourceNoteOf(source: ConfigSource): string {
 export const INITIALLY_EXPANDED_GROUPS: ReadonlySet<ConfigGroup> = new Set<ConfigGroup>([
   'llm',
   'embedding',
-  'rerank',
 ])
 
 /** 分组默认是否展开。 */
@@ -874,7 +875,7 @@ export const RESTART_COMMANDS = [
 
 /** 连接测试的固定说明。这句不能省：否则「保存 + 测试通过」会被当成已生效。 */
 export const TEST_SCOPE_NOTE =
-  '「测试连接」测的是当前正在运行的配置，不是刚保存、还没重启的配置。'
+  '「测试连接」使用当前表单内容，自动识别向量维度。保存后重启服务生效。'
 
 /** 连接测试的一行摘要：通过 / 失败 + 耗时。`detail` 另起一行原样显示。 */
 export function testSummaryOf(result: ConfigTestPayload): string {

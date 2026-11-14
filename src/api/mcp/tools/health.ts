@@ -19,6 +19,7 @@
  */
 
 import { healthStatus } from '../../health-status.js';
+import { llmConfigured, retrievalConfigured } from '../../../config/readiness.js';
 
 import {
   asRecord,
@@ -71,7 +72,7 @@ export const healthTool: McpToolDefinition = {
     const memory = await context.observability.health();
     const pending = context.tasks.countByStatus('pending');
     const running = context.tasks.countByStatus('running');
-    const summaryDegraded = context.config.summary.generator === 'rule';
+    const summaryDegraded = context.config.summary.generator === 'rule' || !llmConfigured(context.config);
     // 重排降级与摘要降级是同一类「配了但没生效」：必须在 status 与明细里同时可见。
     const rerank = context.search.rerankHealth;
     const status = healthStatus({
@@ -79,6 +80,7 @@ export const healthTool: McpToolDefinition = {
       degradedSummaries: memory.degradedSummaries,
       rerankDegraded: rerank.degraded,
       indexUnavailable: nodes === null,
+      modelsUnconfigured: !llmConfigured(context.config) || !retrievalConfigured(context.config),
     });
 
     return textResult(
@@ -90,6 +92,8 @@ export const healthTool: McpToolDefinition = {
         `index.visibleNodesTruncated: ${String(nodesTruncated)}`,
         `queue: pending=${pending} processing=${running}`,
         `summary.degraded: ${String(summaryDegraded)}`,
+        `retrieval.configured: ${String(retrievalConfigured(context.config))}`,
+        `memoryExtract.configured: ${String(llmConfigured(context.config))}`,
         `summary.degradedDirs: ${memory.degradedSummaries}`,
         `rerank.degraded: ${String(rerank.degraded)}`,
         `rerank.failures: ${rerank.failures}`,

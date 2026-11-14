@@ -19,8 +19,6 @@
  * 3. **去重**：渲染后正文完全相同的条目只留分数最高的（`ranking.dedupeByRenderedText`）。
  * 4. **配额**：按类别分配条目数；去重之后、渲染之前生效，超出配额的计入 `dropped`。
  *
- * ## 读取成本（`local/notes/comparison.md` 第 1 条）
- *
  * L0 摘要在索引里，取它不花钱；L1 概览和 L2 原文要打开文件。所以：
  *
  * - **同一条目只读一次**：读数按 URI 记忆化，连「并发发起两次读」也只算一次。
@@ -63,6 +61,7 @@ export interface AssemblyCandidate {
   readonly score: number;
   /** L0 摘要；索引里就有，取值不花钱 */
   readonly abstract: string | null;
+  readonly startingDetail?: ContextDetail;
 }
 
 export interface AssemblyPorts {
@@ -309,7 +308,7 @@ async function placeSlot(
   }
 
   let detail: ContextDetail | null =
-    candidate.memoryType === EVENT_MEMORY_TYPE ? 'overview' : 'abstract';
+    candidate.startingDetail ?? (candidate.memoryType === EVENT_MEMORY_TYPE ? 'overview' : 'abstract');
 
   while (detail !== null) {
     const text = await textAt(state, candidate, detail);

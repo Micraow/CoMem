@@ -19,7 +19,7 @@ import { ComemError, fsErrorCode } from '../../../domain/errors.js';
 import { isRecord } from '../../../domain/guards.js';
 import { describeConfig, type ConfigLeafView } from '../../../config/metadata.js';
 import { hasPath } from '../../../config/merge.js';
-import { nextOverrideFor, readOverride, writeOverrideFile } from '../../../config/override.js';
+import { configWithOverride, nextOverrideFor, readOverride, writeOverrideFile } from '../../../config/override.js';
 import { ok } from '../envelope.js';
 import { assertSystemAdmin } from '../middleware.js';
 import { requireRecord, type HttpRouteGroup } from '../server.js';
@@ -131,7 +131,13 @@ export function createConfigRoutes(services: ConfigRouteServices): HttpRouteGrou
       app.post<{ Body: unknown }>('/config/test', async (request) => {
         assertSystemAdmin(request, systemAdmin);
         const body = requireRecord(request.body, 'POST /api/v1/config/test');
-        return ok(await probe(parseTarget(body['target']), services));
+        const target = parseTarget(body['target']);
+        if (body['values'] === undefined) return ok(await probe(target, services));
+        const values = requireRecord(body['values'], 'values');
+        assertWritablePaths(configSnapshot, Object.keys(values));
+        const candidate = configWithOverride(configSnapshot, nextOverrideFor(configSnapshot, readOverride(configSnapshot), values));
+        if (services.draftProbe === undefined) throw new ComemError('INTERNAL', '未装配草稿连接测试。');
+        return ok(await services.draftProbe(target, candidate));
       });
     },
   };

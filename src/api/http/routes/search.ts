@@ -41,6 +41,7 @@ import type {
   TypedQueryIntent,
 } from '../../../domain/retrieval.js';
 import type { ScoredHit } from '../../../services/search.js';
+import type { RerankFailure } from '../../../services/retrieval/types.js';
 import { API_CALL_DEADLINE_MS } from '../../deadline.js';
 import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 import { ok } from '../envelope.js';
@@ -61,7 +62,6 @@ import {
   parseLevels,
   parseMode,
   runRetrieval,
-  scopeOfSubject,
 } from './search-request.js';
 
 /** §12.1：read = 1（`grep` / `glob` 的范围求权只用这一个级别）。 */
@@ -143,17 +143,14 @@ interface SerializedAssembledItem {
   readonly tokens: number;
 }
 
-/** `POST /search/find` 的响应体。 */
-interface SearchFindResponse {
-  readonly hits: readonly SerializedHit[];
-}
-
 /** `POST /search/search`（`mode=context`）的响应体。 */
 interface SearchContextResponse {
   readonly items: readonly SerializedAssembledItem[];
   readonly rendered: string;
   readonly dropped: number;
   readonly usedTokens: number;
+  readonly degradation: string | null;
+  readonly rerankFailure: RerankFailure | null;
 }
 
 /** `POST /search/search`（默认 `list` 模式）的响应体。 */
@@ -262,7 +259,7 @@ export function createSearchRoutes(
         const body = requireRecord(request.body, 'search/find');
         const context = requestContextOf(request);
         const query = requireString(body, 'query');
-        const scope = optionalStringArray(body, 'scopes') ?? [scopeOfSubject(context.subject)];
+        const scope = optionalStringArray(body, 'scopes') ?? await search.defaultScopes(context.subject, context.principals);
         const limit = optionalInteger(body, 'limit', DEFAULT_SEARCH_LIMIT, { min: 1 });
         // 参数校验放在计时之前：非法输入不是检索耗时，它该落进未归因间隙。
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
@@ -272,11 +269,11 @@ export function createSearchRoutes(
         const updatedBefore = optionalString(body, 'updatedBefore');
         // §17.2 的 `recall`：hook 每轮按回车都等的就是这一段。边界只包检索本身，
         // 后面的响应映射也不算——它们各自是未归因间隙。
-        const hits = await runRetrieval(deadlineMs, async (deadline) => {
+        const result = await runRetrieval(deadlineMs, async (deadline) => {
           // 本地索引 / ACL 阶段：超时归因要说得出「卡在本地」，不能笼统写「检索超时」。
           deadline.mark('index');
           return observability.phase('recall', () =>
-            search.find(query, {
+            search.findWithDiagnostics(query, {
               scopes: scope,
               subject: context.subject,
               principals: context.principals,
@@ -291,14 +288,14 @@ export function createSearchRoutes(
             }),
           );
         });
-        return ok<SearchFindResponse>({ hits: hits.map(serializeHit) });
+        return ok({ hits: result.hits.map(serializeHit), degradation: result.degradation, rerankFailure: result.rerankFailure });
       });
 
       app.post<{ Body: unknown }>('/search', async (request) => {
         const body = requireRecord(request.body, 'search/search');
         const context = requestContextOf(request);
         const query = requireString(body, 'query');
-        const scope = optionalStringArray(body, 'scopes') ?? [scopeOfSubject(context.subject)];
+        const scope = optionalStringArray(body, 'scopes') ?? await search.defaultScopes(context.subject, context.principals);
         const limit = optionalInteger(body, 'limit', DEFAULT_SEARCH_LIMIT, { min: 1 });
         const contextTypes = parseContextTypes(optionalStringArray(body, 'contextTypes'));
         const levels = parseLevels(optionalStringArray(body, 'levels'));
@@ -322,7 +319,7 @@ export function createSearchRoutes(
           const result = await runRetrieval(deadlineMs, async (deadline) => {
             deadline.mark('index');
             return observability.phase('recall', () =>
-              search.context(query, {
+              search.contextWithDiagnostics(query, {
                 scopes: scope,
                 subject: context.subject,
                 principals: context.principals,
@@ -339,10 +336,12 @@ export function createSearchRoutes(
             );
           });
           return ok<SearchContextResponse>({
-            items: result.items.map(serializeAssembledItem),
-            rendered: result.rendered,
-            dropped: result.dropped,
-            usedTokens: result.tokensUsed,
+            items: result.assembly.items.map(serializeAssembledItem),
+            rendered: result.assembly.rendered,
+            dropped: result.assembly.dropped,
+            usedTokens: result.assembly.tokensUsed,
+            degradation: result.degradation,
+            rerankFailure: result.rerankFailure,
           });
         }
 

@@ -502,7 +502,7 @@ function minimalContext(search: SearchService): Omit<
 }
 
 function hangingService(overrides: Partial<SearchService>): SearchService {
-  return overrides as unknown as SearchService;
+  return { defaultScopes: async () => [`comem://user/${SUBJECT.slice(5)}`], ...overrides } as unknown as SearchService;
 }
 
 /** 一个永远不 settle 的 Promise（模拟挂起的上游）。 */

@@ -104,6 +104,11 @@ export class Arms {
    * 关闭重排时 `candidateLimit === limit`，与接线前逐字一致。
    */
   async retrieve(text: string, options: FindOptions, limit: number): Promise<RetrieveOutcome> {
+    if (this.#engine !== 'fts5' && this.#vector?.embedding.model === null) {
+      throw new ComemError('PROVIDER_UNAVAILABLE', '语义检索待配置：请在设置中连接 embedding 模型并重启服务。需要仅关键词检索时显式设置 retrieval.engine: fts5。', {
+        field: 'providers.embedding', reason: 'embedding_not_configured', engine: this.#engine,
+      });
+    }
     const candidateLimit = Math.max(limit, this.#rerank.candidateFloor);
     // 「现在」只取一次：FTS 臂与向量臂的候选集必须用同一个时刻。分两次取，一条
     // 恰好在两次取时刻之间开始生效的记忆会出现在向量候选里、却不在 FTS 候选里。
@@ -172,14 +177,7 @@ export class Arms {
     }
 
     const model = vector.embedding.model;
-    if (model === null) {
-      return {
-        hits: [],
-        degradation: '没有配置嵌入模型，无法按模型过滤向量。',
-        rerankFailure: null,
-      };
-    }
-
+    if (model === null) throw new ComemError('PROVIDER_UNAVAILABLE', '没有配置嵌入模型。');
     const uris = await this.#readableUris(options, asOf);
     const raw = await vector.vectors.search({
       vector: queryVector,

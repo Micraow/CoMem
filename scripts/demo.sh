@@ -104,7 +104,7 @@ if [ -n "$LLM_KEY" ]; then
       timeoutSeconds: 120"
 else
   SUMMARY_GENERATOR=rule
-  PROVIDERS_BLOCK="# 没有 COMEM_LLM_KEY，阶段二会失败重试后进死信。摘要降级成规则生成。"
+  PROVIDERS_BLOCK="# 没有 COMEM_LLM_KEY，跳过抽取与归纳，摘要使用规则生成器。"
 fi
 
 cat > "$DEMO_ROOT/config.yaml" <<YAML
@@ -112,6 +112,8 @@ dataDir: ${DEMO_ROOT}/data
 ${PROVIDERS_BLOCK}
 summary:
   generator: ${SUMMARY_GENERATOR}
+retrieval:
+  engine: fts5
 server:
   host: 127.0.0.1
   port: ${DEMO_PORT}

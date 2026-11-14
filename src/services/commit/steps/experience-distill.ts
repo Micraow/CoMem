@@ -151,13 +151,13 @@ export class ExperienceDistillStep extends CommitStep {
   }
 
   async run(context: StepContext): Promise<void> {
+    const messages = stripToolParts(context.messages);
+    if (messages.length === 0) return;
     const existing = await this.#prefetchExisting(context);
 
-    // 工具输出与抽取保持同一条边界（§10.1）：`tool_result` 会泄漏环境变量、数据库
-    // 内容与文件系统结构。经验归纳读的是「会话过程」，但过程里的原文不进模型。
     const output = await this.#llm.generateJson(
       buildExperiencePrompt({
-        messages: stripToolParts(context.messages),
+        messages,
         existing,
         today: localDate(new Date()),
       }),

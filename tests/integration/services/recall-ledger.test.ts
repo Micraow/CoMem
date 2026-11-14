@@ -93,6 +93,28 @@ describe('scopeKeyOf', () => {
   });
 });
 
+it('内容更新与上下文重置允许重新交付，不被旧 URI 记录压制', async () => {
+  const { ledger } = createLedger();
+  const first = { uri: 'comem://user/alice/memories/computer.md', detail: 'full' as const, text: 'Ubuntu' };
+  await ledger.record(SCOPE, 'session:epoch-a', 1, [first], options());
+  expect(await ledger.recentlyDelivered(SCOPE, 'session:epoch-a', 2, options(), [first])).toEqual(new Set([first.uri]));
+  expect(await ledger.recentlyDelivered(SCOPE, 'session:epoch-a', 2, options(), [{ ...first, text: 'Arch Linux' }])).toEqual(new Set());
+  expect(await ledger.recentlyDelivered(SCOPE, 'session:epoch-b', 2, options(), [first])).toEqual(new Set());
+});
+
+it('同一作用域并发会话写入不会丢账，新会话不会被旧会话高轮次挤出', async () => {
+  const { ledger } = createLedger();
+  const item = { uri: 'comem://user/alice/memories/computer.md', detail: 'full' as const, text: 'Arch' };
+  await Promise.all([
+    ledger.record(SCOPE, 'old', 1000, [item], options({ maxEntries: 2 })),
+    ledger.record(SCOPE, 'new', 1, [item], options({ maxEntries: 2 })),
+  ]);
+  expect(await ledger.recentlyDelivered(SCOPE, 'old', 1001, options(), [item])).toEqual(new Set([item.uri]));
+  expect(await ledger.recentlyDelivered(SCOPE, 'new', 2, options(), [item])).toEqual(new Set([item.uri]));
+  await ledger.record(SCOPE, 'latest', 0, [item], options({ maxEntries: 2 }));
+  expect(await ledger.recentlyDelivered(SCOPE, 'latest', 1, options(), [item])).toEqual(new Set([item.uri]));
+});
+
 describe('RecallLedger 读取（经 recentlyDelivered）', () => {
   it('文件不存在时按空账本处理', async () => {
     const { ledger, store } = createLedger();

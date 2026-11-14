@@ -95,7 +95,7 @@ export class IntentStage {
       };
     }
 
-    const recentMessages = await this.#recentMessages(options.sessionId, options.subject);
+    const recentMessages = await this.recentMessages(options);
     const prompt: LlmPrompt = {
       system: REWRITE_SYSTEM_PROMPT,
       messages: [
@@ -169,10 +169,8 @@ export class IntentStage {
    * 质量，让整次检索失败代价更大。这不算静默降级——`analyzed` 仍然是 `true`，
    * 因为分析确实跑了，只是没有历史可用。
    */
-  async #recentMessages(
-    sessionId: string | undefined,
-    subject: string,
-  ): Promise<readonly RewriteMessage[]> {
+  async recentMessages(options: SearchOptions): Promise<readonly RewriteMessage[]> {
+    const { sessionId, subject } = options;
     if (sessionId === undefined) {
       return [];
     }
@@ -193,8 +191,10 @@ export class IntentStage {
     }
 
     try {
-      const session = await this.#sessions.load(sessionUri);
-      return session.messages
+      const messages = this.#sessions.recentMessages === undefined
+        ? (await this.#sessions.load(sessionUri)).messages
+        : await this.#sessions.recentMessages(sessionUri, RECENT_MESSAGES, options.principals);
+      return messages
         .filter(isConversational)
         .slice(-RECENT_MESSAGES)
         .map((message) => ({ role: message.role, text: renderMessageText(message) }));

@@ -26,7 +26,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { access, chmod, constants, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, chmod, constants, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -222,7 +222,18 @@ async function backup(file) {
 
 async function writeSettings(file, settings) {
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const mode = await stat(file).then((info) => info.mode & 0o777).catch((error) => {
+    if (error.code === 'ENOENT') return 0o600;
+    throw error;
+  });
+  try {
+    await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { encoding: 'utf8', mode, flag: 'wx' });
+    await chmod(temporary, mode);
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 function hooksOf(settings) {
@@ -346,8 +357,9 @@ export async function doctor(options = {}) {
     // 2s 是自检的等待上限（经验值）：doctor 是人工触发的，服务端在跑就秒回，
     // 等满默认的 5s 只会让人以为命令卡住了。
     const http = createHttpClient({ ...config, timeoutMs: 2000, fetchImpl: options.fetchImpl });
-    await http.get('/health');
+    const health = await http.get('/health');
     checks.push({ name: '服务端可达', passed: true, hint: `已连接 ${config.baseUrl}` });
+    checks.push({ name: '语义检索配置', passed: health?.retrieval?.configured === true, hint: health?.retrieval?.configured === true ? `检索引擎：${health.retrieval.engine}；供应商连通性用设置页测试。` : '在控制台配置 embedding，测试并保存后重启；旧服务端需要同步升级。' });
   } catch (error) {
     checks.push({
       name: '服务端可达',
@@ -356,23 +368,16 @@ export async function doctor(options = {}) {
     });
   }
 
-  // 2. 配置文件存在且填了 userId。
   try {
     const config = await loadConfig({ env });
-    if (config.userId === '') {
-      checks.push({
-        name: '配置文件',
-        passed: false,
-        hint: `在 ${config.configFile} 里写 userId: <你的用户名>`,
-      });
-    } else {
-      checks.push({ name: '配置文件', passed: true, hint: config.configFile });
-    }
+    const http = createHttpClient({ ...config, timeoutMs: 2000, fetchImpl: options.fetchImpl });
+    const identity = await http.get('/api/v1/auth/me');
+    checks.push({ name: '请求身份', passed: typeof identity?.subject === 'string', hint: identity?.subject ?? '服务端未返回身份。' });
   } catch (error) {
     checks.push({
-      name: '配置文件',
+      name: '请求身份',
       passed: false,
-      hint: `修复配置语法后重试（${error instanceof Error ? error.message : String(error)}）`,
+      hint: `检查服务地址、配置语法与认证凭据（${error instanceof Error ? error.message : String(error)}）`,
     });
   }
 

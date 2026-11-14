@@ -1,7 +1,5 @@
 /**
  * 会话与归档（架构文档 §10、§15）。
- *
- * 会话是提交管线的输入：消息进来、攒够阈值、走两阶段提交（§10.1）。
  * 这里只放数据形状与纯判定，落盘在 `services/session.ts` 与 `adapters/`。
  */
 
@@ -98,6 +96,7 @@ export interface SessionMessage {
   /** 本条消息在当前 live 窗口内的序号（`nextTurn` = `messages.length + 1`），
    * 不是会话累计轮次；账本时钟用 `SessionService.totalMessageCount`。 */
   readonly turn: number;
+  readonly source?: { readonly host: string; readonly machineId: string; readonly cwd: string };
 }
 
 export interface Session {

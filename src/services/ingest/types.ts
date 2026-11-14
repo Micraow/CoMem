@@ -135,7 +135,7 @@ export interface IngestExtractionBatchReport {
  * 是为了让报告自己说明「为什么没抽取」——`extraction: null` 已经表示「没等」
  * （`--no-wait` / dry-run / 超时为 0），不能再多一个含义。
  */
-export type IngestExtractionSkipReason = 'llm_disabled';
+export type IngestExtractionSkipReason = 'llm_disabled' | 'llm_unconfigured';
 
 export interface IngestExtractionReport {
   /** 恒为 `false`。与 {@link IngestExtractionSkippedReport} 区分用。 */

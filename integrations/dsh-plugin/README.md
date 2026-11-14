@@ -4,17 +4,16 @@
 那条路：DSH **没有 hook 脚本面**，它的生命周期是同一进程内的 typed 事件，只能用
 插件订阅。
 
-插件做五件事：开局注入画像 / 偏好 / 技能索引，每轮按 prompt 召回，`turn/end` 时把
-本轮消息交给 CoMem 归档，`agent/disposed` 时尽力补交，`compaction/start` 时留一条
-「压缩前不会归档」的 warn。
+插件在开局注入个人背景正文与技能目录，每轮请求服务端自动上下文，通过 `tools/post-execute` 采集工具调用与结果，`turn/end` 时归档消息，`agent/disposed` 时尽力补交，`compaction/start` 时重置召回上下文并提示压缩前不会额外归档。
 
 | 接缝 | 等价于 | 行为 |
 |---|---|---|
 | `agent/created` | `SessionStart` | 调 `servers/session-start.mjs` 的 `handleSessionStart`，把返回的块 `agent.inject()` |
 | `agent/pre-step`（waterfall） | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则调 `handleUserPromptSubmit`，把块折进 `decision.messages` |
+| `tools/post-execute` | `PostToolUse` | 采集调用与结果，保留底层 decision |
 | `session/event` 的 `turn/end` | `Stop` | 本轮 user / assistant 消息过 `lib/sanitize.mjs` 的剥离，再 `POST /sessions/{id}/messages` + `POST /sessions/{id}/commit` |
 | `agent/disposed` | `SessionEnd` 的近似物 | 把会话缓冲里还没交出去的消息发一次 |
-| `session/event` 的 `compaction/start` | `PreCompact` | **不归档**，只记一条 warn（见「已知限制」） |
+| `session/event` 的 `compaction/start` | `PreCompact` | 不额外归档，重置 context epoch 并记 warn（见「已知限制」） |
 
 **没有第二份渲染、预算、转义或剥离逻辑。** 块怎么拼、怎么截断、怎么转义、哪些
 消息该剥，全部在 `integrations/lib/` 与 `integrations/servers/` 里；本插件只做
@@ -60,10 +59,9 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 | `timeoutMs` | 否 | `5000` | 单次 HTTP 超时；实际生效值是 `min(它, 本次注入的总预算剩余)` |
 
 其余配置继续读 `~/.config/comem/config.yaml`（或 `COMEM_*` 环境变量），与 hook
-完全同一套：`userId`、`recallLimit`、`recallScoreThreshold`、`queryFilters`、
+完全同一套：`recallLimit`、`queryFilters`、
 `profileBudgetTokens`、`skillBudgetTokens`、`commitTimeoutMs`、`tmpDir`。
-**`userId` 仍必须配**——没有它就拼不出 `comem://user/{uid}/memories`，插件会记一条
-warn 并跳过画像注入。
+身份来自服务端认证，不需要重复填写用户 ID。服务端与插件应同步升级以支持 `/context`。
 
 总预算沿用 hook 的那张表（`integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`）：
 开局注入最多 4s，每轮召回最多 2s，提交用 `commitTimeoutMs`（默认 30s）。区别是
@@ -75,8 +73,7 @@ warn 并跳过画像注入。
   不采集；否则每次委派都会把画像再投一遍，子 agent 的对话也会作为独立会话入库。
 - **注入消息的来源 `kind` 是 `comem`。** 下一轮取 prompt 时只认 `source.kind === 'user'`，
   注入块不会被当成用户说的话再检索一次。采集侧还有 `lib/sanitize.mjs` 的二次剥离。
-- **召回块不需要额外去重。** 它由 `handleUserPromptSubmit` 写跨轮账本
-  （`lib/recall.mjs`），下一轮同一 URI 不再投；`agent/pre-step` 的空批次判断只负责
+- **召回块由服务端去重。** `/context` 按会话、epoch 和内容指纹记账；`agent/pre-step` 的空批次判断只负责
   「同一轮的 tool step 不重复检索」。
 - **提交失败不丢消息。** `turn/end` 的 POST 失败时缓冲保留，下一次 `turn/end` 重投；
   服务端按消息 `id` 幂等（DSH 的消息 ID 原样用作 CoMem 消息 ID）。`agent/disposed`
@@ -95,11 +92,8 @@ warn 并跳过画像注入。
 2. **没有 `SessionEnd` 的真等价物。** DSH 的 `agent/disposed` 是 emit 模式、没有人
    等它，进程退出时也不保证调用。它只能尽力补交；真正的保证仍是每条 `turn/end`。
    进程被强杀时，最后半轮消息会丢。
-3. **工具调用与工具结果不采集。** 本轮只上报 user / assistant 消息（与
-   `servers/stop.mjs` 采 transcript 的角色一致）。`tools/result` 事件能拿到工具输出，
-   但那是另一个接缝，本插件没接；`<comem-recall>` 之外的上下文不会作为 `tool` 消息入库。
-4. **召回账本按进程共享一个文件。** `lib/recall.mjs` 的设计是「一次一个会话」；同时
-   开多个 DSH 会话时账本会互相覆盖，去重变弱（不会错投，更多是重复投喂）。
+3. **工具采集使用 `tools/post-execute` typed 接口。** 调用名、callId、arguments 与结果配对，保留后续策略决定；文本经过公共注入剥离。只有限定 shell 环境命令可进入长期事实抽取，任意工具输出不会直接交给抽取模型。
+4. **压缩更新上下文 epoch。** 不同会话按 session.id 隔离；agent.id 不作为持久会话 ID。既有已投放内容无法从宿主历史中撤回。
 5. **跨会话的状态只在本进程内。** 采集缓冲、提交队列都在内存里；DSH 重启即丢。
    这是「尽力」而不是「至少一次」——hook 那条路的游标可以做到至少一次，插件不在
    磁盘上维护游标。

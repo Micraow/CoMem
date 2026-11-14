@@ -13,12 +13,6 @@
  * | 本文件 | 真实文件 IO：权限、fd 上限、摘要缺失 | 有界并发 + 逐 URI 记忆化 |
  * | `MetadataFileStore` | 字节怎么安全落盘 | 原子写 |
  *
- * 并发上限不是「防御性编程」：一次组装最多几十个候选，`Promise.all` 会把它们全部
- * 同时发出去，每个文件占的 fd 不止一个（`open` + `stat`），同一进程还有 SQLite、
- * 日志、socket 在抢（`local/notes/comparison.md` 第 1 条）。
- *
- * ## 权限
- *
  * 两个读方法都先过 `authorizer.check(uri, read)`。候选来自索引，索引侧已经按
  * `node_permission` 过滤过（§8.2），但**组装层不能依赖索引实现的自觉**——§12.4 的
  * 出口清单里 `abstract` / `overview` 与 `read` 同级，漏一个就是泄露。
@@ -151,7 +145,13 @@ export class ContextAssembler {
       estimateTokens,
       logger: this.#logger,
     };
-    return assembleContext(candidates, options, ports);
+    const readable = await this.#authorizer.filterReadable(
+      candidates.flatMap((candidate) => {
+        const uri = Uri.tryParse(candidate.uri);
+        return uri === null ? [] : [uri];
+      }), principals,
+    );
+    return assembleContext(candidates.filter((candidate) => readable.has(candidate.uri)), options, ports);
   }
 
   /**

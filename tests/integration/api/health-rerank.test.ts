@@ -73,6 +73,7 @@ beforeEach(async () => {
       COMEM_SUMMARY_GENERATOR: 'llm',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_RETRIEVAL_ENGINE: 'fts5',
+      COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: 'http://127.0.0.1:1/v1',
       COMEM_RETRIEVAL_RERANK_ENABLED: 'true',
       COMEM_PROVIDERS_RERANK_TYPE: 'http',
       COMEM_PROVIDERS_RERANK_BASE_URL: 'http://127.0.0.1:1/v1',

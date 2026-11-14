@@ -1,20 +1,6 @@
 /**
  * 物化权限与授权反查（架构文档 §8.2、§12.3）。
  *
- * `node_permission` 是「这个节点对谁能做什么」的物化结果：写 ACL 时整棵子树重算，
- * 检索时只查表。代价转移方向是硬约束——ACL 改动低频，读高频，所以物化必须在写侧
- * 完成，读侧不许 open 祖先的 `.acl.json`（§8.2：一条候选要读 5 层文件，40 条候选
- * 就是 200 次 IO，而且候选全无权限时会假报「没有结果」）。
- *
- * `acl_entry` 是物化之前的原始授权条目，只服务授权反查（控制台的 ACL 页、退组清理），
- * 不参与检索。
- *
- * ## deny 也必须物化
- *
- * `level` 只能表达「允许到什么级别」。同一主体在同一节点上既有 allow 又有 deny 时
- * deny 赢（§12.2 不变量 2），求值结果是空集；空集如果只靠「没有行」表达，读侧就
- * 分不清「被拒绝」与「从未授权」，`user:*` 的 allow 会把被 deny 的主体放进来。
- * 所以 `node_permission` 带 `effect`，读侧谓词是「有 allow 且没有 deny」。
  */
 
 import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
@@ -113,6 +99,20 @@ export class PermissionRepository {
   constructor(deps: PermissionRepositoryDeps) {
     this.#db = deps.db;
     this.#logger = deps.logger;
+  }
+
+  readableScopes(principals: readonly string[]): readonly string[] {
+    if (principals.length === 0) return [];
+    const principalList = placeholders(principals.length);
+    const rows = this.#db.prepare(`SELECT DISTINCT p.node_uri FROM node_permission p
+      WHERE p.principal IN (${principalList}) AND ${readablePredicateSql(principalList)}
+      ORDER BY p.node_uri`).all(...principals, ...principals);
+    const scopes: string[] = [];
+    for (const row of rows) {
+      const uri = text(row['node_uri']);
+      if (!scopes.some((scope) => uri === scope || uri.startsWith(`${scope}/`))) scopes.push(uri);
+    }
+    return scopes;
   }
 
   /**

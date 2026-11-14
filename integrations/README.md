@@ -25,9 +25,9 @@ integrations/
 │   ├── dedup.mjs         # 事件去重（500ms 窗口）
 │   ├── lock.mjs          # 跨进程会话锁
 │   ├── cursor.mjs        # 消息游标
-│   ├── recall.mjs        # 跨轮召回账本（已注入的 URI，防重复投喂）
+│   ├── context-epoch.mjs # 每个宿主会话的上下文重置标识
 │   ├── sanitize.mjs      # 捕获侧剥离（去掉自己注入的块）
-│   ├── injection.mjs     # 注入侧渲染：转义 / 索引截断 / 字节上限
+│   ├── injection.mjs     # 技能目录转义 / token 估算 / 最终字节上限
 │   ├── filter.mjs        # sed 风格查询过滤
 │   └── telemetry.mjs     # 四阶段开销上报
 ├── servers/              # 七个可执行入口
@@ -43,7 +43,7 @@ integrations/
 │   └── codex.mjs
 ├── dsh-plugin/           # DSH 原生插件（独立包，装进 profile）
 │   ├── package.json      # main / engines.dsh
-│   ├── lib/index.js      # 五个接缝的订阅者
+│   ├── lib/index.js      # 宿主事件与工具执行事件的订阅者
 │   └── README.md         # 安装、配置与已知限制
 ├── skills/               # 提示词（装进宿主的技能目录）
 │   ├── comem-memory/SKILL.md
@@ -118,19 +118,19 @@ dsh plugin --profile web add "link:$PWD/integrations/dsh-plugin"
 dsh --profile web --dump-config | grep -A6 'id: comem'
 ```
 
-插件在五个接缝上做与 hook 等价的事：
+插件在以下接缝上做与 hook 等价的事：
 
 | 接缝 | 等价于 | 行为 |
 |---|---|---|
-| `agent/created` | `SessionStart` | 调 `handleSessionStart`，把画像 / 偏好 / 技能索引 `agent.inject()` |
+| `agent/created` | `SessionStart` | 调 `handleSessionStart`，把个人背景正文与技能目录 `agent.inject()` |
 | `agent/pre-step` | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则调 `handleUserPromptSubmit` 并把块折进 `decision.messages` |
 | `session/event` 的 `turn/end` | `Stop` | 本轮 user / assistant 消息过 `lib/sanitize.mjs` 剥离后 `POST /sessions/{id}/messages` + `/commit` |
+| `tools/post-execute` | `PostToolUse` | 保留原工具 decision，把调用、结果与来源加入采集缓冲 |
 | `agent/disposed` | `SessionEnd` 的近似物 | 尽力把还没交出去的消息发一次（emit 模式，没人等它） |
 | `session/event` 的 `compaction/start` | `PreCompact` | **做不到**：压缩开始时才能观察到，只记一条 warn |
 
 **已知限制**（细节见 `integrations/dsh-plugin/README.md`）：压缩前不能拦截；没有
-真正的 `SessionEnd`，进程被强杀时最后半轮会丢；工具调用/结果不采集；召回账本按
-进程共享一个文件，并发会话下去重变弱；采集缓冲只在内存里，DSH 重启即丢。子 agent
+真正的 `SessionEnd`，进程被强杀时最后半轮会丢；采集缓冲只在内存里，DSH 重启即丢。子 agent
 会话（`header.origin === 'subagent'`）不注入、不采集。
 
 ### Codex
@@ -163,7 +163,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | 检查 | 失败时怎么修 |
 |---|---|
 | 服务端可达 | 启动服务端；`COMEM_BASE_URL` 或配置里的 `baseUrl` 指对地址 |
-| 配置文件 | 在配置文件里写 `userId: <你的用户名>` |
+| 请求身份 | 检查服务地址和当前用户凭据，`GET /auth/me` 应返回本人身份 |
 | hook 脚本 | 重新运行 `co-mem install` |
 | 游标文件可写 | 检查 `COMEM_HOOK_TMPDIR` 目录权限 |
 
@@ -172,7 +172,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | Hook | 做什么 | 阻塞还是异步 |
 |---|---|---|
 | `SessionStart` | 注入 profile、偏好、`<available-skills>` 技能目录 | 阻塞（一次读 + 一次列表） |
-| `UserPromptSubmit` | 拿 prompt 去 `find`，把相关记忆注入上下文 | 阻塞（§15.9 的核心开销） |
+| `UserPromptSubmit` | 调 `/context`，结合 prompt 与近期对话注入相关记忆 | 阻塞（§15.9 的核心开销） |
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的 `Read` / `Write` / `Edit`，指回 MCP 工具 | 阻塞（纯内存判断；**不发 HTTP，也不上报开销**） |
 | `PostToolUse` | 把工具调用与结果采集为 `tool` 消息 | 阻塞（5–20ms 的采集写入） |
 | `Stop` | 采集本轮 user / assistant 消息并提交 | **主进程立刻返回**，采集与提交在分离的 worker 进程里 |
@@ -183,8 +183,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 都是「对话要没了，把手上的消息交出去」，但内部事件名不同（`pre_compact` /
 `session_end`）、预算也不同。`co-mem install` 默认把七个都写进宿主的配置。
 
-**这张表是「hook 脚本」这条路的七个事件。** DSH 上没有 hook 脚本，原生插件只覆盖
-其中五个接缝（没有 `PreToolUse` / `PostToolUse`，`PreCompact` 只能事后 warn），
+**这张表是「hook 脚本」这条路的七个事件。** DSH 原生插件另接 `tools/post-execute` 采集工具结果，没有 `PreToolUse`，压缩开始时只能重置上下文并 warn，
 见「[DSH](#dsh)」。
 
 ### 事件名与开销上报
@@ -448,45 +447,30 @@ Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭�
 
 | 注入块 | 来源 | 格式 | 提示词里的定位 |
 |---|---|---|---|
-| `<comem-profile>` | `SessionStart` | 索引：`- [profile] 摘要 · comem://…` | 一次性档案；要看细节用 `read` 取 URI |
-| `<comem-preferences>` | `SessionStart` | 索引：一条偏好一行 | 历史默认，与当前请求冲突时以当前请求为准；细节用 `read` |
+| `<comem-profile>` | `SessionStart` | 个人画像与偏好的正文块，附 URI、类型与投放层级 | 可直接使用；历史默认与当前请求冲突时以当前请求为准 |
+| `<comem-preferences>` | 旧版 `SessionStart` | 旧偏好块 | 升级后仍识别并剥离，当前版本合并到背景块 |
 | `<available-skills>` | `SessionStart` | `- 名字: 描述` | 技能目录，不是记忆 |
-| `<comem-recall>` | `UserPromptSubmit` | `1. [类型] comem://…` + 缩进摘要 | 本轮召回结果，直接 `read` |
+| `<comem-recall>` | `UserPromptSubmit` | 与问题相关的正文块，附 URI、类型与投放层级 | 直接使用已给出的内容，确需更多细节时 `read` |
 
 **`<comem-recall>` 里没有分数。** 分数只在同一次检索的同一引擎内可比（§13.2），写进
-注入块会暗示一个不存在的精度；顺序是这里唯一稳定的信息，所以只编号。
+注入块会暗示一个不存在的精度；块的顺序保留服务端排序。
 
-**偏好按目录列，不能拼 `.overview.md`。** `.abstract.md` / `.overview.md` 是保留名
-（`src/domain/uri.ts` 的 `RESERVED_SEGMENT_NAMES`），`Uri.parse` 对它们抛
-`INVALID_URI`（HTTP 400）。`SessionStart` 因此走
-`GET /api/v1/fs/ls?uri=comem://user/{uid}/memories/preferences`（参数是**目录**），
-再对每个直接子文件 `GET /content/abstract` 取摘要。曾经这里直接 `content/read`
-文件名、再用 `.catch(() => null)` 吞掉 400——`<comem-preferences>` 从上线起就没注入
-过，而文件一直在盘上。读取失败（不是 403 / 404）现在记一条 stderr 的 `warn`。
-
-**注入的是索引，不是正文。** 块首固定一句「以下是记忆索引。需要细节时用 read 工具
-按 URI 读原文」，之后每条记忆一行。摘要来自服务端 `GET /content/abstract`（文件的
-L0 在索引里，目录的 L0 是 `.abstract.md`），**不在 hook 里截断正文**：那是第二个
-摘要实现。没有 URI 的索引等于删数据，所以没有摘要时也保留 `- [类型] comem://…`。
-偏好目录一次最多为 32 条拉摘要（`PREFERENCES_INDEX_ENTRY_LIMIT`，经验上界），超出
-的部分写「（已截断，共 M 条）」。
+服务端从当前身份的个人根读取画像，开局另取最多四条偏好。普通轮次使用个人背景与当前问题、最近对话检索出的记忆；预算内直接交付正文，必要时退到概览或摘要。只剩地址的条目不会自动注入。团队记忆按当前权限参与检索，块内说明 URI 的归属，避免把队友的设备或偏好当成当前用户的事实。
 
 ### 注入预算契约
 
-`SessionStart` 的三个块（`<comem-profile>` / `<comem-preferences>` / `<available-skills>`）
+`SessionStart` 的背景块与技能目录
 都有硬上限。超过宿主上限不是「多一点上下文」，而是**整段被转存成文件、模型只看到
 预览**——注入静默失效。
 
 | 约束 | 值 | 超了怎么办 |
 |---|---|---|
-| 画像 token 预算 | `profileBudgetTokens`，默认 2000 | 索引只有一条记忆（一行），实际不触发 |
-| 偏好 token 预算 | 画像预算的 1/4，默认 500 | 按条目从后往前截，至少保留 1 条 + 「（已截断，共 M 条）」 |
+| 开局背景 token 预算 | `profileBudgetTokens`，默认 2000，同时受服务端 assembly 上限约束 | 服务端按正文 → 概览 → 摘要降级，最终整条删除 |
+| 普通轮次 token 预算 | 服务端默认 1600，同时受 assembly 上限约束 | 同上，说明文字与标签计入预算 |
 | 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
 | 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 插件 9,500 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能目录 → 召回 → 偏好 → 画像，记一条 `warn` |
 
-**只注入摘要 + URI。** 画像与偏好的正文不再进上下文：`profile.md` 的 YAML
-frontmatter 对模型是噪声，而正文按 157 字/归档增长。模型要细节时用 `read` 取
-索引里的 URI——服务端 `content/read` 接受的就是这个地址。
+背景正文去掉 frontmatter 后注入。服务端按实际文本检查 token 与字节预算，Hook 为包装标签留 64 字节；技能目录另有自身预算。
 
 **token 估算按文本自身的 CJK 密度**：`ceil(CJK 码点数 × 1 + 其余码点数 × 0.25)`。
 常用的 `chars / 4` 对中文**低估 6 倍**（1000 个汉字约 1000–1500 token，不是 250），
@@ -495,11 +479,9 @@ frontmatter 对模型是噪声，而正文按 157 字/归档增长。模型要�
 
 **降级顺序是显式的，从最先丢到最不该丢。** 判据是「丢了之后还能不能拿回来」：
 技能目录是可选能力清单，模型不靠它也能工作；`<comem-recall>` 每轮重新检索，下一轮
-还有机会；偏好能用 `find` / `list` 按需取回，先截条目；画像（「这个用户是谁」）是
-唯一不可恢复的，最后才动，且至少保留一条带 URI 的记录。顺序定义在
+还有机会；个人背景最后删除。顺序定义在
 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER`，不靠块的插入位置。
-索引化之后三个块的实际占用在 1–2 KB 量级，9,500 字节的上限正常不会触发；这条链
-挡的是偏好目录异常增长与部署方调低宿主上限。
+内容已在服务端裁剪，Hook 只按整块处理宿主的最终字节上限。
 
 **宿主字节上限的来源是宿主的实现细节，不是公开规范。** Claude Code / Codex 在 hook
 输出超过约 10,000 字符时转存文件、只放预览，这里取 9,500 留余量。两个数在
@@ -564,20 +546,17 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | 配置键 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
 | `baseUrl` | `COMEM_BASE_URL` | `http://127.0.0.1:1933` | 服务端地址 |
-| `userId` | `COMEM_USER_ID` | 空 | 个人根标识；为空时不召回、不采集，`doctor` 报失败 |
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
 | `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时；实际生效值是 `min(它, 事件总预算的剩余)`，见「每个 hook 的总预算」 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
-| `recallScoreThreshold` | `COMEM_RECALL_SCORE_THRESHOLD` | `0.5` | 相对阈值：只保留分数不低于本次最高分 × 该值的命中（§15.9 的「三条前提」之二） |
 | `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
-| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 画像索引的 token 预算（画像只有一条记忆，实际不触发）；偏好索引取它的 1/4，超了按条目截断并写「（已截断，共 M 条）」（见「注入预算契约」） |
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 开局个人背景正文预算，同时受服务端 assembly 总预算与宿主字节上限约束 |
 | `queryFilters` | `COMEM_QUERY_FILTERS`（换行分隔） | §8.8 的五条 | sed 风格正则 |
 
 ```yaml
 baseUrl: http://127.0.0.1:1933
-userId: alice
 queryFilters:
   - 's|^/\w+.*$||'
   - 's|@[\w/\.\-]+||g'
@@ -589,13 +568,9 @@ queryFilters:
 **过滤后为空就不检索。** 空查询返回的是随机结果，比不返回更糟——模型会以为它真的
 对应某条记忆，还会写进召回账本。
 
-**阈值是相对于本次最高分的比例，不是绝对分数下限。** 三种检索引擎的分数量纲不同：
-`fts5` 是取负的 bm25，`vector` 是余弦，`hybrid` 是 RRF 融合分（`Σ 1 / (60 + rank)`，
-只有 `0.016–0.033`）。绝对阈值跨引擎不可比，`0.5` 在默认引擎 `hybrid` 下会把全部
-命中丢掉，hook 静默返回「没有记忆」。`recallScoreThreshold: 0.5` 表达的是「只保留
-与最佳命中差距不到一半的」；最高分为 0 或负（分数不可用）时全部保留，不静默丢数据。
+**自动上下文统一由服务端返回。** Hook 调 `POST /context`，服务端负责近期对话、个人背景、embedding/FTS 检索、团队 ACL、预算与去重；客户端只包装协议。旧 `userId` 和 `recallScoreThreshold` 不再生效，应删除；服务端与插件需要一起升级。组成员使用各自凭据，私人事实不会因参加团队自动共享。来源 URI 可见不等于原始会话可读。
 
-注入块的行首只编号、不写绝对分数：RRF 下 rank 1 与 rank 5 的比值是 `0.938`，
+自动注入块不写绝对分数：RRF 下 rank 1 与 rank 5 的比值是 `0.938`，
 两位小数会把两条都渲染成 `0.02`，既不携带「哪条更相关」，又暗示不存在的精度。
 
 **宿主名**：`co-mem install` 写进 hook 命令的 `--host` 参数（或 `COMEM_HOST`），
@@ -606,7 +581,7 @@ queryFilters:
 放四个取值助手。DSH 不在 `hosts/` 里——它是插件，不从 stdin 收载荷。
 
 **临时文件**：锁 `{tmpdir}/comem-{sessionId}.lock`、游标 `{tmpdir}/comem-cursors.json`、
-事件去重 `{tmpdir}/comem-events.json`、召回账本 `{tmpdir}/comem-recall-ledger.json`、
+事件去重 `{tmpdir}/comem-events.json`、上下文重置标识 `{tmpdir}/comem-context-<地址与会话哈希>.json`、
 worker 载荷 `{tmpdir}/comem-stop-*.json`、采集诊断 `{tmpdir}/comem-capture.log`
 （超过 256 KiB 整份重写）。`COMEM_HOOK_TMPDIR` 可以整体换一个目录（测试与多实例
 隔离用）。
@@ -669,10 +644,9 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 
 | 用途 | 请求 | 期望响应 |
 |---|---|---|
-| 读 profile / 偏好 | `GET /api/v1/content/read?uri=<uri>` | `{status:'ok', result:{text}}` 或纯文本 |
+| 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?}` | `result: {rendered, items, tokensUsed, dropped, degradation}`；空 query 取开局背景 |
 | 技能目录 | `GET /api/v1/skills` | `result: {skills: [{name, description?}]}` 或 URI 数组 |
-| 召回 | `POST /api/v1/search/find`，`{query, limit}` | `result` 为命中数组或 `{hits}`；每条含 `uri` / `score` / `abstract?` / `memoryType?` |
-| 建会话 | `POST /api/v1/sessions`，`{sessionId, userId}` | 200 新建；409 已存在，复用（消息原样保留） |
+| 建会话 | `POST /api/v1/sessions`，`{sessionId}` | 身份取请求认证；409 已存在时复用 |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
 | 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关 |
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |
@@ -709,7 +683,7 @@ transcript 时，它们与用户真的说过的话长得一模一样。原样处
   模型会把它当成块边界，后面跟着的正文就成了伪造的指令。
 
 三个机制各管一段，代码分别在 `lib/sanitize.mjs`、`lib/injection.mjs` 的
-`escapeInjectionText`、`lib/recall.mjs`。
+`escapeInjectionText`、服务端召回账本。
 
 ### 1. 捕获侧剥离（`lib/sanitize.mjs`）
 
@@ -755,32 +729,13 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
 宿主处理：转义它会让记忆正文里正常的引用变形，而伪造宿主标签的收益远低于伪造
 召回块（模型按 `<comem-recall>` 判断「这是记忆」）。
 
-### 3. 跨轮账本（`lib/recall.mjs`）
+### 3. 服务端跨轮账本
 
-`UserPromptSubmit` 每轮检索 top-k 并注入；账本记「这个会话已经投喂过哪些 URI」，
-下一轮检索后按 URI 排除。用户连续问三个相关问题时，同一段记忆不会被完整注入
-三次。
+`POST /context` 按身份、会话、context epoch 与内容指纹去重。开局背景也记账；同一地址正文更新后可以再次交付，宿主重启或压缩后的新 epoch 可以恢复上下文。条目只在最终通过预算后记账，账本的窗口与容量沿用服务端配置，详见架构文档 §8.7。
 
-- **位置**：`{tmpdir}/comem-recall-ledger.json`，与游标、事件去重同一个目录
-  （`COMEM_HOOK_TMPDIR` 可整体替换）。hook 是短命进程，跨轮状态只能靠文件；
-  hook 也拿不到服务端的 `dataDir`（插件可能装在另一台机器上）。账本丢了只影响
-  去重强度，不影响正确性——放 `/tmp` 正好。
-- **形状**：`{"sessionId": "cc-…", "uris": [...]}`。**只存一个会话**：`sessionId`
-  变了就整份替换，这就是「会话切换 → 账本重置」，也把文件大小钉死在 200 条。
-- **上限**：200 条，超出按 FIFO 淘汰（重复 URI 先删再追加，所以淘汰的是最早
-  投喂的）。
-- **关键规则：本轮一条都没注入时不写账本。** 「没给过」不等于「给过了」——写了
-  会让这些记忆在去重窗口内被静默压制，下一轮真相关时召不回来。
-- **欠额补偿**：客户端过滤不会让服务端补位，所以检索时多要
-  `min(已投喂条数, recallLimit)` 条（最多多要一倍）。不能跟着账本上限 200 走：
-  服务端按 `limit × candidateMultiplier` 取候选，210 条会把它放大到 840 条，把
-  每轮按回车的延迟绑在检索上。
+Hook 的 `lib/context-epoch.mjs` 只保存按服务地址与会话隔离的随机标识，文件原子替换、权限 0600；DSH 在内存按会话保存，压缩时重置。客户端不再维护 URI 列表，也不按分数过滤。服务端按 scope 串行写入账本，多个会话不会相互覆盖。
 
-**服务端的「排除 URI」参数：`POST /search/find` 没有。** 服务端有召回账本
-（`docs/architecture.md` §8.7），但它的去重入口只在 `POST /search/search` 的
-`mode=context` 上；hook 走的 `find` 不接受排除列表。让 hook 改走 `mode=context`
-是换一条出口（组装、预算、渲染全变），不是加一个参数。所以 v1 在 hook 侧记一份、
-客户端过滤；服务端加参数属于 API 变更，另行决定。
+账本记录的是服务端返回的内容，宿主没有接收确认协议；返回后网络中断或宿主丢弃输出，仍可能在窗口内被认为已交付。同一会话同时发起两个召回也可能重复注入；按 scope 串行的是写入，检索与交付整体没有加锁。组装后去重当前不补足被排除的条目，因此一轮可能少于条数上限。
 
 ### 误伤与已覆盖
 
@@ -810,18 +765,9 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
   「transcript 格式不匹配」。唯一读者是 `runCaptureWorker`，所以这不是缺陷；文件
   里的注释说明了外部工具读它时要自己调 `sanitizeCapturedMessages`。
 
-**残留（设计取舍，不改）：**
-
-- **`SessionStart` 注入的块不记账。** 账本记的是「`UserPromptSubmit` 这一轮已经
-  以召回块形式投喂过哪些 URI」，它防的是同一段记忆每轮重复完整注入；画像、偏好与
-  技能目录每局只注入一次，本来就没有重复。反过来把它们的 URI 记进账本，下一轮
-  `find` 会按「已投喂」把它们过滤掉（`hits.filter((hit) => !deliveredSet.has(hit.uri))`）
-  ——而画像往往正是会话开头最相关的命中，静默压制它等于让第一轮召回变空。
-
 用例在 `tests/sanitize.test.mjs`（纯函数，含 1MB 输入耗时）、
 `tests/post-tool-use.test.mjs`（工具输出剥离与非字符串透传）、
-`tests/session-start.test.mjs`（技能目录的转义）、`tests/recall.test.mjs`（真落盘
-的账本）、`tests/user-prompt-submit.test.mjs`（转义与跨轮去重的接入）与
+`tests/session-start.test.mjs`（技能目录的转义）、服务端 `tests/integration/services/recall-ledger.test.ts`、`tests/user-prompt-submit.test.mjs`（自动上下文与重置标识的接入）与
 `tests/stop.test.mjs`（发 HTTP 前剥离）。
 
 ## 故障排查
@@ -829,8 +775,7 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
 **`doctor` 报「服务端可达」失败**：`curl $COMEM_BASE_URL/health` 确认服务端起了；
 检查 `baseUrl` 是否带了协议与端口。
 
-**`doctor` 报「配置文件」失败**：`userId` 为空。它决定 `comem://user/{uid}/` 这个
-根，拼不出来就既不召回也不采集。
+**`doctor` 报「请求身份」失败**：检查凭据与 `GET /api/v1/auth/me`。个人根取认证结果，插件不再配置 `userId`。若提示模型未配置，在设置页测试并保存模型配置，重启后再检查。
 
 **装完宿主里没有任何变化**：`cat ~/.claude/settings.json` 看 `hooks` 里有没有
 `integrations/servers/*.mjs`；没有就重新 `co-mem install`。宿主对 settings 的语法
@@ -855,11 +800,7 @@ SQLite 的写锁。
 选错了宿主；`reason: "no-transcript-path"` 说明宿主没给 `transcript_path`；`reason:
 "transcript-read-failed"` 说明文件读不到（`error` 是 errno）。
 
-**同一段记忆被注入两次**：hook 侧的账本是
-`${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-recall-ledger.json`（见上面的「注入与
-捕获的去重」）。目录不可写时去重静默失效，stderr 有一行 `召回账本写入失败`。服务端
-的召回账本（§8.7）只作用于 `POST /search/search` 的 `mode=context`，hook 走的是
-`find`，`dedupTurns` 对它无效。
+**同一段记忆被注入两次**：检查服务端账本日志，以及请求的 `sessionId` / `contextEpoch` 是否稳定。内容或投放层级变化、压缩、窗口到期会允许再次交付；`dedupTurns` 对 `POST /context` 生效。
 
 **记忆库开始复读自己**：上一轮的注入块被当成用户的话重新抽取了。检查
 `lib/sanitize.mjs` 的块标签表是否覆盖了宿主实际写的标签——宿主新增一种带外提示

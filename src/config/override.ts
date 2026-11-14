@@ -55,6 +55,12 @@ export function nextOverrideFor(
   return next;
 }
 
+export function configWithOverride(snapshot: ConfigSnapshot, override: ConfigRecord) {
+  return validateConfigCandidate(mergeConfig(
+    mergeConfig(mergeConfig(snapshot.defaults, snapshot.fileConfig), override), snapshot.envOverrides,
+  ), { configPath: snapshot.configPath, overridePath: snapshot.overridePath, overrideConfig: override });
+}
+
 /**
  * 原子写覆盖文件：同目录临时文件 + `rename`。
  *

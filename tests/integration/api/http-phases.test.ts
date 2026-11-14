@@ -55,6 +55,7 @@ beforeEach(async () => {
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,
+      COMEM_RETRIEVAL_ENGINE: 'fts5',
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: 'http://127.0.0.1:1/v1',

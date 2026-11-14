@@ -31,6 +31,7 @@ import type { Models } from './models.js';
 import { FileResourceStorage } from './ports.js';
 import type { Retrieval } from './retrieval.js';
 import { readLimitOption, readScopesOption } from './support.js';
+import { retrievalConfigured } from '../../config/readiness.js';
 
 /** 记忆栈产物。`principals` 是调度器求权用的主体集合，与 API 请求同源。 */
 export interface MemoryStack {
@@ -90,14 +91,11 @@ export function createMemory(
     filesystem: rawFilesystem,
     search: {
       find: async (query, findOptions) => {
-        const hits = await search.find(query, {
-          scopes: readScopesOption(findOptions, [subjectScope.toString()]),
-          subject,
-          principals,
-          ...(readLimitOption(findOptions) === undefined
-            ? {}
-            : { limit: readLimitOption(findOptions) }),
-        });
+        const scopes = readScopesOption(findOptions, [subjectScope.toString()]);
+        const limit = readLimitOption(findOptions) ?? 5;
+        const hits = retrievalConfigured(config)
+          ? await search.find(query, { scopes, subject, principals, limit })
+          : await index.search({ text: query, scopes, principals, limit, asOf: new Date().toISOString() });
         return hits.map((hit) => ({
           uri: hit.uri,
           abstract: hit.abstract,

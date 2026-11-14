@@ -76,7 +76,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `summary.generator` | `llm` | `llm` 走模型（`providers.llm.default.type` 不能是 `disabled`）；`rule` 断网降级（子节点名字 + 摘要首句拼接）。**`rule` 的结果恒带 `degraded: true`**，`/health` 会把它报成 `degraded` |
 | `summary.abstractMaxChars` | `256` | L0 摘要的字符预算（§9.1）。超了截断，不重试 |
 | `summary.overviewMaxChars` | `4000` | L1 概览的字符预算 |
-| `retrieval.engine` | `fts5` | 检索后端：`fts5` / `vector` / `hybrid`。后两者需要 `providers.embedding`，没配时 `loadConfig` 直接报错 |
+| `retrieval.engine` | `hybrid` | 检索后端：`fts5` / `vector` / `hybrid`。未配置 embedding 时管理入口可用，语义检索明确返回待配置 |
 | `retrieval.candidateMultiplier` | `4` | 先取 `limit × N` 候选再按权限过滤，避免过滤后不足数（§8.2）。候选被拦得多时调大 |
 | `retrieval.levelWeights.l0` / `.l1` / `.l2` | `1.15` / `1.05` / `1.00` | 层级加权（§8.5）。只用来在 BM25 接近时打破平局 |
 | `retrieval.queryFilters` | `[]` | sed 风格正则数组，作用在 prompt 上，产物才是查询（§8.8）。Hook 侧也有默认五条 |
@@ -152,7 +152,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 |---|---|---|
 | `GET /api/v1/config` | 系统管理员 | 全部 84 个叶子。每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；密钥类只回 `configured` 与 `masked`（`****abcd`，末 4 位），`value` 是 `null` |
 | `PATCH /api/v1/config` | 系统管理员 | 请求体 `{ "values": { "providers.llm.default.baseUrl": "http://127.0.0.1:8089/v1" } }`；先完整校验，合法才原子写入（同目录临时文件 + `rename`，权限 `0600`） |
-| `POST /api/v1/config/test` | 系统管理员 | 请求体 `{ "target": "llm" \| "embedding" \| "rerank" }`，回 `{ ok, latencyMs, detail }` |
+| `POST /api/v1/config/test` | 系统管理员 | 请求体 `{ "target": "llm" \| "embedding" \| "rerank", "values"?: { "配置路径": "草稿值" } }`，回 `{ ok, latencyMs, detail, dimension? }` |
 
 `GET /api/v1/config` 顶层另有 `overridePath` 与 `overrideWritable`（`fs.access`
 的结果）。`PATCH` 成功回 `{ written, overridePath, restartRequired: true }`——
@@ -169,12 +169,11 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 `retrieval.queryFilters` 的值可见但也不可写：schema 只校验它是字符串数组，非法
 正则要等到检索时才报错。
 
-**`POST /api/v1/config/test` 测的是当前进程已生效的配置，不是刚写到磁盘、还没
-重启的覆盖文件。** 三个探针分别是：LLM 发一条 `maxTokens: 1` 的普通 completion
-（不走结构化输出，非 JSON 网关也能测）；Embedding 嵌一个唯一短串，同时检查
-`degraded` / `reason` 与 `vectors[0].length === dimension`（`type: disabled` 不抛
-错，只回 `degraded`）；Rerank 直接 `POST <baseUrl>/rerank`。失败一律
-`ok: false` 并带 `detail`。
+**设置页测试当前表单。** `values` 按保存接口的白名单、类型与环境变量优先级校验，合并磁盘上的覆盖值后构造临时供应商；不写配置、不改运行实例或向量索引。LLM 发一条 `maxTokens: 1` completion；Embedding 发一个短串并识别实际维度，成功后填入表单；Rerank 调兼容的 `/rerank`。失败只返回错误类别与排查方向，不回显供应商的任意错误正文。省略 `values` 的脚本调用仍测试运行配置。
+
+**首次配置与升级。** 默认 `retrieval.engine: hybrid`，embedding 初始停用。管理入口可以启动；检索返回 503 `PROVIDER_UNAVAILABLE`，`details.reason: embedding_not_configured`。填写生成、嵌入连接并测试，保存后重启。仅关键词部署显式写 `fts5`；旧部署省略引擎时升级会采用 hybrid，不会自动启用供应商。`/health` 的 `retrieval.configured` 表示配置存在，不能证明网络、模型或向量回填已经就绪。占位生成地址不调用模型，抽取/合并/归纳步骤标为跳过，归档仍保留。模型或维度变化继续走现有重建/回填流程；应等待索引完成再检索。没有凭据时不会下载本地模型。
+
+未配置生成模型分为 `llm_disabled`（显式停用）与 `llm_unconfigured`（仍是占位地址）。归档元数据、导入报告与健康接口使用同一个原因。摘要在占位配置下自动使用规则生成器；显式开启工作记忆或记忆合并仍要求真实模型地址。仅缺 embedding 时，后台抽取的已有记忆预取暂用 FTS5；对外语义检索继续明确报待配置。
 
 #### Docker 下怎么写
 
@@ -1641,7 +1640,7 @@ $ curl -s http://127.0.0.1:1933/health | jq
 | `queue.pending` / `processing` | 待执行 / 执行中的任务 | `processing` 长期不降 = 卡住的任务，看租约 |
 | `summary.pendingDirs` | 待刷新摘要的目录数 | 长期不降 = 摘要失效在堆积 |
 | `summary.degradedDirs` | 用规则摘要生成的目录数 | 模型不可用时会涨；恢复后需要重算 |
-| `memoryExtract.skipped` | 归档提交是否跳过记忆抽取（`providers.llm.default.type` 是 `disabled` 时为 `true`） | 为真 = 归档照常完成，但 `memory_extract` / `memory_merge` 没跑，`find` 搜不到新记忆。`reason` 是 `llm_disabled` |
+| `memoryExtract.skipped` | 显式停用生成模型或仍为占位地址时为 `true` | 归档照常完成，但不产生新记忆；`reason` 分别为 `llm_disabled` / `llm_unconfigured` |
 | `rerank.configured` | 是否配了重排（`retrieval.rerank.enabled` + `providers.rerank.type: http`） | 配了重排但这里是 `false` = 装配没接上 |
 | `rerank.degraded` | 最近一次重排调用是否失败（已退回融合分） | 为真 = 这次检索用的是融合分。反复为真看 `lastFailure.reason`：「超时」调大 `timeoutSeconds` 或降低 `topN`，`http_5xx` 看供应商，`network` 看 `baseUrl` |
 | `rerank.failures` | 进程启动以来重排失败的累计次数 | 与 `degraded` 一起看：`degraded: false` + `failures > 0` = 间歇性失败过，最近一次已成功 |

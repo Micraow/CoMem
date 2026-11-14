@@ -31,6 +31,7 @@ import type { Foundation } from './foundation.js';
 import type { MemoryStack } from './memory.js';
 import type { Retrieval } from './retrieval.js';
 import { errorMessage } from '../../domain/errors.js';
+import { createDraftProbe } from './config-probe.js';
 
 /** 接口层产物。`resolveIdentity` 给 HTTP 与 MCP 共用。 */
 export interface Api {
@@ -116,6 +117,7 @@ export function createApi(
 
   const routes = createHttpRouteGroups({
     config, configSnapshot, llm, embedding,
+    draftProbe: createDraftProbe(logger),
     localInference,
     observability,
     filesystem,

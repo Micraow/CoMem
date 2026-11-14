@@ -59,19 +59,12 @@ export const DEFAULT_SKILL_BUDGET_TOKENS = 400;
  * 给技能目录、留出块标签与空行的余量，取 2,000。中文 2,000 字约 6 KB（3 字节/字、
  * 1 token/字），与同一个上限相容。
  *
- * **索引化之后它约束的是索引行的总量**，不再是画像正文。画像只有一条记忆（一行），
- * 实际永远不会触发；偏好目录的条目预算取它的 1/4（见
- * `servers/session-start.mjs` 的 `PREFERENCES_BUDGET_DIVISOR`），才是真正起作用的
- * 那一档。保留这个键而不是换成新名字：部署方已经设过 `COMEM_PROFILE_BUDGET_TOKENS`
- * 的不该因为一次内部格式变化而失效。
  */
 export const DEFAULT_PROFILE_BUDGET_TOKENS = 2000;
 
 /** 默认配置（与 §18 的默认值一致）。 */
 export const DEFAULT_CONFIG = Object.freeze({
   baseUrl: 'http://127.0.0.1:1933',
-  /** 当前用户 ID；召回与采集都要它，缺失时 `co-mem doctor` 报失败 */
-  userId: '',
   /** 可选的 Bearer token */
   token: '',
   timeoutMs: 5000,
@@ -88,13 +81,6 @@ export const DEFAULT_CONFIG = Object.freeze({
    */
   mcpTimeoutMs: 30000,
   recallLimit: 10,
-  /**
-   * 相对阈值：只保留分数不低于**本次最高分 × 该值**的命中（§15.9 的「三条前提」
-   * 之二）。不是绝对分数下限——`fts5` / `vector` / `hybrid` 三种引擎的分数量纲
-   * 不同，`hybrid` 的 RRF 融合分只有 `0.016–0.033`，绝对阈值会把全部命中丢掉。
-   * 默认 `0.5` 表示「只保留与最佳命中差距不到一半的」。
-   */
-  recallScoreThreshold: 0.5,
   skillBudgetTokens: DEFAULT_SKILL_BUDGET_TOKENS,
   profileBudgetTokens: DEFAULT_PROFILE_BUDGET_TOKENS,
   queryFilters: DEFAULT_QUERY_FILTERS,
@@ -103,13 +89,11 @@ export const DEFAULT_CONFIG = Object.freeze({
 /** 环境变量 → 配置键。 */
 const ENV_OVERRIDES = Object.freeze({
   COMEM_BASE_URL: 'baseUrl',
-  COMEM_USER_ID: 'userId',
   COMEM_TOKEN: 'token',
   COMEM_TIMEOUT_MS: 'timeoutMs',
   COMEM_COMMIT_TIMEOUT_MS: 'commitTimeoutMs',
   COMEM_MCP_TIMEOUT_MS: 'mcpTimeoutMs',
   COMEM_RECALL_LIMIT: 'recallLimit',
-  COMEM_RECALL_SCORE_THRESHOLD: 'recallScoreThreshold',
   COMEM_SKILL_BUDGET_TOKENS: 'skillBudgetTokens',
   COMEM_PROFILE_BUDGET_TOKENS: 'profileBudgetTokens',
   COMEM_QUERY_FILTERS: 'queryFilters',
@@ -120,7 +104,6 @@ const NUMERIC_KEYS = new Set([
   'commitTimeoutMs',
   'mcpTimeoutMs',
   'recallLimit',
-  'recallScoreThreshold',
   'skillBudgetTokens',
   'profileBudgetTokens',
 ]);
@@ -255,15 +238,10 @@ function coerce(key, value) {
  * 文件不存在不是错误：全部走默认值与环境变量。只有**存在但解析失败**才抛
  * `HOOK_INVALID_CONFIG`——静默吞掉一个拼错的配置，比报错更难查。
  *
- * `recallScoreThreshold` 是**相对阈值**（`score >= topScore × 该值`），不是绝对
- * 分数下限：三种检索引擎的分数量纲不同，`hybrid` 的 RRF 融合分只有 `0.016–0.033`，
- * 绝对阈值在默认引擎下会把全部命中丢掉（§15.9）。
- *
  * @param {{ env?: NodeJS.ProcessEnv }} [options]
  * @returns {Promise<{
- *   baseUrl: string, userId: string, token: string, timeoutMs: number,
+ *   baseUrl: string, token: string, timeoutMs: number,
  *   commitTimeoutMs: number, mcpTimeoutMs: number, recallLimit: number,
- *   recallScoreThreshold: number,
  *   skillBudgetTokens: number, profileBudgetTokens: number, queryFilters: readonly string[],
  *   configFile: string, tmpDir: string,
  * }>}

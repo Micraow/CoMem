@@ -4,8 +4,6 @@
  * （后者要 `observers` 数组）、`SearchService` 在它之后（`grep` 要读文件）；
  * `TaskService` 在 `SessionService` 之前（阶段一提交要建任务），后者又在
  * `SearchService` 之前（意图分析要读最近几轮消息做指代消解，§8.4）。
- *
- * `IndexObserver` 不用 `FileSystemService`（直接用 `ContentStore`），不构成环。
  */
 
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
@@ -30,6 +28,7 @@ import type { Foundation } from './foundation.js';
 import type { Models } from './models.js';
 import { InheritingAuthorizer } from './ports.js';
 import { fsErrorCode } from '../../domain/errors.js';
+import { llmConfigured } from '../../config/readiness.js';
 
 /** 召回账本的文件存储。`write` 必须原子（临时文件 + `rename`）：半截 JSON 会持续损坏。 */
 class FileLedgerStore implements LedgerStore {
@@ -104,7 +103,7 @@ function createRetrievalCore(
     db,
     acl,
     generator:
-      config.summary.generator === 'llm'
+      config.summary.generator === 'llm' && llmConfigured(config)
         ? new LlmSummarizer(llm, {
             abstractMaxChars: config.summary.abstractMaxChars,
             overviewMaxChars: config.summary.overviewMaxChars,
@@ -204,6 +203,7 @@ export function createRetrieval(
 
   const search = new SearchService({
     index,
+    readableScopes: (principals) => permissions.readableScopes(principals),
     filesystem,
     authorizer: acl,
     assembler,

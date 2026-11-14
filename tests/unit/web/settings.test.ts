@@ -176,9 +176,9 @@ describe('分组', () => {
   });
 
   it('首屏只展开模型 / 向量 / 重排，其余折叠', () => {
-    expect([...INITIALLY_EXPANDED_GROUPS]).toEqual(['llm', 'embedding', 'rerank']);
+    expect([...INITIALLY_EXPANDED_GROUPS]).toEqual(['llm', 'embedding']);
     expect(groups.filter((group) => isExpandedByDefault(group.group)).map((group) => group.group))
-      .toEqual(['llm', 'embedding', 'rerank']);
+      .toEqual(['llm', 'embedding']);
     expect(SETTINGS_PAGE).toContain('v-if="expanded.has(group.group)"');
     expect(SETTINGS_PAGE).toContain(':aria-expanded="expanded.has(group.group)"');
   });
@@ -392,7 +392,7 @@ describe('测试连接', () => {
 
   it('固定说明文案存在，且请求打到 /config/test', () => {
     expect(TEST_SCOPE_NOTE).toBe(
-      '「测试连接」测的是当前正在运行的配置，不是刚保存、还没重启的配置。',
+      '「测试连接」使用当前表单内容，自动识别向量维度。保存后重启服务生效。',
     );
     expect(SETTINGS_PAGE).toContain('{{ TEST_SCOPE_NOTE }}');
     expect(SETTINGS_PAGE).toContain("'/config/test'");

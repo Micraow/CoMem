@@ -6,17 +6,6 @@
  * 召回时，同一个会话在 `dedupTurns` 轮内投过的不重复投——否则用户连续问三个相关
  * 问题，同一段记忆会被完整注入三次，上下文浪费 2/3，模型还可能因为重复而分心。
  *
- * **文件按作用域分片，条目按会话过滤。** 去重窗口是「本会话最近几轮投过什么」，
- * 按会话隔离是正确性要求：同一用户的两个会话共用一个 `turn` 时钟会互相污染（会话
- * A 跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，
- * 新会话前几轮召回被静默压制）。但文件不能按会话切：每个会话一个文件会产生大量
- * 小文件，而按作用域分片让并发写落在不同文件上。
- *
- * 与 §8.6 第 3 步的去重不是一回事：那里的去重是**同一次请求内**同一 URI 命中多条
- * 记录；这里的账本是**跨请求**的重复。
- *
- * ## 三条规则（§8.7）
- *
  * 1. **只记账真的给了正文的条目。** 只给了 URI 的不记——模型没看到内容，下一轮
  *    还得给。
  * 2. **轮次时钟取消息总数。** `turn = SessionService.totalMessageCount(sessionUri)`
@@ -35,6 +24,7 @@
  */
 
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import { ComemError } from '../domain/errors.js';
 import { isRecord } from '../domain/guards.js';
@@ -51,6 +41,7 @@ export interface RecallEntry {
   readonly sessionId: string | null;
   readonly turn: number;
   readonly detail: ContextDetail;
+  readonly fingerprint?: string;
 }
 
 export interface RecallLedgerData {
@@ -94,6 +85,7 @@ export interface RecallLedgerOptions {
 export interface DeliveredItem {
   readonly uri: string;
   readonly detail: ContextDetail | null;
+  readonly text?: string;
 }
 
 /**
@@ -183,7 +175,8 @@ function parseEntry(value: unknown): RecallEntry {
   if (!isContextDetail(detail)) {
     throw new Error('条目的 detail 不合法');
   }
-  return { uri, sessionId: sessionId === undefined ? null : sessionId, turn, detail };
+  return { uri, sessionId: sessionId === undefined ? null : sessionId, turn, detail,
+    ...(typeof value['fingerprint'] === 'string' ? { fingerprint: value['fingerprint'] } : {}) };
 }
 
 /** 账本文件的结构校验。坏数据一律抛，由 `load` 决定怎么降级。 */
@@ -233,6 +226,7 @@ export class RecallLedger {
   readonly #dataDir: string;
   readonly #store: LedgerStore;
   readonly #logger: Logger;
+  readonly #writes = new Map<string, Promise<void>>();
 
   constructor(deps: RecallLedgerDeps) {
     this.#dataDir = deps.dataDir;
@@ -270,18 +264,10 @@ export class RecallLedger {
   /**
    * 删掉一个作用域的账本（删账号 / 组时调用）。
    *
-   * **为什么必须删。** 账本记录的是「哪个会话在第 N 轮投喂过哪些 URI」。账号被删、
-   * 同 ID 重建之后，新的会话 ID 通常不同，`recentlyDelivered` 的会话过滤会让旧条目
-   * 不匹配——但这不是保证：会话 ID 可以由调用方指定（`POST /sessions` 的
-   * `sessionId`），测试环境重置、导入工具复用 ID 都会让新账号的第一轮召回被旧账本
-   * 静默压制（第一次召回返回空）。
-   *
-   * 账本是缓存，删除的代价只是「多投一次」；留着则会让一个已经被删除的账号把去重
-   * 状态带进新生命周期。删除与 `purgeSubtree` 同源：账号不存在了，它命名空间里的
-   * 派生产物都不该继续有效。
    */
   async remove(scopeKey: string): Promise<void> {
     const key = assertScopeKey(scopeKey);
+    await this.#writes.get(key);
     await this.#store.remove(this.#pathOf(key));
   }
 
@@ -299,6 +285,13 @@ export class RecallLedger {
     items: readonly DeliveredItem[],
     options: RecallLedgerOptions,
   ): Promise<void> {
+    const previous = this.#writes.get(scopeKey) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.#record(scopeKey, sessionId, turn, items, options));
+    this.#writes.set(scopeKey, next);
+    try { await next; } finally { if (this.#writes.get(scopeKey) === next) this.#writes.delete(scopeKey); }
+  }
+
+  async #record(scopeKey: string, sessionId: string, turn: number, items: readonly DeliveredItem[], options: RecallLedgerOptions): Promise<void> {
     const key = assertScopeKey(scopeKey);
     assertSessionId(sessionId);
     assertTurn(turn);
@@ -306,19 +299,20 @@ export class RecallLedger {
 
     const current = await this.#load(key);
     const cutoff = turn - PRUNE_TURN_FACTOR * dedupTurns;
-    const kept = current.entries.filter((entry) => entry.turn > cutoff);
+    const kept = current.entries.filter((entry) => entry.sessionId !== sessionId || entry.turn > cutoff);
 
     const delivered: RecallEntry[] = [];
     for (const item of items) {
       if (item.detail === null) {
         continue;
       }
-      delivered.push({ uri: item.uri, sessionId, turn, detail: item.detail });
+      delivered.push({ uri: item.uri, sessionId, turn, detail: item.detail,
+        ...(item.text === undefined ? {} : { fingerprint: contentFingerprint(item) }) });
     }
 
-    // 按 turn 升序稳定排序后再截尾：turn 可能乱序到达（重放、补录），保留「最新的」
-    // 必须按 turn 判断，不能按数组位置。
-    const merged = [...kept, ...delivered].sort((a, b) => a.turn - b.turn);
+    const sessionEntries = [...kept.filter((entry) => entry.sessionId === sessionId), ...delivered]
+      .sort((first, second) => first.turn - second.turn);
+    const merged = [...kept.filter((entry) => entry.sessionId !== sessionId), ...sessionEntries];
     const capped = merged.length > maxEntries ? merged.slice(merged.length - maxEntries) : merged;
 
     await this.#save(key, { version: 1, entries: capped });
@@ -333,9 +327,6 @@ export class RecallLedger {
    * entry.sessionId === sessionId && entry.turn > turn - dedupTurns && entry.turn <= turn
    * ```
    *
-   * - **会话相等**：同一作用域下的另一个会话投过什么与本次无关。少了它，会话 A
-   *   跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，
-   *   新会话前几轮召回被静默压制。
    * - **下界 `entry.turn > turn - dedupTurns`**（严格大于）：第 `turn - dedupTurns`
    *   轮投过的应该还能再投。「`dedupTurns` 轮内」数的是间隔，投在 `turn - dedupTurns`
    *   的那一条距当前正好 `dedupTurns` 轮，已经出了窗口。`dedupTurns = 0` 时窗口为空，
@@ -351,19 +342,23 @@ export class RecallLedger {
     sessionId: string,
     turn: number,
     options: RecallLedgerOptions,
+    items?: readonly DeliveredItem[],
   ): Promise<ReadonlySet<string>> {
     const key = assertScopeKey(scopeKey);
     assertSessionId(sessionId);
     assertTurn(turn);
     const { dedupTurns } = resolveOptions(options);
 
+    await this.#writes.get(key);
     const data = await this.#load(key);
+    const fingerprints = items === undefined ? undefined : new Map(items.map((item) => [item.uri, contentFingerprint(item)]));
     const windowStart = turn - dedupTurns;
     return new Set(
       data.entries
         .filter(
           (entry) =>
-            entry.sessionId === sessionId && entry.turn > windowStart && entry.turn <= turn,
+            entry.sessionId === sessionId && entry.turn > windowStart && entry.turn <= turn &&
+            (fingerprints === undefined || (entry.fingerprint !== undefined && entry.fingerprint === fingerprints.get(entry.uri))),
         )
         .map((entry) => entry.uri),
     );
@@ -372,4 +367,8 @@ export class RecallLedger {
   #pathOf(scopeKey: string): string {
     return join(this.#dataDir, '_meta', 'recall', `${scopeKey}.recall_log.json`);
   }
+}
+
+function contentFingerprint(item: DeliveredItem): string {
+  return createHash('sha256').update(`${item.detail ?? ''}\0${item.text ?? ''}`).digest('hex');
 }

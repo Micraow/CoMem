@@ -408,24 +408,7 @@ export async function readScopes(
     return [uri.toString()];
   }
 
-  // 个人根必须可读：读不到自己的空间是身份或装配错误，不是「范围为空」。
-  const personal = subjectScope(context);
-  await context.acl.assert(personal, READ_LEVEL, context.principals);
-
-  // 组根按可读性过滤：退组后 `principals` 里没有这个组；组根尚未预置 ACL 时
-  // 也不该让整次查询失败——那只是「这个组没有可查的内容」。
-  const scopes = new Set<string>([personal.toString()]);
-  for (const principal of context.principals) {
-    const parsed = parsePrincipal(principal);
-    if (parsed.kind !== 'group') {
-      continue;
-    }
-    const uri = Uri.parse(`comem://group/${parsed.id}`);
-    if (await context.acl.check(uri, READ_LEVEL, context.principals)) {
-      scopes.add(uri.toString());
-    }
-  }
-  return [...scopes];
+  return context.search.defaultScopes(context.subject, context.principals);
 }
 
 // ── 输入校验 ──

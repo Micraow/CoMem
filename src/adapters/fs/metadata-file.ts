@@ -190,8 +190,7 @@ function isCommitStepNameArray(value: unknown): value is readonly CommitStepName
 /**
  * 一项「被跳过的步骤」。
  *
- * 原因目前只有一个合法值。写成白名单而不是 `typeof reason === 'string'`：坏值读回
- * 去会让调用方按 `'llm_disabled'` 之外的值去解释，而这一段在类型上根本不成立。
+ * 原因只接受领域契约中的白名单值，未知值按损坏元数据处理。
  */
 function isSkippedCommitStep(value: unknown): value is SkippedCommitStep {
   if (!isRecord(value)) {
@@ -201,7 +200,7 @@ function isSkippedCommitStep(value: unknown): value is SkippedCommitStep {
   return (
     typeof step === 'string' &&
     isCommitStepName(step) &&
-    value['reason'] === 'llm_disabled'
+    (value['reason'] === 'llm_disabled' || value['reason'] === 'llm_unconfigured')
   );
 }
 

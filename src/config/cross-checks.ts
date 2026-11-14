@@ -14,6 +14,7 @@ import { ComemError } from '../domain/errors.js';
 import { isLoopbackAddress } from '../domain/network.js';
 
 import type { ComemConfig } from './schema.js';
+import { llmConfigured } from './readiness.js';
 
 /**
  * 回环信任不允许与非回环监听组合（§12.7）。
@@ -57,29 +58,6 @@ export function assertCrossChecks(config: ComemConfig): void {
   assertTrustLoopbackHostIsLoopback(config);
 
   /**
-   * 交叉校验：检索后端要向量，就必须有嵌入供应商。
-   *
-   * **不能静默降级成 FTS5。** 用户把 `retrieval.engine` 改成 `vector`，是因为他要
-   * 语义检索；退回关键词检索会给出「看起来能用、实际没按配置生效」的结果，正是
-   * AGENTS.md §1 说的「假配置」。这种错误在启动时抛，比在第一次查询时发现好。
-   *
-   * `anthropic` 不提供嵌入接口，但它在 `AiSdkEmbeddingProvider` 构造期抛
-   * `INVALID_ARGUMENT`——这里只判断 `disabled`，不重复判断供应商能力。
-   */
-  const engine = config.retrieval.engine;
-  if (engine !== 'fts5' && config.providers.embedding.type === 'disabled') {
-    throw new ComemError(
-      'INVALID_ARGUMENT',
-      `retrieval.engine 需要 providers.embedding：engine 是 ${engine} 时必须配置嵌入模型，否则没有可用的向量来源。`,
-      {
-        engine,
-        embeddingType: config.providers.embedding.type,
-        field: 'providers.embedding',
-      },
-    );
-  }
-
-  /**
    * 交叉校验：开了重排就必须有重排供应商。
    *
    * **不能静默降级成「不重排」。** 用户把 `retrieval.rerank.enabled` 打开，是因为
@@ -106,14 +84,14 @@ export function assertCrossChecks(config: ComemConfig): void {
    * `providers.llm.default.type: disabled` 是同一个判据的另一种写法：两者都表示
    * 「没有可用的模型」。这种错误在启动时抛，比在第一次合并时发现好。
    */
-  const llmEnabled = config.providers.llm.default.type !== 'disabled';
+  const llmEnabled = llmConfigured(config);
   if (
     config.memory.consolidation.enabled &&
     (config.summary.generator !== 'llm' || !llmEnabled)
   ) {
     throw new ComemError(
       'INVALID_ARGUMENT',
-      'memory.consolidation.enabled 需要可用的 LLM：summary.generator 必须是 llm，且 providers.llm.default.type 不能是 disabled。',
+      'memory.consolidation.enabled 需要可用的 LLM：summary.generator 必须是 llm，且 providers.llm.default 需要配置真实的供应商地址。',
       {
         field: 'memory.consolidation.enabled',
         summaryGenerator: config.summary.generator,
@@ -135,7 +113,7 @@ export function assertCrossChecks(config: ComemConfig): void {
   if (config.memory.workingMemory.enabled && !llmEnabled) {
     throw new ComemError(
       'INVALID_ARGUMENT',
-      'memory.workingMemory.enabled 需要可用的 LLM：providers.llm.default.type 是 disabled。工作记忆没有规则生成器——摘要可以降级成 rule，它不能，开了就必须能调模型。关掉它，或配置 providers.llm。',
+      'memory.workingMemory.enabled 需要可用的 LLM：工作记忆没有规则生成器。配置真实的 providers.llm.default 供应商地址，或关闭工作记忆。',
       {
         field: 'memory.workingMemory.enabled',
         llmType: config.providers.llm.default.type,
@@ -151,7 +129,7 @@ export function assertCrossChecks(config: ComemConfig): void {
    * 关掉——但「关掉」与「摘要仍然走 llm」互相矛盾，此时每一次摘要都会停在模型
    * 之前。让它在启动时失败，而不是每次写文件都投递一次注定失败的摘要失效。
    */
-  if (config.summary.generator === 'llm' && !llmEnabled) {
+  if (config.summary.generator === 'llm' && config.providers.llm.default.type === 'disabled') {
     throw new ComemError(
       'INVALID_ARGUMENT',
       'summary.generator 是 llm 但没有可用的 LLM 提供者：providers.llm.default.type 是 disabled。把 summary.generator 改成 rule，或配置 providers.llm。',

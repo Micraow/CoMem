@@ -39,7 +39,9 @@ import { createAdminRoutes, type AdminAccess } from './admin.js';
 import { createAuthRoutes } from './auth.js';
 import { createBootstrapRoutes, type BootstrapAccess } from './bootstrap.js';
 import { createConfigRoutes } from './config.js';
+import type { ConfigTarget, ConfigTestResult } from './config-probes.js';
 import { createContentRoutes } from './content.js';
+import { createContextRoutes } from './context.js';
 import { createFsRoutes } from './fs.js';
 import { createInferenceRoutes } from './inference.js';
 import type { LocalInferencePort } from './inference.js';
@@ -70,6 +72,7 @@ export interface HttpRouteServices {
   /** 模型服务：`POST /config/test` 的 LLM / 嵌入探针。 */
   readonly llm: LlmService;
   readonly embedding: EmbeddingService;
+  readonly draftProbe?: (target: ConfigTarget, config: ComemConfig) => Promise<ConfigTestResult>;
   readonly observability: ObservabilityService;
   readonly filesystem: FileSystemService;
   /** 管理面（`getAcl` / `setAcl` / grant / revoke）。 */
@@ -165,6 +168,7 @@ export function createHttpRouteGroups(
     createFsRoutes(services),
     createContentRoutes(services),
     createSearchRoutes(services),
+    createContextRoutes(services),
     createSessionRoutes(services),
     createTaskRoutes(services),
     createAclRoutes(services),

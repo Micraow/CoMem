@@ -630,6 +630,10 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
 
 **`user/alice/sessions/sess_7f3a91c2/.meta.json`**
 
+会话的 `messages.jsonl` 中每条消息可带 `source: {host, machineId, cwd}`，HTTP 写入与磁盘重读均保留。新插件以机器名与 home 路径的哈希标识安装环境；这不是硬件身份，也不能判断当前执行位置是主力电脑、服务器还是容器。旧消息没有来源时不猜机器归属。归档仍受会话 ACL 保护，分享记忆结论不会自动分享其原始消息。
+
+抽取保留 user/assistant 角色、来源和时间，忽略 system 文本。任意工具结果不进入个人事实抽取；只允许 shell 执行的 `cat /etc/os-release`、`uname -s`、`uname -m`、`cat /sys/class/dmi/id/product_name` 的有界结构值形成「当前执行环境观察」。复合命令、错误结果和其它输出不进入观察，观察不证明设备属于用户。经验归纳仍隐藏全部工具部分。没有可抽取材料时不调用模型或预取，写出可重放的空操作产物。原始工具输出仍可能存在归档中，这不是归档脱敏功能。
+
 ```json
 {
   "sessionId": "sess_7f3a91c2",
@@ -1059,7 +1063,7 @@ function toMatchExpression(query: string): string | null {
 
 单字会拉低 BM25 的区分度（虚词「的」「在」到处都是），但**短语匹配要求字符相邻**，精度是够的。真正的排序靠 §8.5 的层级加权和后续的 rerank。
 
-**已知边界（不是缺陷，是词法检索的边界）**：无空格的整句中文（`重试网关层支付`）没有词边界，短语要求连续，仍然召回 0；自然语言问句里含文档中不存在的词时，`AND` 合取也返回 0。这两类由 `vector` / `hybrid` 引擎覆盖——这也是 `retrieval.engine` 默认 `fts5` 但文档建议自然语言场景切到 `hybrid` 的原因。
+**词法检索的边界**：无空格中文短语要求连续；自然语言问句含文档没有的词时，`AND` 合取也可能返回 0。默认 `hybrid` 用 embedding 补充语义召回，FTS5 保留精确词匹配。
 
 **索引里存的是切分后的文本，不是原文。** `node_fts.content` 只服务于匹配，`snippet()` / `highlight()` 不用（返回的是 `abstract` 与 URI，摘要来自 `node` 表）。原文在磁盘上，`read` / `grep` 走文件系统，不走这张表。
 
@@ -1206,7 +1210,7 @@ export interface RetrievalIndex {
 
 **合并规则**：多条 TypedQuery 各跑一次 `find`，按 URI 去重取最高分，`matchedQuery` 记是哪条命中。这样「同一条记忆被两个改写查询命中」不会在结果里出现两次。
 
-**MCP 的 16 个工具全部在 30 秒总上限下，HTTP 只有两个检索路由（三条调用路径）。** MCP 侧由 `ToolRegistry` 的 `bindDeadline` 统一包装（§13.3），所以 `grep` / `glob` 在 MCP 里也有上限；HTTP 侧是 `/search/find` 与 `/search/search`（后者分 `list` / `context` 两种 `mode`），到点返回 503 `PROVIDER_UNAVAILABLE`；`/search/grep` 与 `/search/glob` 不调模型，没有这一层；两者也不是纯本地扫描：`glob` 是一次索引查询（`index.glob` 在 SQL 里按 `node_permission` 过滤，服务层再过一遍 `filterReadable`），`grep` 的候选集同样来自 `index.glob`（上限 `GREP_CANDIDATE_LIMIT = 200` 个候选文件），只有逐文件读盘与行匹配发生在本地（见 `docs/operations.md` 已知限制 28）。向量与重排在到期之前先降级（FTS5 / 融合分）并把 `Degraded` 写进结果。
+**MCP 的 16 个工具全部在 30 秒总上限下。** `ToolRegistry` 的 `bindDeadline` 统一包装全部工具（§13.3）；HTTP 的 `/context`、`/search/find` 与 `/search/search`（含 list/context 两种 mode）也受同一上限约束，到点返回 503 `PROVIDER_UNAVAILABLE`。HTTP 的 grep/glob 不调模型，没有这一层；glob 在 SQL 按权限过滤，服务层再检查可读性，grep 从 glob 取得最多 200 个候选再逐文件匹配。向量和重排失败时按各引擎契约降级并返回原因。
 
 **检索默认只看「现在有效」的记忆。** `find` 与 `search` 的命中都在索引侧按
 `valid_from <= now < valid_until` 过滤（NULL 表示该侧无界，§8.1）。`search` 先取一次
@@ -1256,13 +1260,21 @@ score(d) = Σ_retriever levelWeight(level_d) / (k + rank_retriever(d))
 
 RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要经过压缩，信息密度更高），不是检索后端的分数量纲，所以两者不冲突。名次为 1 的 L0 贡献 `1.15 / 61`、L2 贡献 `1.00 / 61`：同分时 L0 赢，L2 词频明显更高时仍然赢。权重全为 `1` 时退化成标准 RRF（`1.0 * x === x`）。
 
-单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，`hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。**默认引擎是 `fts5`**（`engine` 默认值写在 `src/config/schema.ts:182`），只给单引擎加权的实现会在切到 `hybrid` 时让配置项失效。
+单引擎（`fts5` / `vector`）走 `rankCandidates` 的 `score × levelWeight[level]`，默认 `hybrid` 走融合贡献；两条路径读同一份 `retrieval.levelWeights`。
 
 **重排之后先验仍然保留**（§18 的「重排的实际语义」）：模型分替换的是相关性判断，不是层级先验。不保留时 `hybrid + rerank` 下层级权重只在「模型没给分」的尾部候选上生效。
 
 权重集中配置（`retrieval.levelWeights`），来源是「摘要经过一次人工或模型的压缩，信息密度更高」这个经验假设。**没有实测数据支撑具体数值**，调参时应该用一批真实查询做对比。
 
 ### 8.6 上下文组装（Context Assembly）
+
+**自动上下文。** `SearchService.automaticContext(query, options)` 供 `POST /api/v1/context` 使用。身份取认证请求；默认范围统一为本人根、实际可读的组根与直接授权子树。范围查询来自物化权限，候选与正文再次求权；无权节点的 URI、索引摘要也不出现在输出。共享结论不展开私有源会话。撤权与退组在下一次请求生效，已经进入宿主历史的文字无法远程撤回。
+
+空 query 用于开局：读取本人 `memories/profile.md` 与最多 4 条偏好的正文，按既有 chat 配额最多 5 条；偏好超出的内容留待语义召回。普通 query 只固定读取 profile，优先使用当前问题与最近 10 条可读 user/assistant 对话，历史尾部最多 4000 字符。近期读取跨 live 和归档、按消息 ID 去重，并持会话 TREE 锁避免与归档交错。不默认增加每轮 LLM 改写，主动 `search` 的改写路径保留。自动候选只查 memory，不把整段原始会话送作长期事实。
+
+默认请求预算 1600 token、9000 字节，且不超过服务端 `assembly.maxTokens`；指令、标签与转义后的正文都计入。普通请求背景最多使用剩余 token 的一半，给相关个人及团队知识留空间；开局可使用全部预算。这是初版工程分配假设，尚无模型效果标定。历史 4000 字符和抽取预取 8000 字符同为有界输入的工程上限。背景从全文起投，放不下沿既有层级降级；最终按完整条目缩减，不切断事实或标签。空正文/只有 URI 不自动注入。结果包括 `items/rendered/tokensUsed/dropped/degradation`，降级只发给诊断层。
+
+RRF 用于排序，没有通用的「无答案」判定；自动路径移除相对分数门槛。注入指令要求只使用相关且归属明确的事实，新指示优先；这能约束使用方式，不能保证下游模型总能忽略无关候选。真实自然语言效果和冷查询延迟仍需在实际使用中确认。
 
 `search` 有一个 `mode="context"` 变体：返回的不是命中列表，而是一段**可直接塞进模型上下文**的文本。这是「检索结果 → 模型输入」的独立一层。
 
@@ -1328,6 +1340,8 @@ L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` �
 
 ### 8.7 召回账本（Recall Ledger）
 
+自动接入与主动工具共用服务端账本。自动上下文在组装后按 `sha256(detail + NUL + text)` 比较内容，更新正文或改变交付粒度后允许重新注入。自动上下文的会话键由宿主会话 ID 与 `contextEpoch` 组成；SessionStart 与压缩重置边界更新 epoch。旧条目没有内容指纹时不能抑制新的自动投放。写入按作用域串行，裁剪只用当前会话的轮次淘汰当前会话条目，再按最近写入的会话保留总量上限；跨会话的轮次不可比较。未返回的条目不记账，客户端没有第二份召回账本。HTTP 成功发送仍不能证明宿主最终接受了注入，网络断开或宿主丢弃后可能在窗口内暂时少投。
+
 **文件按作用域分片，条目按会话过滤。** 账本文件是 `{dataDir}/_meta/recall/{scopeKey}.recall_log.json`（如 `user_alice.recall_log.json`），每条记录带 `sessionId`，写的是「哪个会话在第 N 轮给模型投喂了哪些 URI、投喂到什么粒度」。下一轮召回时，**同一个会话**在 `dedup_turns` 轮内投过的**不重复投**。
 
 **为什么这样切。** 去重窗口是「本会话最近几轮投过什么」，按会话隔离是正确性要求：同一用户的两个会话共用一个 `turn` 时钟会互相污染——会话 A 跑到第 50 轮后，会话 B 从第 1 轮开始会把 A 投过的全部 URI 当成「刚投过」，新会话前几轮召回被静默压制。但文件不能按会话切：每个会话一个文件会产生大量小文件，而按作用域分片让并发写落在不同文件上。
@@ -1346,7 +1360,7 @@ entry.sessionId === sessionId && entry.turn > turn - dedup_turns && entry.turn <
 
 1. **只记账真的给了正文的条目。** 只给了 URI 的不记——模型没看到内容，下一轮还得给。
 2. **轮次时钟取会话的累计消息数。** `turn = SessionService.totalMessageCount(sessionUri)` = 已归档消息 ID 集合大小 + live 条数。它是**派生量**，不额外存储：存成计数器就要在归档、补完归档、删除消息几条路径上同步维护，漏一处时钟就与消息总数漂移，而去重窗口只依赖这个单调量。
-3. **按 `turn - 4 × dedup_turns` 裁剪，上限 500 条。** 不裁剪会无限增长。
+3. **当前会话按 `turn - 4 × dedup_turns` 裁剪，全文件上限 500 条。** 不裁剪会无限增长。
 
 **为什么需要**：用户连续问三个相关问题，同一段记忆会被完整注入三次。上下文浪费 2/3，模型还可能因为重复而分心。
 
@@ -1596,7 +1610,7 @@ commit(sessionId, options)
 | `ContextPart` | 上下文引用（URI + 摘要），表示「这条消息引用了哪段记忆」 |
 | `ToolPart` | 工具调用的 `{toolCallId, name, input, output}` |
 
-`ToolPart` 不能省：很多经验藏在工具输出里（「这个命令报错了，因为 X」）。但**用户记忆抽取时默认隐藏工具输出**——它会泄漏环境变量、数据库内容、文件系统结构。只有 agent 作用域才带上，且截断到 500 字符。
+`ToolPart` 保存调用与结果。个人事实抽取隐藏任意工具原文，仅允许 §6.6 列出的受控环境观察；经验归纳隐藏全部工具部分。当前 URI 只有 user/group 两个根，没有独立 agent 作用域。
 
 **为什么 `.done` 最后写。** `.done` 是唯一的完成信号。先写它就等于宣称成功。崩溃后重放时，看到 `.done` 就跳过整个归档。
 
@@ -3109,7 +3123,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 
 **`write`（MCP）与 `POST /content/write`（HTTP）不丢 frontmatter，丢的是提交语义。** MCP `write` 的 `replace` / `append` 与 HTTP `POST /content/write` 都走 `ContentStore.writeText`：不传 `frontmatter` 时它保留磁盘上现有的 frontmatter，只替换正文（键、值与类型语义保留；YAML 会按统一格式重新序列化，注释、引号与流式数组写法会归一化——语义保留，字节不保证）。这两条路径绕过 `MemoryService`，因此跳过的是补丁合并、复核状态流转、`sources` 的追加与去重、字段类型校验，以及 **`addOnly` 类型（如 `events`）的既有文件保护**——记忆写入点（`services/memory/service.ts` 的 `upsertMemory`）对 `addOnly` 类型的既有文件抛 `ALREADY_EXISTS`，`write` 直接覆盖。一条记忆被 `write` 改过正文后仍然是一条记忆，`memory_type` / `status` 都还在，但**这次改动没有溯源**（`sources` 不追加），也**没有经过复核**；对 `events` 这类记忆，覆盖写等于改写「已经发生过的事」，被覆盖的正文没有第二份副本可以核对。想定点改一条记忆的正文，目前**没有既保提交语义的入口**：`edit`（文本级 patch）能改正文、保住 frontmatter（索引与父目录摘要照常失效重算），在**提交语义**上它与 `write` 一样：都不追加 `sources`、不经复核、不做字段类型校验；差别在**正文改法**（`edit` 是行级 patch，`write` 是整份替换）与**是否重写 frontmatter**（`edit` 不重写），所以 `edit` 不是「语义安全」的写入路径。`remember` 提交的是会话，由抽取决定改哪条记忆，不能指名。要连提交语义一起保留，只能走记忆抽取 / 合并那条链路，由系统决定写什么，而不是直接改。`create` 模式在目标已存在时抛 `ALREADY_EXISTS`，不会覆盖。
 
-**检索分数的可比范围。** `find` / `search` 返回的分数只在**同一次检索的同一个引擎内**可比：`fts5` 是取负的 bm25，`vector` 是余弦（`[-1, 1]`），`hybrid` 是 RRF 融合分（`Σ levelWeight / (60 + rank)`，上限约 `2/61 ≈ 0.033`）。三种量纲不同，任何绝对阈值跨引擎都不可比。`rule_search` 的 `threshold` 因此是**相对于本次最高分**的比例（`score >= topScore × threshold`），不是绝对分数下限；默认 `0.65` 表示「只保留与最佳规则差距不到 35% 的」。Hook 的 `recallScoreThreshold` 是同一个语义（§15.9）。
+**检索分数的可比范围。** `find` / `search` 的分数只在同次检索、同一引擎内可比；FTS5、余弦、RRF 的量纲不同。`rule_search` 保留显式相对阈值参数，自动接入只使用排序与预算，不把相对分数当作相关概率。
 
 **`remember` 复用提交管线**：造一个合成会话再提交，不另写一条记忆写入路径。传 `sessionId`
 时用调用方给的稳定 ID 并跳过已有消息（`stableMessageId(role, text, createdAt)`，与 ingest
@@ -3166,7 +3180,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 **只停止等待，不取消在途调用。** `runWithDeadline` 用 `Promise.race` 加一个 `unref()` 的定时器；到点后调用方不再等，上游能不能立刻停下是上游契约的事——工具层不假设每个上游都正确响应 `AbortSignal`。
 
-**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由都把 `deadlineAt` 传给 `SearchService`，只在传了它的路径上收窄上游预算（Hook 不传，行为不变）：每个上游的预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析另按「最多用剩余的一半」收窄（`services/retrieval/budget.ts` 的 `remainingBudget` 与 `services/retrieval/intent.ts` 的 `analyze`）。provider 侧把这个预算当**上限**（`min(配置 timeoutSeconds × 1000, timeoutMs)`），预算到点时由 `AbortController` 真正中止在途 HTTP，不是等它跑完再丢弃结果（§19）；总上限本身只停止等待，不取消在途调用（`api/deadline.ts` 的文件头）。预留这份余量的目的是让降级先于总上限失败发生：两者同时到点时谁先返回取决于定时器顺序，降级路径可能输给总上限，把一次本可以返回 FTS 结果的检索变成错误。LLM 另传 `AbortSignal`——后者让 `LlmService` 在第一次超时后不再打剩下两次（`services/llm.ts` 的 `options?.abortSignal?.aborted !== true`）。
+**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由把 `deadlineAt` 传给 `SearchService`，上游预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析最多使用剩余的一半。provider 将预算视为上限，到期由 AbortController 中止在途 HTTP；总上限只停止等待。Hook 的等待预算更短（开局 4 秒、普通轮次 2 秒），断开客户端当前不会取消服务端的 30 秒任务，冷查询可能被宿主放弃。真实模型延迟尚未验证。
 
 `find` / `rule_search` / `search`（`mode=context`）在 `degradation` 或 `rerankFailure` 非空时，于命中列表后追加 `Degraded:` 行：
 
@@ -3183,6 +3197,8 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 **实测**（`tests/integration/mcp/tool-deadline.test.ts`，上游是接受连接但永不回包的本地 HTTP 服务器，不可达端口是先监听再关闭的本地端口）：上游挂起 + 150 毫秒上限 → 212 毫秒返回 `isError`；慢嵌入 + 400 毫秒预算 → 330 毫秒返回 FTS 命中与降级说明；嵌入端口不可达 → 6 毫秒快速失败。
 
 ## 14. HTTP API
+
+自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?}`，空 query 取本人背景；认证身份确定可读范围，30 秒上限。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals}`，含组成员身份。
 
 统一前缀 `/api/v1`。响应封套：
 
@@ -3238,8 +3254,8 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 | Hook | 做什么 |
 |---|---|
-| `SessionStart` | 注入用户画像索引 + 偏好索引 + `<available-skills>` 技能目录 |
-| `UserPromptSubmit` | 拿这条 prompt 去 `find`，把相关记忆注入上下文 |
+| `SessionStart` | 请求 `/context` 的本人背景正文 + `<available-skills>` 技能目录 |
+| `UserPromptSubmit` | 请求 `/context`，服务端结合近期对话召回并组装个人及团队记忆 |
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的文件工具调用，指回 MCP 工具。判定全在本地、不发 HTTP，因此**不做开销上报**（预算仍然是 1000ms） |
 | `PostToolUse` | 采集工具调用与结果（作为 `tool` 部分） |
 | `Stop` | 采集本轮的 user / assistant 消息，提交会话 |
@@ -3248,15 +3264,15 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 七个事件、六个脚本：`PreCompact` 与 `SessionEnd` 共用 `servers/pre-compact.mjs`，但内部事件名（`pre_compact` / `session_end`）与预算各自独立。
 
-**这张表是 Claude Code / Codex 的「hook 脚本」面。** DSH 没有 hook 脚本，它的生命周期点是同进程 Cordis 插件订阅的 typed 事件，原生插件（§15.7）只覆盖其中五个：`agent/created`（≈ `SessionStart`）、`agent/pre-step`（≈ `UserPromptSubmit`）、`session/event` 的 `turn/end`（≈ `Stop`）、`agent/disposed`（`SessionEnd` 的近似物）、`session/event` 的 `compaction/start`（`PreCompact` 只能观察、不能拦截）。没有 `PreToolUse` / `PostToolUse` 的等价接缝被接上。
+**这张表是 Claude Code / Codex 的 hook 脚本面。** DSH 通过原生 Cordis 插件订阅会话事件，另接 `tools/post-execute` 采集工具调用和结果；没有接管工具执行前权限。
 
 **事件名有两套。** 内部事件名是 snake_case（`session_start` … `session_end`，7 个），出现在 `POST /telemetry/hook` 的 `event` 字段、`comem_hook_*` 的 `event` 标签与控制台的行键；PascalCase（`SessionStart` …）只出现在宿主载荷与返回信封里。两套名字的对应只写在 `integrations/lib/events.json`，两个 hook 宿主共享同一张表——各写一份时所有 hook 样本会塌进 `event="other"`（见 `lib/events.mjs` 的文件头）。这张表还标了 `reportsOverhead`：`pre_tool_use` 为 `false`，所以**进 `/metrics` 的事件是 6 个**，与「宿主会调的事件是 7 个」不是同一个集合。
 
-**`SessionStart` 注入的是索引，不是正文。** `<comem-profile>` 与 `<comem-preferences>` 每条记忆一行 `- [类型] 摘要 · comem://…`，块首固定一句「以下是记忆索引。需要细节时用 read 工具按 URI 读原文」。摘要来自服务端 `GET /content/abstract`（文件的 L0 存在索引里，目录的 L0 是 `.abstract.md`），**hook 不自己截断正文**——那是第二个摘要实现，两处口径必然漂移。整段注入的代价是每一轮重付一次画像：1,076 次归档的画像有 16 万字，而索引化之后一条记忆几十 token，地址还在，模型按需 `read` 正文。偏好目录用 `GET /fs/ls` 列直接子文件，再逐条取摘要；一次 `SessionStart` 最多为 32 条偏好拉摘要（经验上界，见 `integrations/servers/session-start.mjs` 的 `PREFERENCES_INDEX_ENTRY_LIMIT`），超出的部分在块内写「（已截断，共 M 条）」，完整列表用 `list` 取。
+**`SessionStart` 交付有界正文。** `<comem-profile>` 包含服务端已组装的个人背景，具体规则见 §8.6。Hook 只调一次上下文接口，不逐条拉摘要，不维护个人画像副本。宿主身份由认证结果确定，不要求另填 `userId`。
 
 技能目录有独立 token 预算：放不下就只列名字，连一个名字都放不下就缩成一行计数。
 
-**超宿主字节上限时按显式顺序降级，不依赖块在数组里的位置。** 顺序定义在 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER`，从最先丢到最不该丢：技能目录（可选能力清单）→ `<comem-recall>`（每轮重新检索，下一轮还有机会）→ `<comem-preferences>`（索引块，截到只剩 1 条 + 「（已截断，共 M 条）」）→ `<comem-profile>`（唯一无法从别处恢复的信息，至少保留一条带 URI 的记录）。技能目录的独立 token 预算（400）与偏好的条目预算（画像预算的 1/4）先于字节上限生效。索引化之后三个块的实际占用在 1–2 KB 量级，9,500 字节的上限**正常不会触发**——这条链挡的是偏好目录异常增长（几十条中文摘要）与部署方调低宿主上限，不是日常路径。
+**宿主字节上限。** Hook 请求时预留 64 字节供外层标签使用（标签实际小于此上界），服务端按 UTF-8 字节与 token 双重预算缩减；开局附加技能目录后还会复核整体字节数，先丢技能、再丢背景整块。只对返回的正文记账。
 
 ### 15.3 采集不阻塞对话
 
@@ -3304,7 +3320,7 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 **工具发现靠描述自解释。** `initialize` → `tools/list` 的 `description` 是 agent 唯一能看到的用法说明，所以 16 条各自必须回答「什么时候用 / 什么时候不用」，`find` / `search` / `rule_search` 三个必须能互相分辨（`find` 是语义召回、`search` 多一次意图重写、`rule_search` 取规则完整正文）。URI 参数的描述统一写上 `~` 别名——agent 不该为了拼一个绝对 URI 去猜 uid。
 
-**提示词与注入格式必须一致。** Hook 往对话里塞四个块：`<comem-profile>` / `<comem-preferences>`（`SessionStart`，一次性，**索引形态：一条记忆一行摘要 + URI**）与 `<comem-recall>`（`UserPromptSubmit`，每轮），另有 `<available-skills>`（技能目录）。`integrations/skills/` 的提示词按这四个块写「已经有什么」，否则 agent 会把档案当召回结果、把技能目录当记忆去 `find`。`<comem-recall>` 的条目是 `1. [类型] comem://…` 加缩进摘要，**不带分数**（§15.9 的「注入块里不写绝对分数」），所以提示词只能说「顺序即相关度」。提示词拆两份：`comem-memory` 靠「用户提到记忆」触发，`comem-rules` 必须在「用户没提记忆、但你即将动手」时触发——一份 description 覆盖不了两个触发器。
+**提示词与注入格式必须一致。** `<comem-profile>` 交付开局画像与偏好正文，`<comem-recall>` 交付当前问题相关的正文、概览或摘要；内部条目包含 URI、类型与 detail，不显示绝对分数。`<available-skills>` 是技能目录；旧 `<comem-preferences>` 仍在捕获剥离表中。`comem-memory` 要求先使用已交付的内容，缺细节时才 read；`comem-rules` 在动手前取适用规则，两者触发条件不同。
 
 工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证、提示词与验证步骤见 `integrations/README.md` 的「MCP 接入」。
 
@@ -3327,13 +3343,14 @@ v1 做三个：**Claude Code**（hooks + MCP，最常用）、**Codex**（hooks 
 |---|---|---|
 | `agent/created` | `SessionStart` | `handleSessionStart` + `agent.inject()` |
 | `agent/pre-step`（waterfall） | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则 `handleUserPromptSubmit` 并把块折进 `decision.messages` |
+| `tools/post-execute`（waterfall） | `PostToolUse` | 保留 `next()` 的决定，缓冲调用/结果，随本轮提交 |
 | `session/event` 的 `turn/end` | `Stop` | `sanitizeCapturedMessages` → `ensureSession` → `POST /sessions/{id}/messages` + `/commit` |
 | `agent/disposed` | `SessionEnd` 的近似物 | 尽力补交，emit 模式没人等 |
 | `session/event` 的 `compaction/start` | `PreCompact` | **做不到**：只记一条 warn，压缩前不归档 |
 
 插件不写第二份渲染 / 预算 / 剥离：它 import `integrations/servers/*.mjs` 的
 `handleSessionStart` / `handleUserPromptSubmit` / `ensureSession`，以及 `lib/` 的
-`injection.mjs` / `sanitize.mjs` / `recall.mjs` / `http.mjs` / `lifecycle.mjs`。
+`injection.mjs` / `sanitize.mjs` / `http.mjs` / `lifecycle.mjs`。
 `hosts/dsh.mjs` 已删除——它假设的载荷形状、`transcriptPath` 与工具名都不存在，
 永远不会被调用。`install --host dsh` 在写第一个字节之前失败并指向插件。
 
@@ -3384,7 +3401,7 @@ integrations/
 │   ├── dedup.mjs              # 事件去重（500ms 窗口）
 │   ├── lock.mjs               # 跨进程会话锁
 │   ├── cursor.mjs             # 消息游标
-│   ├── recall.mjs             # 跨轮召回账本（已注入的 URI，防重复投喂）
+│   ├── context-epoch.mjs      # 每个宿主会话的上下文重置标识
 │   ├── sanitize.mjs           # 捕获侧剥离（去掉自己注入的块）
 │   ├── injection.mjs          # 注入侧渲染：转义 / 索引截断 / 字节上限
 │   ├── filter.mjs             # sed 风格查询过滤
@@ -3422,7 +3439,7 @@ integrations/
 
 | 事件 | 总预算 | 依据 |
 |---|---|---|
-| `SessionStart` | 4000ms | 会话开局一次；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒还能接受」定；本机空载实测 57ms |
+| `SessionStart` | 4000ms | 会话开局一次；上下文与技能目录并发请求。4 秒是已有宿主等待预算，新上下文路径未做真实模型延迟测量 |
 | `UserPromptSubmit` | 2000ms | **每轮按回车都付**。宿主默认给 30s，30s 与挂住没有区别；本节典型 60–180ms、本机实测 54ms，2s 是典型值的约 10 倍，超了退化成「本轮没有记忆」 |
 | `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的约 30 倍 |
 | `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
@@ -3470,15 +3487,16 @@ integrations/
 **注入的三条前提**（缺一条，召回噪音就会盖过收益）：
 
 1. **召回为空就不注入**——不要给模型一段「没有相关记忆」的废话；
-2. **低于阈值不注入**——低分命中是噪音。阈值是**相对于本次最高分的比例**（`score >= topScore × recallScoreThreshold`），不是绝对分数下限：`fts5` 取负的 bm25、`vector` 的余弦、`hybrid` 的 RRF 融合分（`0.016–0.033`）量纲不同，绝对阈值在 `hybrid` 下一条都留不下，hook 静默返回 `undefined`——功能看起来「正常」但从未注入过。默认 `0.5` 表示「只保留与最佳命中差距不到一半的」；最高分为 0 或负时（分数不可用）全部保留，不静默丢数据。重排开启时它比较的是重排后的 `P(yes)`，标定方法见 `local-inference/README.md` 的「阈值怎么标定」；
+2. **预算与权限通过服务端组装**——只返回可读且装得下的内容；自动接入不把 RRF 比例当作相关概率，不再使用 `recallScoreThreshold`；
 3. **账本去重**——同一记忆不重复投喂（§8.7）。
 
-**注入块里不写绝对分数。** 分数只在同一次检索的同一个引擎内可比（§13.2）：RRF 下 rank 1 与 rank 5 的比值是 `0.938`，`toFixed(2)` 会把两条都渲染成 `0.02`——既不携带「哪条比哪条更相关」，又暗示一个不存在的精度。归一化成百分比同样不行：那是按当前结果集重新缩放，多返回一条命中就会改变所有分数（§17.5 的同一理由）。顺序是唯一稳定的信息，所以行首只编号：
+**自动注入块里不写绝对分数。** 分数只在同一次检索的同一个引擎内可比（§13.2），RRF 不能作为相关概率。块内保留来源和实际交付粒度：
 
 ```
 <comem-recall>
-1. [profile] comem://user/alice/memories/profile.md
-   后端工程师
+<memory uri="comem://user/alice/memories/profile.md" type="memory" detail="full">
+后端工程师
+</memory>
 </comem-recall>
 ```
 
@@ -3503,11 +3521,11 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级（`<comem-recall>` / `<comem-profile>` / `<comem-preferences>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则）、行首时间戳前缀、裸 epoch（只在块剥完之后做）。剥空的消息整条丢弃，游标按剥离后的条数推进。两个宿主适配器不各剥一次——它们只回答「怎么解析」；DSH 插件的 `turn/end` 也调同一个函数。
 2. **注入侧转义**（`integrations/lib/injection.mjs` 的 `escapeInjectionText`）。记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）：正文含 `</comem-recall><comem-recall>` 时，渲染后的块里开标签与闭标签各只有一个，结构没被破坏，内容仍然可读。反斜杠会把转义链引进来，删标签会改变记忆本身。
-3. **跨轮账本**（`integrations/lib/recall.mjs`）。账本是 `{tmpDir}/comem-recall-ledger.json`（与游标、事件去重同一个目录——hook 是短命进程，跨轮只能靠文件，且它拿不到服务端的 `dataDir`），记「本会话已投喂的 URI」，下一轮检索后排除。**本轮一条都没注入时不记账**：「没给过」不等于「给过了」，写了会让这些记忆在去重窗口内被静默压制。上限 200 条、FIFO；`sessionId` 变了整份替换（会话切换即重置）。客户端过滤不补位，所以检索时多要 `min(已投喂条数, recallLimit)` 条。
+3. **服务端跨轮账本**（§8.7）。Hook 只保留每个地址/会话的随机 epoch 文件，DSH 在内存保留 epoch；内容指纹、窗口、会话隔离与并发写都由服务端处理。
 
-**服务端的「排除 URI」参数不存在。** 服务端的召回账本（§8.7）只在 `POST /search/search` 的 `mode=context` 上生效；hook 走的 `POST /search/find` 不接受排除列表。让 hook 改走 `mode=context` 是换一条出口（组装、预算、渲染全变），不是加一个参数，所以 v1 在 hook 侧记账、客户端过滤。在 `/search/find` 上加排除参数属于 API 变更，另行决定。
+**接口出口。** 自动接入走 `POST /context`；主动检索仍走 16 个 MCP 工具与原有 HTTP 检索接口。没有新增 MCP 工具。服务端正文按领域渲染器转义 `<>&`，技能目录继续由 Hook 转义标签前缀。
 
-**剥离会误伤。** 规则认的是字符串，不是「这是不是真的注入」：讨论 CoMem 时贴出的 `<comem-recall>…</comem-recall>` 示例、行首的日志时间戳、恰好落在 `16…`–`19…` 的 10 / 13 位数字都会被吃掉。反方向也有残余（`<available-skills>` 两侧都不处理、`SessionStart` 的块不记账、`PostToolUse` 的工具输出不剥离），清单在 README 同一节。
+**剥离会误伤。** 规则认的是字符串：讨论 CoMem 时贴出的注入块示例、行首日志时间戳、恰好落在 epoch 范围的数字可能被吃掉。`<available-skills>` 与工具输出现已在剥离路径；开局背景由服务端记账。已知限制见 integrations README。
 
 
 ## 16. Web 控制台
@@ -3913,7 +3931,7 @@ retrieval:
   #   fts5   关键词检索（BM25 + 中文 unigram 分词），零依赖
   #   vector 语义检索，需要 providers.embedding
   #   hybrid 并行跑两者再按 RRF 融合
-  engine: fts5
+  engine: hybrid
   candidateMultiplier: 4  # 先取 limit×N 候选，再按权限过滤
   levelWeights:           # 层级加权，用于 BM25 平局时打破
     l0: 1.15
@@ -4021,7 +4039,7 @@ task:
 |---|---|
 | `GET /api/v1/config` | 84 个叶子，每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；顶层 `overridePath` / `overrideWritable`。密钥类只回 `configured` 与 `masked`（末 4 位），`value` 是 `null` |
 | `PATCH /api/v1/config` | 写覆盖文件。先完整校验，合法才原子写（临时文件 + `rename`，`0600`）；回 `restartRequired: true` |
-| `POST /api/v1/config/test` | `target: llm` 发一条 `maxTokens: 1` 的 completion；`embedding` 嵌唯一短串并检查 `degraded` / 维度；`rerank` 直接 `POST <baseUrl>/rerank`。测的是**当前进程已生效**的配置 |
+| `POST /api/v1/config/test` | 接收 `target: llm/embedding/rerank` 与可选 `values` 草稿；无草稿测运行配置，有草稿按配置优先级合并磁盘覆盖与表单，临时构造供应商，不保存、不热更新、不建索引。LLM 发短 completion，草稿 embedding 检测实际维度，rerank 发测试请求；错误返回类型与排查方向，不透传供应商原文 |
 
 **明文永不出现在响应里。** `apiKey` / `auth.sessionSecret` 只回 `configured` 与
 `masked`（`****abcd`）；`apiKey` 写空串等于清除，不写等于不改。`dataDir`、
@@ -4039,7 +4057,7 @@ task:
 
 **`providers.embedding.cache` 默认开。** 缓存的是 `(model, 正文摘要) → 向量`，命中就不打供应商。读失败 / 写失败都降级成「没命中」，生产写入路径不受影响（§7 的同一原则）。`enabled: false` 只对「每次都要拿新向量」的调试有意义；`maxEntries` 默认 20,000，淘汰策略与失效场景见 §8.1。
 
-**`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 没配就不产生网络调用——写记忆是热路径，一次悄悄打出去的请求会把「本地数据库」变成「依赖第三方可用性的数据库」，而失败还是静默降级的。把 `retrieval.engine` 设成 `vector` / `hybrid` 但 `providers.embedding.type` 仍是 `disabled` 时，`loadConfig` 抛 `INVALID_ARGUMENT`：**配置项存在但不生效比没有更糟**。同理，`retrieval.rerank.enabled` 为 `true` 而 `providers.rerank.type` 仍是 `disabled` 时也抛错，不静默降级成「不重排」。
+**`providers.embedding` 与 `providers.rerank` 都有自己的 `type`，默认 `disabled`。** 未配置的供应商不产生网络调用。默认 `retrieval.engine: hybrid` 在 embedding 尚未配置时允许服务启动，以便从控制台完成设置；管理、文件与会话归档可用，语义检索请求返回 `PROVIDER_UNAVAILABLE`（HTTP 503，原因 `embedding_not_configured`），健康检查提示待配置。显式选择 `fts5` 可进行离线关键词检索。`retrieval.rerank.enabled` 为 `true` 而 `providers.rerank.type` 仍是 `disabled` 时，`loadConfig` 继续抛 `INVALID_ARGUMENT`，避免重排配置无效。
 
 **重排的实际语义。** `retrieval.rerank.enabled` 打开后，`find` / `search` / `context` 在融合（或单引擎排序）之后、热度加权之前调用重排模型：
 

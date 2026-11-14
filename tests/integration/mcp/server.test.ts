@@ -118,6 +118,7 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
     // health 额外读 `search.rerankHealth`（重排降级可见性），所以这一项不能是空对象。
     filesystem: {} as unknown as FileSystemService,
     search: {
+      defaultScopes: async () => ['comem://user/alice'],
       rerankHealth: { configured: false, degraded: false, failures: 0, lastFailure: null },
     } as unknown as SearchService,
     summary: {} as unknown as SummaryService,
@@ -249,7 +250,7 @@ describe('McpHttpServer', () => {
     expect(first).toMatchObject({ type: 'text' });
     if (first !== undefined && first.type === 'text') {
       expect(first.text).toContain('index.visibleNodes: 0');
-      expect(first.text).toContain('status: ok');
+      expect(first.text).toContain('status: degraded');
     }
   });
 

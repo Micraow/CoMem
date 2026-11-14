@@ -159,7 +159,7 @@ describe('概览读取', () => {
     expect(item?.text).toBe('只有标题');
   });
 
-  it('无权限时不读文件，条目只剩 URI', async () => {
+  it('无权限时不读文件，也不暴露 URI', async () => {
     await writeBody(BODY, '原文正文');
     const spy = vi.spyOn(store, 'readText');
 
@@ -167,7 +167,7 @@ describe('概览读取', () => {
       createAssembler(new DenyAllAuthorizer()),
       overviewOnly(BODY),
     );
-    expect(item?.detail).toBeNull();
+    expect(item).toBeUndefined();
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -182,10 +182,7 @@ describe('概览读取', () => {
 
   it('URI 无法解析时按缺失处理', async () => {
     const item = await assembleItem(createAssembler(), overviewOnly('not-a-uri'));
-    expect(item?.detail).toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith('检索候选的 URI 无法解析，概览按缺失处理', {
-      uri: 'not-a-uri',
-    });
+    expect(item).toBeUndefined();
   });
 });
 
@@ -216,14 +213,14 @@ describe('原文读取', () => {
     expect(item?.detail).toBe('abstract');
   });
 
-  it('无权限时停在摘要层', async () => {
+  it('无权限时也不能暴露索引里的摘要', async () => {
     await writeBody(BODY, '正文');
 
     const item = await assembleItem(
       createAssembler(new DenyAllAuthorizer()),
       candidate(BODY, { abstract: '摘要' }),
     );
-    expect(item?.detail).toBe('abstract');
+    expect(item).toBeUndefined();
   });
 });
 
@@ -309,7 +306,7 @@ describe('assemble', () => {
     expect(peak).toBe(8);
   });
 
-  it('无权限的候选拿不到正文，按只剩 URI 投放', async () => {
+  it('无权限的候选不进入输出', async () => {
     await writeBody(BODY, '原文正文');
 
     const assembler = createAssembler(new DenyAllAuthorizer());
@@ -318,8 +315,7 @@ describe('assemble', () => {
       quotaPreset: 'chat',
     }, AUTH_PRINCIPALS);
 
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0]?.detail).toBeNull();
-    expect(result.items[0]?.text).toBe('');
+    expect(result.items).toEqual([]);
+    expect(result.rendered).toBe('');
   });
 });

@@ -151,6 +151,33 @@ export class SessionService {
     return archived + live;
   }
 
+  async recentMessages(sessionUri: Uri, limit: number, principals: readonly string[]): Promise<readonly SessionMessage[]> {
+    return this.#locks.withLock(sessionUri, 'tree', () => this.#recentMessages(sessionUri, limit, principals));
+  }
+
+  async #recentMessages(sessionUri: Uri, limit: number, principals: readonly string[]): Promise<readonly SessionMessage[]> {
+    await this.#authorizer?.assert(sessionUri, 1, principals);
+    await requireSession(this.#meta, sessionUri);
+    const messages = new Map<string, SessionMessage>();
+    const collect = async (directory: Uri): Promise<void> => {
+      const uri = messagesUri(directory);
+      if (this.#authorizer !== undefined && !(await this.#authorizer.check(uri, 1, principals))) return;
+      for (const message of [...await readMessages(this.#store, uri)].reverse()) {
+        if ((message.role === 'user' || message.role === 'assistant') && !messages.has(message.id)) {
+          messages.set(message.id, message);
+        }
+        if (messages.size >= limit) break;
+      }
+    };
+    if (limit <= 0) return [];
+    await collect(sessionUri);
+    for (const archive of [...await this.listArchives(sessionUri)].reverse()) {
+      if (messages.size >= limit) break;
+      await collect(archive);
+    }
+    return [...messages.values()].reverse();
+  }
+
   /** 追加消息，按消息 ID 幂等。见 `append.appendMessage`。 */
   async addMessage(
     sessionUri: Uri,

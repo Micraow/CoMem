@@ -470,7 +470,7 @@ describe('「使用」= 进入调用方上下文（§11.7）', () => {
     // 600 token 只够 1 条摘要、另外 2 条降到「只剩 URI」。配额与预算丢弃都算没进上下文。
     const service = createService(fakeIndex(sixHits()), { recordAccess, maxTokens: 600 });
 
-    const result = await service.context('记忆', { ...findOptions(), limit: 10 });
+    const { assembly: result } = await service.contextWithDiagnostics('记忆', { ...findOptions(), limit: 10 });
 
     // 6 条候选进组装，注入与丢弃都要有——只测到「全注入」或「全丢弃」都没意义。
     expect(result.items.length + result.dropped).toBe(URIS.length);
@@ -537,6 +537,7 @@ describe('装配接线（真实 createContainer）', () => {
       env: {
         ...process.env,
         COMEM_DATA_DIR: containerDir,
+        COMEM_RETRIEVAL_ENGINE: 'fts5',
         COMEM_SUMMARY_GENERATOR: 'rule',
         COMEM_LOGGING_LEVEL: 'error',
         COMEM_TELEMETRY_HOTNESS_WEIGHT: '1',

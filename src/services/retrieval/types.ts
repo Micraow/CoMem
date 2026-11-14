@@ -1,6 +1,5 @@
 /**
  * 负责：检索服务的对外类型，以及 `retrieval/` 目录内部的中间结构。
- * 不负责：任何行为——本文件只有类型声明，没有运行期代码。
  */
 
 import type { NodeAccessStats, NodeRepository } from '../../adapters/sqlite/node-repository.js';
@@ -134,7 +133,8 @@ export interface SearchServiceDeps {
    *   `messageCount`**：那是 live 未提交条数（`shouldAutoCommit` 的判据），提交后
    *   归零，时钟会倒退。
    */
-  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'>;
+  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'> & Partial<Pick<SessionService, 'recentMessages'>>;
+  readonly readableScopes?: (principals: readonly string[]) => readonly string[];
   /**
    * 嵌入（§8.3、§18 的 `retrieval.engine`）。只有 `vector` / `hybrid` 用到。
    *
@@ -153,7 +153,7 @@ export interface SearchServiceDeps {
    * 归档状态不在这里补：候选集已由 `index.glob` 的 SQL 过滤。
    */
   readonly nodes?: Pick<NodeRepository, 'get'>;
-  /** §18 的 `retrieval.engine`，默认 `fts5`（与 schema 默认值一致）。 */
+  /** 独立组装可省略引擎；生产装配显式传入配置值。 */
   readonly engine?: RetrievalEngine;
   /**
    * 热度对最终排序的影响（`telemetry.hotness.weight`）。

@@ -53,6 +53,7 @@ beforeEach(async () => {
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_RETRIEVAL_ENGINE: 'fts5',
+      COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: 'http://127.0.0.1:1/v1',
     },
   });
   await container.services.acl.ensureRootPreset(Uri.parse(ROOT));

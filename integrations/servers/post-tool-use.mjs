@@ -32,6 +32,7 @@ import { createHttpClient } from '../lib/http.mjs';
 import { isMainModule } from '../lib/is-main.mjs';
 import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { sanitizeCapturedText } from '../lib/sanitize.mjs';
+import { captureSource } from '../lib/source.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -67,6 +68,7 @@ export function toToolMessage(event) {
     id: `tool_${toolUseId}`,
     role: 'tool',
     createdAt: new Date().toISOString(),
+    source: captureSource(event),
     parts: [
       {
         kind: 'tool_use',
@@ -78,7 +80,7 @@ export function toToolMessage(event) {
         kind: 'tool_result',
         toolUseId,
         output: typeof toolOutput === 'string' ? sanitizeCapturedText(toolOutput) : (toolOutput ?? ''),
-        isError: false,
+        isError: event.isError === true,
       },
     ],
   };
@@ -102,7 +104,6 @@ export async function handlePostToolUse(event, deps) {
   try {
     await deps.http.post(SESSIONS_PATH, {
       sessionId: event.sessionId,
-      userId: deps.config.userId,
     });
   } catch (error) {
     // 409 = 会话已存在（正常路径）：复用它，消息原样保留，继续追加。

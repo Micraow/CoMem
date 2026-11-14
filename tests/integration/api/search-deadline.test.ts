@@ -75,6 +75,7 @@ beforeEach(async () => {
     env: {
       ...process.env,
       COMEM_DATA_DIR: dataDir,
+      COMEM_RETRIEVAL_ENGINE: 'fts5',
       COMEM_SUMMARY_GENERATOR: 'rule',
       COMEM_LOGGING_LEVEL: 'error',
       COMEM_PROVIDERS_LLM_DEFAULT_BASE_URL: UNREACHABLE_LLM_BASE_URL,
@@ -125,6 +126,9 @@ function hangingSearch(): SearchService {
     };
   };
   return {
+    defaultScopes: async () => [ROOT],
+    findWithDiagnostics: hangOn('embedding'),
+    contextWithDiagnostics: hangOn('rerank'),
     find: hangOn('embedding'),
     search: hangOn('llm'),
     context: hangOn('rerank'),

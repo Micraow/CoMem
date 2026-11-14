@@ -390,7 +390,7 @@ export interface HealthPayload {
    */
   readonly memoryExtract: {
     readonly skipped: boolean
-    readonly reason: 'llm_disabled' | null
+    readonly reason: 'llm_disabled' | 'llm_unconfigured' | null
   }
   /** 重排健康度。`failures` 是累计值，成功一次后 `degraded` 清空。 */
   readonly rerank: {

@@ -34,7 +34,7 @@ async function withTempDir(fn) {
 async function startServer() {
   const server = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ status: 'ok', result: { status: 'ok' } }));
+    response.end(JSON.stringify({ status: 'ok', result: { status: 'ok', subject: 'user:alice', retrieval: { configured: true, engine: 'hybrid' } } }));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
@@ -175,11 +175,11 @@ test('doctor 四项全部通过', async () => {
 
     assert.deepEqual(
       checks.map((check) => check.name),
-      ['服务端可达', '配置文件', 'hook 脚本', '游标文件可写'],
+      ['服务端可达', '语义检索配置', '请求身份', 'hook 脚本', '游标文件可写'],
     );
     assert.deepEqual(
       checks.map((check) => check.passed),
-      [true, true, true, true],
+      [true, true, true, true, true],
     );
     for (const check of checks) {
       assert.ok(check.hint.length > 0, check.name);
@@ -206,7 +206,7 @@ test('doctor 报服务端不可达，并给出修法', async () => {
   });
 });
 
-test('doctor 报配置文件缺 userId', async () => {
+test('doctor 从认证结果获得身份，不要求重复填写 userId', async () => {
   const server = await startServer();
   await withTempDir(async (dir) => {
     const configFile = join(dir, 'config.yaml');
@@ -215,9 +215,9 @@ test('doctor 报配置文件缺 userId', async () => {
       env: { COMEM_BASE_URL: server.baseUrl, COMEM_CONFIG_FILE: configFile, COMEM_HOOK_TMPDIR: dir },
       root: ROOT,
     });
-    const configCheck = checks.find((check) => check.name === '配置文件');
-    assert.equal(configCheck.passed, false);
-    assert.match(configCheck.hint, /userId/);
+    const configCheck = checks.find((check) => check.name === '请求身份');
+    assert.equal(configCheck.passed, true);
+    assert.equal(configCheck.hint, 'user:alice');
   });
   await server.close();
 });

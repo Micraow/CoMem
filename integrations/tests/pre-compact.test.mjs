@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FileEventDeduper } from '../lib/dedup.mjs';
+import { contextEpoch } from '../lib/context-epoch.mjs';
 import { handlePreCompact } from '../servers/pre-compact.mjs';
 
 function message(index) {
@@ -47,6 +48,16 @@ async function withTempDir(fn) {
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+test('压缩前即使没有新增消息也重置上下文，允许下一轮重新召回', async () => {
+  await withTempDir(async (dir) => {
+    const config = { baseUrl: 'http://isolated.invalid', tmpDir: dir };
+    const first = await contextEpoch(config, 'cc-reset', true);
+    await handlePreCompact({ event: 'pre_compact', sessionId: 'cc-reset', cwd: '/repo', eventId: null,
+      transcriptPath: null, messages: [] }, { config, http: fakeHttp(), env: {} });
+    assert.notEqual(await contextEpoch(config, 'cc-reset'), first);
+  });
+});
 
 test('等提交完成：消息写入 + 触发提交都在返回之前', async () => {
   await withTempDir(async (dir) => {

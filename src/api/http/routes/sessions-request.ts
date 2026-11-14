@@ -126,5 +126,15 @@ export function parseMessage(body: Record<string, unknown>): Omit<SessionMessage
     role: parseRole(body['role']),
     parts: parts.map((part, index) => parsePart(part, index)),
     createdAt: typeof createdAt === 'string' ? createdAt : new Date().toISOString(),
+    ...(body['source'] === undefined ? {} : { source: parseSource(body['source']) }),
+  };
+}
+
+function parseSource(value: unknown): NonNullable<SessionMessage['source']> {
+  const source = requireRecord(value, 'source');
+  return {
+    host: requireStringField(source, 'host', 'source'),
+    machineId: requireStringField(source, 'machineId', 'source'),
+    cwd: requireStringField(source, 'cwd', 'source'),
   };
 }

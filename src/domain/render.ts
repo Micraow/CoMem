@@ -72,12 +72,12 @@ export function escapeBody(text: string): string {
 }
 
 /** 渲染成一段可注入模型的上下文块（§8.6）。 */
-export function renderItem(item: RenderedItem): string {
+export function renderItem(item: RenderedItem, includeScore = true): string {
   const tag = item.contextType;
   const detail = item.detail === null ? '' : ` detail="${item.detail}"`;
   const attributes =
-    `uri="${escapeAttribute(item.uri)}" type="${tag}" ` +
-    `score="${item.score.toFixed(SCORE_FRACTION_DIGITS)}"${detail}`;
+    `uri="${escapeAttribute(item.uri)}" type="${tag}"` +
+    `${includeScore ? ` score="${item.score.toFixed(SCORE_FRACTION_DIGITS)}"` : ''}${detail}`;
 
   // 只剩 URI 时输出单行自闭合标签：多出来的空行会占预算，也会让模型以为正文是空的。
   if (item.text === '') {
@@ -88,6 +88,6 @@ export function renderItem(item: RenderedItem): string {
 }
 
 /** 把多条渲染结果拼成最终文本，条目之间空一行。 */
-export function renderAll(items: readonly RenderedItem[]): string {
-  return items.map(renderItem).join('\n\n');
+export function renderAll(items: readonly RenderedItem[], includeScore = true): string {
+  return items.map((item) => renderItem(item, includeScore)).join('\n\n');
 }

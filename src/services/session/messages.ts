@@ -54,9 +54,14 @@ function toSessionMessage(value: unknown, uri: Uri): SessionMessage {
   if (typeof turn !== 'number' || !Number.isInteger(turn) || turn < 1) {
     throw corruptDocument(uri, '消息的 turn 不是正整数');
   }
+  const source = value['source'];
+  if (source !== undefined && (!isRecord(source) ||
+    !['host', 'machineId', 'cwd'].every((field) => typeof source[field] === 'string'))) {
+    throw corruptDocument(uri, '消息的 source 不合法');
+  }
   // `parts` 是判别联合，逐项校验等于把领域定义抄一遍；写入侧只接受 `SessionMessage`，
   // 这里确认它是数组即可（§4.2 不鼓励在服务层重写领域校验）。
-  return { id, role, parts: parts as readonly ContentPart[], createdAt, turn };
+  return { ...value, id, role, parts: parts as readonly ContentPart[], createdAt, turn };
 }
 
 /** 一条消息一行（JSONL，§6.5）。空会话是空文件，不是 `[]`。 */

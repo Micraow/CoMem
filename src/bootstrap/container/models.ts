@@ -22,6 +22,7 @@ import { LlmService } from '../../services/llm.js';
 import type { Foundation } from './foundation.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import { llmBaseUrlIsPlaceholder } from './support.js';
+import { llmConfigured } from '../../config/readiness.js';
 
 /** 模型层产物。`embeddingConfig` / `rerankConfig` 一并带出，调用点不再重读配置。 */
 export interface Models {
@@ -47,7 +48,7 @@ export function createModels(core: Foundation): Models {
     );
   }
   const llmProvider =
-    llmConfig.type === 'disabled'
+    !llmConfigured(config) || llmConfig.type === 'disabled'
       ? new DisabledLlmProvider()
       : new AiSdkLlmProvider({
           type: llmConfig.type,

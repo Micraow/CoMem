@@ -19,6 +19,7 @@
 export type HealthStatus = 'ok' | 'degraded';
 
 export interface HealthSignals {
+  readonly modelsUnconfigured?: boolean;
   /** 摘要生成器配成 `rule`：模型不可用时的降级路径。 */
   readonly ruleGenerator: boolean;
   /** 最近一次重排调用失败（已退回融合分）。 */
@@ -36,6 +37,7 @@ export interface HealthSignals {
 
 export function healthStatus(signals: HealthSignals): HealthStatus {
   const degraded =
+    signals.modelsUnconfigured === true ||
     signals.ruleGenerator ||
     signals.rerankDegraded ||
     (signals.degradedSummaries ?? 0) > 0 ||

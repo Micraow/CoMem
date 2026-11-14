@@ -24,11 +24,6 @@
  * 截断（`finishReason === 'length'`）不重试、直接抛 `PROVIDER_UNAVAILABLE`。这一步
  * 不做任何额外重试——重试两次解析失败只会把「模型不会」拖成「等更久」。
  *
- * ## 工具输出默认隐藏（§10.1）
- *
- * `tool_use` / `tool_result` 会泄漏环境变量、数据库内容与文件系统结构，用户记忆抽取
- * 默认丢弃它们（`renderMessageText` 里的 `[tool_use ...]` / `[tool_result ...]`
- * 段落整体消失）。只有 agent 作用域才带上，且截断到 500 字符——那是 v2 的事。
  */
 
 import { z } from 'zod';
@@ -49,6 +44,7 @@ import type { MemoryRecord } from '../../memory.js';
 import { assertMemoryIdentity, renderMemoryUri } from '../../memory.js';
 import { buildExtractPrompt, NEW_PAGE_ID_START, type ExtractPage } from '../../prompts/extract.js';
 import { CommitStep, type StepContext } from '../pipeline.js';
+import { extractionMaterial } from './extract-material.js';
 
 /** 跨步骤传递产物的键（`memory_merge` 消费）。 */
 export const EXTRACT_RESULT_KEY = 'memory_extract.result';
@@ -186,19 +182,16 @@ export function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['
 }
 
 /**
- * 预取的检索 query：最后一条用户消息。没有用户消息时是空串（`find` 会直接返回空）。
+ * 预取的检索 query：本批用户文本；没有文本时使用受控环境观察。
  *
  * 导出给 `experience_distill`：两条步骤都要「按这次会话找相关记忆」，查询构造只应
  * 有一份（改了一处、另一处不跟着改，预取就会悄悄取到不相干的记忆）。
  */
 export function retrievalQuery(messages: readonly SessionMessage[]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message !== undefined && message.role === 'user') {
-      return renderMessageText(message);
-    }
-  }
-  return '';
+  const query = messages.filter((message) => message.role === 'user')
+    .map((message) => renderMessageText({ ...message, parts: message.parts.filter((part) => part.kind === 'text') }))
+    .filter((text) => text.trim() !== '').join('\n').slice(-8000);
+  return query || extractionMaterial(messages.filter((message) => message.role === 'tool')).map((message) => message.content).join('\n').slice(-8000);
 }
 
 /**
@@ -423,10 +416,11 @@ export class MemoryExtractStep extends CommitStep {
   }
 
   async run(context: StepContext): Promise<void> {
-    const pages = await this.#prefetchPages(context);
+    const messages = extractionMaterial(context.messages);
+    const pages = messages.length === 0 ? new Map<number, ExtractPage>() : await this.#prefetchPages(context);
 
     const prompt = buildExtractPrompt({
-      messages: stripToolParts(context.messages),
+      messages,
       memoryTypes: Object.values(BUILTIN_MEMORY_TYPES),
       pages: [...pages.values()],
       previousOverview: context.latestArchiveOverview ?? undefined,
@@ -434,7 +428,7 @@ export class MemoryExtractStep extends CommitStep {
       today: localDate(new Date()),
     });
 
-    const output = await this.#llm.generateJson(prompt, extractOutputSchema);
+    const output = messages.length === 0 ? { operations: [] } : await this.#llm.generateJson(prompt, extractOutputSchema);
     const result = resolveOperations(output, context.scopeUri, pages);
 
     // 先落盘再进 `state`：`state` 只是本次运行的缓存，重放时靠的是归档目录里的

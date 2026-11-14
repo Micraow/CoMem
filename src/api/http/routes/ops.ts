@@ -47,6 +47,7 @@ import { ok } from '../envelope.js';
 import { PROMETHEUS_CONTENT_TYPE, SERVICE_VERSION, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
+import { llmConfigured, llmSkipReason, retrievalConfigured } from '../../../config/readiness.js';
 
 /**
  * 绑定主体可寻址且可读的根（§12.1、§12.5）。
@@ -101,11 +102,12 @@ interface HealthResponse {
   /** 实际生效的检索策略（`retrieval.engine`）。控制台据此如实标注「关键词 / 向量 / 混合」。 */
   readonly retrieval: {
     readonly engine: RetrievalEngine;
+    readonly configured: boolean;
   };
   /** 归档提交的记忆抽取是否被跳过（`providers.llm.default.type = disabled`）。 */
   readonly memoryExtract: {
     readonly skipped: boolean;
-    readonly reason: 'llm_disabled' | null;
+    readonly reason: 'llm_disabled' | 'llm_unconfigured' | null;
   };
   /** 重排健康度。`failures` 是累计值，`lastFailure` 成功一次后清空。 */
   readonly rerank: {
@@ -133,11 +135,11 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
     register(app: FastifyInstance): void {
       app.get('/health', async () => {
         const health = await observability.health();
-        const ruleGenerator = config.summary.generator === 'rule';
+        const ruleGenerator = config.summary.generator === 'rule' || !llmConfigured(config);
         // 没有可用模型时，归档提交会跳过 `memory_extract` / `memory_merge`（见
         // `bootstrap/container.ts` 的 `commitSkippedSteps`）。这两步不执行时归档
         // 仍然会写 `.done`，除了这条信息没有任何错误——降级必须可见。
-        const memoryExtractSkipped = config.providers.llm.default.type === 'disabled';
+        const memoryExtractSkipped = !llmConfigured(config);
         // 重排是「配了就必须能查」的质量增强：`degraded` 为真表示最近一次重排
         // 调用失败、这次检索用的是融合分。与 `summary.degraded` 同一个判定模式。
         const rerank = search.rerankHealth;
@@ -146,6 +148,7 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             ruleGenerator,
             degradedSummaries: health.degradedSummaries,
             rerankDegraded: rerank.degraded,
+            modelsUnconfigured: !llmConfigured(config) || !retrievalConfigured(config),
           }),
           // 控制台的身份引导读这两个字段（§16）；与 MCP `health` 的字段同名同义。
           subject,
@@ -164,12 +167,12 @@ export function createOpsRoutes(services: HttpRouteServices): HttpRouteGroup {
             pendingDirs: health.staleSummaries,
             degradedDirs: health.degradedSummaries,
           },
-          retrieval: { engine: config.retrieval.engine },
+          retrieval: { engine: config.retrieval.engine, configured: retrievalConfigured(config) },
           // 归档提交的记忆抽取。形状与 `ingest` 报告的 `extraction` 一致
           // （`{ skipped, reason }`），两边说的是同一件事。
           memoryExtract: {
             skipped: memoryExtractSkipped,
-            reason: memoryExtractSkipped ? 'llm_disabled' : null,
+            reason: llmSkipReason(config),
           },
           // 重排健康度。`failures` 是累计值（看得出间歇性失败），`lastFailure`
           // 在成功一次后清空（看得出「现在」还在不在跑）。

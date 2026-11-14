@@ -84,7 +84,7 @@ export function isCommitStepName(value: unknown): value is CommitStepName {
  * 没匹配上），这里是**步骤**级的跳过（这一步在本次部署里不可能执行，也不该阻塞
  * 归档完成）。
  */
-export type CommitStepSkipReason = 'llm_disabled';
+export type CommitStepSkipReason = 'llm_disabled' | 'llm_unconfigured';
 
 /** 没有执行、但归档仍然完成的步骤。 */
 export interface SkippedCommitStep {

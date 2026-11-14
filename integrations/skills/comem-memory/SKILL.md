@@ -13,12 +13,12 @@ CoMem 把上下文存在 `comem://` 地址下，跨会话、跨机器、跨队�
 
 | 块 | 谁注入 | 是什么 | 怎么用 |
 |---|---|---|---|
-| `<comem-profile>` | SessionStart | 用户档案：谁在用、什么背景 | 不用再查 |
+| `<comem-profile>` | SessionStart | 用户画像与偏好正文，附来源 URI | 直接使用已给的内容，不用再查 |
 | `<comem-preferences>` | SessionStart | 偏好与工作方式 | 与当前请求冲突时**以当前请求为准**；偏好是历史默认 |
 | `<available-skills>` | SessionStart | 可用技能包的名字，可能只有名字 | 这是**技能**不是记忆，别拿去 `find` |
-| `<comem-recall>` | UserPromptSubmit | 与本轮 prompt 相关的记忆，每条 `1. [类型] comem://…` 加缩进摘要 | 直接 `read` 那个 URI 拿正文 |
+| `<comem-recall>` | UserPromptSubmit | 与本轮问题相关的记忆正文、概览或摘要，附 URI 与 detail | 直接使用；缺少必要细节时才 `read` |
 
-`<comem-recall>` 里的条目**不带分数**，别凭它排序——顺序就是相关度顺序。它没有出现只代表这一轮没命中，不代表库里没有。
+`<comem-recall>` 里的条目不带分数，顺序保留服务端排序。仅使用与问题相关的内容；团队或他人的事实不代表当前用户，当前明确指示优先。块没有出现可能是无命中、已交付、预算不足或服务不可用，不能据此断言库里没有。
 
 ## 什么时候主动召回
 

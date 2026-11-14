@@ -1,9 +1,8 @@
 /**
  * 配置连接探针（架构文档 §18 的 `POST /config/test`）。
  *
- * 三个探针测的都是**当前进程已生效的配置**：LLM 与嵌入走启动时构造好的服务实例，
- * 重排按启动快照里的 `providers.rerank` 发请求。刚写到磁盘、还没重启的覆盖文件不
- * 在探针的视野里——这正是 `/config` 响应里 `restartRequired: true` 要说明的事。
+ * 无 values 时测试运行配置；传 values 时由装配层构造临时供应商测试表单草稿，
+ * 不写盘、不替换运行实例、不建索引。草稿嵌入检测实际维度，不以旧维度判失败。
  *
  * 从路由文件拆出来：三个探针各自的成功 / 失败分支是独立的一组判断，混在请求解析
  * 里会让路由超过形状门禁。
@@ -11,7 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { ComemError, errorMessage } from '../../../domain/errors.js';
+import { ComemError } from '../../../domain/errors.js';
 import { isRecord } from '../../../domain/guards.js';
 import type { EmbeddingService } from '../../../services/embedding.js';
 import type { LlmService } from '../../../services/llm.js';
@@ -22,18 +21,20 @@ import type { HttpRouteServices } from './index.js';
 export interface ConfigProbeServices {
   readonly llm: Pick<LlmService, 'generate'>;
   readonly embedding: Pick<EmbeddingService, 'embed'>;
+  readonly detectEmbeddingDimension?: () => Promise<number>;
 }
 
 export type ConfigRouteServices = Pick<
   HttpRouteServices,
   'config' | 'configSnapshot' | 'systemAdmin'
-> &
+> & Pick<HttpRouteServices, 'draftProbe'> &
   ConfigProbeServices;
 
 export interface ConfigTestResult {
   readonly ok: boolean;
   readonly latencyMs: number;
   readonly detail: string;
+  readonly dimension?: number;
 }
 
 export type ConfigTarget = 'llm' | 'embedding' | 'rerank';
@@ -53,7 +54,7 @@ export function parseTarget(value: unknown): ConfigTarget {
 }
 
 /** LLM 探针：发一条 `maxTokens: 1` 的普通 completion。 */
-async function probeLlm(services: ConfigRouteServices): Promise<ConfigTestResult> {
+async function probeLlm(services: ConfigProbeServices & Pick<HttpRouteServices, 'config'>): Promise<ConfigTestResult> {
   const startedAt = performance.now();
   const model = services.config.providers.llm.default.model;
   try {
@@ -70,7 +71,7 @@ async function probeLlm(services: ConfigRouteServices): Promise<ConfigTestResult
     return {
       ok: false,
       latencyMs: elapsedMs(startedAt),
-      detail: `模型调用失败（${failure.code}）：${failure.message}`,
+      detail: `模型调用失败（${failure.code}）：请检查地址、认证与模型配置。`,
     };
   }
 }
@@ -84,9 +85,17 @@ async function probeLlm(services: ConfigRouteServices): Promise<ConfigTestResult
  * `type: disabled` 不抛错，只 `degraded`；维度不匹配也在这里显式判，否则
  * 「返回了一个向量」会被当成可用，而检索时整批向量都会因长度不符被跳过。
  */
-async function probeEmbedding(services: ConfigRouteServices): Promise<ConfigTestResult> {
+async function probeEmbedding(services: ConfigProbeServices & Pick<HttpRouteServices, 'config'>): Promise<ConfigTestResult> {
   const startedAt = performance.now();
   const { dimension, model } = services.config.providers.embedding;
+  if (services.detectEmbeddingDimension !== undefined) {
+    try {
+      const actual = await services.detectEmbeddingDimension();
+      return { ok: true, latencyMs: elapsedMs(startedAt), detail: `嵌入模型 ${model} 返回 ${actual} 维向量。`, dimension: actual };
+    } catch (error) {
+      return { ok: false, latencyMs: elapsedMs(startedAt), detail: `嵌入调用失败（${ComemError.from(error).code}）：请检查地址、认证与模型配置。` };
+    }
+  }
   const outcome = await services.embedding.embed([`comem-config-probe-${randomUUID()}`]);
   const latencyMs = elapsedMs(startedAt);
   if (outcome.degraded) {
@@ -111,7 +120,7 @@ async function probeEmbedding(services: ConfigRouteServices): Promise<ConfigTest
 }
 
 /** 重排探针：直接 `POST <baseUrl>/rerank`，不经过检索路径。 */
-async function probeRerank(services: ConfigRouteServices): Promise<ConfigTestResult> {
+async function probeRerank(services: Pick<HttpRouteServices, 'config'>): Promise<ConfigTestResult> {
   const startedAt = performance.now();
   const config = services.config.providers.rerank;
   if (config.type !== 'http' || config.baseUrl.trim() === '') {
@@ -165,14 +174,14 @@ async function probeRerank(services: ConfigRouteServices): Promise<ConfigTestRes
     return {
       ok: false,
       latencyMs: elapsedMs(startedAt),
-      detail: `重排调用失败：${errorMessage(error)}`,
+      detail: `重排调用失败（${ComemError.from(error).code}）：请检查地址、认证与模型配置。`,
     };
   }
 }
 
 export function probe(
   target: ConfigTarget,
-  services: ConfigRouteServices,
+  services: ConfigProbeServices & Pick<HttpRouteServices, 'config'>,
 ): Promise<ConfigTestResult> {
   switch (target) {
     case 'llm':

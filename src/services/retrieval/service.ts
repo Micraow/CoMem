@@ -15,6 +15,9 @@ import type { GrepHit, RetrievalEngine, SearchPlan } from '../../domain/retrieva
 
 import type { ContextAssembler } from '../context-assembler.js';
 import { Arms } from './arms.js';
+import { AutomaticContext, type AutomaticContextOptions } from './automatic.js';
+import { userScopeOf, parsePrincipal } from '../../domain/acl.js';
+import { Uri } from '../../domain/uri.js';
 import { elapsedMs, resolveLimit } from './budget.js';
 import { DeliveryTracker } from './delivery.js';
 import { IntentStage } from './intent.js';
@@ -51,16 +54,17 @@ export class SearchService {
   readonly #paths: PathSearch;
   readonly #delivery: DeliveryTracker;
   readonly #rerankStage: RerankStage;
+  readonly #automatic: AutomaticContext;
+  readonly #deps: SearchServiceDeps;
 
   constructor(deps: SearchServiceDeps) {
+    this.#deps = deps;
     this.#logger = deps.logger;
     this.#assembler = deps.assembler;
     this.#config = deps.config;
     // 配置错误在装配期抛出，不是首次查询时——那时已经有人等着结果了。
     this.#queryFilters = compileQueryFilters(deps.config.queryFilters);
 
-    // 默认值只在 `config/schema.ts` 一处。这里不再兜底：兜底会把「配置错了」变成
-    // 「配置被忽略」，正是本 wave 要消灭的那类静默失效。
     const hotnessWeight = deps.hotnessWeight;
     const halfLifeHours = deps.hotnessHalfLifeHours;
     if (!Number.isFinite(hotnessWeight) || hotnessWeight < 0) {
@@ -120,6 +124,24 @@ export class SearchService {
       ledger: deps.ledger, sessions: deps.sessions, logger: deps.logger,
       recordAccess: deps.recordAccess, dedupTurns: deps.config.assembly.dedupTurns,
     });
+    this.#automatic = new AutomaticContext(deps, (query, options) => this.#findWithOutcome(query, options), (options) => this.#intent.recentMessages(options), this.#delivery);
+  }
+
+  async defaultScopes(subject: string, principals: readonly string[]): Promise<readonly string[]> {
+    const personal = userScopeOf(subject, '检索身份');
+    await this.#deps.authorizer.assert(personal, 1, principals);
+    const candidates = this.#deps.readableScopes?.(principals) ?? principals.flatMap((principal) => {
+      const parsed = parsePrincipal(principal);
+      return parsed.kind === 'group' ? [`comem://group/${parsed.id}`] : [];
+    });
+    const readable = await this.#deps.authorizer.filterReadable(candidates.map((uri) => Uri.parse(uri)), principals);
+    return [...new Set([personal.toString(), ...readable])];
+  }
+
+  async automaticContext(query: string, options: AutomaticContextOptions) {
+    const result = await this.#automatic.assemble(query, options);
+    this.#delivery.recordHits(result.items);
+    return result;
   }
 
   /** 重排健康度快照（`/health` 与 MCP `health` 读它）；状态在 `rerank.ts`。 */
@@ -141,10 +163,6 @@ export class SearchService {
 
   /**
    * 与 `find` 同一次检索，额外返回向量 / 重排的降级原因。
-   *
-   * 给「降级必须可见」的出口用（MCP `find` / `rule_search`）。`find` 继续只返回
-   * 命中：其它调用方（HTTP、Hook、`memory.search`）的输出契约里没有这一列，加了
-   * 反而要改一圈协议。
    *
    * **这里记访问，`context` 不走这里。** 命中列表本身就是交付物，返回即算一次使用
    * （§11.7）；`mode=context` 交付的是组装后的注入块，只该记活到最后的条目，
@@ -315,34 +333,9 @@ export class SearchService {
   }
 
   /**
-   * §8.6 的 `context` 变体：返回可直接注入模型的文本。
-   *
-   * `find` → `AssemblyCandidate[]` →（可选）账本去重 → 组装 → 账本写回 → 访问记账。
-   *
-   * `memoryType` 从索引透传：§8.6 的起始层级按记忆类型区分（`events` 从 L1 概览起，
-   * 其余从 L0 摘要起）。少了这一列，事件类记忆会一律退化成一句话摘要。
-   *
-   * **访问记账放在组装之后，记的是 `AssemblyResult.items`。** 「使用」= 进入了调用方
-   * 的上下文（§11.7）。命中被预算截断、被配额挤掉、被同一渲染正文去重掉的条目不
-   * 在 `items` 里，它们没进调用方的上下文，所以不该记。这里不重新算一遍预算：预算
-   * 的唯一实现是 `assembleContext`，照着候选集再推一遍会立刻漂移。
-   *
-   * 账本写回也放在组装之后：只记**真的给了正文**的条目（§8.7 规则 1），只给 URI 的
-   * 条目由 `RecallLedger.record` 自己跳过。
-   */
-  async context(query: string, options: ContextOptions): Promise<ContextAssembly> {
-    return (await this.contextWithDiagnostics(query, options)).assembly;
-  }
-
-  /**
    * `context` 的带诊断版本：`search` 的 `mode=context` 用它把「这次降级了」写进
    * 返回值。
    *
-   * 只返回组装结果时，向量不可用会表现为 `Context: 0 item(s)`——与「记忆里没有」
-   * 无法区分。诊断列与 `findWithDiagnostics` 同一套来源，不另算一遍。
-   *
-   * **不走 `findWithDiagnostics`**：那个入口在返回命中时就记访问，而这里交给调用方
-   * 的是组装后的注入块。走它会让被截断的条目也记一次（§11.7）。
    */
   async contextWithDiagnostics(
     query: string,
@@ -371,9 +364,6 @@ export class SearchService {
       excludedUris: await this.#delivery.excluded(clock),
     };
     const result = await this.#assembler.assemble(candidates, assembly, options.principals);
-    // 「使用」= 进入了调用方的上下文：只记组装保留下来的条目，被截断 / 被配额挤掉 /
-    // 被跨轮去重排除的都不在 `result.items` 里（§11.7）。集合由组装层给出，这里不
-    // 用候选再推一遍预算。
     this.#delivery.recordHits(result.items);
     await this.#delivery.delivered(clock, result.items);
 

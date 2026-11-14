@@ -202,7 +202,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   });
   const degradedEmbedding = {
     available: false,
-    model: null,
+    model: 'test-unavailable-embedding',
     embed: async (): Promise<EmbedOutcome> => ({
       vectors: [],
       degraded: true,
@@ -942,9 +942,9 @@ describe('health', () => {
 
     const text = await callText('health', {});
 
-    expect(text).toContain('status: ok');
+    expect(text).toContain('status: degraded');
     expect(text).toContain('index.visibleNodes: 2');
-    expect(text).toContain('summary.degraded: false');
+    expect(text).toContain('summary.degraded: true');
     // 重排没配时不是降级：`degraded` 为 false，计数器为 0。
     expect(text).toContain('rerank.degraded: false');
     expect(text).toContain('rerank.failures: 0');

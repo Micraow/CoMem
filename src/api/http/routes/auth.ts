@@ -22,6 +22,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { ok } from '../envelope.js';
+import { requestContextOf } from '../middleware.js';
 import { requireRecord, requireString, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
@@ -48,6 +49,10 @@ export function createAuthRoutes(services: AuthRouteServices): HttpRouteGroup {
   return {
     prefix: '/auth',
     register(app: FastifyInstance): void {
+      app.get('/me', async (request) => {
+        const { subject, principals } = requestContextOf(request);
+        return ok({ subject, principals });
+      });
       app.post<{ Body: unknown }>('/login', async (request) => {
         const body = requireRecord(request.body, 'auth/login');
         const username = requireString(body, 'username');

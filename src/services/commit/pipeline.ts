@@ -25,8 +25,6 @@
  * 超过重试上限的错误原样抛给 `TaskService`，由任务层决定是否把任务置为 `failed`
  * 或者等租约过期后重放（§10.4）。
  *
- * ## 部署缺少能力时跳过步骤，而不是让任务失败
- *
  * `providers.llm.default.type: disabled` 的部署里，`memory_extract` 每次都会撞上
  * `DisabledLlmProvider` 抛出的 `INVALID_ARGUMENT`。那是**终态错误**：第一次就把
  * 任务置 `failed`，归档永远停在 `archive_summary`。但阶段一（归档落盘、建任务、
@@ -143,6 +141,7 @@ const DEFAULT_STEP_ATTEMPTS = 1;
 /** 跳过原因的人类可读说明，只用于日志。 */
 const SKIP_REASON_LABELS: Readonly<Record<CommitStepSkipReason, string>> = {
   llm_disabled: 'providers.llm.default.type 是 disabled',
+  llm_unconfigured: 'providers.llm.default 尚未配置真实供应商',
 };
 
 /**

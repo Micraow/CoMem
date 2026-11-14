@@ -47,6 +47,7 @@ import { createContainer } from '../bootstrap/container.js';
 import type { CommitRunner } from '../bootstrap/commit-runner.js';
 import { readFlag } from '../config/file.js';
 import type { ComemConfig } from '../config/index.js';
+import { llmSkipReason } from '../config/readiness.js';
 import { USER_WILDCARD } from '../domain/acl.js';
 import { ComemError, comemErrorMessage } from '../domain/errors.js';
 import { fsErrorCode } from '../domain/errors.js';
@@ -584,13 +585,7 @@ async function runWithConfig(
     const sessions = writers?.sessions;
     const cursors = writers?.cursors ?? readOnly?.cursors;
     const extraction = writers?.extraction;
-    // 没有可用模型时阶段二注定失败：每个会话的任务都会停在 `DisabledLlmProvider`。
-    // 阶段一（归档）不依赖模型，所以降级成「只归档」并把原因写进报告，而不是让
-    // 1,076 个会话各失败一次、也不是拒绝整个命令——「先导数据、后配模型」合法。
-    const extractionSkip =
-      config.providers.llm.default.type === 'disabled'
-        ? ('llm_disabled' as const)
-        : undefined;
+    const extractionSkip = llmSkipReason(config) ?? undefined;
     const service = new IngestService({
       sources: createSources(config, logger),
       scopeUri: scopeUriOf(config.server.subject),

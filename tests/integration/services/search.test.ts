@@ -546,7 +546,7 @@ describe('context 账本', () => {
     };
 
     const service = await createService({ ledger, sessions: sessionsWithClock(4) });
-    const first = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
+    const { assembly: first } = await service.contextWithDiagnostics('记忆', contextOptions({ sessionId: 'sess_1' }));
 
     expect(first.items.map((item) => item.uri)).toEqual([DOC]);
     expect(ledger.record).toHaveBeenCalledWith('user_alice', 'sess_1', 4, first.items, {
@@ -554,7 +554,7 @@ describe('context 账本', () => {
       maxEntries: 500,
     });
 
-    const second = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
+    const { assembly: second } = await service.contextWithDiagnostics('记忆', contextOptions({ sessionId: 'sess_1' }));
     expect(second.items).toEqual([]);
     expect(second.rendered).toBe('');
   });
@@ -569,7 +569,7 @@ describe('context 账本', () => {
     };
 
     const service = await createService({ ledger, sessions: sessionsWithClock(1) });
-    const result = await service.context('记忆', contextOptions({ sessionId: 'sess_1' }));
+    const { assembly: result } = await service.contextWithDiagnostics('记忆', contextOptions({ sessionId: 'sess_1' }));
 
     expect(result.items).toHaveLength(1);
     expect(logger.warn).toHaveBeenCalledWith(
@@ -588,7 +588,7 @@ describe('context 账本', () => {
     const service = await createService({ sessions: sessionsWithClock(1) });
 
     await expect(
-      service.context('记忆', contextOptions({ sessionId: 'sess_1' })),
+      service.contextWithDiagnostics('记忆', contextOptions({ sessionId: 'sess_1' })),
     ).rejects.toBeInstanceOf(ComemError);
   });
 });
@@ -683,7 +683,7 @@ describe('context 账本：累计时钟', () => {
     const service = await createService({ ledger: createLedger(), sessions });
     const options = contextOptions({ sessionId: sessionUri.name });
 
-    const first = await service.context('记忆', options);
+    const { assembly: first } = await service.contextWithDiagnostics('记忆', options);
     const firstUris = first.items.map((item) => item.uri);
     expect(firstUris).toEqual([DOC]);
 
@@ -692,7 +692,7 @@ describe('context 账本：累计时钟', () => {
     expect((await sessions.load(sessionUri)).messageCount).toBe(0);
     expect(await sessions.totalMessageCount(sessionUri)).toBe(2);
 
-    const second = await service.context('记忆', options);
+    const { assembly: second } = await service.contextWithDiagnostics('记忆', options);
     const secondUris = second.items.map((item) => item.uri);
     expect(secondUris.filter((uri) => firstUris.includes(uri))).toEqual([]);
 
@@ -707,12 +707,12 @@ describe('context 账本：累计时钟', () => {
     const service = await createService({ ledger, sessions });
     const options = contextOptions({ sessionId: sessionUri.name });
 
-    await service.context('记忆', options);
+    await service.contextWithDiagnostics('记忆', options);
     // 2 条 live 消息 = turn 2。
     expect(record.mock.calls.map((call) => call[2])).toEqual([2]);
 
     await sessions.commitPhase1(sessionUri);
-    await service.context('记忆', options);
+    await service.contextWithDiagnostics('记忆', options);
 
     // 提交后 live = 0，累计数仍是 2：turn 不回到 0。
     const turns = record.mock.calls.map((call) => call[2]);
@@ -736,7 +736,7 @@ describe('context 账本：累计时钟', () => {
     const service = await createService({ ledger, sessions });
     const options = contextOptions({ sessionId: sessionUri.name });
 
-    const first = await service.context('记忆', options);
+    const { assembly: first } = await service.contextWithDiagnostics('记忆', options);
     const firstUris = first.items.map((item) => item.uri);
     expect(firstUris).toEqual([DOC]);
     // 3 条 live 消息 = turn 3。
@@ -750,7 +750,7 @@ describe('context 账本：累计时钟', () => {
     expect(loaded.messages.map((item) => item.id)).toEqual(['m3']);
     expect(await sessions.totalMessageCount(sessionUri)).toBe(3);
 
-    const second = await service.context('记忆', options);
+    const { assembly: second } = await service.contextWithDiagnostics('记忆', options);
     expect(second.items.map((item) => item.uri).filter((uri) => firstUris.includes(uri))).toEqual(
       [],
     );
@@ -762,7 +762,7 @@ describe('context 账本：累计时钟', () => {
     await seed(DOC, '记忆', { abstract: '一句话摘要' });
     const service = await createService({ ledger: createLedger(), sessions: createSessions() });
 
-    const result = await service.context('记忆', contextOptions({ sessionId: 'sess_missing' }));
+    const { assembly: result } = await service.contextWithDiagnostics('记忆', contextOptions({ sessionId: 'sess_missing' }));
 
     expect(result.items.map((item) => item.uri)).toEqual([DOC]);
     expect(logger.warn).toHaveBeenCalledWith(
