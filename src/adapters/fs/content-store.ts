@@ -190,9 +190,8 @@ export class ContentStore {
    * 写正文。
    *
    * `options.frontmatter` 提供时，同名摘要字段覆盖磁盘上的值；未提供的键（包括
-   * `freshness`、`uri`、`generated_by` 这些本层不认识的键）全部原样保留，这就是
+   * `freshness`、`uri`、`generated_by` 这些本层不认识的键）保留，记忆正文写入刷新 evidence_at，这是
    * §10.6 的元数据写保护。文件不存在时基底是空对象。
-   *
    * `options.expectedDigest` 是乐观并发：磁盘上**正文**的摘要与它不符就抛
    * CONFLICT；文件不存在也抛 CONFLICT（「按期望版本改一个不存在的文件」同样是冲突）。
    */
@@ -221,10 +220,11 @@ export class ContentStore {
     }
 
     const base = existing?.data ?? {};
-    const data =
+    const data: Record<string, unknown> =
       options.frontmatter === undefined
-        ? base
+        ? { ...base }
         : { ...base, ...toFrontmatterRecord(options.frontmatter) };
+    if (typeof data['memory_type'] === 'string') data['evidence_at'] = new Date().toISOString();
     const content = serializeDocument(text, data);
 
     await this.#ensureParentDirectory(absolute, uri);

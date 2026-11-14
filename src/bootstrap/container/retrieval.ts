@@ -161,13 +161,12 @@ export function createRetrieval(
     nodes.recordAccess(uris, new Date());
   };
   const filesystem = new FileSystemService({
+    forgetBarriers: core.forgetBarriers,
     store,
     locks,
     authorizer,
     logger,
     observers: [indexObserver],
-    // `read` 是公开读路径：按 URI 读到正文也算一次使用，否则天天被读、从没被检索
-    // 命中的记忆会被 TTL 误归档（§11.7）。
     recordAccess,
   });
 

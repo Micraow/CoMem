@@ -22,6 +22,7 @@ import type { Uri } from '../../domain/uri.js';
 import { invalidArgument } from '../../domain/errors.js';
 import { frontmatterFieldsOf, parseSources, parseSupersedes, splitFrontmatter } from './frontmatter.js';
 import { formatField, formatScalar } from './yaml.js';
+import { evidenceTimestamp } from './evidence.js';
 
 /**
  * 记忆的状态。
@@ -48,6 +49,7 @@ export interface MemoryDocument {
   readonly validUntil: string | null;
   /** 被这条记忆顶替掉的版本文件 URI（保留键 `supersedes`）；缺键时是 `null` */
   readonly supersedes: string | null;
+  readonly evidenceAt: string | null;
 }
 
 /** `content` 之外还有一个 camelCase vs snake_case 的映射：frontmatter 用 `updated_at`。 */
@@ -121,6 +123,7 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set([
   VALID_FROM_KEY,
   VALID_UNTIL_KEY,
   SUPERSEDES_KEY,
+  'evidence_at',
 ]);
 
 const FRONTMATTER_DELIMITER = '---';
@@ -213,6 +216,7 @@ export function serializeMemoryDocument(input: {
   readonly validUntil: string | null;
   /** 被顶替的版本文件 URI；`null` 时不写这个键。 */
   readonly supersedes: string | null;
+  readonly evidenceAt?: string | null;
 }): string {
   const header = [
     FRONTMATTER_DELIMITER,
@@ -222,10 +226,8 @@ export function serializeMemoryDocument(input: {
     `${UPDATED_AT_KEY}: ${formatScalar(input.updatedAt)}`,
     `${URI_KEY}: ${formatScalar(input.uri.toString())}`,
   ];
+  if (input.evidenceAt != null) header.push(`evidence_at: ${formatScalar(input.evidenceAt)}`);
 
-  // 有效期与被顶替版本放在同一段元数据里（`status` / `created_at` 那一列），
-  // **不放 `fields`**：模型的一次 `replace` 不该能改自己的有效期，而 `fields` 是
-  // 模型可写的。
   if (input.validFrom !== null) {
     header.push(`${VALID_FROM_KEY}: ${formatScalar(input.validFrom)}`);
   }
@@ -240,8 +242,6 @@ export function serializeMemoryDocument(input: {
     header.push(formatField(SOURCES_KEY, input.sources));
   }
 
-  // L0 摘要写进 frontmatter：`IndexObserver` 把它当 `abstract` 索引，检索侧的
-  // 重排直接读它，不需要为了重排再打开文件（§8.5 的重排语义）。
   const summary = abstractOfContent(input.fields[CONTENT_FIELD]);
   if (summary !== null) {
     header.push(`${SUMMARY_KEY}: ${formatScalar(summary)}`);
@@ -297,7 +297,6 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
     fields[CONTENT_FIELD] = content;
   }
 
-  // `updated_at` 是 `updatedAt` 字段在磁盘上的写法（§6.6 的 frontmatter 用 snake_case）。
   // 只认 `memory_type` 就够：`read` 不该因为一个自定义类型没注册进内置表而返回「不存在」，
   // 那会让「写进去了但读不出来」看起来像「没有这条记忆」。
   const createdAt =
@@ -321,6 +320,7 @@ export function parseMemoryDocument(text: string): MemoryDocument | null {
     validFrom: frontmatter.validFrom,
     validUntil: frontmatter.validUntil,
     supersedes: parseSupersedes(document.data[SUPERSEDES_KEY]),
+    evidenceAt: evidenceTimestamp(document.data['evidence_at']),
     body: document.body,
   };
 }

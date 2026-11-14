@@ -268,6 +268,7 @@ function start(ctx, rawConfig) {
     });
     if (result?.context !== undefined) {
       agent.inject(contextMessage(result.context, 'catalog'));
+      await Promise.resolve(result.onDelivered?.()).catch((error) => ctx.logger.warn('comem: 记录交付回执失败。%o', errorFields(error)));
     }
   }
 
@@ -310,7 +311,9 @@ function start(ctx, rawConfig) {
       if (result?.context === undefined) {
         return decision;
       }
-      return { ...decision, messages: [...decision.messages, contextMessage(result.context, 'recall')] };
+      const messagesWithContext = [...decision.messages, contextMessage(result.context, 'recall')];
+      await Promise.resolve(result.onDelivered?.()).catch((error) => ctx.logger.warn('comem: 记录交付回执失败。%o', errorFields(error)));
+      return { ...decision, messages: messagesWithContext };
     } catch (error) {
       // 召回是旁路：这一轮没有记忆，对话照常。
       ctx.logger.warn('comem: 召回失败，本轮不注入 <comem-recall>。%o', errorFields(error));

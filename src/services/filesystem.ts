@@ -34,9 +34,6 @@
  * 视图——区别在于「可能少几个刚被删掉的条目」，不在于「可能读到写了一半的文件」。
  */
 
-// 架构文档 §4.4 明确「没有 ContentStore 接口」：内容存储就是适配层里的一个具体类，
-// 分层靠「node:fs 只允许出现在 adapters/」保证。这里用 `import type` 引用具体类型，
-// 运行期实例由 bootstrap 注入，本服务不 new 适配器（§4.2 的 type-only 例外）。
 import type {
   ContentStore,
   StoredStat,
@@ -53,6 +50,7 @@ import type { Uri } from '../domain/uri.js';
 
 import type { Authorizer } from './authorizer.js';
 import { assertNotVersionTarget } from './version-directory.js';
+import type { ForgetBarriers } from '../adapters/fs/forget-barriers.js';
 
 /**
  * `tree` 的默认深度。来源：架构文档 §13.2 的 `tree` 工具契约 `levelLimit=3`。
@@ -131,6 +129,7 @@ export interface NodeWriteObserver {
 }
 
 export interface FileSystemServiceDeps {
+  readonly forgetBarriers?: ForgetBarriers;
   readonly store: ContentStore;
   readonly locks: PathLockManager;
   readonly authorizer: Authorizer;
@@ -156,6 +155,7 @@ export class FileSystemService {
   readonly #logger: Logger;
   readonly #observers: readonly NodeWriteObserver[];
   readonly #recordAccess: FileSystemServiceDeps['recordAccess'];
+  readonly #forgetBarriers: FileSystemServiceDeps['forgetBarriers'];
 
   constructor(deps: FileSystemServiceDeps) {
     this.#store = deps.store;
@@ -164,6 +164,7 @@ export class FileSystemService {
     this.#logger = deps.logger;
     this.#observers = deps.observers ?? [];
     this.#recordAccess = deps.recordAccess;
+    this.#forgetBarriers = deps.forgetBarriers;
   }
 
   /** 读正文。**不拿路径锁**：写入是原子的，锁只会让读等后台写者（见文件头）。 */
@@ -296,8 +297,6 @@ export class FileSystemService {
   ): Promise<WriteResult> {
     assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
-    // 写者建立父目录：目标父目录不存在时锁文件没有地方放，而写者会**创建**目标
-    // ——不建目录的话「同一时刻只有一个写者」对新路径不成立。
     return this.#locks.withLock(
       uri,
       'exact',
@@ -372,10 +371,11 @@ export class FileSystemService {
   }
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */
-  async remove(uri: Uri, principals: readonly string[]): Promise<RemoveResult> {
+  async remove(uri: Uri, principals: readonly string[], reason: 'explicit' | 'expired' = 'explicit'): Promise<RemoveResult> {
     assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, MANAGE_LEVEL, principals);
     return this.#locks.withLock(uri, 'tree', async () => {
+      if (reason === 'explicit') await this.#forgetBarriers?.record(uri);
       const removedFiles = await this.#store.remove(uri, { recursive: true });
       await this.#notifyRemoved(uri);
       return { removedFiles };

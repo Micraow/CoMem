@@ -86,6 +86,7 @@ export interface DeliveredItem {
   readonly uri: string;
   readonly detail: ContextDetail | null;
   readonly text?: string;
+  readonly fingerprint?: string;
 }
 
 /**
@@ -307,7 +308,7 @@ export class RecallLedger {
         continue;
       }
       delivered.push({ uri: item.uri, sessionId, turn, detail: item.detail,
-        ...(item.text === undefined ? {} : { fingerprint: contentFingerprint(item) }) });
+        ...(item.text === undefined && item.fingerprint === undefined ? {} : { fingerprint: contentFingerprint(item) }) });
     }
 
     const sessionEntries = [...kept.filter((entry) => entry.sessionId === sessionId), ...delivered]
@@ -369,6 +370,6 @@ export class RecallLedger {
   }
 }
 
-function contentFingerprint(item: DeliveredItem): string {
-  return createHash('sha256').update(`${item.detail ?? ''}\0${item.text ?? ''}`).digest('hex');
+export function contentFingerprint(item: DeliveredItem): string {
+  return item.fingerprint ?? createHash('sha256').update(`${item.detail ?? ''}\0${item.text ?? ''}`).digest('hex');
 }

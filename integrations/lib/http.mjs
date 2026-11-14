@@ -244,6 +244,7 @@ export function createHttpClient(options) {
   }
 
   return {
+    remainingMs() { return Math.max(1, Math.floor(Math.min(timeoutMs, deadline?.remainingMs() ?? timeoutMs))); },
     get(path, query) {
       return request('GET', path, undefined, query);
     },

@@ -55,6 +55,7 @@ import type { MemoryLinkService } from '../../memory-link.js';
 import { buildExperiencePrompt, type ExistingExperience } from '../../prompts/experience.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
+import { evidenceTime } from '../../memory/evidence.js';
 import { appendExperienceDiff, experienceDiffEntry, type ExperienceDiffArchive } from './experience-diff.js';
 import {
   DEFAULT_PREFETCH_TOP_N,
@@ -205,19 +206,18 @@ export class ExperienceDistillStep extends CommitStep {
         continue;
       }
 
-      // 同一个 topic 落到同一个 URI：已有正文由转换函数整段覆盖，这是「归纳」与
-      // 「追加」的区别。补丁在 `upsertMemory` 的 `exact(uri)` 锁内应用。
       const write = await this.#memory.upsertMemory(context.scopeUri, experiencesMemoryType, {
         uri,
-        // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
-        provenance: { sources },
+        provenance: { sources, evidenceAt: evidenceTime(context.messages) },
         update: (current) => ({ ...current, topic, content, updatedAt: now }),
+      }).catch((error: unknown) => {
+        const failure = ComemError.from(error);
+        if (failure.details?.['reason'] !== 'stale_evidence' && failure.details?.['reason'] !== 'forgotten_evidence') throw error;
+        this.#logger.warn('材料未覆盖当前经验记忆', { uri: uri.toString(), code: failure.details['reason'] }); return null;
       });
-      // 清单只记真写过的（转换函数返回 `null` 时没落盘）。
-      if (write.written) written.push(write);
+      if (write === null || !write.written) continue;
+      written.push(write);
 
-      // 先文件、后派生（与 `MemoryMergeStep` 同一个顺序）：反过来会让派生物比真相
-      // 更早存在。links 写失败只记 error——记忆已经正确落盘，它能从 sources 重建。
       try {
         this.#links.addLinks(uri, [{ toUri: context.archiveUri, linkType: DERIVED_FROM }]);
       } catch (error) {

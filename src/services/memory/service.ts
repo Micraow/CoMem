@@ -53,6 +53,7 @@ import {
 } from './query.js';
 import { approveMemory, rejectMemory, type MemoryRejectResult } from './review.js';
 import { writeVersionSnapshot } from './versioning.js';
+import { assertCurrentEvidence, assertRememberable, evidenceTimestamp } from './evidence.js';
 
 export interface MemoryWriteResult {
   readonly uri: Uri;
@@ -99,10 +100,8 @@ export interface MemoryUpdateInput {
    * 归档写记忆，模型看不到原始材料 URI，让它输出只会得到幻觉。所以它不从抽取提示词
    * 里来，也不进 `MemoryFields`。
    *
-   * 只放在「先读后写」这一形态上：直接传字段的调用方（`remember`、`consolidation`
-   * 的写回）不掌握归档 URI，它们应当一个字段都不丢地保留旧值。
    */
-  readonly provenance?: { readonly sources: readonly Uri[] };
+  readonly provenance?: { readonly sources: readonly Uri[]; readonly evidenceAt?: string };
 }
 
 /**
@@ -138,6 +137,7 @@ export class MemoryService {
   readonly #logger: Logger;
   /** 需要复核的记忆类型。来自 `memory.reviewRequired`，不是写死的。 */
   readonly #reviewRequired: ReadonlySet<string>;
+  readonly #forgetBarriers: MemoryServicePorts['forgetBarriers'];
 
   constructor(ports: MemoryServicePorts) {
     this.#filesystem = ports.filesystem;
@@ -145,6 +145,7 @@ export class MemoryService {
     this.#search = ports.search;
     this.#logger = ports.logger;
     this.#reviewRequired = new Set(ports.reviewRequired ?? DEFAULT_REVIEW_REQUIRED);
+    this.#forgetBarriers = ports.forgetBarriers;
   }
 
   /** 读一条记忆；不存在返回 `null`。 */
@@ -184,12 +185,12 @@ export class MemoryService {
       target.uri,
       'exact',
       async () => {
+        await assertRememberable(this.#forgetBarriers, target.uri, target.provenance);
         const existing = await readMemoryDocument(this.#filesystem, this.#logger, target.uri);
+        assertCurrentEvidence(existing, target.provenance?.evidenceAt);
         const current = existing?.fields ?? {};
-        // 补丁必须打在磁盘上的最新正文上：`current` 是锁内的读，不是调用方的快照。
         const next = target.update(current);
         if (next === null) {
-          // 没有可写的字段：落盘只会改 `updated_at` 并把 `status` 打回 `pending`。
           return {
             uri: target.uri,
             memoryType: schema.type,
@@ -200,7 +201,6 @@ export class MemoryService {
           };
         }
 
-        // 合并而不是替换：转换函数只对自己返回的字段负责。
         const merged: Record<string, unknown> = { ...current, ...next };
         assertMemoryIdentity(schema, merged);
         assertFieldTypes(schema, merged);
@@ -277,6 +277,7 @@ export class MemoryService {
           validFrom: now,
           validUntil: null,
           supersedes,
+          evidenceAt: evidenceTimestamp(target.provenance?.evidenceAt) ?? now,
         });
         await this.#filesystem.write(target.uri, text);
 
@@ -287,9 +288,6 @@ export class MemoryService {
           created: existing === null,
         });
 
-        // 画像的格式契约（§11.1）能由字面判定的部分在这里执行。**只告警，不拒绝**：
-        // 拒绝或丢弃等于把模型抽到的事实直接扔掉，而且用户永远不知道。日志带
-        // scope / URI / 违规类型与条数，**不带正文**——画像可能含个人信息。
         if (schema.type === profileMemoryType.type) {
           this.#warnProfileFormat(scopeUri, target.uri, fields[CONTENT_FIELD]);
         }
@@ -339,8 +337,9 @@ export class MemoryService {
    * 所以不需要读回来判断。**仍然持 `exact` 锁**：并发的 `upsertMemory` 会在
    * 「读完、还没写」之间被它看见，没有锁时删除与覆盖写的先后无法解释。
    */
-  async remove(uri: Uri): Promise<void> {
+  async remove(uri: Uri, evidenceAt?: string): Promise<void> {
     await this.#locks.withLock(uri, 'exact', async () => {
+      assertCurrentEvidence(await readMemoryDocument(this.#filesystem, this.#logger, uri), evidenceAt);
       await this.#filesystem.remove(uri);
     });
     this.#logger.info('记忆已删除', { uri: uri.toString() });

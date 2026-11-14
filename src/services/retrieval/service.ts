@@ -139,9 +139,11 @@ export class SearchService {
   }
 
   async automaticContext(query: string, options: AutomaticContextOptions) {
-    const result = await this.#automatic.assemble(query, options);
-    this.#delivery.recordHits(result.items);
-    return result;
+    return this.#automatic.assemble(query, options);
+  }
+
+  acknowledgeContext(token: string, identity: Pick<ContextOptions, 'subject' | 'principals'>): Promise<void> {
+    return this.#automatic.acknowledge(token, identity);
   }
 
   /** 重排健康度快照（`/health` 与 MCP `health` 读它）；状态在 `rerank.ts`。 */

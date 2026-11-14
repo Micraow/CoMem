@@ -35,10 +35,17 @@ it('捕获→归档→抽取→合并→embedding→新会话召回→纠正→�
   });
   const nativeFetch = globalThis.fetch;
   const embeddingInputs: string[] = [];
+  let slowQuery = false;
+  let aborted = false;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     if (!String(input).startsWith('http://embedding.invalid/')) return nativeFetch(input, init);
     const body = JSON.parse(String(init?.body)) as { input: string[] };
     embeddingInputs.push(...body.input);
+    if (slowQuery) await new Promise((_resolve, reject) => {
+      const abort = () => { aborted = true; reject(init?.signal?.reason ?? new Error('aborted')); };
+      if (init?.signal?.aborted) abort();
+      else init?.signal?.addEventListener('abort', abort, { once: true });
+    });
     return new Response(JSON.stringify({ object: 'list', model: 'synthetic', data: body.input.map((text, index) => ({
       object: 'embedding', index, embedding: /电脑|机器|Arch|Fedora|ThinkBook/.test(text) ? [1, 0] : [0, 1],
     })), usage: { prompt_tokens: 1, total_tokens: 1 } }), { headers: { 'content-type': 'application/json' } });
@@ -80,7 +87,12 @@ it('捕获→归档→抽取→合并→embedding→新会话召回→纠正→�
       query: '那在我这台机器上呢', sessionId: 'new-session', contextEpoch: epoch,
     } });
     expect(response.statusCode).toBe(200);
-    return response.json().result as { rendered: string; items: { uri: string }[] };
+    const result = response.json().result as { rendered: string; items: { uri: string }[]; deliveryToken: string | null };
+    if (result.deliveryToken !== null) {
+      const ack = await http.inject({ method: 'POST', url: '/api/v1/context/ack', payload: { deliveryToken: result.deliveryToken } });
+      expect(ack.statusCode).toBe(200);
+    }
+    return result;
   };
   await services.session.ensure(root, 'old-session', principals);
   await append('old-session', 'old-one', '我的 ThinkBook 主力电脑使用 Arch Linux。');
@@ -102,6 +114,21 @@ it('捕获→归档→抽取→合并→embedding→新会话召回→纠正→�
   expect(corrected.rendered).not.toContain('Arch Linux');
   expect((await services.memory.read(Uri.parse(personalUri)))?.sources).toHaveLength(3);
   expect((await recall('after-compaction')).rendered).toContain('Fedora');
+  slowQuery = true;
+  const startedAt = Date.now();
+  const slow = await http.inject({ method: 'POST', url: '/api/v1/context', payload: {
+    query: 'ThinkBook', sessionId: 'slow-session', contextEpoch: 'slow', budgetMs: 300,
+  } });
+  expect(slow.statusCode, slow.body).toBe(200);
+  expect(Date.now() - startedAt).toBeLessThan(2000);
+  expect(slow.json().result.degradation).not.toBeNull();
+  expect(slow.json().result.rendered).toContain('Fedora');
+  expect(aborted).toBe(true);
+  slowQuery = false;
+  const retry = await http.inject({ method: 'POST', url: '/api/v1/context', payload: {
+    query: 'ThinkBook', sessionId: 'slow-session', contextEpoch: 'slow',
+  } });
+  expect(retry.json().result.rendered).toContain('Fedora');
   expect((await services.index.glob({ pattern: '**', scopes: [root.toString()], principals: ['user:bob', 'user:*'], limit: 50 }))).toEqual([]);
   await services.acl.ensureRootPreset(Uri.parse('comem://group/eng'), 'local');
   await services.acl.ensureRootPreset(Uri.parse('comem://user/bob'));

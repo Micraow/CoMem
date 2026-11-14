@@ -126,10 +126,10 @@ export async function writeVersionSnapshot(
       validFrom: document.validFrom ?? (document.createdAt === '' ? null : document.createdAt),
       validUntil: now,
       supersedes: document.supersedes,
+      evidenceAt: document.evidenceAt,
     }),
   );
   await truncateVersions(filesystem, logger, directory, name);
-
   logger.info('记忆旧值已存为版本', {
     uri: identityUri.toString(),
     version: versionUri.toString(),
@@ -249,9 +249,9 @@ export async function restoreSuperseded(
       fields: previous.fields,
       sources: previous.sources,
       validFrom: previous.validFrom,
-      // 又有效了：清掉终点，检索重新看得到它。
       validUntil: null,
       supersedes: previous.supersedes,
+      evidenceAt: previous.evidenceAt,
     }),
   );
   return previousUri;

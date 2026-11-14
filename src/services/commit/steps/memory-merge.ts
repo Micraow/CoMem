@@ -66,6 +66,7 @@ import { Uri } from '../../../domain/uri.js';
 
 import type { MemoryWrite, MemoryWriteResult } from '../../memory.js';
 import type { MemoryLinkService } from '../../memory-link.js';
+import { evidenceTime } from '../../memory/evidence.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
 import { EXTRACT_RESULT_KEY, isMemoryExtractResult } from './memory-extract.js';
@@ -94,7 +95,7 @@ export interface MemoryMergeStepDeps {
       schema: MemoryTypeSchema,
       input: MemoryWrite,
     ): Promise<MemoryWriteResult>;
-    remove(uri: Uri): Promise<void>;
+    remove(uri: Uri, evidenceAt?: string): Promise<void>;
   };
   /** 写/读 `archive_NNN/memory_diff.json`（保留名，必须按归档目录定位）。 */
   readonly archive: {
@@ -216,8 +217,6 @@ export class MemoryMergeStep extends CommitStep {
 
     const groups = groupByUri(suppressConflicts(extracted.operations));
 
-    // 这次写入的原始材料就是本次归档本身。抽取模型看不到归档 URI，让它输出只会
-    // 得到幻觉。
     const sources: readonly Uri[] = [context.archiveUri];
 
     const adds: MemoryDiffEntry[] = [];
@@ -232,7 +231,12 @@ export class MemoryMergeStep extends CommitStep {
       const uri = Uri.parse(uriString);
 
       if (group.kind === 'delete') {
-        await this.#memory.remove(uri);
+        try { await this.#memory.remove(uri, evidenceTime(context.messages)); }
+        catch (error) {
+          const failure = ComemError.from(error);
+          if (failure.details?.['reason'] !== 'stale_evidence') throw error;
+          skipped.push({ memoryType, reasonCode: 'stale_evidence', reason: failure.message }); continue;
+        }
         deletes.push(uriString);
         removed.push(uri);
         continue;
@@ -248,16 +252,12 @@ export class MemoryMergeStep extends CommitStep {
         continue;
       }
 
-      // 每个 URI 只写一次（§11.5）。补丁在 `upsertMemory` 的 `exact(uri)` 锁内
-      // 应用：`current` 是磁盘上的最新字段，不是这里提前读到的快照。读在锁外时，
-      // 两个并发归档各带一份基于旧正文算出的 `content`，后写者会覆盖先写者
-      // （`profile` 只有一个 `content` 字段，字段级合并保护不到它）。
       let write: MemoryWriteResult;
       try {
         write = await this.#memory.upsertMemory(context.scopeUri, schema, {
           uri,
           // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
-          provenance: { sources },
+          provenance: { sources, evidenceAt: evidenceTime(context.messages) },
           update: (current) => {
             const result = applyOperations({ ...current }, group.operations);
             for (const failure of result.skipped) {
@@ -274,6 +274,9 @@ export class MemoryMergeStep extends CommitStep {
         });
       } catch (error) {
         const failure = ComemError.from(error);
+        if (failure.details?.['reason'] === 'stale_evidence' || failure.details?.['reason'] === 'forgotten_evidence') {
+          skipped.push({ memoryType, reasonCode: failure.details['reason'], reason: failure.message }); continue;
+        }
         if (failure.code !== 'ALREADY_EXISTS') {
           // 其它写盘失败是真正的故障：`memory_diff.json` 不写，重放才有意义。
           throw error;
@@ -291,7 +294,6 @@ export class MemoryMergeStep extends CommitStep {
             ? `该 URI 已存在同一条事件，未重复写入：${uriString}（${memoryType} 类型只允许新增）。`
             : `该 URI 已存在内容不同的事件，本次内容未写入：${uriString}。事件不可修改，请换一个 event 标识再提交。`,
         });
-        // 降级必须可见：归档会走完，用户不会收到任何错误。
         this.#logger.warn('记忆写入被跳过：目标已存在，记忆类型只允许新增', {
           archive: context.archiveUri.toString(),
           uri: uriString,
@@ -324,9 +326,6 @@ export class MemoryMergeStep extends CommitStep {
       // 顺序：**先文件、后派生**。反过来会让派生物比真相更早存在：文件写失败时，
       // `links` 里已经有一条指向不存在来源的边。
       //
-      // 两者允许短暂不一致（文件写成功、links 写失败）：links 能从 `sources` 重建，
-      // 而记忆本身已经正确落盘——不能因为派生读模型失败就回滚真相或让归档失败。
-      // 所以这里只记 error，不抛。
       try {
         this.#links.addLinks(
           write.uri,

@@ -18,6 +18,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { AclFileStore } from '../../adapters/fs/acl-file.js';
 import { ContentStore } from '../../adapters/fs/content-store.js';
+import { ForgetBarriers } from '../../adapters/fs/forget-barriers.js';
 import { createPathLockManager } from '../../adapters/fs/lock.js';
 import { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import { LocalInferenceManager } from '../../adapters/local-inference/manager.js';
@@ -48,6 +49,7 @@ const DATABASE_FILE = 'comem.sqlite';
 
 /** 适配器、仓储与进程级单例。后续每个阶段都收这一份，不再各自 `new`。 */
 export interface Foundation {
+  readonly forgetBarriers: ForgetBarriers;
   readonly config: ComemConfig;
   /** 配置的四层输入与来源：`GET /config` 读它，避免请求时重读磁盘。 */
   readonly configSnapshot: ConfigSnapshot;
@@ -135,6 +137,7 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   });
 
   return {
+    forgetBarriers: new ForgetBarriers(dataDir),
     config,
     configSnapshot,
     logger,

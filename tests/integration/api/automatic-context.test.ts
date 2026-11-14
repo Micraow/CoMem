@@ -110,8 +110,8 @@ it('归档后仍可读取最近对话，来源保留，消息单独撤权立即�
   expect(recent[0]?.parts).toEqual([{ kind: 'text', text: '我的 ThinkBook 用 Arch Linux。' }]);
   const archive = (await session.listArchives(uri))[0];
   if (archive === undefined) throw new Error('missing archive');
-  await acl.materializeNode(archive);
   await acl.setAcl(uri, { mode: 'inherit', entries: [{ principal: 'user:bob', level: 1, effect: 'allow' }] }, 'user:local', LOCAL);
+  await acl.materializeNode(archive);
   expect(await session.recentMessages(uri, 10, BOB)).toHaveLength(1);
   await acl.setAcl(archive, { mode: 'restricted', entries: [] }, 'user:local', LOCAL);
   expect(await session.recentMessages(uri, 10, BOB)).toEqual([]);

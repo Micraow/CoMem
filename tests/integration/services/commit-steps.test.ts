@@ -155,7 +155,7 @@ function createContext(overrides: Partial<StepContext> = {}): StepContext {
 }
 
 function message(id: string, role: SessionMessage['role'], parts: readonly ContentPart[]): SessionMessage {
-  return { id, role, parts, createdAt: '2026-11-08T00:00:00.000Z', turn: 1 };
+  return { id, role, parts, createdAt: new Date().toISOString(), turn: 1 };
 }
 
 function record(uri: string, memoryType: string, fields: Record<string, unknown>): MemoryRecord {

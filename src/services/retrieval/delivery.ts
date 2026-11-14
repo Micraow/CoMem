@@ -3,12 +3,11 @@
  * 不负责：检索与组装本身；账本 / 访问计数写失败只记 warn，不影响检索结果。
  */
 
-import type { AssembledItem } from '../../domain/assembly.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { Uri } from '../../domain/uri.js';
 
-import { DEFAULT_RECALL_LEDGER_OPTIONS, scopeKeyOf, type RecallLedger } from '../recall-ledger.js';
+import { DEFAULT_RECALL_LEDGER_OPTIONS, scopeKeyOf, type DeliveredItem, type RecallLedger } from '../recall-ledger.js';
 import type { SessionService } from '../session.js';
 import { sessionUriOf } from './intent.js';
 import type { ContextOptions, DeliveryClock, SearchServiceDeps } from './types.js';
@@ -91,7 +90,7 @@ export class DeliveryTracker {
    */
   async delivered(
     clock: DeliveryClock | undefined,
-    items: readonly AssembledItem[],
+    items: readonly DeliveredItem[],
   ): Promise<void> {
     const ledger = this.#ledger;
     if (clock === undefined || ledger === undefined) {
@@ -158,7 +157,7 @@ export class DeliveryTracker {
   /** 跨轮去重：账本里 `dedupTurns` 轮内投过的 URI（§8.7）。 */
   async excluded(
     clock: DeliveryClock | undefined,
-    items?: readonly AssembledItem[],
+    items?: readonly DeliveredItem[],
   ): Promise<ReadonlySet<string> | undefined> {
     if (clock === undefined) {
       return undefined;

@@ -644,7 +644,7 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 
 | 用途 | 请求 | 期望响应 |
 |---|---|---|
-| 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?}` | `result: {rendered, items, tokensUsed, dropped, degradation}`；空 query 取开局背景 |
+| 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}` | `result: {rendered, items, tokensUsed, dropped, degradation, deliveryToken}`；空 query 取开局背景 |
 | 技能目录 | `GET /api/v1/skills` | `result: {skills: [{name, description?}]}` 或 URI 数组 |
 | 建会话 | `POST /api/v1/sessions`，`{sessionId}` | 身份取请求认证；409 已存在时复用 |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
@@ -731,11 +731,11 @@ JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉
 
 ### 3. 服务端跨轮账本
 
-`POST /context` 按身份、会话、context epoch 与内容指纹去重。开局背景也记账；同一地址正文更新后可以再次交付，宿主重启或压缩后的新 epoch 可以恢复上下文。条目只在最终通过预算后记账，账本的窗口与容量沿用服务端配置，详见架构文档 §8.7。
+`POST /context` 按身份、会话、context epoch 与内容指纹去重。开局背景也参与；同一地址正文更新后可以再次交付，宿主重启或压缩后的新 epoch 可以恢复上下文。返回 `deliveryToken` 后暂不记账：Hook成功写出宿主stdout、DSH完成注入后保存待确认回执，下轮携带 `previousDeliveryToken` 后才由服务端记账；也可显式 `POST /context/ack`。服务端和插件需要同步升级。
 
 Hook 的 `lib/context-epoch.mjs` 只保存按服务地址与会话隔离的随机标识，文件原子替换、权限 0600；DSH 在内存按会话保存，压缩时重置。客户端不再维护 URI 列表，也不按分数过滤。服务端按 scope 串行写入账本，多个会话不会相互覆盖。
 
-账本记录的是服务端返回的内容，宿主没有接收确认协议；返回后网络中断或宿主丢弃输出，仍可能在窗口内被认为已交付。同一会话同时发起两个召回也可能重复注入；按 scope 串行的是写入，检索与交付整体没有加锁。组装后去重当前不补足被排除的条目，因此一轮可能少于条数上限。
+待确认回执由 `lib/context-delivery.mjs` 按服务地址、凭据、会话与epoch隔离，原子文件权限0600；回执含URI和正文指纹，不含正文。一天有效，服务端重启失效，旧回执被自动忽略，之后可以重新投放。stdout成功不证明宿主最终保留或模型实际使用了内容；已知宿主没有更强确认能力时采用此边界。客户端用剩余总预算80%收紧服务端调用，20%留给返回与输出。同一会话并发仍可能重复；组装后去重暂不补足名额。
 
 ### 误伤与已覆盖
 

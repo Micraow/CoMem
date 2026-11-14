@@ -76,6 +76,7 @@ export async function approveMemory(
       validFrom: document.validFrom,
       validUntil: document.validUntil,
       supersedes: document.supersedes,
+      evidenceAt: document.evidenceAt,
     }),
   );
   logger.info('记忆复核通过', {

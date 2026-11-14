@@ -187,7 +187,7 @@ export class TtlService {
         }
         // 复用 `forget` 的删除路径：MANAGE 求权 → TREE 锁 → 删文件 → 观察者删索引
         // （node / node_fts / node_permission）。文件不存在时 `remove` 返回 0，不抛错。
-        await this.#filesystem.remove(parsed, this.#principals);
+        await this.#filesystem.remove(parsed, this.#principals, 'expired');
         purged += 1;
         this.#logger.info('TTL 归档超期，已物理删除。', { uri });
       } catch (error) {

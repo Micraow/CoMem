@@ -14,6 +14,7 @@
  */
 
 import type { PathLockManager } from '../../adapters/fs/lock.js';
+import type { ForgetBarriers } from '../../adapters/fs/forget-barriers.js';
 import { ComemError } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import type { Uri } from '../../domain/uri.js';
@@ -36,6 +37,7 @@ export type MemoryDirectoryEntry = {
  * 两个用例的必需能力。`FileSystemService` 结构上同时满足这四个方法。
  */
 export interface MemoryServicePorts {
+  readonly forgetBarriers?: ForgetBarriers;
   /**
    * 记忆文件的路径锁（§18「并发控制」）。
    *

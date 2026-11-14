@@ -83,6 +83,7 @@ export function createMemory(
   const principals = [subject, ...groups, USER_WILDCARD];
 
   const memory = new MemoryService({
+    forgetBarriers: core.forgetBarriers,
     // 配置项必须真的生效：写死的复核列表让 `memory.reviewRequired` 变成假配置。
     reviewRequired: config.memory.reviewRequired,
     // 记忆文件的「读 → 序列化 → 写」由 `MemoryService` 自己持 `exact` 锁：

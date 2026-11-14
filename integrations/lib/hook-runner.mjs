@@ -96,6 +96,7 @@ export function createRunHook({ hostLabel, normalizeEvent, formatOutput }) {
       const output = formatOutput(event, result);
       if (output !== null) {
         await write(JSON.stringify(output));
+        await result?.onDelivered?.();
       }
     } catch (error) {
       // 任何内部错误：stdout 一个字节都不写（宿主按「没有输出」放行），退出码 0。
