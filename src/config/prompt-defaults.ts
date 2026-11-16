@@ -49,7 +49,9 @@ function errorCodeOf(error: unknown): string | null {
 export function readPromptDefault(id: PromptId): string {
   const path = join(PROMPTS_DIRECTORY, `${id}.md`);
   try {
-    return readFileSync(path, 'utf8');
+    // 统一成 LF 再交出去：模板是运行时读的文本资源，Windows 检出或编辑器另存会
+    // 带来 CRLF，`\r` 会被原样拼进提示词，让同一条提示词因行尾不同而不同。
+    return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
   } catch (error) {
     if (errorCodeOf(error) === 'ENOENT') {
       throw new ComemError('INTERNAL', `提示词默认模板缺失：${path}`, {

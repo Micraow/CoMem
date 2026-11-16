@@ -201,7 +201,7 @@ describe('writeOverrideFile', () => {
       providers: { llm: { default: { apiKey: 'sk-secret' } } },
     });
 
-    // Windows 没有 POSIX 权限位，`statSync` 只会报 0o666；内容断言照常执行。
+    // Windows 没有 POSIX 权限位
     if (process.platform !== 'win32') {
       const mode = statSync(overridePath()).mode & 0o777;
       expect(mode).toBe(0o600);
