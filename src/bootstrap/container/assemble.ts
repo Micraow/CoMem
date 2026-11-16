@@ -66,7 +66,13 @@ export async function createContainer(
   const foundation = createFoundation(options);
   await migrateMemoryLinks(foundation.db, foundation.dataDir, foundation.store, foundation.locks, foundation.logger);
   const models = createModels(foundation);
-  const access = await createAccess(foundation, options);
+  // 身份装配会拒绝 `group:` 主体。此时 sqlite 已经打开，必须关掉再抛：不关的话
+  // 数据目录在进程退出前删不掉, Windows 上 EBUSY
+  // 而 Linux 允许删掉正在运行的文件
+  const access = await createAccess(foundation, options).catch((error: unknown) => {
+    foundation.db.close();
+    throw error;
+  });
   const retrieval = createRetrieval(foundation, models, access);
   const memoryStack = createMemory(foundation, models, access, retrieval);
   const background = createBackground(foundation, models, retrieval, memoryStack);

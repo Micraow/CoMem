@@ -7,7 +7,7 @@
 
 import { existsSync } from 'node:fs';
 import { homedir as osHomedir } from 'node:os';
-import { join } from 'node:path';
+import { posix, win32 } from 'node:path';
 
 export interface ResolveDataDirOptions {
   /** `--data-dir` 或 `COMEM_DATA_DIR` 的值；空串按未提供处理 */
@@ -53,16 +53,21 @@ export function resolveDataDir(options: ResolveDataDirOptions = {}): string {
   }
 
   // 4. 桌面单用户。
+  //
+  // 拼接用 `posix` / `win32` 而不是宿主平台的 `join`
   const appData = env.APPDATA;
   switch (platform) {
     case 'darwin':
-      return join(home, 'Library', 'Application Support', 'comem');
+      return posix.join(home, 'Library', 'Application Support', 'comem');
     case 'win32':
-      return join(appData !== undefined && appData !== '' ? appData : join(home, 'AppData', 'Roaming'), 'comem');
+      return win32.join(
+        appData !== undefined && appData !== '' ? appData : win32.join(home, 'AppData', 'Roaming'),
+        'comem',
+      );
     default: {
       const xdgDataHome = env.XDG_DATA_HOME;
-      const base = xdgDataHome !== undefined && xdgDataHome !== '' ? xdgDataHome : join(home, '.local', 'share');
-      return join(base, 'comem');
+      const base = xdgDataHome !== undefined && xdgDataHome !== '' ? xdgDataHome : posix.join(home, '.local', 'share');
+      return posix.join(base, 'comem');
     }
   }
 }

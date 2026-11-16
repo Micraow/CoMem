@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -21,9 +21,17 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-/** 固定 XDG 数据目录，避免读取真实 home。 */
+/**
+ * linux/darwin `XDG_DATA_HOME`、
+ * win32 `APPDATA`。只设 XDG 时在 Windows `%APPDATA%\comem`。
+ */
 function testEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { XDG_DATA_HOME: join(tempDir, 'xdg'), ...extra };
+  return { XDG_DATA_HOME: join(tempDir, 'xdg'), APPDATA: join(tempDir, 'appdata'), ...extra };
+}
+
+/** 桌面单用户默认数据根：win32 `%APPDATA%`，其它平台 `$XDG_DATA_HOME`。 */
+function defaultDataDir(): string {
+  return process.platform === 'win32' ? join(tempDir, 'appdata', 'comem') : join(tempDir, 'xdg', 'comem');
 }
 
 function writeConfig(content: string): string {
@@ -134,7 +142,7 @@ describe('loadConfig', () => {
       isRoot: false,
     });
 
-    expect(config).toEqual(expectedDefaults(join(tempDir, 'xdg', 'comem')));
+    expect(config).toEqual(expectedDefaults(defaultDataDir()));
   });
 
   it('默认值里的 dataDir 非空：留空时按 §6.5 推导', () => {
@@ -145,7 +153,7 @@ describe('loadConfig', () => {
       isRoot: false,
     });
 
-    expect(config.dataDir).toBe(join(tempDir, 'xdg', 'comem'));
+    expect(config.dataDir).toBe(defaultDataDir());
   });
 
   // §6.5 的四条规则。不注入 container / isRoot 时，宿主机上的真实判定会决定
@@ -256,7 +264,7 @@ describe('loadConfig', () => {
     });
 
     expect(config).toEqual({
-      ...(expectedDefaults(join(tempDir, 'xdg', 'comem')) as Record<string, unknown>),
+      ...(expectedDefaults(defaultDataDir()) as Record<string, unknown>),
       providers: {
         llm: {
           default: {
@@ -843,12 +851,13 @@ describe('resolveDataDir', () => {
         container: false,
         isRoot: false,
       }),
-    ).toBe(join('/appdata/roaming', 'comem'));
+    ).toBe(win32.join('/appdata/roaming', 'comem'));
   });
 
   it('win32 没有 APPDATA 时回到 home 下的默认位置', () => {
+    // 注入 `platform: 'win32'` 时结果用该平台的分隔符，与宿主是什么无关。
     expect(
       resolveDataDir({ env: {}, platform: 'win32', homedir: home, container: false, isRoot: false }),
-    ).toBe(join(home, 'AppData', 'Roaming', 'comem'));
+    ).toBe(win32.join(home, 'AppData', 'Roaming', 'comem'));
   });
 });

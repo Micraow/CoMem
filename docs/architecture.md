@@ -261,13 +261,17 @@ CoMem/
 ├── integrations/                     # Hook 插件（独立交付物，装进宿主）
 │   ├── cli.mjs                       # co-mem install / doctor
 │   ├── servers/  hosts/  lib/        # Hook 入口 / 宿主适配 / 共享骨架
+│   ├── dsh-plugin/                   # DSH 原生插件包（取代脚本 hook 那条路）
 │   ├── skills/                       # 给宿主的 skill 清单
 │   └── tests/                        # node --test
 │
 ├── scripts/                          # 质量闸门与运维脚本
 │   ├── check-config.ts               # 配置项必须有消费方（L1–L3）
+│   ├── check-docs.ts                 # 文档里的 file:line 引用必须指到真实声明
 │   ├── check-reachability.ts         # 写了但没接线
 │   ├── check-shape.ts                # 行数 ratchet：文件只能变短
+│   ├── copy-build-assets.mjs         # 构建后拷非 TS 资源（`pnpm build`）
+│   ├── reachability-baseline.json    # 可达性检查基线
 │   ├── shape-baseline.json           # 形状检查基线（只允许收紧）
 │   ├── e2e.mjs                       # 六条链路端到端演示（`pnpm test:e2e`）
 │   ├── demo.mjs                      # 演示辅助进程（等 /health、断言产物）
