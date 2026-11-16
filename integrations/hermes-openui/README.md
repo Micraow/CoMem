@@ -26,4 +26,16 @@ No Hermes patch is needed. The card appears as its source arrives; controls beco
 
 The bundled examples cover a comparison with a local threshold, a cited brief, and a San Francisco answer with credited photos and a pannable OpenStreetMap map. Choosing a place moves the marker without asking the model. The map shows one place at a time and needs access to OpenStreetMap; a separate place link remains available. The model supplies source and photo URLs; the plugin checks them but does not verify claims, find photos, or compute routes. An unavailable photo retains its caption and source link.
 
+To use CoMem from the same chat, add its MCP server to the Hermes profile's `config.yaml`. This example assumes both processes are on the same machine and CoMem is listening on loopback with loopback trust enabled:
+
+```yaml
+mcp_servers:
+  comem:
+    url: http://127.0.0.1:1933/mcp
+    tools:
+      include: [find, read, remember]
+```
+
+Restart the gateway and start a new chat. For non-loopback connections, use [CoMem authentication](../../docs/operations.md#认证与账号). This gives Hermes explicit tools to retrieve and submit memories. For importing conversations, see the [CoMem console guide](../../docs/ingest-prompt.md). The [joint test report](../../docs/experiments/1116-hermes-comem-import/report.md) records what was verified with a real model and local embedding.
+
 To run `npm run test:webapp`, start an isolated Hermes v0.23.1 gateway with the Webapp enabled on `127.0.0.1:19120`. Install this build into that profile and set its model to `stream-fixture` with `provider: custom`, `api_mode: chat_completions`, and `base_url: http://127.0.0.1:19121/v1`. If the provider requires an API key, use a dummy key in the test profile. The test starts the model fixture itself. Set `OPENUI_TEST_HERMES` to the Hermes executable and keep `HERMES_HOME` pointed at the test profile. Port overrides are `OPENUI_TEST_WEBAPP_PORT` and `OPENUI_FIXTURE_PORT`. Screenshots and a JSON report are saved under `evidence/`.
