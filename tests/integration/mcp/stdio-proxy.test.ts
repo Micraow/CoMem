@@ -14,6 +14,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -41,8 +42,8 @@ import type { SkillService } from '../../../src/services/skill.js';
 import type { SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
-/** 代理脚本的绝对路径（相对本测试文件）。 */
-const PROXY_PATH = new URL('../../../integrations/servers/mcp-proxy.mjs', import.meta.url).pathname;
+/** 代理脚本的绝对路径（相对本测试文件）。`URL#pathname` 在 Windows 上会留下 `/D:/` 前缀。 */
+const PROXY_PATH = fileURLToPath(new URL('../../../integrations/servers/mcp-proxy.mjs', import.meta.url));
 
 const EXPECTED_NAMES = [
   'find',
