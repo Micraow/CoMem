@@ -21,13 +21,18 @@ export const INTELLIGENT_UI_STYLES = `
   --oui-chart-3: #8b5cf6;
   --oui-chart-4: #f4a340;
   --oui-shadow-sm: 0 1px 3px rgb(0 0 0 / 5%);
-  --oui-shadow: 0 14px 40px rgb(0 0 0 / 6%);
+  --oui-shadow: 0 4px 20px rgb(0 0 0 / 6%);
   color: var(--oui-ink);
   color-scheme: light;
   font-family: var(--oui-font);
   line-height: 1.5;
   max-width: 42rem;
   width: 100%;
+}
+/* Hermes's transcript-wide heading and paragraph rules otherwise add a
+   second layer of spacing on top of the card's own layout. */
+[data-slot='aui_assistant-message-content'] .aui-md .hermes-openui-surface :is(h3, h4, p, figure, ol) {
+  margin-block: 0;
 }
 :is([data-theme="dark"], [data-openui-theme="dark"]) .hermes-openui-surface {
   --oui-canvas: #1c1c1e;
@@ -39,49 +44,122 @@ export const INTELLIGENT_UI_STYLES = `
   --oui-chart-3: #a07cff;
   --oui-chart-4: #f6ae55;
   --oui-shadow-sm: 0 1px 3px rgb(0 0 0 / 28%);
-  --oui-shadow: 0 14px 40px rgb(0 0 0 / 30%);
+  --oui-shadow: 0 4px 20px rgb(0 0 0 / 35%);
   color-scheme: dark;
 }
 .hermes-openui-answer {
   box-sizing: border-box;
   display: grid;
-  gap: 20px;
+  gap: 16px;
   min-width: 0;
   padding: 2px 0 4px;
   width: 100%;
 }
 .hermes-openui-heading {
   display: grid;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
 }
 .hermes-openui-eyebrow {
   color: var(--oui-muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 640;
-  letter-spacing: .11em;
+  letter-spacing: .09em;
   line-height: 1.3;
   text-transform: uppercase;
 }
 .hermes-openui-title {
   color: var(--oui-ink);
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 640;
-  letter-spacing: -.55px;
-  line-height: 1.2;
+  letter-spacing: -.4px;
+  line-height: 1.25;
   margin: 0;
+  text-wrap: balance;
 }
 .hermes-openui-description,
 .hermes-openui-text,
 .hermes-openui-caption {
   color: var(--oui-muted);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.55;
   margin: 0;
   overflow-wrap: anywhere;
 }
 .hermes-openui-caption {
   font-size: 12px;
+}
+.hermes-openui-citations {
+  border-block: 1px solid var(--oui-border);
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-block: 12px;
+}
+.hermes-openui-citations-title {
+  color: var(--oui-ink);
+  font-size: 12px;
+  font-weight: 640;
+  letter-spacing: .015em;
+  line-height: 1.4;
+  margin: 0;
+}
+.hermes-openui-citation-list {
+  counter-reset: citation;
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+.hermes-openui-citation {
+  counter-increment: citation;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  min-width: 0;
+}
+.hermes-openui-citation::before {
+  color: var(--oui-faint);
+  content: "0" counter(citation);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.65;
+}
+.hermes-openui-citation-body {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.hermes-openui-citation-link {
+  color: var(--oui-ink);
+  font-size: 13px;
+  font-weight: 590;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-decoration-color: color-mix(in srgb, var(--oui-ink) 30%, transparent);
+  text-underline-offset: 3px;
+}
+a.hermes-openui-citation-link::after {
+  color: var(--oui-muted);
+  content: " ↗";
+  font-size: 11px;
+  font-weight: 500;
+}
+a.hermes-openui-citation-link:hover {
+  text-decoration-color: var(--oui-ink);
+}
+.hermes-openui-citation-meta {
+  color: var(--oui-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.hermes-openui-citation-note {
+  color: var(--oui-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 2px;
 }
 .hermes-openui-row {
   align-items: center;
@@ -95,13 +173,13 @@ export const INTELLIGENT_UI_STYLES = `
   gap: 0;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   min-width: 0;
-  padding-block: 14px;
+  padding-block: 11px;
 }
 .hermes-openui-kpi {
   display: grid;
   gap: 2px;
   min-width: 0;
-  padding-inline: 16px;
+  padding-inline: 14px;
 }
 .hermes-openui-kpi:first-child {
   padding-left: 0;
@@ -121,11 +199,11 @@ export const INTELLIGENT_UI_STYLES = `
 }
 .hermes-openui-kpi-value {
   color: var(--oui-ink);
-  font-size: 24px;
+  font-size: 22px;
   font-variant-numeric: tabular-nums;
   font-weight: 640;
   letter-spacing: -.6px;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 .hermes-openui-kpi-note {
   color: var(--oui-faint);
@@ -156,8 +234,8 @@ export const INTELLIGENT_UI_STYLES = `
   font: inherit;
   font-size: 13px;
   line-height: 1.4;
-  min-height: 30px;
-  padding: 5px 14px;
+  min-height: 28px;
+  padding: 4px 13px;
   transition: background .18s ease, color .18s ease, box-shadow .18s ease;
   white-space: nowrap;
 }
@@ -179,13 +257,13 @@ export const INTELLIGENT_UI_STYLES = `
     radial-gradient(circle at 92% 10%, color-mix(in srgb, var(--oui-chart-1) 10%, transparent), transparent 34%),
     var(--oui-surface);
   border: 1px solid var(--oui-border);
-  border-radius: 18px;
+  border-radius: 16px;
   box-shadow: var(--oui-shadow);
   display: grid;
-  gap: 16px;
+  gap: 13px;
   min-width: 0;
   overflow: hidden;
-  padding: 18px;
+  padding: 16px;
 }
 .hermes-openui-benchmark-head {
   align-items: end;
@@ -196,7 +274,7 @@ export const INTELLIGENT_UI_STYLES = `
 }
 .hermes-openui-benchmark-title {
   color: var(--oui-ink);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 640;
   letter-spacing: -.15px;
   line-height: 1.35;
@@ -213,13 +291,13 @@ export const INTELLIGENT_UI_STYLES = `
 }
 .hermes-openui-bars {
   display: grid;
-  gap: 13px;
+  gap: 11px;
   min-width: 0;
 }
 .hermes-openui-bar-row {
   align-items: center;
   display: grid;
-  gap: 10px;
+  gap: 9px;
   grid-template-columns: 1.6rem minmax(5.5rem, 8rem) minmax(4rem, 1fr) 2.6rem;
   min-width: 0;
 }
@@ -241,7 +319,7 @@ export const INTELLIGENT_UI_STYLES = `
 .hermes-openui-bar-track {
   background: color-mix(in srgb, var(--oui-ink) 6%, transparent);
   border-radius: 999px;
-  height: 12px;
+  height: 10px;
   min-width: 0;
   overflow: hidden;
 }
@@ -274,16 +352,16 @@ export const INTELLIGENT_UI_STYLES = `
 .hermes-openui-insight {
   align-items: start;
   display: grid;
-  gap: 10px;
-  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 8px;
+  grid-template-columns: 7px minmax(0, 1fr);
 }
 .hermes-openui-insight::before {
   background: var(--oui-chart-1);
   border-radius: 999px;
   content: "";
-  height: 8px;
+  height: 7px;
   margin-top: 6px;
-  width: 8px;
+  width: 7px;
 }
 .hermes-openui-insight .hermes-openui-text {
   color: var(--oui-ink);
@@ -294,11 +372,11 @@ export const INTELLIGENT_UI_STYLES = `
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(12rem, 1fr) auto;
-  padding-top: 16px;
+  padding-top: 12px;
 }
 .hermes-openui-slider {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 .hermes-openui-slider-head {
@@ -323,10 +401,13 @@ export const INTELLIGENT_UI_STYLES = `
   appearance: none;
   -webkit-appearance: none;
   background: transparent;
+  border: 0;
+  border-radius: 999px;
   cursor: pointer;
   display: block;
-  height: 32px;
+  height: 28px;
   margin: 0;
+  outline: none;
   width: 100%;
 }
 .hermes-openui-slider input::-webkit-slider-runnable-track {
@@ -357,6 +438,15 @@ export const INTELLIGENT_UI_STYLES = `
   height: 16px;
   width: 16px;
 }
+.hermes-openui-slider input:focus-visible {
+  outline: none;
+}
+.hermes-openui-slider input:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--oui-canvas), 0 0 0 4px var(--oui-ink);
+}
+.hermes-openui-slider input:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 2px var(--oui-canvas), 0 0 0 4px var(--oui-ink);
+}
 .hermes-openui-action {
   align-items: center;
   align-self: center;
@@ -372,8 +462,8 @@ export const INTELLIGENT_UI_STYLES = `
   gap: 8px;
   justify-content: center;
   line-height: 1.2;
-  min-height: 38px;
-  padding: 9px 16px;
+  min-height: 36px;
+  padding: 8px 15px;
   transition: filter .15s ease, transform .15s ease;
   white-space: nowrap;
 }
@@ -394,8 +484,8 @@ export const INTELLIGENT_UI_STYLES = `
   opacity: .45;
 }
 .hermes-openui-action:focus-visible,
-.hermes-openui-slider input:focus-visible,
-.hermes-openui-segmented button:focus-visible {
+.hermes-openui-segmented button:focus-visible,
+.hermes-openui-citation-link:focus-visible {
   outline: 2px solid var(--oui-ink);
   outline-offset: 3px;
 }
@@ -406,7 +496,7 @@ export const INTELLIGENT_UI_STYLES = `
 }
 @media (max-width: 600px) {
   .hermes-openui-answer {
-    gap: 17px;
+    gap: 14px;
   }
   .hermes-openui-title {
     font-size: 20px;

@@ -21,7 +21,9 @@ const url = output.match(/https?:\/\/[^\s]+/)?.[0]
 const webappPort = process.env.OPENUI_TEST_WEBAPP_PORT ?? '19120'
 assert.ok(url && new URL(url).port === webappPort, 'Expected a sign-in link for the isolated Webapp')
 const browser = await chromium.launch({executablePath: process.env.CHROMIUM_PATH ?? '/usr/bin/chromium', args:['--no-sandbox']})
-const fixture = await startModelFixture({ primaryProgram: DESIGN_OPENUI_PROGRAM, secondaryProgram: DESIGN_OPENUI_PROGRAM.replace('Retrieval strategies, compared', 'Second session comparison') }).catch(async error => {
+const primaryHeading = DESIGN_OPENUI_PROGRAM.match(/^root = Card\("([^"\n]+)"/)?.[1]
+assert.ok(primaryHeading, 'The primary fixture must start with a card title')
+const fixture = await startModelFixture({ primaryProgram: DESIGN_OPENUI_PROGRAM, secondaryProgram: DESIGN_OPENUI_PROGRAM.replace(primaryHeading, 'Second session comparison') }).catch(async error => {
   await browser.close()
   throw error
 })
@@ -82,7 +84,7 @@ try {
   record('webapp-loaded')
   await send(primaryPrompt)
   const card = page.locator('[data-hermes-openui-card].hermes-openui-card-mount').first()
-  await page.getByRole('heading',{name:'Retrieval strategies, compared'}).waitFor({timeout:25_000})
+  await page.getByRole('heading',{name:primaryHeading}).waitFor({timeout:25_000})
   const earlyState = await state()
   const earlySession = earlyState.sessions.find(session => session.prompt === primaryPrompt)
   assert.ok(earlySession,'The primary fixture session must start')
@@ -179,7 +181,7 @@ try {
   )
   record('second-session-submitted', {fixtureSessions:ownSecondarySessions.length})
   assert.ok(ownSecondarySessions.length > 0,'Second prompt must reach a secondary fixture session')
-  assert.equal(await page.getByRole('heading',{name:'Retrieval strategies, compared'}).count(),0)
+  assert.equal(await page.getByRole('heading',{name:primaryHeading}).count(),0)
   const stopButtons = page.locator('[data-slot="composer-root"] button[aria-label="Stop"]').filter({visible:true})
   await stopButtons.first().waitFor()
   assert.equal(await stopButtons.count(),1,'Expected one visible Stop button while the second response streams')
@@ -208,7 +210,7 @@ try {
   await firstSessionTab.waitFor()
   await secondSessionTab.waitFor()
   await firstSessionTab.click()
-  await page.getByRole('heading',{name:'Retrieval strategies, compared'}).waitFor()
+  await page.getByRole('heading',{name:primaryHeading}).waitFor()
   assert.equal(await slider.inputValue(),'90')
   record('return-to-first-session', {evidenceFloor:await slider.inputValue()})
   assert.ok(continuityCheck.count > 0, 'The browser must sample the card while streaming')

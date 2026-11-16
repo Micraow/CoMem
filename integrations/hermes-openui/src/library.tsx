@@ -21,6 +21,17 @@ function numberText(value: number, unit = ''): string {
   return /^[$€£¥₹]/.test(unit) ? `${unit}${number}` : `${number}${unit}`
 }
 
+function webUrl(value: string): string | null {
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
+      ? url.href
+      : null
+  } catch {
+    return null
+  }
+}
+
 const Card = defineComponent({
   name: 'Card',
   description: 'Unboxed answer surface with an editorial heading and composed content.',
@@ -85,6 +96,71 @@ const Caption = defineComponent({
   component: ({ props }) => <p className="hermes-openui-caption">{props.text}</p>
 })
 
+const CitationList = defineComponent({
+  name: 'CitationList',
+  description:
+    'Compact ordered source list. Each source needs a title, http(s) URL, publisher, year, and optional evidence note.',
+  props: z.object({
+    items: z.array(
+      z.object({
+        title: z.string(),
+        url: z.string(),
+        publisher: z.string(),
+        year: z.string(),
+        note: z.string().optional()
+      })
+    ),
+    title: z.string().optional()
+  }),
+  component: ({ props }) => {
+    const items = props.items.filter(item => item.title.trim() && item.url.trim())
+
+    return (
+      <section
+        aria-label={props.title ?? 'Sources'}
+        className="hermes-openui-citations"
+        data-hermes-openui-citations
+      >
+        <h4 className="hermes-openui-citations-title">{props.title ?? 'Sources'}</h4>
+        <ol className="hermes-openui-citation-list">
+          {items.map((item, index) => {
+            const href = webUrl(item.url)
+            const attribution = [item.publisher, item.year].filter(Boolean).join(' · ')
+
+            return (
+              <li
+                className="hermes-openui-citation"
+                data-hermes-openui-citation
+                data-safe-url={href ? 'true' : 'false'}
+                key={`${item.url}-${index}`}
+              >
+                <div className="hermes-openui-citation-body">
+                  {href ? (
+                    <a
+                      className="hermes-openui-citation-link"
+                      href={href}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      {item.title}
+                    </a>
+                  ) : (
+                    <span className="hermes-openui-citation-link">{item.title}</span>
+                  )}
+                  <span className="hermes-openui-citation-meta">{attribution}</span>
+                  {item.note ? (
+                    <span className="hermes-openui-citation-note">{item.note}</span>
+                  ) : null}
+                </div>
+              </li>
+            )
+          })}
+        </ol>
+      </section>
+    )
+  }
+})
+
 const Kpi = defineComponent({
   name: 'KPI',
   description: 'Compact label, prominent value, and optional supporting note.',
@@ -130,7 +206,7 @@ const SegmentedControl = defineComponent({
 
     return (
       <div
-        aria-label="Comparison view"
+        aria-label="Local view"
         className="hermes-openui-segmented"
         data-hermes-openui-segmented
         role="radiogroup"
@@ -164,6 +240,7 @@ const BenchmarkBars = defineComponent({
     quality: z.array(z.number()),
     speed: z.array(z.number()),
     efficiency: z.array(z.number()),
+    floor: reactive(z.number()).optional(),
     unit: z.string().optional()
   }),
   component: ({ props, statementId }) => {
@@ -173,10 +250,16 @@ const BenchmarkBars = defineComponent({
       : 'Quality'
     const values =
       lens === 'Speed' ? props.speed : lens === 'Efficiency' ? props.efficiency : props.quality
+    const floor =
+      typeof props.floor === 'number' && Number.isFinite(props.floor)
+        ? Math.min(100, Math.max(0, props.floor))
+        : 0
     const rows = props.labels.map((label, index) => ({
       label,
-      value: Math.min(100, Math.max(0, values[index] ?? 0))
+      value: Math.min(100, Math.max(0, values[index] ?? 0)),
+      below: floor > 0 && (values[index] ?? 0) < floor
     }))
+    const belowCount = rows.filter(row => row.below).length
     const leader = rows.reduce(
       (best, row, index) => (row.value > rows[best].value ? index : best),
       0
@@ -193,14 +276,18 @@ const BenchmarkBars = defineComponent({
         <header className="hermes-openui-benchmark-head">
           <h4 className="hermes-openui-benchmark-title">{props.title}</h4>
           <span className="hermes-openui-benchmark-meta">
-            <strong>{lens}</strong> view · {rows[leader]?.label ?? 'No result'} leads
+            <strong>{lens}</strong> view ·{' '}
+            {floor > 0
+              ? `${belowCount} ${belowCount === 1 ? 'bar' : 'bars'} below ${floor}%`
+              : `${rows[leader]?.label ?? 'No result'} leads`}
           </span>
         </header>
         <div className="hermes-openui-bars">
           {rows.map((row, index) => (
             <div
-              className={`hermes-openui-bar-row is-${Math.min(3, index + 1)}`}
+              className={`hermes-openui-bar-row is-${Math.min(3, index + 1)}${row.below ? ' is-below' : ''}`}
               data-hermes-openui-bar={row.label}
+              data-hermes-openui-below={row.below ? 'true' : 'false'}
               key={row.label}
             >
               <span className="hermes-openui-bar-rank">{String(index + 1).padStart(2, '0')}</span>
@@ -305,6 +392,7 @@ export const openUILibrary = createLibrary({
     Row,
     Text,
     Caption,
+    CitationList,
     Kpi,
     Insight,
     SegmentedControl,
@@ -314,32 +402,48 @@ export const openUILibrary = createLibrary({
   ]
 })
 
-export const DESIGN_OPENUI_PROGRAM = `root = Card("Retrieval strategies, compared", "A compact read on the fixture's quality-speed-efficiency trade-off.", [kpis, tabs, chart, insight, checkpoint], "RESEARCH SYNTHESIS · LOCAL DESIGN FIXTURE")
+export const DESIGN_OPENUI_PROGRAM = `root = Card("Choose a retrieval strategy", "Hybrid is the safer default for mixed exact-match and semantic queries.", [kpis, tabs, chart, insight, checkpoint, note])
 kpis = Row([kpi1, kpi2, kpi3], 4, "kpis")
-kpi1 = KPI("Best balance", "Hybrid", "leads the overall fixture")
-kpi2 = KPI("Quality peak", "94", "semantic, local fixture")
-kpi3 = KPI("Fastest path", "90", "graph, local fixture")
+kpi1 = KPI("Balanced", "Hybrid", "no axis in last place")
+kpi2 = KPI("Quality", "94", "semantic")
+kpi3 = KPI("Speed", "90", "graph")
 $lens = "Quality"
-tabs = SegmentedControl($lens, ["Quality", "Speed", "Efficiency"])
-chart = BenchmarkBars($lens, "Relative performance", ["Hybrid", "Semantic", "Graph"], [88, 94, 76], [82, 61, 90], [74, 69, 86])
-insight = Insight("Semantic leads on quality; Graph leads on speed and efficiency. Hybrid gives up a little of each to stay balanced.")
-checkpoint = Row([threshold, follow], 3, "checkpoint")
 $minimum = 75
+tabs = SegmentedControl($lens, ["Quality", "Speed", "Efficiency"])
+chart = BenchmarkBars($lens, "Illustrative scores", ["Hybrid", "Semantic", "Graph"], [88, 94, 76], [82, 61, 90], [74, 69, 86], $minimum)
+insight = Insight($lens == "Quality" ? "Choose semantic when nuanced recall matters most; choose hybrid when exact identifiers must stay covered." : $lens == "Speed" ? "Choose graph when latency dominates; choose hybrid when query types vary." : "Choose graph for throughput; choose hybrid when corpus behavior is uneven.")
 threshold = Slider($minimum, 50, 95, 5, "Evidence floor", "%")
+checkpoint = Row([threshold, follow], 3, "checkpoint")
+note = Caption("Illustrative 0-100 scores, not measured benchmarks.")
 follow = Button("Explain this trade-off", @ToAssistant("Explain the " + $lens + " comparison above " + $minimum + "% evidence floor."))`
+
+export const DECISION_BRIEF_OPENUI_PROGRAM = `root = Card("Choose a retrieval path", "A cited recommendation for queries that mix names, codes, and semantic intent.", [signals, viewTabs, details, sources, follow])
+signals = Row([signal1, signal2, signal3], 4, "kpis")
+signal1 = KPI("Exact matches", "BM25")
+signal2 = KPI("Semantic recall", "DPR")
+signal3 = KPI("Combined ranking", "RRF")
+$view = "Decision"
+viewTabs = SegmentedControl($view, ["Decision", "Evidence", "Caveats"])
+details = $view == "Decision" ? Insight("Start with hybrid retrieval: combine BM25 and dense rankings, then evaluate on your own query set.") : $view == "Evidence" ? Insight("BM25 supplies a lexical baseline, DPR supplies dense dual-encoder retrieval, and reciprocal rank fusion combines ranked lists without score calibration.") : Insight("Exact identifiers favor lexical matching, while paraphrases favor dense retrieval. Fusion can add latency and does not guarantee better ranking.")
+sources = CitationList([{ title: "The Probabilistic Relevance Framework: BM25 and Beyond", url: "https://doi.org/10.1561/1500000019", publisher: "Foundations and Trends in Information Retrieval", year: "2009" }, { title: "Dense Passage Retrieval for Open-Domain Question Answering", url: "https://arxiv.org/abs/2004.04906", publisher: "EMNLP", year: "2020" }, { title: "Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods", url: "https://doi.org/10.1145/1571941.1572114", publisher: "ACM SIGIR", year: "2009" }], "Sources")
+follow = Button("Draft an evaluation plan", @ToAssistant("Draft an evaluation plan for hybrid retrieval using the " + $view + " view. Require citations and report recall, identifier accuracy, latency, and ranking quality."))`
 
 export const OPENUI_PROMPT = openUILibrary.prompt({
   preamble:
     'When an answer benefits from one interactive visual explanation, compose a compact OpenUI answer using the local design system.',
   additionalRules: [
     'Use Card as the root. Start with root so forward references can render progressively.',
-    'Use Row, KPI, SegmentedControl, BenchmarkBars, Insight, Slider, Caption, Text, and Button as needed.',
+    'Use Row, KPI, SegmentedControl, BenchmarkBars, CitationList, Insight, Slider, Caption, Text, and Button as needed.',
     'Keep the surface unboxed: do not invent nested form panels or decorative placeholder shapes.',
     'Bind SegmentedControl and Slider values to $variables. Every control must change visible content or an explicit follow-up.',
-    'Label sample or fixture data honestly. Use real measured values and provenance when the answer contains research results.',
-    'End with exactly one Button whose @ToAssistant message includes the current local values.'
+    'Give Card a specific title and one useful description. Do not use fixture, demo, design, or component vocabulary in user-visible labels.',
+    'A chart already shows its values. Use at most one Insight for the decision implication and do not repeat every number in Markdown, Text, or Caption.',
+    'Do not explain how controls work in prose. Make each control change visible content and end with one task-specific follow-up.',
+    'If scores are illustrative, disclose that once in a final Caption. Cite research with real publisher, year, and http(s) URLs instead of invented sources.',
+    'Do not invent photographs or map geometry, and do not fetch citation metadata in the browser.',
+    'Keep text outside the directive to one concise takeaway before it. Do not append a second summary after the directive.'
   ],
-  examples: [DESIGN_OPENUI_PROGRAM]
+  examples: [DECISION_BRIEF_OPENUI_PROGRAM, DESIGN_OPENUI_PROGRAM]
 })
 
 export const SAMPLE_OPENUI_PROGRAM = `$minimum = 70
