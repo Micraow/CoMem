@@ -488,7 +488,7 @@ pnpm verify     # typecheck + lint + check:config + check:reachability + check:s
 | [`docs/architecture.md`](docs/architecture.md) | **唯一真相**：分层、数据布局、六条链路、错误模型、里程碑（21 节） |
 | [`docs/operations.md`](docs/operations.md) | 部署、配置、备份、监控、排障、已知限制 |
 | [`docs/coverage-map.md`](docs/coverage-map.md) | 按代码核对的能力全景图：每项能力给入口、实现 `file:line`、数据流、测试证据；另列已砍掉的东西与已知缺口 |
-| [`docs/ingest-prompt.md`](docs/ingest-prompt.md) | 历史会话导入提示词：整段复制给本机已接 CoMem MCP 的 Agent，由它盘点本机会话日志、解析成消息数组、用 `remember` 原样上传；抽取与复核在服务端，重跑按稳定 `sessionId` 幂等。与服务端适配器 `pnpm ingest` 互补——它覆盖 CoMem 进程读不到的导出目录 |
+| [`docs/ingest-prompt.md`](docs/ingest-prompt.md) | 历史会话导入：从控制台复制提示词，给已接入 CoMem 的 Agent 指定导出文件或文本，确认预览后由 `remember` 提交；与 `pnpm ingest` 共用归档、抽取、合并与复核流程 |
 | [`integrations/README.md`](integrations/README.md) | Hook 插件：安装、七个 hook、MCP 接入、bypass、去重 |
 
 ---

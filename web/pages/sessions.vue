@@ -178,6 +178,9 @@ watch(scopeRoot, () => {
     <div class="page">
       <DomainPageHeader title="会话与任务">
         <template #actions>
+          <NuxtLink to="/connect#import-history" class="btn btn--secondary btn--sm">
+            导入历史会话
+          </NuxtLink>
           <UiButton
             variant="secondary"
             size="sm"

@@ -298,8 +298,10 @@ watch(scopeRoot, () => {
             服务状态没有取到，无法确认这次写入会不会产生记忆。
           </p>
         </UiCard>
+        <DomainHistoryImportGuide />
       </div>
     </div>
+    <UiToast />
   </div>
 </template>
 
