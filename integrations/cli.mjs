@@ -128,14 +128,15 @@ const HOST_MATCHERS = Object.freeze({
  * 按脚本路径匹配（`servers/xxx.mjs`），不按事件名——同名事件下可能还有别人的
  * hook，删错一个就破坏用户已有的自动化。
  */
-const SCRIPT_MARKER = join('integrations', 'servers');
+const SCRIPT_MARKER = 'integrations/servers';
 
 export function isCoMemHook(hook) {
   return (
     typeof hook === 'object' &&
     hook !== null &&
     typeof hook.command === 'string' &&
-    (hook.command.includes(SCRIPT_MARKER) || hook.command.includes('integrations\\servers'))
+    // 命令里的路径可能来自不同平台
+    hook.command.split('\\').join('/').includes(SCRIPT_MARKER)
   );
 }
 
@@ -152,7 +153,9 @@ function shellQuote(value) {
 
 /** 生成一条 hook 命令。绝对路径，`--host` 决定适配器。 */
 export function hookCommand(event, host, options = {}) {
-  const script = join(options.root ?? ROOT, 'servers', HOOK_EVENTS[event]);
+  // 脚本路径统一成正斜杠：settings.json 写进去的字符串跨平台一致，也避开反斜杠
+  // 在某些 shell 里被当转义符。可执行文件路径保持宿主原样（那条命令由宿主直接跑）。
+  const script = join(options.root ?? ROOT, 'servers', HOOK_EVENTS[event]).split('\\').join('/');
   const executable = options.execPath ?? process.execPath;
   return `${shellQuote(executable)} ${shellQuote(script)} --host ${host}`;
 }
