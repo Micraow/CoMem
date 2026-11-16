@@ -78,10 +78,10 @@ function relogin(): void {
           </template>
         </DomainPageHeader>
 
-        <section class="identity-card" aria-labelledby="account-role-title">
+        <section class="identity-card" aria-labelledby="account-identity-title">
           <div class="identity-card__avatar" aria-hidden="true">{{ subjectInitial }}</div>
           <div class="identity-card__copy">
-            <span id="account-role-title" class="identity-card__eyebrow">系统角色</span>
+            <h2 id="account-identity-title" class="identity-card__name">{{ currentUserId || '当前账户' }}</h2>
             <UiBadge :variant="isAdmin ? 'green' : 'gray'">{{ roleLabel }}</UiBadge>
           </div>
         </section>
@@ -191,11 +191,11 @@ function relogin(): void {
   gap: 10px;
 }
 
-.identity-card__eyebrow {
-  color: var(--label-3);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+.identity-card__name {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .account-grid {

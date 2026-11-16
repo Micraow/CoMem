@@ -2937,13 +2937,13 @@ UTC 形态，不在序列化层换格式）；`supersedes` 非空即「这条记
 
 **管理端点判定的是目标资源，不是调用方自己的根。** 对「自己的根」求 `manage` 对每个登录用户都成立（user 根 owner 恒为本人），用它当门禁等于任何登录用户都是管理员。所以改密码、改资料、启用禁用、删除用户，签发 / 列出 / 吊销 API Key，改组资料、删除组、加退组成员，一律对目标用户根或组根求 `manage`。吊销 API Key 的请求里只有 key ID，先反查持有者，再对持有者的根求权——否则任何登录用户都能吊销别人的凭据。组 owner 变更不能只看组根 manage 的历史原因见下。
 
-**跨主体端点只认系统管理员。** 列全部用户 / 组、建用户、建组，以及 `/tasks` 的三个端点（`GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`）在数据模型里没有可求权的目标：`task` 表没有 scope 或 uri 列，`payload` 是 `unknown`，从它里面猜路径等于把授权建在不可校验的 JSON 上。它们按 `auth.adminUserIds` 判定——名单存 `app_user.id`，默认 `[]`（空表示没有管理员）。没有「第一个用户自动成为管理员」「绑定主体即管理员」这类隐式规则：默认值站在安全的一侧。
+**跨主体端点只认系统管理员。** 列全部用户 / 组、建用户、建组，以及 `/tasks` 的三个端点（`GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`）在数据模型里没有可求权的目标：`task` 表没有 scope 或 uri 列，`payload` 是 `unknown`，从它里面猜路径等于把授权建在不可校验的 JSON 上。系统管理员包括通过 `POST /bootstrap/admin` 初始化的管理员和 `auth.adminUserIds` 中列出的用户 ID。名单默认为空；这不影响初始化管理员。普通建用户流程和回环绑定本身不会授予系统管理员角色。
 
 **提示词分读写。** 提示词是全局的（不分作用域），读它不会暴露任何节点内容，所以 `GET /prompts` 与 `GET /prompts/{id}` 任何已认证身份可读；`PUT` / `DELETE` / `POST /prompts/{id}/preview` 改的是所有身份的注入行为，要系统管理员。没有「目标资源」可以表达这件事——它不是某个节点上的权限。
 
 **`GroupMember.role` 是派生字段。** 唯一真相是 `app_group.owner_user_id`：只有 `userId === ownerUserId` 才是 `owner`。`group_member.role` 列已废弃、写入只落常量 `member`，读取时不采用；`POST /admin/groups/{id}/members` 显式传 `role` 返回 `INVALID_ARGUMENT`，改 owner 的入口只有 `POST /admin/groups/{id}/owner`。
 
-**升级说明：这是一次破坏性变更。** 存量部署必须显式配 `auth.adminUserIds: [<uid>, ...]`，否则用户与组管理端点、`/tasks` 全部 403。回环信任（`auth.trustLoopback`）给出的 `server.subject` 同样要写进名单——跨主体端点不认「请求来自本机」这个事实。
+**存量部署。** 没有初始化管理员的部署可用 `auth.adminUserIds: [<uid>, ...]` 指定管理员。回环信任（`auth.trustLoopback`）只确定调用身份；若 `server.subject` 对应的用户未通过初始化获得管理员角色，同样需要列入名单。
 
 管理面的组 owner 变更不能只看「自己根的 manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能接管别人的组。判定改用组根的主体集合。
 
@@ -3593,8 +3593,8 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 **一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
 
-- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（`assertSystemAdmin`，名单是 `auth.adminUserIds`，默认 `[]`），因为 `task` 表没有可求权的目标（§12.4）；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
-- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
+- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（§12.4），因为 `task` 表没有可求权的目标；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
+- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。「我的账户」并排显示登录账号与系统角色。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
 - **文件详情页的「记忆」区块回答「为什么搜不到」。** `memories/` 下的**文件**另请求一次 `GET /memories/{uri}`，显示记忆类型、状态、能否被检索与有效期。状态与类型取自**检索索引**而不是记忆文件的 frontmatter：TTL 归档只把索引行改成 `archived`，文件里仍是 `active`（§11.7），读文件会在归档后给出相反的答案。能否被检索由状态推导：检索只返回 `active`（索引的 `n.status = 'active'`），所以 `pending` 写「待复核，检索不到」并给「去复核」入口，`archived` 写「已归档，检索不到」并说明按 URI 仍可读取。没有恢复端点，因此不给恢复按钮——按了也做不成事。有效期来自记忆文件（索引的 `NodeStat` 没有这两列）。没有索引行、目录、`.history` 版本文件与 `.abstract.md` 显示「未知」，与请求失败分开。请求失败只影响这一块，正文、摘要、关联与权限照常渲染（`web/pages/files/[...path].vue`、`web/components/domain/SummaryPanel.vue`）。
