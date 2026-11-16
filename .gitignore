@@ -31,3 +31,5 @@ data/
 .idea/
 .vscode/
 *.swp
+
+.archify/
