@@ -148,6 +148,8 @@ test('the photo strip renders honest source links and rejects unsafe media URLs'
   assert.match(html, /href="https:\/\/commons.wikimedia.org\/wiki\/File:/)
   assert.match(html, /target="_blank"/)
   assert.match(html, /rel="noopener noreferrer"/)
+  assert.match(html, /https:\/\/www.openstreetmap.org\/export\/embed.html/)
+  assert.match(html, /href="https:\/\/www.openstreetmap.org\/relation\/21407754"/)
 
   const unsafeProgram = PHOTO_STRIP_OPENUI_PROGRAM.replace(
     'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Golden_Gate_Bridge_at_sunset_1.jpg/1280px-Golden_Gate_Bridge_at_sunset_1.jpg',
@@ -166,6 +168,27 @@ test('the photo strip renders honest source links and rejects unsafe media URLs'
   assert.doesNotMatch(unsafeHtml, /src="http:\/\//)
   assert.match(unsafeHtml, /data-photo-state="fallback"/)
   assert.match(unsafeHtml, /Image unavailable/)
+})
+
+test('PlaceMap rejects invalid coordinates and keeps the OpenStreetMap fallback link', () => {
+  const invalidProgram = PHOTO_STRIP_OPENUI_PROGRAM.replace(
+    'lat: 37.8182923',
+    'lat: 95'
+  )
+  const html = renderToStaticMarkup(
+    <OpenUISurface
+      identity="invalid-place-map"
+      onFollowUp={() => true}
+      sessionId="session-a"
+      source={invalidProgram}
+      streaming={false}
+    />
+  )
+
+  assert.doesNotMatch(html, /openstreetmap.org\/export\/embed.html/)
+  assert.match(html, /Map unavailable for this place/)
+  assert.match(html, /href="https:\/\/www.openstreetmap.org\/relation\/21407754"/)
+  assert.match(html, /Map data © OpenStreetMap contributors/)
 })
 
 test(
@@ -638,7 +661,7 @@ test(
 )
 
 test(
-  'PhotoStrip aligns three photos, preserves attribution, and falls back on load failure',
+  'PhotoStrip and PlaceMap align media, update one marker, and preserve fallback links',
   { timeout: 60_000 },
   async t => {
     const workspace = process.cwd()
@@ -708,11 +731,20 @@ test(
     })
     const page = await browser.newPage({ viewport: { height: 900, width: 900 } })
     const pageErrors: string[] = []
+    const mapRequests: string[] = []
     const photoRequests: string[] = []
 
     page.setDefaultTimeout(5_000)
     page.on('console', message => console.error(`[browser:${message.type()}] ${message.text()}`))
     page.on('pageerror', error => pageErrors.push(error.message))
+    await page.route('https://www.openstreetmap.org/export/embed.html**', async route => {
+      mapRequests.push(route.request().url())
+      await route.fulfill({
+        body: '<!doctype html><html><body><main data-local-osm-fixture>Local OpenStreetMap iframe fixture</main></body></html>',
+        contentType: 'text/html; charset=utf-8',
+        status: 200
+      })
+    })
     await page.route('https://upload.wikimedia.org/**', async route => {
       const fixture = LOCAL_PHOTO_FIXTURES[photoRequests.length % LOCAL_PHOTO_FIXTURES.length]
 
@@ -749,6 +781,74 @@ test(
       (await sourceLinks.evaluateAll(elements =>
         elements.map(element => [element.getAttribute('target'), element.getAttribute('rel')])
       )).every(([target, rel]) => target === '_blank' && rel === 'noopener noreferrer')
+    )
+
+    const map = page.locator('[data-hermes-openui-place-map]')
+    const mapFrame = map.locator('iframe')
+    const mapSelector = page.getByRole('combobox', { name: 'Choose a place on the map' })
+
+    await mapFrame.waitFor()
+    assert.equal(mapRequests.length, 1)
+
+    const initialMapUrl = new URL((await mapFrame.getAttribute('src')) ?? '')
+    const marker = (url: URL) => (url.searchParams.get('marker') ?? '').split(',').map(Number)
+    const bbox = initialMapUrl.searchParams.get('bbox')?.split(',').map(Number) ?? []
+    const [markerLat, markerLon] = marker(initialMapUrl)
+
+    assert.equal(initialMapUrl.origin + initialMapUrl.pathname, 'https://www.openstreetmap.org/export/embed.html')
+    assert.equal(initialMapUrl.searchParams.get('layer'), 'mapnik')
+    assert.equal(bbox.length, 4)
+    assert.ok(bbox[0]! < bbox[2]! && bbox[1]! < bbox[3]!)
+    assert.ok(Math.abs((bbox[1]! + bbox[3]!) / 2 - markerLat!) < 0.000001)
+    assert.ok(Math.abs((bbox[0]! + bbox[2]!) / 2 - markerLon!) < 0.000001)
+    assert.ok(Math.abs(bbox[3]! - bbox[1]! - 0.018) < 0.00001)
+    assert.ok(bbox[2]! - bbox[0]! > 0.02 && bbox[2]! - bbox[0]! < 0.05)
+    assert.equal(await mapFrame.getAttribute('sandbox'), 'allow-scripts allow-same-origin')
+    assert.equal(await map.getAttribute('data-selected-place'), 'Golden Gate Bridge')
+
+    const nextMapRequest = page.waitForRequest(request =>
+      request.url().includes('openstreetmap.org/export/embed.html') &&
+      request.url().includes('marker=37.802919%2C-122.448403')
+    )
+
+    await mapSelector.selectOption({ label: 'Palace of Fine Arts' })
+    await nextMapRequest
+    await page.waitForFunction(() => {
+      const frame = document.querySelector('[data-hermes-openui-place-map] iframe')
+      const src = frame?.getAttribute('src')
+      return src ? new URL(src).searchParams.get('marker') === '37.802919,-122.448403' : false
+    })
+    const changedMapUrl = new URL((await mapFrame.getAttribute('src')) ?? '')
+
+    assert.notEqual(changedMapUrl.searchParams.get('marker'), initialMapUrl.searchParams.get('marker'))
+    assert.equal(await map.getAttribute('data-selected-place'), 'Palace of Fine Arts')
+    assert.equal(mapRequests.length, 2)
+    assert.equal(await map.locator('.hermes-openui-place-map-frame .hermes-openui-place-map-open').count(), 0)
+    assert.equal(
+      await map
+        .getByRole('link', { name: 'Palace of Fine Arts on OpenStreetMap ↗' })
+        .getAttribute('href'),
+      'https://www.openstreetmap.org/way/288371295'
+    )
+    assert.equal(
+      await map.getByRole('link', { name: 'Map data © OpenStreetMap contributors' }).getAttribute('href'),
+      'https://www.openstreetmap.org/copyright'
+    )
+
+    await page.reload()
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-hermes-openui-place-map]')?.getAttribute('data-selected-place') ===
+        'Palace of Fine Arts'
+    )
+    await page.waitForFunction(() => {
+      const images = [...document.querySelectorAll('[data-hermes-openui-photo] img')]
+      return images.length === 3 && images.every(image => image instanceof HTMLImageElement && image.naturalWidth > 0)
+    })
+    assert.equal(await mapSelector.inputValue(), '1')
+    assert.equal(
+      new URL((await mapFrame.getAttribute('src')) ?? '').searchParams.get('marker'),
+      '37.802919,-122.448403'
     )
 
     const desktopLayout = await photos.evaluateAll(elements =>

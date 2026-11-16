@@ -243,6 +243,109 @@ a.hermes-openui-citation-link:hover {
 .hermes-openui-photo-source:hover {
   text-decoration-color: currentColor;
 }
+.hermes-openui-place-map {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.hermes-openui-place-map-title {
+  color: var(--oui-ink);
+  font-size: 12px;
+  font-weight: 640;
+  letter-spacing: .015em;
+  line-height: 1.4;
+  margin: 0;
+}
+.hermes-openui-place-map-frame {
+  aspect-ratio: 3 / 2;
+  background: var(--oui-surface);
+  border: 1px solid var(--oui-border);
+  border-radius: 18px;
+  isolation: isolate;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+.hermes-openui-place-map-embed {
+  border: 0;
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  width: 100%;
+  z-index: 0;
+}
+.hermes-openui-place-map-selector {
+  align-items: center;
+  backdrop-filter: blur(12px) saturate(1.4);
+  background: color-mix(in srgb, var(--oui-canvas) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--oui-ink) 10%, transparent);
+  border-radius: 999px;
+  box-shadow: 0 2px 12px rgb(0 0 0 / 8%);
+  display: flex;
+  left: 12px;
+  max-width: min(18rem, calc(100% - 24px));
+  min-height: 34px;
+  position: absolute;
+  top: 12px;
+  z-index: 2;
+}
+.hermes-openui-place-map-selector::after {
+  color: var(--oui-ink);
+  content: "⌄";
+  font-size: 13px;
+  line-height: 1;
+  pointer-events: none;
+  position: absolute;
+  right: 11px;
+}
+.hermes-openui-place-map-selector select {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--oui-ink);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.4;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 6px 32px 6px 12px;
+  width: 100%;
+}
+.hermes-openui-place-map-open {
+  color: var(--oui-ink);
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1.45;
+  text-decoration: none;
+}
+.hermes-openui-place-map-fallback {
+  align-content: center;
+  color: var(--oui-muted);
+  display: grid;
+  font-size: 12px;
+  gap: 7px;
+  height: 100%;
+  justify-items: start;
+  padding: 24px;
+}
+.hermes-openui-place-map-fallback a,
+.hermes-openui-place-map-footer a {
+  color: var(--oui-ink);
+  text-decoration-color: color-mix(in srgb, var(--oui-ink) 30%, transparent);
+  text-underline-offset: 2px;
+}
+.hermes-openui-place-map-footer {
+  align-items: baseline;
+  color: var(--oui-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 10px;
+  gap: 4px 12px;
+  justify-content: space-between;
+  line-height: 1.45;
+}
 .hermes-openui-row {
   align-items: center;
   display: flex;
@@ -568,7 +671,11 @@ a.hermes-openui-citation-link:hover {
 .hermes-openui-action:focus-visible,
 .hermes-openui-segmented button:focus-visible,
 .hermes-openui-citation-link:focus-visible,
-.hermes-openui-photo-source:focus-visible {
+.hermes-openui-photo-source:focus-visible,
+.hermes-openui-place-map-selector select:focus-visible,
+.hermes-openui-place-map-open:focus-visible,
+.hermes-openui-place-map-footer a:focus-visible,
+.hermes-openui-place-map-fallback a:focus-visible {
   outline: 2px solid var(--oui-ink);
   outline-offset: 3px;
 }
@@ -628,6 +735,14 @@ a.hermes-openui-citation-link:hover {
   }
   .hermes-openui-photo-credit {
     font-size: 9.5px;
+  }
+  .hermes-openui-place-map-frame {
+    border-radius: 14px;
+  }
+  .hermes-openui-place-map-selector {
+    left: 9px;
+    max-width: calc(100% - 18px);
+    top: 9px;
   }
   .hermes-openui-action {
     justify-self: start;

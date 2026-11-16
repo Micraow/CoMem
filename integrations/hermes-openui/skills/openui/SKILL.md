@@ -21,8 +21,9 @@ to decorate a complete answer.
 3. Put the source in one HTML comment. Start with `root`, then refer forward
    to statements defined afterward so the answer can render progressively.
 4. Use `Card` for the unboxed answer surface. Use `Row`, `KPI`,
-   `SegmentedControl`, `CitationList`, `PhotoStrip`, `BenchmarkBars`,
-   `Insight`, `Slider`, `Caption`, `Text`, and `Button` as needed.
+   `SegmentedControl`, `CitationList`, `PhotoStrip`, `PlaceMap`,
+   `BenchmarkBars`, `Insight`, `Slider`, `Caption`, `Text`, and `Button` as
+   needed.
 5. Bind `SegmentedControl` and `Slider` values to `$variables`. Visible output
    or the explicit `@ToAssistant` action must use every control value.
 6. Give `Card` a specific title and at most one useful description. Do not use
@@ -39,6 +40,11 @@ to decorate a complete answer.
     license, and `https` source-page URL:
     `PhotoStrip([{ src, alt, label, credit, license, sourceUrl }], "Title")`.
     Do not search for photos in the browser or draw substitute imagery.
+11. Use `PlaceMap` only for verified coordinates and OpenStreetMap place pages:
+    `PlaceMap([{ name, lat, lon, sourceUrl }], "Title")`. The component builds
+    its own fixed OpenStreetMap embed URL and one selected marker. Do not
+    invent routes, travel times, or transit claims, and keep the separate
+    OpenStreetMap source and attribution links.
 
 Avoid nested form panels, ornamental empty shapes, and controls that only send
 a message. A compact source list, one semantic local view, and one explicit

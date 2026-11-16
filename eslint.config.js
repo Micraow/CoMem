@@ -29,6 +29,7 @@ export default tseslint.config(
       'docs/**',
       'web/**',
       'integrations/hermes-openui/desktop/plugin.js',
+      'integrations/hermes-openui/.plugin-test-*/**',
     ],
   },
   js.configs.recommended,
