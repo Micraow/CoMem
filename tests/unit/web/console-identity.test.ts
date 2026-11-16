@@ -11,6 +11,7 @@ import {
   bootstrapConsoleIdentity,
   consoleIdentityOrThrow,
   consoleIdentityState,
+  consoleScopeLabel,
   identityHeaders,
   logoutConsole,
   setConsoleIdentity,
@@ -19,6 +20,13 @@ import {
 
 const BASE = 'https://console.example.test/api/v1';
 const SUBJECT = 'user:alice';
+
+describe('空间标签', () => {
+  it('个人根和组根使用用户可见的名称', () => {
+    expect(consoleScopeLabel('comem://user/alice', SUBJECT)).toBe('个人空间');
+    expect(consoleScopeLabel('comem://group/eng', SUBJECT)).toBe('团队 · eng');
+  });
+});
 
 /**
  * 控制台身份引导的单元测试。
@@ -76,7 +84,7 @@ describe('请求头', () => {
     try {
       clearConsoleSession();
       writeConsoleSession(sessionOf());
-      setConsoleIdentity({ subject: SUBJECT, scopes: [] });
+      setConsoleIdentity({ subject: SUBJECT, scopes: [], isAdmin: false });
       expect(identityHeaders()).toEqual({ authorization: 'Bearer v1.test.token' });
 
       // 另一个标签页登出 / 用户手动清存储：模块级缓存不能继续发旧 token。
@@ -187,6 +195,10 @@ describe('身份引导的状态机（GET /bootstrap 优先）', () => {
         routedRequest(
           {
             [`${BASE}/bootstrap`]: { status: 'ok', result: BOOTSTRAP },
+            [`${BASE}/auth/me`]: {
+              status: 'ok',
+              result: { subject: SUBJECT, principals: [SUBJECT, 'group:eng'], isAdmin: false },
+            },
             [`${BASE}/fs/tree?uri=comem%3A%2F%2Fuser%2Falice&depth=1&limit=1`]: {
               status: 'ok',
               result: {},
@@ -200,11 +212,72 @@ describe('身份引导的状态机（GET /bootstrap 优先）', () => {
 
       expect(state).toEqual({
         status: 'ready',
-        identity: { subject: SUBJECT, scopes: ['comem://user/alice'] },
+        identity: { subject: SUBJECT, scopes: ['comem://user/alice'], isAdmin: false },
       });
-      // 两个候选根各探测一次；组根 404 被跳过。
-      expect(calls).toHaveLength(3);
+      // 当前身份策略一次，两个候选根各探测一次；组根 404 被跳过。
+      expect(calls).toHaveLength(4);
       expect(calls[0]).toBe(`GET ${BASE}/bootstrap`);
+      expect(calls[1]).toBe(`GET ${BASE}/auth/me`);
+    } finally {
+      Reflect.deleteProperty(globalThis, 'sessionStorage');
+    }
+  });
+
+  it('刷新时用 /auth/me 的当前组关系探测团队空间', async () => {
+    const storage = new Map<string, string>();
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: {
+        getItem: (key: string): string | null => storage.get(key) ?? null,
+        setItem: (key: string, value: string): void => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string): void => {
+          storage.delete(key);
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    try {
+      clearConsoleSession();
+      writeConsoleSession({
+        token: 'v1.test.token',
+        subject: SUBJECT,
+        // 登录响应可能落后于刚加入的组；刷新不能继续按这份旧关系探测。
+        principals: [SUBJECT],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      const state = await bootstrapConsoleIdentity(
+        BASE,
+        routedRequest({
+          [`${BASE}/bootstrap`]: { status: 'ok', result: BOOTSTRAP },
+          [`${BASE}/auth/me`]: {
+            status: 'ok',
+            result: {
+              subject: SUBJECT,
+              principals: [SUBJECT, 'group:eng'],
+              isAdmin: true,
+            },
+          },
+          [`${BASE}/fs/tree?uri=comem%3A%2F%2Fuser%2Falice&depth=1&limit=1`]: {
+            status: 'ok',
+            result: {},
+          },
+          [`${BASE}/fs/tree?uri=comem%3A%2F%2Fgroup%2Feng&depth=1&limit=1`]: {
+            status: 'ok',
+            result: {},
+          },
+        }),
+      );
+
+      expect(state).toEqual({
+        status: 'ready',
+        identity: {
+          subject: SUBJECT,
+          scopes: ['comem://user/alice', 'comem://group/eng'],
+          isAdmin: true,
+        },
+      });
     } finally {
       Reflect.deleteProperty(globalThis, 'sessionStorage');
     }

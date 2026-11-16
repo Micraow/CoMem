@@ -155,21 +155,17 @@ export class UserRepository {
     return String(row['session_epoch']);
   }
 
-  /**
-   * 写密码哈希，**同时轮换身份版本**。用户不存在返回 `false`（不抛，与 `update` 一致）。
-   *
-   * 轮换是改密码语义的一部分：改密码的用途之一就是「让泄露的凭据立刻失效」。只换
-   * 哈希不换版本，已签发的 session token 会在整个 `exp` 窗口内继续有效——W47a 之前
-   * 的「改密码不踢线」限制就是这条。
-   */
-  setPasswordHash(id: string, passwordHash: string, now: Date): boolean {
+  /** 写哈希并轮换身份版本；传入 `expectedHash` 时只在该哈希仍匹配时更新。 */
+  setPasswordHash(id: string, passwordHash: string, now: Date, expectedHash?: string): boolean {
+    const expected = expectedHash ?? null;
     const changed = Number(
       withWriteTransaction(this.#db, () =>
         this.#db
           .prepare(
-            'UPDATE app_user SET password_hash = ?, session_epoch = ?, updated_at = ? WHERE id = ?',
+            `UPDATE app_user SET password_hash = ?, session_epoch = ?, updated_at = ?
+             WHERE id = ? AND (? IS NULL OR password_hash = ?)`,
           )
-          .run(passwordHash, randomUUID(), now.toISOString(), id).changes,
+          .run(passwordHash, randomUUID(), now.toISOString(), id, expected, expected).changes,
       ),
     );
     this.#logger.debug('用户密码已更新', { userId: id, changed });

@@ -439,6 +439,23 @@ auth:
 `POST /bootstrap/admin` 里写入）。把它的 ID 写进 `auth.adminUserIds` 再重启，否则登录
 成功却管不了任何人。
 
+### 自助账号安全
+
+登录用户修改自己的密码走 `POST /api/v1/auth/password`：
+
+```bash
+curl -sS -X POST http://127.0.0.1:1933/api/v1/auth/password \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"currentPassword":"当前密码","newPassword":"新密码"}'
+```
+
+端点从 Bearer 身份确定目标，请求体没有用户 ID。当前密码错误或同时改密码的请求已经
+先成功时，返回 400 `INVALID_ARGUMENT`，`details.field` 为 `currentPassword`；这次失败
+不会让当前 session token 失效。成功后 `session_epoch` 轮换，已有 session token 下次
+请求 401，需要重新登录；API Key 保持有效，可在登录态中用下面同一个 owner ACL 路由
+查看和撤销。`POST /admin/users/{id}/password` 只用于管理员或有目标根 `manage` 的调用方
+重置**其他用户**；把 `id` 指向自己会返回 400，避免绕过当前密码。
+
 ### 建第一个账号
 
 一条路径：起服务 → 从启动日志拿初始化令牌 → `/setup` 建管理员 → 登录。本地开发、
@@ -593,7 +610,7 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   不在 HTTP 管理面）。
 - **召回账本是缓存，删账号 / 组时一起删。** `_meta/recall/*.recall_log.json` 记的是
   「这个作用域投过哪些 URI」。`DELETE /admin/users/{id}` 与 `/admin/groups/{id}` 在撤权
-  之前先删对应账本（`src/api/http/routes/admin-users.ts:114`、`src/api/http/routes/admin-groups.ts:181`），同 ID 重建的账号不会继承
+  之前先删对应账本（`src/api/http/routes/admin-users.ts:119`、`src/api/http/routes/admin-groups.ts:181`），同 ID 重建的账号不会继承
   去重状态。账本是缓存，删除的代价只是「多投一次」；先删它，失败时什么都没动。
 - **`node_embedding` 按 URI 留旧向量。** 向量行带 `content_digest`：正文变了就重算，
   正文没变就复用。它只回答「这段正文的向量是什么」，不携带授权信息，所以删账号不清
@@ -2238,7 +2255,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
 18. **`ingest_cursor` 不随账号删除。** 游标表按 `(harness, native_session_id)` 存
     `session_uri` 与 `cursor_value` 列，行类型 `IngestCursorRow`（`src/adapters/sqlite/ingest-cursor-repository.ts:25`），
     而 `IdentityService.deleteUser` 只清身份行、成员关系、API Key、组 owner 与召回账本
-    （`src/services/identity.ts:210`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
+    （`src/services/identity.ts:197`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
     原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest/session-ingest.ts:52`），
     读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest/session-ingest.ts:109`），新账号的会话
     目录里没有消息。恢复：删掉对应行再重跑导入

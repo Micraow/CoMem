@@ -29,11 +29,13 @@ export interface UserRowPayload {
   readonly createdAt: string
   readonly updatedAt: string
   readonly permissionCount: number
+  /** 服务端系统管理员策略：`auth.adminUserIds` 或引导管理员。 */
+  readonly isAdmin: boolean
 }
 </script>
 
 <script setup lang="ts">
-import { KeyRound, Pencil, Trash2, UserRound, Users } from 'lucide-vue-next'
+import { KeyRound, Pencil, ShieldCheck, Trash2, UserRound, Users } from 'lucide-vue-next'
 
 import { formatDateTime } from '~/utils/format'
 import { userStatusLabel } from '~/utils/userLabels'
@@ -45,6 +47,8 @@ const props = defineProps<{
   offset: number
   loading: boolean
   error: string | null
+  /** 当前登录用户 ID；用于把自己的凭据操作导向账户页。 */
+  currentUserId: string
 }>()
 
 const emit = defineEmits<{
@@ -54,6 +58,15 @@ const emit = defineEmits<{
   delete: [user: UserRowPayload]
   page: [offset: number]
 }>()
+
+function systemRoleOf(user: UserRowPayload): {
+  readonly label: string
+  readonly variant: 'green' | 'gray'
+} {
+  return user.isAdmin
+    ? { label: '系统管理员', variant: 'green' }
+    : { label: '普通用户', variant: 'gray' }
+}
 </script>
 
 <template>
@@ -79,6 +92,7 @@ const emit = defineEmits<{
             <th>显示名</th>
             <th>邮箱</th>
             <th>状态</th>
+            <th>系统角色</th>
             <th>登录密码</th>
             <th>创建时间</th>
             <th class="num">操作</th>
@@ -98,12 +112,17 @@ const emit = defineEmits<{
               </UiBadge>
             </td>
             <td>
+              <UiBadge :variant="systemRoleOf(user).variant">
+                {{ systemRoleOf(user).label }}
+              </UiBadge>
+            </td>
+            <td>
               <div class="password-cell">
                 <UiBadge :variant="user.hasPassword ? 'gray' : 'orange'">
                   {{ user.hasPassword ? '已设密码' : '未设密码' }}
                 </UiBadge>
                 <UiButton
-                  v-if="!user.hasPassword"
+                  v-if="!user.hasPassword && user.id !== props.currentUserId"
                   variant="plain"
                   size="sm"
                   :disabled="props.loading"
@@ -112,6 +131,9 @@ const emit = defineEmits<{
                   <KeyRound :size="13" :stroke-width="1.5" />
                   设密码
                 </UiButton>
+                <span v-else-if="!user.hasPassword" class="caption">
+                  在「我的账户」中设置
+                </span>
               </div>
             </td>
             <td>
@@ -127,10 +149,16 @@ const emit = defineEmits<{
                   :disabled="props.loading"
                   @click="emit('detail', user)"
                 >
-                  <UserRound :size="13" :stroke-width="1.5" />
-                  详情
+                  <ShieldCheck
+                    v-if="user.id === props.currentUserId"
+                    :size="13"
+                    :stroke-width="1.5"
+                  />
+                  <UserRound v-else :size="13" :stroke-width="1.5" />
+                  {{ user.id === props.currentUserId ? '我的账户' : '详情' }}
                 </UiButton>
                 <UiButton
+                  v-if="user.id !== props.currentUserId"
                   variant="plain"
                   size="sm"
                   :disabled="props.loading"
@@ -140,6 +168,7 @@ const emit = defineEmits<{
                   编辑
                 </UiButton>
                 <UiButton
+                  v-if="user.id !== props.currentUserId"
                   variant="plain"
                   size="sm"
                   :disabled="props.loading"
@@ -175,6 +204,8 @@ const emit = defineEmits<{
 <style scoped>
 .rowflex--end {
   justify-content: flex-end;
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 /* 徽章与补救入口同一行：看到「未设密码」的位置就能点「设密码」。 */

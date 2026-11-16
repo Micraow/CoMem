@@ -17,11 +17,11 @@
  * 动作**没生效。前者进页面内的提示条，后者走 toast，不把整页标成坏的。口令不合规
  * 是例外：它属于「密码」这个字段，原文挂在该字段旁，不要求用户再看一眼 toast。
  *
- * ## 给账号设密码有三条路
+ * ## 凭据按操作者分开
  *
- * 新建时直接填（可选）、列表行内「设密码」、详情抽屉的「密码」页签。后者两个入口
- * 共用 `UserPasswordForm.vue`，校验与错误落点只有一份；新建对话框要把密码和账号
- * 信息一起提交，单独一套字段。
+ * 管理员在这里为其他用户委派重设密码；当前登录用户自己的密码与 API Key 由
+ * 「我的账户」管理。自己的行仍给出入口，但点击后切到账户页——自助改密码需要当前
+ * 密码，不能借用管理员的重设端点。
  *
  * 密码留空是合法状态：账号可以作为 ACL 主体存在、用 API Key 接入，只是不能登录。
  * 列表的「登录密码」列把这件事写出来，否则用户只会看到「用户名或密码错误」。
@@ -33,14 +33,14 @@
  * （§11）；这里与概览页、任务表一致，显示「需要管理员权限」的空态，不显示成错误。
  * 重试不会改变结果。其它失败仍显示服务端消息——那是排查用的诊断信息。
  *
- * 侧栏入口不做角色隐藏：前端不知道谁是管理员（那需要后端暴露一个权限标志）。
- * 页内的「新建」按钮在 forbidden 时收起——页面已经说明了不能用，就不留一个注定
- * 失败的入口。
+ * 侧栏入口按 `GET /auth/me` 的真实管理员标志显示；直接访问本页时仍以服务端 403
+ * 为准。页内的「新建」按钮在 forbidden 时收起。
  */
-import { Copy, Plus } from 'lucide-vue-next'
+import { Copy, Plus, ShieldCheck } from 'lucide-vue-next'
 
 import { ApiClientError, errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
+import { consoleIdentityState } from '~/composables/consoleIdentity'
 import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 import { isRecord } from '~/utils/record'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
@@ -105,6 +105,12 @@ const PAGE_SIZE = 100
 
 const api = useApi()
 const toast = useToast()
+const identityState = consoleIdentityState()
+const currentUserId = computed(() => {
+  const subject =
+    identityState.status === 'ready' ? identityState.identity.subject : 'user:unknown'
+  return subject.startsWith('user:') ? subject.slice('user:'.length) : ''
+})
 
 const tab = ref<Tab>('users')
 
@@ -300,10 +306,18 @@ async function loadGroups(): Promise<void> {
 }
 
 function openUserDetail(user: UserRowPayload): void {
+  if (user.id === currentUserId.value) {
+    void navigateTo('/account')
+    return
+  }
   detailUser.value = user
 }
 
 function openUserPassword(user: UserRowPayload): void {
+  if (user.id === currentUserId.value) {
+    void navigateTo('/account')
+    return
+  }
   passwordUser.value = user
 }
 
@@ -637,6 +651,10 @@ onMounted(() => {
     <div class="page">
       <DomainPageHeader title="用户与组">
         <template v-if="!forbidden" #actions>
+          <NuxtLink to="/acl" class="btn btn--secondary btn--sm">
+            <ShieldCheck :size="14" :stroke-width="1.6" />
+            数据权限
+          </NuxtLink>
           <UiButton variant="primary" size="sm" @click="openCreate">
             <Plus :size="14" :stroke-width="1.8" />
             {{ createLabel }}
@@ -659,6 +677,7 @@ onMounted(() => {
           :offset="usersOffset"
           :loading="usersLoading"
           :error="usersError"
+          :current-user-id="currentUserId"
           @detail="openUserDetail"
           @edit="openEditUser"
           @password="openUserPassword"
@@ -772,6 +791,7 @@ onMounted(() => {
     <DomainUserDetail
       v-model="detailUserOpen"
       :user="detailUser"
+      :current-user-id="currentUserId"
       @password-saved="onDetailPasswordSaved"
     />
 
@@ -844,9 +864,31 @@ onMounted(() => {
       </form>
     </UiDialog>
 
-    <UiDialog v-model="detailOpen" placement="left" :title="detailGroup === null ? '组成员' : `组 ${detailGroup.id}`">
-      <div class="stack-16 drawer-body">
-        <p class="caption">共 {{ members.length }} 个成员</p>
+    <UiDialog
+      v-model="detailOpen"
+      :title="detailGroup === null ? '组成员' : `组 ${detailGroup.id}`"
+    >
+      <div class="stack-16 group-detail">
+        <div class="group-summary">
+          <div>
+            <span>所有者</span>
+            <b class="mono">{{ detailGroup?.ownerUserId ?? '无所有者' }}</b>
+          </div>
+          <div>
+            <span>成员</span>
+            <b>{{ members.length }}</b>
+          </div>
+        </div>
+
+        <UiCallout tone="info">
+          <div class="group-acl">
+            <span>成员身份决定主体展开；具体数据给谁读取、写入或管理，请到权限管理中按节点设置。</span>
+            <NuxtLink to="/acl" class="btn btn--secondary btn--sm">
+              <ShieldCheck :size="14" :stroke-width="1.6" />
+              打开权限管理
+            </NuxtLink>
+          </div>
+        </UiCallout>
 
         <UiErrorCallout v-if="membersError !== null" :message="membersError" />
 
@@ -940,14 +982,56 @@ onMounted(() => {
   word-break: break-word;
 }
 
+.group-detail {
+  min-width: 0;
+}
+
+.group-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.group-summary > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+  box-shadow: var(--inset-hair);
+}
+
+.group-summary span {
+  color: var(--label-3);
+  font-size: 13px;
+}
+
+.group-summary b {
+  overflow: hidden;
+  color: var(--label);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-acl {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.group-acl span {
+  flex: 1;
+}
+
+.group-acl :deep(.btn) {
+  flex: none;
+}
+
 .member-input {
   flex: 1;
   min-width: 160px;
-}
-
-/* 左侧抽屉的 `.dialog__body` 去掉了内边距（移动端导航复用同一套样式）。 */
-.drawer-body {
-  padding: 20px;
 }
 
 .command {
@@ -961,5 +1045,12 @@ onMounted(() => {
   line-height: 1.5;
   overflow-wrap: anywhere;
   user-select: all;
+}
+
+@media (max-width: 600px) {
+  .group-acl {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 </style>

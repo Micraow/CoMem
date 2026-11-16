@@ -73,6 +73,17 @@ async function login(username = 'local', password = PASSWORD): Promise<string> {
   return String(result['token']);
 }
 
+async function seedUser(id: string): Promise<void> {
+  const adminToken = await login();
+  const created = await inject({
+    method: 'POST',
+    url: '/api/v1/admin/users',
+    headers: bearer(adminToken),
+    payload: { id, displayName: id, password: PASSWORD },
+  });
+  expect(created.statusCode, created.body).toBe(200);
+}
+
 function bearer(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
 }
@@ -144,6 +155,255 @@ describe('登录', () => {
   });
 });
 
+describe('账号安全', () => {
+  it('GET /auth/me 保留 subject / principals，并从系统管理员策略返回 isAdmin', async () => {
+    await seedUser('alice');
+    const [localToken, aliceToken] = await Promise.all([login(), login('alice')]);
+
+    const local = await inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: bearer(localToken),
+    });
+    expect(local.statusCode).toBe(200);
+    expect(json(local)['result']).toEqual({
+      subject: 'user:local',
+      principals: ['user:local', 'user:*'],
+      isAdmin: true,
+    });
+
+    const alice = await inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: bearer(aliceToken),
+    });
+    expect(alice.statusCode).toBe(200);
+    expect(json(alice)['result']).toMatchObject({
+      subject: 'user:alice',
+      isAdmin: false,
+    });
+    expect((json(alice)['result'] as Record<string, unknown>)['principals']).toContain(
+      'user:alice',
+    );
+  });
+
+  it('自助改密码需要认证，错误当前密码返回 currentPassword 字段且不使登录态失效', async () => {
+    await seedUser('alice');
+    const aliceToken = await login('alice');
+    const endpoint = '/api/v1/auth/password';
+
+    expect(
+      (
+        await inject({
+          method: 'POST',
+          url: endpoint,
+          payload: { currentPassword: PASSWORD, newPassword: 'alice-new-password' },
+        })
+      ).statusCode,
+    ).toBe(401);
+
+    const wrong = await inject({
+      method: 'POST',
+      url: endpoint,
+      headers: bearer(aliceToken),
+      payload: { currentPassword: 'wrong-password', newPassword: 'alice-new-password' },
+    });
+    expect(wrong.statusCode).toBe(400);
+    expect(json(wrong)['error']).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { field: 'currentPassword' },
+    });
+    expect(wrong.body).not.toContain('wrong-password');
+    expect(wrong.body).not.toContain('alice-new-password');
+
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/auth/me',
+          headers: bearer(aliceToken),
+        })
+      ).statusCode,
+    ).toBe(200);
+    await expect(login('alice')).resolves.toEqual(expect.any(String));
+    expect(
+      (
+        await inject({
+          method: 'POST',
+          url: '/api/v1/auth/login',
+          payload: { username: 'alice', password: 'alice-new-password' },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
+  it('新密码走共享策略；失败不轮换身份版本', async () => {
+    await seedUser('alice');
+    const aliceToken = await login('alice');
+    const rejected = await inject({
+      method: 'POST',
+      url: '/api/v1/auth/password',
+      headers: bearer(aliceToken),
+      payload: { currentPassword: PASSWORD, newPassword: '1234567' },
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(json(rejected)['error']).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { field: 'password' },
+    });
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/auth/me',
+          headers: bearer(aliceToken),
+        })
+      ).statusCode,
+    ).toBe(200);
+    await expect(login('alice')).resolves.toEqual(expect.any(String));
+  });
+
+  it('成功只更新当前用户，响应不回显凭据，并轮换 session 身份版本', async () => {
+    await seedUser('alice');
+    const aliceToken = await login('alice');
+    const newPassword = 'alice-rotated-password';
+    const changed = await inject({
+      method: 'POST',
+      url: '/api/v1/auth/password',
+      headers: bearer(aliceToken),
+      // 额外目标字段不能把更新导向 local。
+      payload: { id: 'local', currentPassword: PASSWORD, newPassword },
+    });
+    expect(changed.statusCode).toBe(200);
+    expect(json(changed)['result']).toEqual({ passwordChanged: true });
+    expect(changed.body).not.toContain(PASSWORD);
+    expect(changed.body).not.toContain(newPassword);
+    expect(changed.body).not.toContain('scrypt$');
+
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/auth/me',
+          headers: bearer(aliceToken),
+        })
+      ).statusCode,
+    ).toBe(401);
+    await expect(login()).resolves.toEqual(expect.any(String));
+    expect(
+      (
+        await inject({
+          method: 'POST',
+          url: '/api/v1/auth/login',
+          payload: { username: 'alice', password: PASSWORD },
+        })
+      ).statusCode,
+    ).toBe(401);
+    await expect(login('alice', newPassword)).resolves.toEqual(expect.any(String));
+  });
+
+  it('管理端点不能重置自己的密码；委派重置其他用户仍可用', async () => {
+    await seedUser('alice');
+    const [adminToken, aliceToken] = await Promise.all([login(), login('alice')]);
+    for (const [id, token] of [
+      ['local', adminToken],
+      ['alice', aliceToken],
+    ] as const) {
+      const rejected = await inject({
+        method: 'POST',
+        url: `/api/v1/admin/users/${id}/password`,
+        headers: bearer(token),
+        payload: { password: 'self-reset-bypass' },
+      });
+      expect(rejected.statusCode, id).toBe(400);
+      expect(json(rejected)['error']).toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        details: { field: 'id' },
+      });
+    }
+
+    const delegated = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users/alice/password',
+      headers: bearer(adminToken),
+      payload: { password: 'delegated-reset' },
+    });
+    expect(delegated.statusCode).toBe(200);
+    await expect(login('alice', 'delegated-reset')).resolves.toEqual(expect.any(String));
+  });
+
+  it('普通用户可用既有 owner ACL 路由自助管理 API Key；并发改密码只有一个成功', async () => {
+    await seedUser('alice');
+    const aliceToken = await login('alice');
+    const created = await inject({
+      method: 'POST',
+      url: '/api/v1/admin/users/alice/api-keys',
+      headers: bearer(aliceToken),
+      payload: { name: 'self-service' },
+    });
+    expect(created.statusCode, created.body).toBe(200);
+    const key = json(created)['result'] as Record<string, unknown>;
+
+    const endpoint = '/api/v1/auth/password';
+    const changes = await Promise.all(
+      ['alice-race-one', 'alice-race-two'].map((newPassword) =>
+        inject({
+          method: 'POST',
+          url: endpoint,
+          headers: bearer(String(key['key'])),
+          payload: { currentPassword: PASSWORD, newPassword },
+        }),
+      ),
+    );
+    expect(changes.map((response) => response.statusCode).sort()).toEqual([200, 400]);
+    expect(
+      json(changes.find((response) => response.statusCode === 400) ?? changes[0] ?? { body: '' })[
+        'error'
+      ],
+    ).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { field: 'currentPassword' },
+    });
+    const loginStatuses = await Promise.all(
+      [PASSWORD, 'alice-race-one', 'alice-race-two'].map(
+        async (password) =>
+          (
+            await inject({
+              method: 'POST',
+              url: '/api/v1/auth/login',
+              payload: { username: 'alice', password },
+            })
+          ).statusCode,
+      ),
+    );
+    expect(loginStatuses.sort()).toEqual([200, 401, 401]);
+
+    const listed = await inject({
+      method: 'GET',
+      url: '/api/v1/admin/users/alice/api-keys',
+      headers: bearer(String(key['key'])),
+    });
+    expect(listed.statusCode, listed.body).toBe(200);
+    expect(listed.body).not.toContain(String(key['key']));
+
+    const revoked = await inject({
+      method: 'DELETE',
+      url: `/api/v1/admin/api-keys/${String(key['id'])}`,
+      headers: bearer(String(key['key'])),
+    });
+    expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(
+      (
+        await inject({
+          method: 'GET',
+          url: '/api/v1/auth/me',
+          headers: bearer(String(key['key'])),
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+});
+
 describe('删账号与改密码撤销访问', () => {
   /**
    * 回归：token 载荷只有用户 ID 时，「删账号」不撤销访问——同 ID 重建后旧 token
@@ -205,9 +465,9 @@ describe('删账号与改密码撤销访问', () => {
     const token = await login();
     const changed = await inject({
       method: 'POST',
-      url: '/api/v1/admin/users/local/password',
+      url: '/api/v1/auth/password',
       headers: bearer(token),
-      payload: { password: 'rotated-password' },
+      payload: { currentPassword: PASSWORD, newPassword: 'rotated-password' },
     });
     expect(changed.statusCode).toBe(200);
 

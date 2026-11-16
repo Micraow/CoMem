@@ -2908,7 +2908,8 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | `rm` / `mv` | manage |
 | `getAcl` / `setAcl` | manage |
 | 改组 owner（`POST /admin/groups/{id}/owner`） | 当前 owner、系统管理员，或组根 manage |
-| 用户管理（改密码、改资料、启用禁用、删除） | 对 `comem://user/{id}` 求 manage |
+| 用户管理（委派改密码、改资料、启用禁用、删除） | 对目标 `comem://user/{id}` 求 manage；改密码不能以自己的 ID 为目标 |
+| 自助改密码（`POST /auth/password`） | 只更新当前 `subject`，并校验 `currentPassword` |
 | API Key（签发、列出、吊销） | 对**持有者**的 `comem://user/{id}` 求 manage |
 | 组管理（改资料、删除、加退成员） | 对 `comem://group/{gid}` 求 manage |
 | 提示词（`GET`） | 任何已认证身份 |
@@ -3059,15 +3060,30 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 | 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `boundSubject` / `adminConfigured`。控制台在拿到身份之前调它；`needsSetup` 就是「`app_user` 里没有任何密码哈希」。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
+| 当前身份 | `GET /api/v1/auth/me` | `{subject, principals, isAdmin}`；`isAdmin` 使用系统管理员策略 |
+| 自助改密码 | `POST /api/v1/auth/password` | 已认证请求，`{currentPassword, newPassword}`；只改当前 `subject`，成功后轮换 `session_epoch`，已有 session token 下次请求 401 |
 | 建用户 | `POST /api/v1/admin/users` | `{id, displayName, email?, password?}`，系统管理员（§12.4）。`password` 省略时建出无密码账号（先当 ACL 主体用），传了则**先过口令策略再建账号**、一次完成建账号 + 设密码；响应带 `hasPassword` |
 | 列用户 | `GET /api/v1/admin/users` | 每一项带 `hasPassword`：只由 `app_user.password_hash` 非空派生，不回哈希或其任何派生值 |
-| 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4）；口令策略与建用户同一份 |
+| 委派设密码 | `POST /api/v1/admin/users/{id}/password` | 对**其他**目标用户根 `manage`，或系统管理员；请求目标必须是当前 `subject` 以外的用户，否则 400 并指向自助入口；口令策略与建用户同一份 |
 | 签发 key | `POST /api/v1/admin/users/{id}/api-keys` | 对目标用户根 `manage`，或系统管理员；明文只在创建响应里出现一次 |
 | 列出 key | `GET /api/v1/admin/users/{id}/api-keys` | 同上；只回 `prefix`，永不回哈希 |
 | 撤销 key | `DELETE /api/v1/admin/api-keys/{keyId}` | 先反查持有者，再对持有者的根求 `manage`，或系统管理员；幂等 |
 
 **改密码 / 撤销凭据是唯一的「让 token 立刻失效」入口。** 认证恒开之后没有
 「关掉认证」这个开关，撤销只能针对具体凭据（§12.7 的 session token 段）。
+
+**自助改密码与委派重置是两条不同的信任路径。** 自助入口从认证中间件取得当前
+`subject`，请求体没有目标用户 ID，因此不能改另一个账号；它先校验
+`currentPassword`，再用旧哈希作为比较交换条件写新哈希。当前密码错误或并发请求
+已先换掉哈希时返回 400 `INVALID_ARGUMENT`，`details.field` 为
+`currentPassword`，前端保留登录态让用户重试。校验通过后沿用 `setPasswordHash`
+轮换 `session_epoch`：session token 立即失效，API Key 不随密码轮换而撤销。
+
+**管理端点的自助绕过已关闭。** 目标用户根对本人恒有 `manage`，所以管理端点若接受
+`id === 当前用户`，任何登录用户都能跳过当前密码重置自己的密码。该组合现在返回
+400，并只接受 `POST /auth/password`。委派重置其他用户仍走目标根 `manage` 或系统
+管理员，这是管理员协助恢复账号的既有契约；忘记密码且没有可用登录态时仍用
+`pnpm password` 恢复。
 
 ### 12.8 ACL 写入的锁契约
 
@@ -3218,7 +3234,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 ## 14. HTTP API
 
-自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals}`，含组成员身份。
+自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals, isAdmin}`，含组成员身份与系统管理员判定。
 
 统一前缀 `/api/v1`。记忆复核等端点把完整的 percent-encoded `comem://` URI 放在一个路径参数里；路由器允许该参数最多 4 KiB，避免合法的长主题和多层路径在进入 URI 校验前被 Fastify 默认的 100 字符限制拒绝。响应封套：
 
@@ -3241,7 +3257,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
 | 本地推理 | `GET /inference/local`、`POST /inference/local/start`、`POST /inference/local/stop`。三个都只认系统管理员；启动命令与 pid 管理见 §18.2 |
 | 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验） |
-| 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`POST /auth/login`、`POST /auth/logout`（§12.7） |
+| 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`GET /auth/me`、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（§12.7） |
 | MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
@@ -3556,17 +3572,18 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 ## 16. Web 控制台
 
-Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用户部署下出现的登录页：
+Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 | 页面 | 内容 |
 |---|---|
 | 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
+| 我的账户 | 右上角进入；显示本人系统角色，管理自己的 API Key，验证当前密码后可换新密码并重新登录 |
 | 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
 | 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块，文件还有「记忆」区块（类型、状态、能否被检索、有效期） |
 | 检索 | 输入 query，选「直接查找 / 先理解再检索」，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4）；结果标题用摘要或文件名、URI 降为第二行；右上角如实显示实际引擎（关键词匹配 / 向量检索 / 混合检索，读 `GET /health` 的 `retrieval.engine`）；0 命中区分「库空」与「无匹配」，并说明关键词引擎的边界 |
 | 记忆复核 | 待确认列表优先显示更新与推断偏好；详情展示正文、真实的版本差异及来源；逐条更新通过 / 拒绝的结果 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
-| 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
+| 用户与组 | 系统管理员入口；用户列表显示服务器判定的角色，组成员列表区分所有者和成员。管理员可以为其他用户设置或重置密码；查看或管理节点读写权限使用「权限管理」 |
 | 会话与任务 | 会话列表、归档列表、任务状态；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
 | 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
@@ -3577,7 +3594,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 **一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
 
 - **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（`assertSystemAdmin`，名单是 `auth.adminUserIds`，默认 `[]`），因为 `task` 表没有可求权的目标（§12.4）；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
-- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
+- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
 - **文件详情页的「记忆」区块回答「为什么搜不到」。** `memories/` 下的**文件**另请求一次 `GET /memories/{uri}`，显示记忆类型、状态、能否被检索与有效期。状态与类型取自**检索索引**而不是记忆文件的 frontmatter：TTL 归档只把索引行改成 `archived`，文件里仍是 `active`（§11.7），读文件会在归档后给出相反的答案。能否被检索由状态推导：检索只返回 `active`（索引的 `n.status = 'active'`），所以 `pending` 写「待复核，检索不到」并给「去复核」入口，`archived` 写「已归档，检索不到」并说明按 URI 仍可读取。没有恢复端点，因此不给恢复按钮——按了也做不成事。有效期来自记忆文件（索引的 `NodeStat` 没有这两列）。没有索引行、目录、`.history` 版本文件与 `.abstract.md` 显示「未知」，与请求失败分开。请求失败只影响这一块，正文、摘要、关联与权限照常渲染（`web/pages/files/[...path].vue`、`web/components/domain/SummaryPanel.vue`）。
@@ -3602,7 +3619,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
   走它。
 - **有账号但没有会话**（或会话已过期）：整页进 `/login?redirect=...`，登录成功用
   `POST /auth/login` 换 session token，之后每个请求带
-  `Authorization: Bearer <token>`。登录响应带 `subject` 与 `principals`，控制台按
+  `Authorization: Bearer <token>`。刷新时用 `GET /auth/me` 获取当前主体、组关系和系统角色，控制台按
   `user:{uid}` / `group:{gid}` 推出候选根，再逐个用 `GET /fs/tree` 验证可读；读不到的根
   （组根未预置）不列出来。凭据存 `sessionStorage`（刷新保留、关标签页即清），不存
   `localStorage`；收到 401 时清掉本地会话并回登录页。
@@ -3614,9 +3631,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的
 请求会没有凭据。拉取失败时整页显示错误，**不猜一个默认身份**：即使回环信任会让服务端
 接受不带凭据的本机请求，控制台也不在没有身份的情况下渲染页面——那会让「服务端不可达」
-看起来像正常状态。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」
-区分开。**作用域选择器**只在可读根多于一个时出现，选择存 `sessionStorage`；切换后
-文件树、检索、权限管理各自重新加载，文件详情不在新根下时回 `/files`。
+看起来像正常状态。侧栏底部显示**当前空间**。有多个可读根时在这里切换「个人空间」和团队；只有一个时显示名称，无可读根时显示「暂无可访问空间」。选择存 `sessionStorage`；切换后文件树、权限管理等按新空间加载，文件详情不在新根下时回 `/files`。
 
 **为什么不该给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把登录身份换成第二处配置：
 运维改 `server.subject` 时还要记得改控制台，而控制台的真实身份来自登录响应。
