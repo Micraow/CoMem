@@ -55,6 +55,8 @@ integrations/
 
 ## 安装
 
+**Hermes 用户：** 从 [Hermes 快速上手](../docs/hermes-quickstart.md) 开始。Hermes 通过独立 Memory Provider 自动接入；主动查找、历史导入用 MCP，OpenUI 是可选的网页显示插件。
+
 ```bash
 node integrations/cli.mjs install --host claude-code
 # 也可以先 link，再用 bin 名：pnpm --dir integrations link

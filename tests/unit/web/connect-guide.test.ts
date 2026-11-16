@@ -50,17 +50,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 describe('宿主清单', () => {
-  it('三个宿主按文档顺序排列，标签就是宿主自己的名字', () => {
-    expect([...CONNECT_HOSTS]).toEqual(['claude-code', 'codex', 'dsh']);
+  it('宿主按文档顺序排列，标签就是宿主自己的名字', () => {
+    expect([...CONNECT_HOSTS]).toEqual(['claude-code', 'codex', 'dsh', 'hermes']);
     expect(CONNECT_HOSTS.map((host) => CONNECT_HOST_LABELS[host])).toEqual([
       'Claude Code',
       'Codex',
       'DSH',
+      'Hermes',
     ]);
   });
 
   it('每个宿主都有配置位置与文档锚点', () => {
-    const docKeys = { 'claude-code': 'claudeCode', codex: 'codex', dsh: 'dsh' } as const;
+    const docKeys = { 'claude-code': 'claudeCode', codex: 'codex', dsh: 'dsh', hermes: 'hermes' } as const;
     for (const host of CONNECT_HOSTS) {
       expect(HOST_CONFIG_LOCATION[host]).not.toBe('');
       expect(HOST_DOC_LINK[host]).toBe(DOC_LINKS[docKeys[host]]);
@@ -125,6 +126,19 @@ describe('MCP 配置片段', () => {
       },
     });
     expect(README).toContain('transport: streamable-http');
+  });
+
+  it('Hermes 的 Docker 配置只引用当前 profile 的 API Key 环境变量', () => {
+    const snippet = parseYaml(mcpSnippetFor('hermes', 'http://127.0.0.1:18080', true).text);
+    expect(snippet).toEqual({
+      mcp_servers: {
+        comem: {
+          url: 'http://127.0.0.1:18080/mcp',
+          headers: { Authorization: 'Bearer ${COMEM_TOKEN}' },
+          tools: { include: ['find', 'read', 'remember'] },
+        },
+      },
+    });
   });
 });
 
@@ -234,6 +248,20 @@ describe('验证三态', () => {
     expect(result.checks[2]?.detail).toContain('提交');
     expect(result.checks[2]?.hint).toBe(CURSOR_INSPECT_COMMAND);
     expect(result.allGreen).toBe(false);
+  });
+
+  it('Hermes 只认可 Hermes 会话，已有导入不能冒充自动采集', () => {
+    const input = {
+      host: 'hermes', health: HEALTH, healthError: null, sessionsError: null,
+      sessions: [{ ...COMMITTED_SESSION, id: 'import-already-present' }],
+    } as const;
+    const missing = deriveVerification(input);
+    expect(missing.checks.map((check) => check.key)).toEqual(['server', 'sessions']);
+    expect(missing.checks[1]?.tone).toBe('warn');
+    expect(missing.allGreen).toBe(false);
+    expect(deriveVerification({
+      ...input, sessions: [...input.sessions, { ...COMMITTED_SESSION, id: 'hermes-auto' }],
+    }).allGreen).toBe(true);
   });
 });
 

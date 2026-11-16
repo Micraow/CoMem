@@ -3348,7 +3348,7 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 ### 15.7 支持哪些宿主
 
-v1 做三个：**Claude Code**（hooks + MCP，最常用）、**Codex**（hooks + MCP）和 **DSH**（原生插件 + MCP）。
+支持 **Claude Code**（Hook + MCP）、**Codex**（Hook + MCP）、**DSH**（原生插件 + MCP）和 **Hermes**（Memory Provider + 可选 MCP）。
 
 **两个 hook 宿主**的事件名与载荷覆盖 §15.2 的七个事件：
 
@@ -3388,6 +3388,8 @@ Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` /
 DSH 这种没有 hook 面的宿主走自己的插件包，不塞进 `hosts/`。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
+
+**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP，显示插件 `integrations/hermes-openui/` 独立启用。见[快速上手](hermes-quickstart.md)。
 
 ### 15.8 目录
 
@@ -3566,6 +3568,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
 | 会话与任务 | 会话列表、归档列表、任务状态；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
+| 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 | 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |

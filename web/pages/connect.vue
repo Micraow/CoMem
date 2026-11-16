@@ -22,6 +22,7 @@ import {
   CONNECT_HOST_LABELS,
   DEFAULT_SERVER_BASE_URL,
   FIRST_MEMORY_TEXT,
+  HERMES_OPENUI_DOC,
   HOST_CONFIG_LOCATION,
   HOST_DOC_LINK,
   deriveVerification,
@@ -68,13 +69,13 @@ const HOST_TABS = CONNECT_HOSTS.map((host) => ({
 const api = useApi()
 const scopeRoot = useScopeRoot()
 const runtimeConfig = useRuntimeConfig()
+const route = useRoute()
 
 /**
  * Agent 要连的服务地址。
  *
  * `apiBase` 默认是相对路径（`/api/v1`），由代理转到后端，浏览器看不到后端端口；
- * 只有部署把它配成绝对地址时才能可靠推导。推不出来时默认用当前页面地址，并给出
- * 输入框——开发时控制台与后端端口不同，用户必须能改成后端的实际地址。
+ * 本地开发用代理转发的后端端口；同源部署用当前页面的地址。输入框用于调整可达地址。
  */
 function initialServerBaseUrl(): string {
   const derived = serverBaseUrlFromApiBase(String(runtimeConfig.public.apiBase))
@@ -82,6 +83,9 @@ function initialServerBaseUrl(): string {
     return derived
   }
   if (typeof window !== 'undefined') {
+    if (import.meta.dev) {
+      return `http://127.0.0.1:${runtimeConfig.public.devBackendPort}`
+    }
     return window.location.origin
   }
   return DEFAULT_SERVER_BASE_URL
@@ -89,7 +93,9 @@ function initialServerBaseUrl(): string {
 
 const serverBaseUrl = useState<string>('comem-mcp-server-base-url', initialServerBaseUrl)
 
-const host = ref<ConnectHost>('claude-code')
+const host = ref<ConnectHost>(route.query.host === 'hermes' ? 'hermes' : 'claude-code')
+const isHermes = computed(() => host.value === 'hermes')
+const hermesUseApiKey = ref(false)
 const health = ref<HealthPayload | null>(null)
 const healthError = ref<string | null>(null)
 const sessions = ref<SessionListPayload['sessions'] | null>(null)
@@ -101,7 +107,7 @@ const effectiveServerBaseUrl = computed(
   () => serverBaseUrl.value.trim() || DEFAULT_SERVER_BASE_URL,
 )
 
-const snippet = computed(() => mcpSnippetFor(host.value, effectiveServerBaseUrl.value))
+const snippet = computed(() => mcpSnippetFor(host.value, effectiveServerBaseUrl.value, hermesUseApiKey.value))
 const hook = computed(() => hookInstallFor(host.value))
 const trust = computed(() => trustStepFor(host.value))
 const configLocation = computed(() => HOST_CONFIG_LOCATION[host.value])
@@ -113,6 +119,7 @@ const memoryExtractSkipped = computed(() => health.value?.memoryExtract.skipped 
 
 const verification = computed(() =>
   deriveVerification({
+    host: host.value,
     health: health.value,
     healthError: healthError.value,
     sessions: sessions.value,
@@ -170,7 +177,6 @@ watch(scopeRoot, () => {
     <div class="page">
       <DomainPageHeader title="接入 Agent">
         <template #actions>
-          <UiBadge v-if="verification.allGreen" variant="green">三项检查通过</UiBadge>
           <UiButton variant="secondary" size="sm" :disabled="loading" @click="check">
             <RefreshCw :size="14" :stroke-width="1.5" />
             {{ loading ? '检查中' : '重新检查' }}
@@ -183,9 +189,21 @@ watch(scopeRoot, () => {
           <UiTabs v-model="host" :items="HOST_TABS" aria-label="选择宿主" />
 
           <div class="connect-host">
+            <section v-if="isHermes" class="connect-block">
+              <h3 class="headline">自动记忆</h3>
+              <p class="body-sm">安装 CoMem 的 Hermes 记忆插件。它会在每轮对话中召回相关记忆，并在答完后归档这一轮。</p>
+              <DomainCodeBlock
+                code="hermes memory setup"
+                label="安装后在 Hermes 主机上运行"
+                copy-label="复制记忆插件设置命令"
+              />
+              <p class="body-sm">
+                <a :href="docLink" target="_blank" rel="noreferrer">安装和配置记忆插件</a>
+              </p>
+            </section>
             <section class="connect-block">
               <div class="connect-block__head">
-                <h3 class="headline">MCP 配置</h3>
+                <h3 class="headline">{{ isHermes ? '主动查找与导入（MCP）' : 'MCP 配置' }}</h3>
                 <span class="caption">写入 {{ configLocation }}</span>
               </div>
               <label class="connect-address" for="mcp-server-address">
@@ -198,9 +216,15 @@ watch(scopeRoot, () => {
                 />
               </label>
               <p class="caption">
-                片段与下面的 curl 都使用这个地址。控制台和 CoMem 同源时不用改；开发时
-                后端端口不同，填后端实际地址。接入方式见
-                <a :href="docLink" target="_blank" rel="noreferrer">宿主接入文档</a>。
+                填写 Agent 能访问的 CoMem 地址。本地开发时填写后端端口。Docker 部署请为 Agent 配置 API Key，见
+                <a :href="docLink" target="_blank" rel="noreferrer">接入文档</a>。
+              </p>
+              <label v-if="isHermes" class="api-key-choice body-sm">
+                <input v-model="hermesUseApiKey" type="checkbox" />
+                CoMem 要求 API Key（例如 Docker 部署）
+              </label>
+              <p v-if="isHermes && hermesUseApiKey" class="body-sm">
+                在 Hermes 配置目录的 <code>.env</code> 中设置 <code>COMEM_TOKEN</code>，使用与自动记忆相同的账号。
               </p>
               <DomainCodeBlock
                 :code="snippet.text"
@@ -209,7 +233,7 @@ watch(scopeRoot, () => {
               />
             </section>
 
-            <section class="connect-block">
+            <section v-if="!isHermes" class="connect-block">
               <div class="connect-block__head">
                 <h3 class="headline">安装自动采集</h3>
                 <span class="caption">在仓库根目录执行</span>
@@ -237,11 +261,18 @@ watch(scopeRoot, () => {
                 {{ trust.detail }}
               </div>
             </UiCallout>
+            <section v-if="isHermes" class="connect-block">
+              <h3 class="headline">交互式回答</h3>
+              <p class="body-sm">
+                OpenUI 可选。安装后，Hermes 的网页聊天可边生成边显示交互式回答。
+                <a :href="HERMES_OPENUI_DOC" target="_blank" rel="noreferrer">安装 OpenUI</a>
+              </p>
+            </section>
           </div>
         </UiCard>
 
         <UiCard title="② 验证接入" panel>
-          <p class="caption">三项都通过，说明服务端、会话采集与游标都正常。</p>
+          <p class="body-sm">要验证召回，请在新会话中问一个已经存过的约定。</p>
 
           <ul class="connect-checks">
             <li v-for="item in verification.checks" :key="item.key" class="connect-check">
@@ -264,18 +295,21 @@ watch(scopeRoot, () => {
           <UiCallout v-if="verification.allGreen" tone="success" class="mt-16">
             <template #icon><CheckCircle2 :size="15" :stroke-width="1.4" /></template>
             <div v-if="memoryExtractSkipped">
-              服务端、会话采集与游标都正常。当前未配置模型，会话会被归档但不会产生新的记忆；
+              当前未配置模型，会话会被归档但不会产生新的记忆；
               见下方说明。
             </div>
-            <div v-else>接入完成。Agent 现在可以自动召回、采集，也能主动读写记忆。</div>
+            <div v-else>CoMem 已收到会话。请到「会话与任务」检查刚才那一轮。</div>
           </UiCallout>
         </UiCard>
 
         <UiCard title="③ 写入第一条记忆" panel>
-          <p class="body-sm">
+          <p v-if="isHermes" class="body-sm">
+            在 Hermes 发一条你确实想保留的长期偏好。回到 CoMem 看会话是否归档，等记忆处理完，再开新会话问它。
+          </p>
+          <p v-else class="body-sm">
             告诉 Agent：记住「{{ FIRST_MEMORY_TEXT }}」。等价的一次 MCP 调用：
           </p>
-          <DomainCodeBlock :code="memoryCurl" label="MCP 调用（curl）" copy-label="复制调用命令" />
+          <DomainCodeBlock v-if="!isHermes" :code="memoryCurl" label="MCP 调用（curl）" copy-label="复制调用命令" />
 
           <UiCallout v-if="memoryExtractSkipped" tone="warn" class="mt-16">
             <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
@@ -338,6 +372,12 @@ watch(scopeRoot, () => {
   font-size: 13px;
   font-weight: 500;
   color: var(--label-2);
+}
+
+.api-key-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .connect-checks {
