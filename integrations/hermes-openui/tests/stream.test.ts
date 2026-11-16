@@ -66,7 +66,7 @@ test('parses source that is split through every protocol boundary', () => {
     openUISourceStart(id).slice(9),
     `\n${expected.slice(0, 11)}`,
     expected.slice(11),
-    openUISourceEnd(id)
+    openUISourceEnd()
   ]
   const store = new OpenUIStreamStore({ storage: null, now: () => 7 })
 
@@ -92,7 +92,7 @@ test('parses source that is split through every protocol boundary', () => {
     offset += chunk.length
 
     const card = store.getCard('session-a', id)
-    assert.equal(card?.sourceState, chunk === openUISourceEnd(id) ? 'complete' : card?.sourceState)
+    assert.equal(card?.sourceState, chunk === openUISourceEnd() ? 'complete' : card?.sourceState)
   }
 
   const card = store.getCard('session-a', id)

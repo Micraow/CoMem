@@ -90,33 +90,33 @@ function OpenUIDirective({
     Boolean(id && sessionId && card?.source.trim()) &&
     (!finished || Boolean(card?.complete))
 
-  if (!usable || !id || !sessionId || !card) {
-    if (!finished) {
-      return null
-    }
-
-    return (
-      <p className="hermes-openui-unavailable" role="status">
-        <style>{`
-          .hermes-openui-unavailable {
-            color: var(--ui-text-secondary);
-            font-size: 0.75rem;
-            margin: 6px 0;
-          }
-        `}</style>
-        {OPENUI_UNAVAILABLE}
-      </p>
-    )
-  }
-
   return (
-    <OpenUISurface
-      identity={id}
-      onFollowUp={(message, destination) => submitOpenUIFollowUp(destination, message)}
-      sessionId={sessionId}
-      source={card.source}
-      streaming={streaming || card.streaming}
-    />
+    <div
+      className="hermes-openui-card-mount"
+      data-hermes-openui-card
+      style={{ display: 'contents' }}
+    >
+      {usable && id && sessionId && card ? (
+        <OpenUISurface
+          identity={id}
+          onFollowUp={(message, destination) => submitOpenUIFollowUp(destination, message)}
+          sessionId={sessionId}
+          source={card.source}
+          streaming={streaming || card.streaming}
+        />
+      ) : finished ? (
+        <p className="hermes-openui-unavailable" role="status">
+          <style>{`
+            .hermes-openui-unavailable {
+              color: var(--ui-text-secondary);
+              font-size: 0.75rem;
+              margin: 6px 0;
+            }
+          `}</style>
+          {OPENUI_UNAVAILABLE}
+        </p>
+      ) : null}
+    </div>
   )
 }
 

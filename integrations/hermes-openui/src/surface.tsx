@@ -1,5 +1,5 @@
 import { Renderer, type ActionEvent, type OpenUIError } from '@openuidev/react-lang'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { INTELLIGENT_UI_STYLES } from './intelligent-ui/theme.ts'
 import { openUILibrary } from './library.tsx'
@@ -92,6 +92,20 @@ export function OpenUISurface({
   const visibleErrors = errors.filter(error => error.severity !== 'warning')
   const stateKey = storageKey(sessionId, identity)
   const initialState = useMemo(() => restoreState(stateKey), [stateKey])
+  const lastStateRef = useRef(initialState)
+  const previousIdentityRef = useRef(identity)
+
+  useEffect(() => {
+    if (previousIdentityRef.current !== identity) {
+      previousIdentityRef.current = identity
+      lastStateRef.current = initialState
+      return
+    }
+
+    if (lastStateRef.current) {
+      persistState(stateKey, lastStateRef.current)
+    }
+  }, [identity, initialState, stateKey])
 
   const handleAction = (event: ActionEvent) => {
     const message = actionableMessage(event)
@@ -145,11 +159,14 @@ export function OpenUISurface({
       <Renderer
         initialState={initialState}
         isStreaming={streaming}
-        key={stateKey}
+        key={identity}
         library={openUILibrary}
         onAction={handleAction}
         onError={nextErrors => setErrors(nextErrors)}
-        onStateUpdate={state => persistState(stateKey, state)}
+        onStateUpdate={state => {
+          lastStateRef.current = state
+          persistState(stateKey, state)
+        }}
         response={source.trim() || null}
       />
       {!streaming && visibleErrors.length > 0 ? (

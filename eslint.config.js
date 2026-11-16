@@ -28,6 +28,7 @@ export default tseslint.config(
       'local-inference/**',
       'docs/**',
       'web/**',
+      'integrations/hermes-openui/desktop/plugin.js',
     ],
   },
   js.configs.recommended,

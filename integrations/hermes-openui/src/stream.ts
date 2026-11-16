@@ -139,12 +139,12 @@ export function openUISourceStart(id: string): string {
   return `<!--openui:source id="${id}"\n`
 }
 
-export function openUISourceEnd(_id?: string): string {
+export function openUISourceEnd(): string {
   return SOURCE_END_MARKER
 }
 
 export function openUIResponse(id: string, source: string): string {
-  return `${openUIDirective(id)}\n\n${openUISourceStart(id)}${source.trim()}${openUISourceEnd(id)}`
+  return `${openUIDirective(id)}\n\n${openUISourceStart(id)}${source.trim()}${openUISourceEnd()}`
 }
 
 export function parseOpenUICards(text: string, messageComplete = false): ParsedOpenUICard[] {

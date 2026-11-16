@@ -210,20 +210,17 @@ function renderDirective(
   )
 }
 
-test('shows a neutral fallback only after an unfinished card has settled', async t => {
+test('keeps one directive mount around waiting and settled states', async t => {
   installStorage()
   globalThis.__openuiSubmissions = []
   const plugin = await loadPlugin(t)
   const { contribution } = installPlugin(plugin)
 
-  assert.equal(
-    renderDirective(contribution, {
-      id: 'ui-unknown',
-      sessionId: 'stored-unknown',
-      streaming: true
-    }),
-    ''
-  )
+  const waiting = renderDirective(contribution, {
+    id: 'ui-unknown',
+    sessionId: 'stored-unknown',
+    streaming: true
+  })
 
   const finished = renderDirective(contribution, {
     id: 'ui-unknown',
@@ -232,6 +229,9 @@ test('shows a neutral fallback only after an unfinished card has settled', async
     streaming: false
   })
 
+  assert.match(waiting, /class="hermes-openui-card-mount" data-hermes-openui-card/)
+  assert.doesNotMatch(waiting, /Interactive card unavailable\./)
+  assert.match(finished, /class="hermes-openui-card-mount" data-hermes-openui-card/)
   assert.match(finished, /Interactive card unavailable\./)
   assert.doesNotMatch(finished, /success/i)
 })

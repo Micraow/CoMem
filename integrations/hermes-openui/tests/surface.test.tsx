@@ -75,7 +75,7 @@ test('the original slider fixture still renders through the real Renderer', () =
 })
 
 test(
-  'the designed answer streams, updates locally, restores state, and follows up',
+  'the Renderer keeps its root through prefix variants, completion, and session aliases',
   { timeout: 60_000 },
   async t => {
     const workspace = process.cwd()
@@ -226,6 +226,20 @@ test(
     await page.getByRole('radio', { name: 'Speed' }).click()
     await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
     await page.locator('[data-hermes-openui-bar="Graph"]').filter({ hasText: '90' }).waitFor()
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('[data-hermes-openui-bar]')].every(row => {
+        const track = row.querySelector('.hermes-openui-bar-track')
+        const fill = row.querySelector('.hermes-openui-bar-fill')
+        const expected = Number(row.querySelector('.hermes-openui-bar-value')?.textContent)
+
+        if (!(track instanceof HTMLElement) || !(fill instanceof HTMLElement)) {
+          return false
+        }
+
+        const actual = (fill.getBoundingClientRect().width / track.getBoundingClientRect().width) * 100
+        return Math.abs(actual - expected) < 0.5
+      })
+    )
 
     await range.fill('90')
     await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
@@ -261,6 +275,66 @@ test(
     await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
     assert.equal(await range.inputValue(), '90')
     await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
+
+    await page.getByRole('radio', { name: 'Speed' }).click()
+    await page.waitForFunction(() =>
+      document.querySelector('[data-hermes-openui-chart]')?.getAttribute('data-hermes-openui-lens') === 'Speed'
+    )
+    await page.evaluate(() => {
+      document
+        .querySelector('[data-hermes-openui-surface]')
+        ?.setAttribute('data-surface-before-prefix', 'true')
+      document
+        .querySelector('[data-hermes-openui-card]')
+        ?.setAttribute('data-card-before-prefix', 'true')
+    })
+    await page.evaluate(
+      frame => (window as unknown as HarnessWindow).__setOpenUI(
+        'root = Card("Retrieval strategies, compared", "A compact read on the fixture\'s quality-speed-efficiency trade-off.", [], "RESEARCH SYNTHESIS · LOCAL DESIGN FIXTURE")',
+        frame.streaming
+      ),
+      growingFrame
+    )
+    await page.locator('.hermes-openui-title').filter({ hasText: 'Retrieval strategies, compared' }).waitFor()
+    assert.equal(
+      await page.locator('[data-hermes-openui-surface]').getAttribute('data-surface-before-prefix'),
+      'true'
+    )
+    assert.equal(
+      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-prefix'),
+      'true'
+    )
+    await page.evaluate(
+      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
+      completeFrame
+    )
+    assert.equal(
+      await page.locator('[data-hermes-openui-surface]').getAttribute('data-surface-before-prefix'),
+      'true'
+    )
+    assert.equal(
+      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-prefix'),
+      'true'
+    )
+
+    await page.evaluate(() => {
+      document
+        .querySelector('[data-hermes-openui-card]')
+        ?.setAttribute('data-card-before-final', 'true')
+    })
+    await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession('session-b'))
+    await page.waitForFunction(
+      () => document.querySelector('[data-hermes-openui-surface]')?.getAttribute('data-hermes-openui-identity') === 'research-card-a'
+    )
+    assert.equal(
+      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-final'),
+      'true'
+    )
+    assert.equal(await page.getByRole('radio', { name: 'Speed' }).getAttribute('aria-checked'), 'true')
+    await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession('session-a'))
+    await page.waitForFunction(
+      () => document.querySelector('[data-hermes-openui-chart]')?.getAttribute('data-hermes-openui-lens') === 'Speed'
+    )
 
     await followUp.click()
     await followUp.click()

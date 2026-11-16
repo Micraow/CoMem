@@ -9,6 +9,8 @@
 MCP 工具本身不经过这里：CoMem 在 `/mcp` 暴露 Streamable HTTP，能直连的宿主直接配
 URL 即可。分工与配置片段见下面的「[MCP 接入](#mcp-接入)」。
 
+Hermes 聊天里的流式界面由 [Hermes OpenUI](hermes-openui/README.md) 独立构建。它是展示插件，和下文的 CoMem 记忆 Hook 分开安装。
+
 ```
 integrations/
 ├── package.json          # type: module；bin: co-mem
