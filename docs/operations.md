@@ -109,7 +109,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `auth.sessionTtlSeconds` | `86400` | session token 有效期（秒）。改密码会轮换身份版本，旧 token 立即失效 |
 | `auth.adminUserIds` | `[]` | 额外的系统管理员名单（`app_user.id`）。跨主体端点（列全部用户 / 组、建用户、建组、`/tasks`）只认这份名单与引导管理员（`app_user.bootstrap_admin = 1`）。默认空 = 只有 `/setup` 创建的第一个管理员；其它账号要管这些页面就显式列进来 |
 | `server.host` | `127.0.0.1` | 监听地址。容器里改 `0.0.0.0` |
-| `server.port` | `1933` | 监听端口。控制台的 devProxy 写死转 `1933`，改端口要同时改 `web/nuxt.config.ts` |
+| `server.port` | `1933` | 监听端口。`pnpm dev` 用实际配置的端口设置控制台代理；单独运行前端时用 `COMEM_SERVER_PORT` 指定代理目标 |
 | `logging.level` | `info` | `debug` / `info` / `warn` / `error` / `fatal`（没有 `trace`：`Logger` 上不存在 `trace()`，留着会是一个不产生行为的配置值） |
 | `logging.file` | `""` | 填路径则在 stdout 之外**额外**写一份 `error` 及以上级别的日志。10MB 轮转到 `<path>.1`（§17.8） |
 | `telemetry.metrics.enabled` | `true` | 关掉时 `GET /metrics` 返回 404 并说明「指标已关闭」（空文本会被抓成「指标全为 0」） |
@@ -689,11 +689,13 @@ sqlite3 "$COMEM_DATA_DIR/_meta/comem.sqlite" \
 ### 开发
 
 ```bash
-pnpm dev                 # 后端 + 控制台一起起（端口跟着 COMEM_SERVER_PORT 走）
+pnpm dev                 # 后端 + 控制台一起起；控制台默认端口 3081
 pnpm dev:server          # 只起后端 127.0.0.1:1933，tsx 直接跑 TypeScript
 pnpm dev:web             # 只起控制台 127.0.0.1:3081，devProxy 把 /api 转到 1933
 bash scripts/demo.sh     # 一条命令跑完六条链路，用 /tmp/comem-demo 这个临时数据根
 ```
+
+`pnpm dev` 支持后端的 `--config`、`--data-dir` 参数。并行运行开发实例时，给每个实例指定独立数据根和端口，例如 `COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/data`。
 
 ### 生产
 
@@ -2068,11 +2070,10 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 
 **症状 A：`listen EADDRINUSE: address already in use 127.0.0.1:1933`**
 
-端口被占。`ss -ltnp | grep 1933` 找出进程，或者换端口（控制台的 devProxy 写死 1933，
-换端口要同时改 `web/nuxt.config.ts`）：
+端口被占。可以换一组端口和独立数据根：
 
 ```bash
-COMEM_SERVER_PORT=8080 pnpm dev
+COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/data
 ```
 
 **症状 B：进程立刻退出，日志里只有一行 `$ tsx src/bootstrap/main.ts`**

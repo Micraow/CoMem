@@ -1,32 +1,30 @@
 # 在 Hermes 使用 CoMem（功能分支联调）
 
-本文对应 CoMem 的 `codex/hermes-openui` 功能分支。它同时包含 Hermes Memory Provider、MCP 接入说明和 OpenUI 展示插件。联调使用独立的 CoMem 工作树、数据根、端口和 Hermes 配置目录，现有 `main` 检出、正在运行的 CoMem 服务和真实数据都不参与。
+本文对应 CoMem 的 `codex/hermes-openui` 功能分支。它同时包含 Hermes Memory Provider、MCP 接入说明和 OpenUI 展示插件。联调使用独立的工作树、数据根、端口和 Hermes 配置目录。
 
-先在独立工作树中以 `codex/hermes-openui` 检出代码：
+从分支创建独立工作树。`--detach` 让其他工作树仍可签出该分支：
 
 ```sh
-git worktree add ../CoMem-hermes origin/codex/hermes-openui
+git fetch origin codex/hermes-openui
+git worktree add --detach ../CoMem-hermes origin/codex/hermes-openui
 cd ../CoMem-hermes
+pnpm install --frozen-lockfile
+pnpm --dir web install --frozen-lockfile
 ```
 
-如果该分支已经在另一个工作树检出，直接进入该工作树。依赖安装和构建都在这个工作树内完成，不改写现有服务的安装目录。
+已有联调工作树时可直接使用；`git worktree list` 会列出路径。
 
 ## 1. 启动隔离的 CoMem
 
-从 [配置模板](../config.example.yaml) 复制一份只用于联调的配置。模板中的 `dataDir` 指向这个工作树下的新目录，`server.port` 改为未占用的端口；模型地址与凭据也写进这份隔离配置。已有 `config.yaml` 和 `dataDir` 都不要复用。
-
-验证过的 CoMem 本地启动变量是 `COMEM_SERVER_PORT`，Hermes 隔离变量是 `HERMES_HOME`。例如后端使用 `1934`、控制台使用 `3082` 时，在两个终端分别启动：
+首次试用控制台，可以用默认规则和独立数据根运行，无需模型凭据。后端用 `1934`，控制台用 `3082`：
 
 ```sh
-export COMEM_SERVER_PORT=1934
-pnpm dev:server --config ./local/hermes-smoke/config.yaml --data-dir ./local/hermes-smoke/data
+COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/hermes-smoke/data
 ```
 
-```sh
-COMEM_SERVER_PORT=1934 pnpm --dir web exec nuxt dev --host 127.0.0.1 --port 3082
-```
+联调记忆提炼时，从 [配置模板](../config.example.yaml) 创建 `./local/hermes-smoke/config.yaml`，填写自己的模型配置。将 `--config ./local/hermes-smoke/config.yaml` 附在同一条命令末尾。`--data-dir` 让本次联调使用独立索引，避免读取其它版本创建的数据库。
 
-`COMEM_SERVER_PORT` 同时决定 Nuxt 的 `/api` devProxy 目标；控制台进程没有收到它时，会把请求发往默认后端端口。打开 `http://127.0.0.1:3082`。CoMem 没有通用的账号 seed 命令。回环监听且保留默认 `auth.trustLoopback: true` 时，`/setup` 不要求初始化令牌；只有非回环请求或关闭回环信任时，才使用启动日志里的一次性初始化令牌。演示脚本生成的临时数据不能写进现有数据根。控制台用于配置、检查会话、归档、任务和记忆复核。
+`pnpm dev` 会把控制台代理指向实际配置的后端端口。打开 `http://127.0.0.1:3082/setup` 初始化账号。回环监听且保留默认 `auth.trustLoopback: true` 时，`/setup` 不要求初始化令牌；非回环请求或关闭回环信任时，使用启动日志里的一次性初始化令牌。
 
 记录 Hermes 主机能访问的**后端**服务地址，例如 `http://127.0.0.1:1934`。如果关闭回环信任，登录控制台后从右上角「我的账户」进入 **API Keys**，为同一个隔离账号创建凭据。
 

@@ -5,42 +5,80 @@
 # 两个进程生命周期绑在一起——关掉一个另一个也必须停，否则再跑一次会撞端口
 # （EADDRINUSE），而报错信息指向的是「端口被占用」不是「上次没关干净」。
 #
-# 用 `kill 0` 杀整个进程组而不是杀 `$!`：`pnpm dev:server` 自己会 fork 出
-# `tsx` 子进程，只杀父进程会留下孤儿占着端口。
+# `set -m` 让后台 job 各自成为进程组。清理时只终止这两个子进程组，避免
+# `pnpm` 自身的多层子进程留下孤儿，也不会向启动脚本的父 shell 发信号。
 
 set -euo pipefail
+set -m
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-BACKEND_PORT="${COMEM_SERVER_PORT:-1933}"
+BACKEND_PORT="$(
+  node --import tsx --input-type=module -e '
+    import { loadConfig } from "./src/config/index.ts";
+    process.stdout.write(String(loadConfig({ argv: process.argv.slice(1) }).server.port));
+  ' -- "$@"
+)"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
+WEB_PORT="${COMEM_WEB_PORT:-3081}"
 BACKEND_PID=""
+WEB_PID=""
 
 cleanup() {
-  # 负号 = 整个进程组。忽略失败：进程可能已经自己退出了。
-  kill -- -$$ 2>/dev/null || true
+  trap - EXIT INT TERM
+  if [ -n "$WEB_PID" ]; then
+    kill -TERM -- "-$WEB_PID" 2>/dev/null || true
+  fi
+  if [ -n "$BACKEND_PID" ]; then
+    kill -TERM -- "-$BACKEND_PID" 2>/dev/null || true
+  fi
+  if [ -n "$WEB_PID" ]; then
+    wait "$WEB_PID" 2>/dev/null || true
+  fi
+  if [ -n "$BACKEND_PID" ]; then
+    wait "$BACKEND_PID" 2>/dev/null || true
+  fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+port_is_available() {
+  node -e '
+    const net = require("node:net");
+    const server = net.createServer();
+    server.once("error", () => process.exit(1));
+    server.listen({ host: "127.0.0.1", port: Number(process.argv[1]), exclusive: true }, () => {
+      server.close(() => process.exit(0));
+    });
+  ' -- "$1"
+}
+
+if [ "$BACKEND_PORT" = "$WEB_PORT" ]; then
+  echo "错误：后端和控制台不能使用同一个端口。请用 COMEM_WEB_PORT 指定控制台端口。" >&2
+  exit 1
+fi
+
+for port in "$BACKEND_PORT" "$WEB_PORT"; do
+  if ! port_is_available "$port"; then
+    echo "错误：端口 ${port} 不可用；请换端口后重试。" >&2
+    exit 1
+  fi
+done
 
 echo "==> 后端 ${BACKEND_URL}"
-pnpm dev:server &
+pnpm dev:server "$@" &
 BACKEND_PID=$!
 
-# 等后端把数据库迁移跑完再起控制台。
-#
-# **必须同时确认两件事**：进程还活着，且 `/health` 返回的是**我们的**服务。
-# 只看进程存活不够——端口被别的服务占着时 `listen` 会失败，但控制台照样能起来，
-# 然后 `devProxy` 把请求转发给那个陌生服务。用户在控制台里看到的是一份别人的
-# 数据，而且没有任何报错。
+# 等后端完成启动和数据库迁移，再启动控制台。
 echo "==> 等待后端就绪"
 READY=0
 for _ in $(seq 1 120); do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
     echo "" >&2
     echo "错误：后端进程已退出，无法启动控制台。" >&2
-    echo "      常见原因是 ${BACKEND_PORT} 端口被别的服务占用（EADDRINUSE）。" >&2
-    echo "      换个端口：COMEM_SERVER_PORT=1934 pnpm dev" >&2
+    echo "      具体原因见上面的后端日志。" >&2
     exit 1
   fi
 
@@ -59,6 +97,14 @@ if [ "$READY" -ne 1 ]; then
   exit 1
 fi
 
-echo "==> 控制台 http://127.0.0.1:3081"
+echo "==> 控制台 http://127.0.0.1:${WEB_PORT}"
 # 把端口传给控制台的 devProxy：两边必须指向同一个后端。
-COMEM_SERVER_PORT="$BACKEND_PORT" pnpm dev:web
+COMEM_SERVER_PORT="$BACKEND_PORT" pnpm --dir web exec nuxt dev --host 127.0.0.1 --port "$WEB_PORT" &
+WEB_PID=$!
+
+while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; do
+  sleep 1
+done
+
+echo "错误：开发进程意外退出。" >&2
+exit 1
