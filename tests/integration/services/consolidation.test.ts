@@ -741,6 +741,20 @@ describe('ConsolidationService.consolidate', () => {
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 
+  it('模型不能通过猜地址读到同一空间里未进入候选清单的待复核内容', async () => {
+    await seedThree();
+    const pending = await container.services.memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'not-yet-reviewed',
+      content: '仅用于验证待复核正文不会进入手动整理。',
+    });
+    const llm = new ScriptedLlm([{ action: 'read', uris: [pending.uri.toString()] }]);
+    const read = vi.spyOn(container.services.memory, 'read');
+    await expect(createService(llm).consolidate(Uri.parse(SCOPE), {
+      dryRun: true, subject: SUBJECT, principals: PRINCIPALS,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(read).not.toHaveBeenCalledWith(pending.uri);
+  });
+
   it('pending 记忆不是合并候选（§11.6 的复核闸门）', async () => {
     await container.services.memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
       topic: 'monorepo-migration',

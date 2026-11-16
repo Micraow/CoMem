@@ -242,8 +242,9 @@ function pathOf(request: FastifyRequest): string {
 export async function createHttpServer(options: HttpServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
-    // Fastify 内置的 requestId 与我们的 `x-request-id` 是两份数据，只用一份。
     requestIdHeader: false,
+    // 完整编码的 comem:// URI 占一个路由参数；给它 4 KiB 的 HTTP 路径预算（§14）。
+    routerOptions: { maxParamLength: 4 * 1024 },
     // 默认 1MB 挡不住 `temp-upload` 的二进制；单文件上限由该路由自己再校验。
     bodyLimit: 64 * 1024 * 1024,
   });

@@ -47,14 +47,15 @@ export function describeOperations(operations: readonly ConsolidationOperation[]
   }
 
   const counts = new Map<ConsolidationOperation['kind'], number>();
+  const labels = { add: '新增', update: '更新', delete: '删除' } as const;
   for (const operation of operations) {
     counts.set(operation.kind, (counts.get(operation.kind) ?? 0) + 1);
   }
   const summary = (['add', 'update', 'delete'] as const)
-    .map((kind) => `${kind} ${counts.get(kind) ?? 0} 条`)
+    .map((kind) => `${labels[kind]} ${counts.get(kind) ?? 0} 条`)
     .join('、');
   const reasons = operations
-    .map((operation) => `${operation.kind} ${operation.uri}（${operation.reason}）`)
+    .map((operation) => `${labels[operation.kind]} ${operation.uri}（${operation.reason}）`)
     .join('；');
   return `${summary}：${reasons}`;
 }

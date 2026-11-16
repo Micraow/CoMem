@@ -448,9 +448,9 @@ export const SETTING_FIELDS = {
   'memory.ttl.sweepBatchSize': { label: '每轮清扫条数', control: 'number' },
   'memory.ttl.retentionDays': { label: '归档后保留天数', control: 'number' },
   'memory.consolidation.enabled': {
-    label: '启用记忆合并',
+    label: '允许手动整理记忆',
     control: 'boolean',
-    hint: '合并会删除记忆，是破坏性操作。',
+    hint: '开启后可预览重复记忆的合并建议；应用整理可能删除记忆。',
   },
   'memory.consolidation.maxIterations': { label: '合并探索轮次上限', control: 'number' },
 

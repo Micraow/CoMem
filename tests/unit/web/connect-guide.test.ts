@@ -135,7 +135,7 @@ describe('MCP 配置片段', () => {
         comem: {
           url: 'http://127.0.0.1:18080/mcp',
           headers: { Authorization: 'Bearer ${COMEM_TOKEN}' },
-          tools: { include: ['find', 'read', 'remember'] },
+          tools: { include: ['health', 'find', 'read', 'remember'] },
         },
       },
     });

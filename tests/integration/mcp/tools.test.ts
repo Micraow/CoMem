@@ -1225,7 +1225,9 @@ describe('remember / download', () => {
   }
 
   it('remember 走提交管线并返回 taskId', async () => {
+    const sessionId = 'history-import-receipt';
     const text = await callText('remember', {
+      sessionId,
       messages: [
         { role: 'user', content: '我偏好中文回答' },
         { role: 'assistant', content: '收到' },
@@ -1234,6 +1236,9 @@ describe('remember / download', () => {
 
     expect(text).toMatch(/^taskId: [0-9a-f-]+/);
     expect(text).toContain('Archived 2 message(s)');
+    const [archive] = await harness.context.session.listArchives(Uri.parse(`${SCOPE}/sessions/${sessionId}`));
+    expect(archive).toBeDefined();
+    expect(text).toContain(`\narchiveUri: ${archive?.toString()}\n`);
   });
 
   it('同一 sessionId + 同一批消息跑两次只有一份', async () => {

@@ -21,7 +21,7 @@ async function copyPrompt(): Promise<void> {
   <UiCard id="import-history" title="导入历史会话" panel>
     <div class="stack-12">
       <p class="body-sm">
-        把提示词交给已接入 CoMem 的 Agent，告诉它要读取哪些导出文件或聊天文本。看完预览再确认导入。
+        把提示词交给已接入 CoMem 的 Agent，告诉它要读取哪些导出文件，或直接给它一段聊天文本。可以先试一两段，看完预览再确认导入。
       </p>
       <div class="import-actions">
         <UiButton variant="primary" size="sm" @click="copyPrompt">
@@ -43,7 +43,7 @@ async function copyPrompt(): Promise<void> {
       </div>
       <p class="body-sm">
         对话会归档到 Agent 所连接的个人空间。到 <NuxtLink to="/sessions">会话与任务</NuxtLink>
-        查看结果，提炼出来的待确认条目在 <NuxtLink to="/review">记忆复核</NuxtLink>。
+        查看导入结果，到 <NuxtLink to="/review">记忆复核</NuxtLink> 处理提炼后需要确认的记忆。
       </p>
     </div>
   </UiCard>

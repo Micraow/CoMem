@@ -338,7 +338,9 @@ watch(scopeRoot, () => {
         @refresh="load"
         @batch-approve="runBatch('approve', '')"
         @batch-reject="openBatchReject"
-      />
+      >
+        <template #actions><DomainConsolidationPreview /></template>
+      </DomainReviewList>
 
       <DomainMemoryDiff
         :memory="selectedMemory"

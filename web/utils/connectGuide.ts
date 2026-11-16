@@ -156,7 +156,7 @@ export function mcpSnippetFor(
     const headers = hermesUseApiKey ? '    headers:\n      Authorization: "Bearer ${COMEM_TOKEN}"\n' : ''
     return {
       format: 'YAML',
-      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n${headers}    tools:\n      include: [find, read, remember]\n`,
+      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n${headers}    tools:\n      include: [health, find, read, remember]\n`,
     }
   }
 

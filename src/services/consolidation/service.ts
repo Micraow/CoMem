@@ -151,6 +151,7 @@ export class ConsolidationService {
     memoriesDirectory: Uri,
     inventory: readonly InventoryEntry[],
   ): Promise<{ operations: readonly ConsolidationOperation[]; trace: ConsolidationTraceEntry[] }> {
+    const readable = new Set(inventory.map(({ uri }) => uri));
     const reads = new Map<string, string>();
     const trace: ConsolidationTraceEntry[] = [];
 
@@ -176,11 +177,10 @@ export class ConsolidationService {
         const readUris: string[] = [];
         for (const raw of requested) {
           const uri = Uri.tryParse(raw);
-          if (uri === null || !memoriesDirectory.isAncestorOf(uri)) {
-            // 隔离：读也只能读这个 scope 下的记忆。
+          if (uri === null || !readable.has(uri.toString())) {
             throw new ComemError(
               'INVALID_ARGUMENT',
-              `记忆合并第 ${iteration} 轮请求读取 scope 外的路径：${raw}。`,
+              `记忆合并第 ${iteration} 轮只能读取候选清单中的记忆：${raw}。`,
               { iteration, uri: raw, scope: scope.toString() },
             );
           }

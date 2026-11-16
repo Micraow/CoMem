@@ -101,6 +101,7 @@ const hasChecked = computed(() => checked.value.length > 0)
         {{ props.memories.length }}
       </UiBadge>
       <span class="spacer" />
+      <slot name="actions" />
       <UiRefreshButton label="重新拉取待复核队列" :disabled="props.loading" @click="emit('refresh')" />
     </div>
 

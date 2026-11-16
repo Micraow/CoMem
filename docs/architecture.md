@@ -2278,7 +2278,7 @@ TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删
 
 | 轮次动作 | 服务端行为 |
 |---|---|
-| `read` | 读这些 URI 的正文，塞进下一轮上下文（只允许 `memories/` 下、且确实存在的记忆） |
+| `read` | 读取已通过 ACL 过滤、列入本次候选清单的生效记忆正文，塞进下一轮上下文 |
 | `finish` | 用 `operations` 结束循环；缺省是空列表（模型认为不需要改） |
 
 每轮的 prompt 含：scope 下**全部**生效中记忆的清单（URI + 类型 + 摘要 + 更新时间，
@@ -2413,7 +2413,7 @@ URI。这是当前行为：保留者路径没有崩溃风险，来源字符串�
 | 谁跑 | CoMem 进程内的 `LogSource` | 用户本机的 Agent |
 | 能读到什么 | 服务进程有权限的路径 | 用户明确指定、Agent 能访问的文件或粘贴的文本 |
 | 输入 | 四个内置宿主格式 | Agent 将能解析的内容转成 `{role, content, createdAt}`，先给预览，确认后才写入 |
-| 产出 | `sessions/<id>/messages.jsonl` | 同一个文件，经 `remember` |
+| 产出 | 会话归档和提交任务 | 同样的归档和任务，经 `remember`；响应包含实际 `archiveUri`、消息数、`taskId` |
 | 之后 | 阶段一 → 阶段二 → 记忆 | 完全一致 |
 
 **为什么不是二选一。** 服务端适配器只能覆盖「服务进程能读到、且格式已内置」的宿主；
@@ -3220,7 +3220,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals}`，含组成员身份。
 
-统一前缀 `/api/v1`。响应封套：
+统一前缀 `/api/v1`。记忆复核等端点把完整的 percent-encoded `comem://` URI 放在一个路径参数里；路由器允许该参数最多 4 KiB，避免合法的长主题和多层路径在进入 URI 校验前被 Fastify 默认的 100 字符限制拒绝。响应封套：
 
 ```json
 { "status": "ok", "result": { } }
@@ -3583,9 +3583,11 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 
 **浏览器里能创建第一条记忆。** 概览页的「还没有数据」空态与文件树工具栏各有一个「新建记忆」入口，共用同一个对话框：选记忆类型（中文名来自 `web/utils/memoryTypeLabels.ts`），填标题/主题与正文，提交走 `POST /memories`。路径不在控制台拼——服务端把标题映射成 identity 值并用各类型自己的 `filename` 模板渲染，响应带最终 URI（见 §11.1）。成功后关闭对话框、刷新目录树、跳到那条文件；`experiences` / `rules` 落在复核队列里，提示语写「等待复核」而不是只说「已保存」。失败时按 `details.field` 把 400 的原文挂在标题或内容字段旁，其余失败（403、网络）挂在对话框内——表单不吞掉服务端的诊断信息（`web/components/domain/MemoryCreateDialog.vue`）。
 
-**导入整段对话从「会话与任务」或概览空态进入。** 接入页提供可复制的[导入提示词](../web/assets/prompts/import-history.md)，浏览器不读取本机文件，也不提交对话。Agent 确认来源后走 MCP `remember`（§11.9），目标由 MCP 登录身份决定；归档和任务在「会话与任务」，待复核记忆在「记忆复核」。
+**导入整段对话从「会话与任务」或概览空态进入。** 接入页提供可复制的[导入提示词](../web/assets/prompts/import-history.md)，浏览器不读取本机文件，也不提交对话。Agent 展示来源和预览后，等用户确认才走 MCP `remember`（§11.9）。目标由 MCP 登录身份决定，Agent 可用 `health` 核对账号和提炼能力。会话在「会话与任务」，原文可按返回的归档地址在「文件树」查看，待复核记忆在「记忆复核」。
 
 **复核页把有效期、替换关系与失败原因都摆在页面上。** 详情头在有 `validUntil` 时写「有效期截止 …」，`validFrom` 与 `updatedAt` 不同时写「自 … 起生效」；`supersedes` 非空时在差异区上方给一条提示：通过会替换掉上一版本，拒绝则恢复到覆盖前的值（`web/components/domain/MemoryDiff.vue`）——用户在按按钮之前，需要知道按钮会做什么。服务端没有批量端点，批量操作逐条独立执行，**失败原因逐条列在队列上方**（可逐条看、可关闭，下一轮开始时清空），toast 只说「成功 N 条，失败 M 条」：3 秒后消失的 toast 装不下「哪几条、各自为什么」（`web/pages/review.vue`）。
+
+**复核页可以生成整理建议。** 「整理建议」调用 `POST /memories/consolidate`，固定传 `dryRun: true`，按新增、更新和删除展示建议及理由。模型只能读取进入本次候选清单的生效记忆。控制台只展示预览、原记忆和提示词入口；它不发 `dryRun: false`，因为旧 API 的执行会重新向模型取方案，不能保证等于用户看到的预览（§11.8）。手动整理默认关闭，需要先在「设置」开启。
 
 **403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 

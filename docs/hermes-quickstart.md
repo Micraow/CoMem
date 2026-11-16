@@ -26,9 +26,9 @@ hermes memory status
 
 ## 3. 把已经积累的对话带过来（可选）
 
-导入由能够读取你文件的 Agent 执行。可以用同一个 Hermes，也可以用 Codex 等接入了同一 CoMem 账号的 Agent。在 CoMem「接入 Agent → Hermes」复制 MCP 配置，合并进 Hermes 当前配置的 `mcp_servers`。如果需要 API Key，按[认证配置](../integrations/hermes-openui/README.md#use-comem-from-the-same-chat)设置。回到「会话与任务 → 导入历史会话」复制提示词，给 Agent 指定文件，看完预览后确认。见[导入说明](ingest-prompt.md)。
+导入由能够读取你文件的 Agent 执行。可以用同一个 Hermes，也可以用 Codex 等接入了同一 CoMem 账号的 Agent。在 CoMem「接入 Agent → Hermes」复制 MCP 配置，合并进 Hermes 当前配置的 `mcp_servers`。如果需要 API Key，按[认证配置](../integrations/hermes-openui/README.md#use-comem-from-the-same-chat)设置。回到「会话与任务 → 导入历史会话」复制提示词，给 Agent 指定文件，看完预览后确认。如果不希望预览聊天本身被自动归档，换到只接 MCP、未开自动采集的配置。见[导入说明](ingest-prompt.md)。
 
-对话原文留在归档。想手写一条已确定的记忆时，可以直接在 CoMem 文件树点「新建记忆」。管理员可在 CoMem「提示词」调整抽取、经验归纳和记忆整理的模板；模板会在下一次相应处理时生效。全库手动整理独立配置，默认关闭，见[记忆整理说明](architecture.md#118-记忆合并agentic-循环)。
+对话原文留在归档。想手写一条已确定的记忆时，可以直接在 CoMem 文件树点「新建记忆」。管理员可在 CoMem「提示词」调整抽取、经验归纳和记忆整理的模板；模板会在下一次相应处理时生效。已经使用模型生成摘要时，可以在「设置」开启「允许手动整理记忆」，再打开「记忆复核 → 整理建议」检查重复或冲突，原记忆不会被修改。
 
 ## 4. 打开交互式回答（可选）
 

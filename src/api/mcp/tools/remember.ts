@@ -232,7 +232,7 @@ export const rememberTool: McpToolDefinition = {
       appended,
     });
     return textResult(
-      `taskId: ${result.taskId}\nArchived ${result.archivedCount} message(s) in ${sessionUri.toString()}. Extraction is running in the background.`,
+      `taskId: ${result.taskId}\nArchived ${result.archivedCount} message(s) in ${sessionUri.toString()}.\narchiveUri: ${result.archiveUri.toString()}\nBackground processing is queued.`,
     );
   },
 };
