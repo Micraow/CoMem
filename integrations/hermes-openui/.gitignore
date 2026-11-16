@@ -17,3 +17,5 @@ local/
 __pycache__/
 *.pyc
 .env*
+.run-live.py
+.live*
