@@ -19,6 +19,7 @@ import type { SearchContextType, SearchMode, SearchLevel } from './HitList.vue'
 const query = defineModel<string>('query', { required: true })
 const mode = defineModel<SearchMode>('mode', { required: true })
 const scope = defineModel<string>('scope', { required: true })
+const scopeMode = defineModel<'current' | 'all' | 'uri'>('scopeMode', { required: true })
 const limit = defineModel<string>('limit', { required: true })
 const level = defineModel<SearchLevel | ''>('level', { required: true })
 const contextType = defineModel<SearchContextType | ''>('contextType', { required: true })
@@ -32,6 +33,12 @@ const DEBOUNCE_MS = 300
 const MODE_OPTIONS = [
   { value: 'find', label: '直接查找' },
   { value: 'search', label: '先理解再检索（需要模型）' },
+] as const
+
+const SCOPE_OPTIONS = [
+  { value: 'all', label: '所有可访问' },
+  { value: 'current', label: '当前空间' },
+  { value: 'uri', label: '指定地址' },
 ] as const
 
 const LIMIT_OPTIONS = [
@@ -57,7 +64,10 @@ const CONTEXT_OPTIONS = [
   { value: 'session', label: '会话' },
 ] as const
 
-const canSubmit = computed(() => query.value.trim() !== '' && !props.loading)
+const canSearch = computed(() =>
+  query.value.trim() !== '' && (scopeMode.value !== 'uri' || scope.value.trim() !== ''),
+)
+const canSubmit = computed(() => canSearch.value && !props.loading)
 
 const fire = useDebounceFn(() => emit('submit'), DEBOUNCE_MS)
 
@@ -71,14 +81,14 @@ function submitNow(): void {
 }
 
 function schedule(): void {
-  if (query.value.trim() === '') {
+  if (!canSearch.value) {
     fire.cancel()
     return
   }
   fire()
 }
 
-watch([query, mode, scope, limit, level, contextType], schedule)
+watch([query, mode, scopeMode, scope, limit, level, contextType], schedule)
 
 /** 键盘提交：⌘/Ctrl + Enter。多行输入里单独的 Enter 是换行。 */
 function onKeydown(event: KeyboardEvent): void {
@@ -113,12 +123,17 @@ onBeforeUnmount(() => {
         <UiSelect v-model="mode" :options="MODE_OPTIONS" aria-label="检索模式" />
       </label>
 
-      <label class="field field--grow">
+      <label class="field">
         <span class="field__label">范围</span>
+        <UiSelect v-model="scopeMode" :options="SCOPE_OPTIONS" aria-label="检索范围" />
+      </label>
+
+      <label v-if="scopeMode === 'uri'" class="field field--grow">
+        <span class="field__label">记忆地址</span>
         <UiInput
           v-model="scope"
-          placeholder="留空使用当前命名空间"
-          aria-label="检索范围"
+          placeholder="comem://…"
+          aria-label="记忆地址"
           size="sm"
         />
       </label>
