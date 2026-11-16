@@ -1,0 +1,12 @@
+name: hermes-openui
+version: 0.1.0
+description: "Render compact interactive OpenUI cards in official Hermes Webapp and Desktop conversations through the bundled desktop plugin."
+author: CoMem
+kind: standalone
+requires_hermes: ">=0.23.1"
+manifest_version: 2
+api_version: 1
+tags:
+  - desktop
+  - webapp
+  - interaction

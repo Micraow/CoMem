@@ -1,61 +1,67 @@
 ---
 name: openui
-description: "Use when a compact interactive OpenUI card helps the user adjust a value and see the result before asking a follow-up."
+description: "Use when a compact interactive OpenUI answer makes a comparison, metric set, or local trade-off easier to understand."
 ---
 
-# OpenUI Card
+# OpenUI Answer
 
-Use one card when the answer has a small parameter the user can adjust
-locally and the visible result changes with that parameter. Good cases
-include changing a threshold, quantity, budget, or limit while the answer
-stays readable.
+Use one OpenUI answer when a visual structure makes the result easier to
+scan: a small comparison, a few meaningful metrics, a focal chart, or one
+value the user can adjust locally.
 
-Reply in Markdown when the answer is static, the result would be a document
-or table, or the control would not change anything the user can inspect.
-Also use Markdown when the user did not ask for interaction and an extra
-control would slow the answer down.
+Reply in Markdown when the answer is mostly prose, would become a long report,
+or the control would not change anything visible. Do not add an interface just
+to decorate a complete answer.
 
-## Generate the answer
+## Compose the answer
 
-1. Write the useful answer as ordinary Markdown first. It must make sense
-   without the card.
-2. Add one OpenUI card only when it adds a real local interaction.
-3. Put the OpenUI source in one HTML comment. Start the source with `root`
-   and refer forward to statement names defined after it, so the renderer can
-   grow the card progressively.
-4. Use only `Card`, `Text`, `Slider`, and `Button`.
-5. Bind one `$variable` to `Slider`. Display its current value in `Text`.
-6. End with one `Button` whose `@ToAssistant` message includes the current
-   value. This is the explicit bridge back to the conversation.
+1. Write the useful answer as ordinary Markdown first, including any fallback
+   conclusion or caveat.
+2. Add one OpenUI answer only when it clarifies the same conclusion.
+3. Put the source in one HTML comment. Start with `root`, then refer forward
+   to statements defined afterward so the answer can render progressively.
+4. Use `Card` for the unboxed answer surface. Use `Row`, `KPI`,
+   `SegmentedControl`, `BenchmarkBars`, `Insight`, `Slider`, `Caption`,
+   `Text`, and `Button` as needed.
+5. Bind `SegmentedControl` and `Slider` values to `$variables`. Visible output
+   or the explicit `@ToAssistant` action must use every control value.
+6. Label sample data honestly. When the answer contains research results, use
+   measured values with provenance instead of invented benchmark scores.
 
-Keep the card focused on the same answer as the prose. Use real values from
-the conversation; do not invent measurements or results.
+Avoid nested form panels, ornamental empty shapes, and controls that only send
+a message. The focal chart, metric strip, and one explicit follow-up are
+enough.
 
 ## Output protocol
 
 The actual response contains the directive, a blank line, and one source
-comment. Do not wrap the protocol in a Markdown code fence in the response.
+comment. Do not wrap this protocol in a Markdown code fence in the response.
 
 ```text
-The best matches are those at or above the relevance threshold you choose.
+Hybrid is the safer default. Semantic search wins on quality alone, while the
+graph approach is faster and more efficient. These values are a local design
+fixture, not published benchmark results.
 
-::openui{id="ui-relevance-01"}
+::openui{id="ui-retrieval-01"}
 
-<!--openui:source id="ui-relevance-01"
-root = Card("Prioritize results", "Adjust the cutoff locally; continue only when you want the assistant to use it.", [readout, slider, follow])
-$minimum = 70
-readout = Text("Show matches at or above " + $minimum + "% relevance.")
-slider = Slider($minimum, 0, 100, 5, "Minimum relevance", "%")
-follow = Button("Use this threshold", @ToAssistant("Use " + $minimum + "% as the relevance threshold."))
+<!--openui:source id="ui-retrieval-01"
+root = Card("Retrieval strategies, compared", "A compact read on the fixture's quality-speed-efficiency trade-off.", [kpis, tabs, chart, insight, checkpoint], "RESEARCH SYNTHESIS · LOCAL DESIGN FIXTURE")
+kpis = Row([kpi1, kpi2, kpi3], 4, "kpis")
+kpi1 = KPI("Best balance", "Hybrid", "leads the overall fixture")
+kpi2 = KPI("Quality peak", "94", "semantic, local fixture")
+kpi3 = KPI("Fastest path", "90", "graph, local fixture")
+$lens = "Quality"
+tabs = SegmentedControl($lens, ["Quality", "Speed", "Efficiency"])
+chart = BenchmarkBars($lens, "Relative performance", ["Hybrid", "Semantic", "Graph"], [88, 94, 76], [82, 61, 90], [74, 69, 86])
+insight = Insight("Semantic leads on quality; Graph leads on speed and efficiency. Hybrid gives up a little of each to stay balanced.")
+checkpoint = Row([threshold, follow], 3, "checkpoint")
+$minimum = 75
+threshold = Slider($minimum, 50, 95, 5, "Evidence floor", "%")
+follow = Button("Explain this trade-off", @ToAssistant("Explain the " + $lens + " comparison above " + $minimum + "% evidence floor."))
 openui:end-->
 ```
 
-The directive ID, opening comment ID, and closing marker must match. Keep the
-ID stable for the card and unique within the conversation. The root appears
-before `readout`, `slider`, and `follow` deliberately: those names become
-available as the stream continues.
-
-Use JavaScript-like string concatenation with `+` and the current `$variable`
-in `@ToAssistant`. The action must describe what the assistant should do with
-the visible local value. Do not emit HTML, JavaScript, network calls, or
-components outside this library.
+Keep the directive ID and source-comment ID identical and unique within the
+conversation. Root-first forward references are deliberate. Finish every
+started program. Use JavaScript-like `+` string concatenation in
+`@ToAssistant`; interpolation such as `${...}` is not OpenUI syntax.

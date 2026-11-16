@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -10,12 +10,14 @@ import { build } from 'esbuild'
 import { chromium } from 'playwright-core'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import { openUILibrary, SAMPLE_OPENUI_PROGRAM } from '../src/library.tsx'
+import {
+  DESIGN_OPENUI_PROGRAM,
+  openUILibrary,
+  SAMPLE_OPENUI_PROGRAM
+} from '../src/library.tsx'
 import { OpenUISurface } from '../src/surface.tsx'
 
-const FIRST_OPENUI_FRAME = `$minimum = 70
-readout = Text("Showing results with at least " + $minimum + "% relevance.")
-root = Card("Filter results", "Move the threshold to narrow the set locally.", [readout])`
+const FIRST_DESIGN_FRAME = `root = Card("Retrieval strategies, compared", "A compact read on the fixture's quality-speed-efficiency trade-off.", [kpis, tabs, chart, insight, checkpoint], "RESEARCH SYNTHESIS · LOCAL DESIGN FIXTURE")`
 
 type HarnessWindow = Window & {
   __openUICalls: Array<[string, string]>
@@ -23,17 +25,38 @@ type HarnessWindow = Window & {
   __setOpenUISession: (sessionId: null | string) => void
 }
 
-test('the sample program satisfies the published library schema', () => {
+test('published programs satisfy the OpenUI library schema', () => {
   const parser = createParser(openUILibrary.toJSONSchema(), openUILibrary.root)
-  const result = parser.parse(SAMPLE_OPENUI_PROGRAM)
+  const design = parser.parse(DESIGN_OPENUI_PROGRAM)
+  const slider = parser.parse(SAMPLE_OPENUI_PROGRAM)
 
+  assert.equal(design.root?.typeName, 'Card')
+  assert.deepEqual(design.meta.errors, [])
+  assert.deepEqual(design.meta.unresolved, [])
+  assert.equal(design.stateDeclarations.$lens, 'Quality')
+  assert.equal(design.stateDeclarations.$minimum, 75)
+  assert.equal(slider.root?.typeName, 'Card')
+  assert.deepEqual(slider.meta.errors, [])
+  assert.deepEqual(slider.meta.unresolved, [])
+})
+
+test('the skill sample matches the runtime library', async () => {
+  const skill = await readFile('skills/openui/SKILL.md', 'utf8')
+  const source = skill.match(
+    /<!--openui:source id="ui-retrieval-01"\n([\s\S]*?)\nopenui:end-->/
+  )?.[1]
+  const parser = createParser(openUILibrary.toJSONSchema(), openUILibrary.root)
+  const result = parser.parse(source ?? '')
+
+  assert.ok(source)
   assert.equal(result.root?.typeName, 'Card')
   assert.deepEqual(result.meta.errors, [])
   assert.deepEqual(result.meta.unresolved, [])
-  assert.equal(result.stateDeclarations.$minimum, 70)
+  assert.equal(result.stateDeclarations.$lens, 'Quality')
+  assert.equal(result.stateDeclarations.$minimum, 75)
 })
 
-test('the surface renders its initial slider and follow-up through the real Renderer', () => {
+test('the original slider fixture still renders through the real Renderer', () => {
   const html = renderToStaticMarkup(
     <OpenUISurface
       identity="filter-card-a"
@@ -48,23 +71,17 @@ test('the surface renders its initial slider and follow-up through the real Rend
   assert.match(html, /Minimum relevance/)
   assert.match(html, /data-hermes-openui-range/)
   assert.match(html, /Explain these results/)
-  assert.match(html, /--ui-widget-surface-background/)
+  assert.match(html, /--oui-chart-1/)
 })
 
 test(
-  'the mounted renderer grows before completion, keeps local state, and restores it on refresh',
+  'the designed answer streams, updates locally, restores state, and follows up',
   { timeout: 60_000 },
   async t => {
     const workspace = process.cwd()
     const surfacePath = path.join(workspace, 'src/surface.tsx')
-    const firstFrameSource = JSON.stringify(FIRST_OPENUI_FRAME)
-    const completeFrame = {
-      source: SAMPLE_OPENUI_PROGRAM.replace(
-        'Move the threshold to narrow the set locally.',
-        'Move the threshold to narrow the set locally. Updated.'
-      ),
-      streaming: false
-    }
+    const firstFrameSource = JSON.stringify(FIRST_DESIGN_FRAME)
+    const completeFrame = { source: DESIGN_OPENUI_PROGRAM, streaming: false }
     const growingFrame = { ...completeFrame, streaming: true }
     const harness = `
       import { useEffect, useState } from 'react'
@@ -96,7 +113,7 @@ test(
 
         return (
           <OpenUISurface
-            identity="filter-card-a"
+            identity="research-card-a"
             onFollowUp={(message, destination) => {
               window.__openUICalls.push([destination, message])
               return true
@@ -127,16 +144,16 @@ test(
     })
     const html = `<!doctype html><html><head><style>
       :root {
-        --font-sans: ui-sans-serif, sans-serif;
-        --ui-accent: #a24d2a;
-        --ui-bg-editor: #fffdf9;
-        --ui-control-hover-background: #f1ece6;
-        --ui-stroke-secondary: #d8d1c8;
-        --ui-text-primary: #231f1c;
-        --ui-text-secondary: #6f655d;
-        --ui-widget-surface-background: #fffdf9;
+        --font-sans: "Inter", ui-sans-serif, sans-serif;
+        --ui-control-hover-background: #f1f1f1;
+        --ui-stroke-secondary: #dedede;
+        --ui-text-primary: #0d0d0d;
+        --ui-text-secondary: #666;
+        --ui-widget-surface-background: #fff;
       }
-      body { margin: 0; padding: 24px; background: #f4f1ec; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 28px; background: #f7f7f8; }
+      #root { margin: 0 auto; max-width: 760px; }
     </style></head><body><div id="root"></div><script>${bundled.outputFiles[0].text}</script></body></html>`
     const server = createServer((_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -162,100 +179,60 @@ test(
       })
       await rm(temp, { force: true, recursive: true })
     })
-    const page = await browser.newPage()
+    const page = await browser.newPage({ viewport: { height: 900, width: 900 } })
     const pageErrors: string[] = []
 
     page.setDefaultTimeout(5_000)
     page.on('console', message => console.error(`[browser:${message.type()}] ${message.text()}`))
     page.on('pageerror', error => pageErrors.push(error.message))
     await page.goto(`http://127.0.0.1:${address.port}`)
-    await page
-      .waitForFunction(() => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function')
-      .catch(async error => {
-        console.error('root:', await page.locator('#root').innerHTML())
-        console.error('page errors:', pageErrors)
-        throw error
-      })
-    assert.deepEqual(pageErrors, [])
+    await page.waitForFunction(
+      () => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function'
+    )
 
-    const range = page.locator('[data-hermes-openui-range]')
     const card = page.locator('[data-hermes-openui-card]')
-    const followUp = page.getByRole('button', { name: 'Explain these results' })
+    const range = page.locator('[data-hermes-openui-range]')
+    const followUp = page.getByRole('button', { name: 'Explain this trade-off' })
 
     await card.waitFor()
-    assert.equal(await page.locator('[data-hermes-openui-surface]').getAttribute(
-      'data-hermes-openui-identity'
-    ), 'filter-card-a')
+    await card.locator('.hermes-openui-title').filter({ hasText: 'Retrieval strategies, compared' }).waitFor()
     assert.equal(await range.count(), 0)
-    assert.equal(await followUp.count(), 0)
-    await page.locator('[data-hermes-openui-card] .hermes-openui-text').filter({ hasText: '70%' }).waitFor()
-    await card.evaluate(element => element.setAttribute('data-first-card', 'true'))
     await card.evaluate(element => element.setAttribute('data-before-complete', 'true'))
+
     await page.evaluate(
-      ({ source, streaming }) => (window as unknown as HarnessWindow).__setOpenUI(source, streaming),
+      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
       growingFrame
     )
-    await page
-      .waitForFunction(() =>
-        document.querySelector('[data-hermes-openui-card]')?.textContent?.includes('Updated.')
-      )
-      .catch(async error => {
-        console.error('card:', await card.textContent())
-        console.error('page errors:', pageErrors)
-        throw error
-      })
-    assert.equal(await card.getAttribute('data-first-card'), 'true')
-    assert.equal(await card.getAttribute('data-before-complete'), 'true')
-    await range.waitFor()
-    await followUp.waitFor()
-    assert.equal(await range.inputValue(), '70')
+    await page.locator('[data-hermes-openui-chart]').waitFor()
+    await page.locator('[data-hermes-openui-segmented]').waitFor()
+    assert.equal(
+      await page.locator('[data-hermes-openui-chart]').getAttribute('data-hermes-openui-lens'),
+      'Quality'
+    )
+    assert.equal(await range.inputValue(), '75')
     assert.equal(await range.isDisabled(), true)
     assert.equal(await followUp.isDisabled(), true)
-
-    await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
-      completeFrame
-    )
-    await page.waitForFunction(
-      () => !(document.querySelector('[data-hermes-openui-range]') as HTMLInputElement | null)?.disabled
-    )
-    assert.equal(await card.getAttribute('data-first-card'), 'true')
     assert.equal(await card.getAttribute('data-before-complete'), 'true')
 
-    await range.fill('85')
-    await page.locator('[data-hermes-openui-output]').filter({ hasText: '85%' }).waitFor()
-    await page.locator('[data-hermes-openui-card] .hermes-openui-text').filter({ hasText: '85%' }).waitFor()
-    await page
-      .waitForFunction(() =>
-        Object.entries(localStorage).some(
-          ([key, value]) => key.startsWith('hermes.openui.state.v1:') && value.includes('85')
-        )
-      )
-      .catch(async error => {
-        console.error('storage:', await page.evaluate(() => ({ ...localStorage })))
-        console.error('page errors:', pageErrors)
-        throw error
-      })
-
-    await page.reload()
-    await page
-      .waitForFunction(() => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function')
-      .catch(async error => {
-        console.error('root after refresh:', await page.locator('#root').innerHTML())
-        console.error('page errors:', pageErrors)
-        throw error
-      })
-    await page.locator('[data-hermes-openui-card] .hermes-openui-text').filter({ hasText: '85%' }).waitFor()
     await page.evaluate(
       frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
       completeFrame
     )
-    await range.waitFor()
     await page.waitForFunction(
       () => !(document.querySelector('[data-hermes-openui-range]') as HTMLInputElement | null)?.disabled
     )
-    assert.equal(await range.inputValue(), '85')
-    await page.locator('[data-hermes-openui-output]').filter({ hasText: '85%' }).waitFor()
+    assert.equal(await card.getAttribute('data-before-complete'), 'true')
+
+    await page.getByRole('radio', { name: 'Speed' }).click()
+    await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
+    await page.locator('[data-hermes-openui-bar="Graph"]').filter({ hasText: '90' }).waitFor()
+
+    await range.fill('90')
+    await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
+    await page.waitForFunction(() => {
+      const value = Object.values(localStorage).join(' ')
+      return value.includes('Speed') && value.includes('90')
+    })
 
     const screenshotPath = process.env.HERMES_OPENUI_SCREENSHOT
 
@@ -263,13 +240,32 @@ test(
       await page.screenshot({ fullPage: true, path: screenshotPath })
     }
 
+    const darkScreenshotPath = process.env.HERMES_OPENUI_DARK_SCREENSHOT
+
+    if (darkScreenshotPath) {
+      await page.evaluate(() => {
+        document.documentElement.dataset.theme = 'dark'
+        document.body.style.background = '#171717'
+      })
+      await page.screenshot({ fullPage: true, path: darkScreenshotPath })
+    }
+
+    await page.reload()
+    await page.waitForFunction(
+      () => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function'
+    )
+    await page.evaluate(
+      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
+      completeFrame
+    )
+    await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
+    assert.equal(await range.inputValue(), '90')
+    await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
+
     await followUp.click()
     await followUp.click()
     assert.deepEqual(await page.evaluate(() => (window as unknown as HarnessWindow).__openUICalls), [
-      [
-        'session-a',
-        'Explain the current results at this relevance threshold.'
-      ]
+      ['session-a', 'Explain the Speed comparison above 90% evidence floor.']
     ])
 
     await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession(null))

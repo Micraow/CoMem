@@ -1,115 +1,10 @@
 import { Renderer, type ActionEvent, type OpenUIError } from '@openuidev/react-lang'
 import { useMemo, useRef, useState } from 'react'
 
+import { INTELLIGENT_UI_STYLES } from './intelligent-ui/theme.ts'
 import { openUILibrary } from './library.tsx'
 
 const STATE_STORAGE_PREFIX = 'hermes.openui.state.v1'
-
-const SURFACE_STYLES = `
-.hermes-openui-surface {
-  color: var(--ui-text-primary);
-  font-family: var(--font-sans);
-  line-height: var(--conversation-line-height, 1.5);
-  max-width: 36rem;
-  width: 100%;
-}
-.hermes-openui-card {
-  background: var(--ui-widget-surface-background, var(--ui-bg-editor));
-  border: 1px solid var(--ui-stroke-secondary);
-  border-radius: 10px;
-  box-sizing: border-box;
-  display: grid;
-  gap: 12px;
-  padding: 12px 14px;
-  width: 100%;
-}
-.hermes-openui-heading {
-  display: grid;
-  gap: 2px;
-}
-.hermes-openui-heading h3 {
-  color: var(--ui-text-primary);
-  font: inherit;
-  font-size: 0.875rem;
-  font-weight: 600;
-  line-height: 1.4;
-  margin: 0;
-}
-.hermes-openui-heading p,
-.hermes-openui-text {
-  color: var(--ui-text-secondary);
-  font: inherit;
-  font-size: 0.8125rem;
-  line-height: 1.45;
-  margin: 0;
-}
-.hermes-openui-body {
-  display: grid;
-  gap: 10px;
-}
-.hermes-openui-slider {
-  display: grid;
-  gap: 6px;
-}
-.hermes-openui-slider-head {
-  align-items: baseline;
-  display: flex;
-  font-size: 0.75rem;
-  gap: 12px;
-  justify-content: space-between;
-  line-height: 1.35;
-}
-.hermes-openui-slider-head label {
-  color: var(--ui-text-secondary);
-}
-.hermes-openui-slider-head output {
-  color: var(--ui-text-primary);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-.hermes-openui-slider input {
-  accent-color: var(--ui-accent);
-  cursor: pointer;
-  margin: 0;
-  width: 100%;
-}
-.hermes-openui-slider input:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-.hermes-openui-action {
-  align-self: start;
-  background: transparent;
-  border: 1px solid var(--ui-stroke-secondary);
-  border-radius: 6px;
-  color: var(--ui-text-secondary);
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.75rem;
-  justify-self: start;
-  line-height: 1.35;
-  min-height: 28px;
-  padding: 4px 9px;
-}
-.hermes-openui-action:hover:not(:disabled) {
-  background: var(--ui-control-hover-background);
-  color: var(--ui-text-primary);
-}
-.hermes-openui-action:focus-visible,
-.hermes-openui-slider input:focus-visible {
-  outline: 2px solid var(--ui-accent);
-  outline-offset: 2px;
-}
-.hermes-openui-action:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-.hermes-openui-error {
-  color: var(--ui-text-secondary);
-  font-size: 0.75rem;
-  margin: 6px 0 0;
-}
-`
 
 export interface OpenUISurfaceProps {
   /** Stable card identity, unique within its session. */
@@ -171,7 +66,7 @@ function persistState(key: string, state: Record<string, unknown>): void {
   try {
     browserStorage()?.setItem(key, JSON.stringify({ state, version: 1 }))
   } catch {
-    // Storage can be disabled or full; the mounted card remains usable.
+    // Storage can be disabled or full; the mounted answer remains usable.
   }
 }
 
@@ -218,7 +113,6 @@ export function OpenUISurface({
 
       if (result === false) {
         followedRef.current = null
-
         return
       }
 
@@ -247,7 +141,7 @@ export function OpenUISurface({
       data-hermes-openui-identity={identity}
       data-hermes-openui-surface
     >
-      <style>{SURFACE_STYLES}</style>
+      <style>{INTELLIGENT_UI_STYLES}</style>
       <Renderer
         initialState={initialState}
         isStreaming={streaming}
