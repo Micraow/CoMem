@@ -1,6 +1,6 @@
 ---
 name: openui
-description: "Use when a compact interactive OpenUI answer makes a cited decision, comparison, or local trade-off easier to understand."
+description: "Use when a compact interactive OpenUI answer makes a cited decision, comparison, photo set, or local trade-off easier to understand."
 ---
 
 # OpenUI Answer
@@ -21,8 +21,8 @@ to decorate a complete answer.
 3. Put the source in one HTML comment. Start with `root`, then refer forward
    to statements defined afterward so the answer can render progressively.
 4. Use `Card` for the unboxed answer surface. Use `Row`, `KPI`,
-   `SegmentedControl`, `CitationList`, `BenchmarkBars`, `Insight`, `Slider`,
-   `Caption`, `Text`, and `Button` as needed.
+   `SegmentedControl`, `CitationList`, `PhotoStrip`, `BenchmarkBars`,
+   `Insight`, `Slider`, `Caption`, `Text`, and `Button` as needed.
 5. Bind `SegmentedControl` and `Slider` values to `$variables`. Visible output
    or the explicit `@ToAssistant` action must use every control value.
 6. Give `Card` a specific title and at most one useful description. Do not use
@@ -34,6 +34,11 @@ to decorate a complete answer.
 9. If scores are illustrative, disclose that once in a final `Caption`. Cite
    research with real titles, publishers, years, and `http(s)` URLs. Never
    invent a source or fetch citation metadata in the browser.
+10. Use `PhotoStrip` only when the user or a trusted tool supplied two or three
+    exact photos. Every photo needs an `https` image URL, alt text, credit,
+    license, and `https` source-page URL:
+    `PhotoStrip([{ src, alt, label, credit, license, sourceUrl }], "Title")`.
+    Do not search for photos in the browser or draw substitute imagery.
 
 Avoid nested form panels, ornamental empty shapes, and controls that only send
 a message. A compact source list, one semantic local view, and one explicit

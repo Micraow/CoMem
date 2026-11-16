@@ -9,7 +9,7 @@ import {
   useStateField,
   useTriggerAction
 } from '@openuidev/react-lang'
-import { useId, type CSSProperties } from 'react'
+import { useId, useState, type CSSProperties } from 'react'
 import { z } from 'zod/v4'
 
 const node = z.any()
@@ -30,6 +30,11 @@ function webUrl(value: string): string | null {
   } catch {
     return null
   }
+}
+
+function httpsUrl(value: string): string | null {
+  const href = webUrl(value)
+  return href && new URL(href).protocol === 'https:' ? href : null
 }
 
 const Card = defineComponent({
@@ -156,6 +161,114 @@ const CitationList = defineComponent({
             )
           })}
         </ol>
+      </section>
+    )
+  }
+})
+
+interface PhotoStripEntry {
+  readonly alt: string
+  readonly credit: string
+  readonly label?: string
+  readonly license: string
+  readonly sourceUrl: string
+  readonly src: string
+}
+
+function PhotoTile({ entry, index }: { readonly entry: PhotoStripEntry; readonly index: number }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null)
+  const src = httpsUrl(entry.src)
+  const sourceUrl = httpsUrl(entry.sourceUrl)
+  const failed = !src || failedSrc === src
+
+  return (
+    <figure className="hermes-openui-photo" data-hermes-openui-photo data-photo-index={index}>
+      <div
+        className="hermes-openui-photo-frame"
+        data-photo-state={failed ? 'fallback' : 'image'}
+      >
+        {!failed ? (
+          <img
+            alt={entry.alt}
+            decoding="async"
+            loading="lazy"
+            onError={() => setFailedSrc(src)}
+            referrerPolicy="no-referrer"
+            src={src}
+          />
+        ) : (
+          <div className="hermes-openui-photo-fallback" data-hermes-openui-photo-fallback>
+            <span>{`Image unavailable: ${entry.alt}`}</span>
+            {sourceUrl ? (
+              <a
+                className="hermes-openui-photo-source"
+                href={sourceUrl}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                View source
+              </a>
+            ) : null}
+          </div>
+        )}
+      </div>
+      <figcaption className="hermes-openui-photo-caption">
+        {entry.label ? <span className="hermes-openui-photo-label">{entry.label}</span> : null}
+        <span className="hermes-openui-photo-credit">
+          {sourceUrl ? (
+            <a
+              className="hermes-openui-photo-source"
+              href={sourceUrl}
+              rel="noopener noreferrer"
+              target="_blank"
+            >
+              {entry.credit}
+            </a>
+          ) : (
+            entry.credit
+          )}
+          {entry.license ? ` · ${entry.license}` : ''}
+        </span>
+      </figcaption>
+    </figure>
+  )
+}
+
+const PhotoStrip = defineComponent({
+  name: 'PhotoStrip',
+  description:
+    'Two or three real photos in aligned columns. Every photo requires an https image URL, alt text, credit, license, and https source-page URL.',
+  props: z.object({
+    items: z
+      .array(
+        z.object({
+          src: z.string(),
+          alt: z.string(),
+          label: z.string().optional(),
+          credit: z.string(),
+          license: z.string(),
+          sourceUrl: z.string()
+        })
+      )
+      .min(2)
+      .max(3),
+    title: z.string().optional()
+  }),
+  component: ({ props }) => {
+    const items = props.items.slice(0, 3)
+
+    return (
+      <section
+        aria-label={props.title ?? 'Photos'}
+        className="hermes-openui-photo-strip"
+        data-hermes-openui-photo-strip
+      >
+        {props.title ? <h4 className="hermes-openui-photo-strip-title">{props.title}</h4> : null}
+        <div className="hermes-openui-photo-grid">
+          {items.map((item, index) => (
+            <PhotoTile entry={item} index={index} key={`${item.src}-${index}`} />
+          ))}
+        </div>
       </section>
     )
   }
@@ -393,6 +506,7 @@ export const openUILibrary = createLibrary({
     Text,
     Caption,
     CitationList,
+    PhotoStrip,
     Kpi,
     Insight,
     SegmentedControl,
@@ -428,18 +542,23 @@ details = $view == "Decision" ? Insight("Start with hybrid retrieval: combine BM
 sources = CitationList([{ title: "The Probabilistic Relevance Framework: BM25 and Beyond", url: "https://doi.org/10.1561/1500000019", publisher: "Foundations and Trends in Information Retrieval", year: "2009" }, { title: "Dense Passage Retrieval for Open-Domain Question Answering", url: "https://arxiv.org/abs/2004.04906", publisher: "EMNLP", year: "2020" }, { title: "Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods", url: "https://doi.org/10.1145/1571941.1572114", publisher: "ACM SIGIR", year: "2009" }], "Sources")
 follow = Button("Draft an evaluation plan", @ToAssistant("Draft an evaluation plan for hybrid retrieval using the " + $view + " view. Require citations and report recall, identifier accuracy, latency, and ranking quality."))`
 
+export const PHOTO_STRIP_OPENUI_PROGRAM = `root = Card("Three views of San Francisco", "A landmark, a park, and a ride that show different sides of the city.", [photos, follow])
+photos = PhotoStrip([{ src: "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Golden_Gate_Bridge_at_sunset_1.jpg/1280px-Golden_Gate_Bridge_at_sunset_1.jpg", alt: "Golden Gate Bridge at sunset above the bay", label: "Golden Gate Bridge", credit: "Brocken Inaglory", license: "CC BY-SA 3.0", sourceUrl: "https://commons.wikimedia.org/wiki/File:Golden_Gate_Bridge_at_sunset_1.jpg" }, { src: "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/Palace_of_Fine_Arts_San_Francisco_January_2014_003.jpg/1280px-Palace_of_Fine_Arts_San_Francisco_January_2014_003.jpg", alt: "Palace of Fine Arts reflected in the lagoon", label: "Palace of Fine Arts", credit: "King of Hearts", license: "CC BY-SA 4.0", sourceUrl: "https://commons.wikimedia.org/wiki/File:Palace_of_Fine_Arts_San_Francisco_January_2014_003.jpg" }, { src: "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/San_Francisco_Cable_Car_55_dllu.jpg/1280px-San_Francisco_Cable_Car_55_dllu.jpg", alt: "San Francisco cable car 55 climbing a city street", label: "Cable car 55", credit: "Dllu", license: "CC BY-SA 4.0", sourceUrl: "https://commons.wikimedia.org/wiki/File:San_Francisco_Cable_Car_55_dllu.jpg" }], "City landmarks")
+follow = Button("Plan a photo walk", @ToAssistant("Plan a compact San Francisco photo walk for the Golden Gate Bridge, Palace of Fine Arts, and California Street cable car."))`
+
 export const OPENUI_PROMPT = openUILibrary.prompt({
   preamble:
     'When an answer benefits from one interactive visual explanation, compose a compact OpenUI answer using the local design system.',
   additionalRules: [
     'Use Card as the root. Start with root so forward references can render progressively.',
-    'Use Row, KPI, SegmentedControl, BenchmarkBars, CitationList, Insight, Slider, Caption, Text, and Button as needed.',
+    'Use Row, KPI, SegmentedControl, BenchmarkBars, CitationList, PhotoStrip, Insight, Slider, Caption, Text, and Button as needed.',
     'Keep the surface unboxed: do not invent nested form panels or decorative placeholder shapes.',
     'Bind SegmentedControl and Slider values to $variables. Every control must change visible content or an explicit follow-up.',
     'Give Card a specific title and one useful description. Do not use fixture, demo, design, or component vocabulary in user-visible labels.',
     'A chart already shows its values. Use at most one Insight for the decision implication and do not repeat every number in Markdown, Text, or Caption.',
     'Do not explain how controls work in prose. Make each control change visible content and end with one task-specific follow-up.',
     'If scores are illustrative, disclose that once in a final Caption. Cite research with real publisher, year, and http(s) URLs instead of invented sources.',
+    'Use PhotoStrip only for two or three real photos supplied by the user or a trusted tool. Give each photo an https image URL, alt text, credit, license, and https source page.',
     'Do not invent photographs or map geometry, and do not fetch citation metadata in the browser.',
     'Keep text outside the directive to one concise takeaway before it. Do not append a second summary after the directive.'
   ],

@@ -31,10 +31,10 @@ export const INTELLIGENT_UI_STYLES = `
 }
 /* Hermes's transcript-wide heading and paragraph rules otherwise add a
    second layer of spacing on top of the card's own layout. */
-[data-slot='aui_assistant-message-content'] .aui-md .hermes-openui-surface :is(h3, h4, p, figure, ol) {
+[data-slot='aui_assistant-message-content'] .aui-md .hermes-openui-surface :is(h3, h4, p, figure, ol, img) {
   margin-block: 0;
 }
-:is([data-theme="dark"], [data-openui-theme="dark"]) .hermes-openui-surface {
+:is(.dark, [data-theme="dark"], [data-openui-theme="dark"]) .hermes-openui-surface {
   --oui-canvas: #1c1c1e;
   --oui-ink: #ededed;
   --oui-muted: rgb(255 255 255 / 62%);
@@ -160,6 +160,88 @@ a.hermes-openui-citation-link:hover {
   font-size: 11px;
   line-height: 1.5;
   margin-top: 2px;
+}
+.hermes-openui-photo-strip {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+.hermes-openui-photo-strip-title {
+  color: var(--oui-ink);
+  font-size: 12px;
+  font-weight: 640;
+  letter-spacing: .015em;
+  line-height: 1.4;
+  margin: 0;
+}
+.hermes-openui-photo-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+}
+.hermes-openui-photo {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+}
+.hermes-openui-photo-frame {
+  aspect-ratio: 3 / 2;
+  background: var(--oui-surface);
+  border-radius: 12px;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+.hermes-openui-photo-frame img {
+  display: block;
+  height: 100%;
+  inset: 0;
+  object-fit: cover;
+  position: absolute;
+  width: 100%;
+}
+.hermes-openui-photo-fallback {
+  align-content: end;
+  background: var(--oui-surface);
+  box-sizing: border-box;
+  display: grid;
+  gap: 5px;
+  height: 100%;
+  padding: 9px;
+}
+.hermes-openui-photo-fallback > span {
+  color: var(--oui-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.hermes-openui-photo-caption {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.hermes-openui-photo-label {
+  color: var(--oui-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.hermes-openui-photo-credit {
+  color: var(--oui-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.hermes-openui-photo-source {
+  color: inherit;
+  text-decoration-color: color-mix(in srgb, var(--oui-ink) 30%, transparent);
+  text-underline-offset: 2px;
+}
+.hermes-openui-photo-source:hover {
+  text-decoration-color: currentColor;
 }
 .hermes-openui-row {
   align-items: center;
@@ -485,7 +567,8 @@ a.hermes-openui-citation-link:hover {
 }
 .hermes-openui-action:focus-visible,
 .hermes-openui-segmented button:focus-visible,
-.hermes-openui-citation-link:focus-visible {
+.hermes-openui-citation-link:focus-visible,
+.hermes-openui-photo-source:focus-visible {
   outline: 2px solid var(--oui-ink);
   outline-offset: 3px;
 }
@@ -530,6 +613,21 @@ a.hermes-openui-citation-link:hover {
   .hermes-openui-checkpoint {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+  .hermes-openui-photo-grid {
+    gap: 6px;
+  }
+  .hermes-openui-photo-frame {
+    border-radius: 9px;
+  }
+  .hermes-openui-photo-fallback {
+    padding: 6px;
+  }
+  .hermes-openui-photo-label {
+    font-size: 10.5px;
+  }
+  .hermes-openui-photo-credit {
+    font-size: 9.5px;
   }
   .hermes-openui-action {
     justify-self: start;
