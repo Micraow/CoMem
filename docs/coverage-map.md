@@ -107,7 +107,7 @@
 | 资源与技能 | MCP 两个 ingest 工具的 HTTP 面 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` | `routes/resources.ts:102`；`routes/skills.ts:74` | 临时上传落 `_meta/tmp/`；`GET /skills` 列已装技能 | `http.test.ts:985`–`:1058` |
 | 用户与组 | 管理面 | `/admin/users*`、`/admin/groups*`、`/admin/api-keys/{keyId}` | `routes/admin.ts:190` | `app_user` / `app_group` / `group_member` / `api_key`；跨主体操作认 `adminUserIds` | `admin.test.ts:161`「创建 → 列表 → 更新 → 删除」；`admin-access-control.test.ts:114`「A 改 B 的密码 → 403」 |
 | 认证 | 登录 / 登出 | `POST /auth/login`、`POST /auth/logout` | `routes/auth.ts:52` | `AuthService`；认证恒开，没有开关探测端点 | `api/auth.test.ts:132`；「回环信任」5 条 |
-| 提示词 | 内置提示词的可视化编辑（八条，含经验归纳两条） | `GET /prompts`、`GET /prompts/{id}`；`PUT` / `DELETE` / `POST /prompts/{id}/preview` | `routes/prompts.ts:105` | `prompt_override` 表覆盖仓库默认正文；渲染器进程级热替换 | `api/prompts.test.ts:92`「列出八条提示词，初始都没有覆盖」；`prompt-service.test.ts:61`「初始状态：每条提示词都使用默认值」 |
+| 提示词 | 内置提示词的可视化编辑（十条，含经验归纳、记忆整理各两条） | `GET /prompts`、`GET /prompts/{id}`；`PUT` / `DELETE` / `POST /prompts/{id}/preview` | `routes/prompts.ts:105` | `prompt_override` 表覆盖仓库默认正文；渲染器进程级热替换 | `api/prompts.test.ts:92`「列出十条提示词，初始都没有覆盖」；`prompt-service.test.ts:61`「初始状态：每条提示词都使用默认值」 |
 | MCP 清单 | 控制台展示模型看到的那份说明 | `GET /mcp/tools` | `routes/mcp.ts:46` | 直接序列化 `ToolRegistry`（不重写文本） | `http.test.ts:1228`；`mcp/registry.test.ts:53` |
 | 遥测 | Hook 上报阻塞开销 | `POST /telemetry/hook` | `routes/telemetry.ts:59` | 进 `ObservabilityService` 的 `Map`（每事件最近一次）→ `/metrics` | `http.test.ts:1131`「telemetry/hook 上报后 /metrics 里能看到」 |
 | 运维 | 探活与抓取 | `GET /health`、`GET /metrics` | `routes/ops.ts:82` | `/health` 聚合 `ObservabilityService.health()` + 任务计数 + 重排健康度 | `http.test.ts:217`；`:1197` metrics 关闭时 404 |

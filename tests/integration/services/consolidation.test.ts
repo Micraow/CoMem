@@ -206,6 +206,30 @@ function inventoryUris(prompt: string): readonly string[] {
 }
 
 describe('ConsolidationService.consolidate', () => {
+  it('使用控制台保存的记忆整理提示词覆盖', async () => {
+    await writePreference('editor', '默认编辑器是 vim。');
+    container.services.prompts.save(
+      'consolidation-system',
+      '自定义记忆整理要求。最多 {{maxIterations}} 轮。',
+    );
+    container.services.prompts.save(
+      'consolidation-user',
+      '范围={{scope}}；清单={{inventory}}；已读={{reads}}；第 {{iteration}}/{{maxIterations}} 轮。',
+    );
+    const llm = new ScriptedLlm([{ action: 'finish', operations: [] }]);
+
+    await createService(llm).consolidate(Uri.parse(SCOPE), {
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    });
+
+    expect(llm.prompts[0]?.system).toBe('自定义记忆整理要求。最多 10 轮。');
+    expect(llm.prompts[0]?.messages[0]?.content).toContain(`范围=${SCOPE}/memories/`);
+    expect(llm.prompts[0]?.messages[0]?.content).toContain(`清单=- ${EDITOR}`);
+    expect(llm.prompts[0]?.messages[0]?.content).toContain('已读=（还没有读过正文。）');
+    expect(llm.prompts[0]?.messages[0]?.content).toContain('第 1/10 轮');
+  });
+
   it('真实容器：3 条相似记忆合并成 2 条，正文是模型给的合并结果', async () => {
     await seedThree();
     const llm = new ScriptedLlm([

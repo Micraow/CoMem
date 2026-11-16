@@ -2284,6 +2284,12 @@ TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删
 每轮的 prompt 含：scope 下**全部**生效中记忆的清单（URI + 类型 + 摘要 + 更新时间，
 **不带正文**）、已经读过的正文、当前轮次。
 
+默认提示词在 `prompts/consolidation-system.md` 与
+`prompts/consolidation-user.md`。它们和抽取、经验归纳、摘要、查询重写使用同一套
+仓库默认值 + 控制台覆盖机制（§18.1）；修改 `memory.consolidation.maxIterations`
+后，系统提示词中的轮次上限会在下一轮渲染时同步更新。提示词是数据，但仍必须通过
+占位符与变量校验，不能绕过 §11.8 的服务端操作验证、ACL 和整批失败规则。
+
 | 配置 | 默认 | 语义 |
 |---|---|---|
 | `memory.consolidation.enabled` | `false` | 关着时 `POST /memories/consolidate` 明确拒绝（403），不返回空结果 |
@@ -4159,6 +4165,10 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 提示词的静态骨架在仓库的 `prompts/*.md`，动态部分由 `services/prompts/*.ts` 渲染成
 字符串后用 `{{name}}` 注入。存储是两层：
 
+内置提示词共十条，按业务链路分为五对：抽取、经验归纳、记忆整理、摘要与查询重写的
+系统 / 用户消息。控制台按这个顺序展示；`memory.consolidation.maxIterations` 等运行
+参数通过变量进入模板，默认模板与覆盖都不需要复制代码里的配置值。
+
 | 层 | 位置 | 谁改 | 优先级 |
 |---|---|---|---|
 | 默认 | `prompts/{id}.md` | 改代码（进 review、可 diff） | 低 |
@@ -4179,8 +4189,9 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 引用了定义外的变量（拼写错误）、模板需要的变量没有传。第三条是「代码少传了」的失败——
 渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
 
-**渲染器是进程级绑定。** 提示词的调用点有四个（`services/retrieval/intent.ts`、`services/summary.ts`、
-`services/commit/steps/memory-extract.ts`、`services/commit/steps/experience-distill.ts`，
+**渲染器是进程级绑定。** 提示词链路的调用点有五个（`services/retrieval/intent.ts`、`services/summary.ts`、
+`services/commit/steps/memory-extract.ts`、`services/commit/steps/experience-distill.ts`、
+`services/consolidation/prompt.ts`，
 每处渲染一对系统 / 用户提示词），这些文件不在本 wave 的文件所有权内，而
 `REWRITE_SYSTEM_PROMPT` 在 `retrieval/intent.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
 没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入

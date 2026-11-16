@@ -124,8 +124,8 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   // 提示词覆盖（§18）。构造期就把全部覆盖读进内存并校验——一条引用了不存在
   // 变量的覆盖会让每一次模型调用失败，而失败只出现在后台任务里。
   const prompts = new PromptService({ overrides: new PromptRepository({ db }) });
-  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：四条提示词的调用点
-  // （`search` / `summary` / `memory-extract` / `experience-distill`）不属于本 wave
+  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：五条提示词链路的调用点
+  // （`search` / `summary` / `memory-extract` / `experience-distill` / `consolidation`）不属于本 wave
   // 的所有权，推导见 `services/prompts/registry.ts`。
   bindPromptRenderer(prompts);
   // `request_log` 的裁剪跟着调度器走（§17.6）：表在进程活着的时候长，只在启动时

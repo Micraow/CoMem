@@ -130,7 +130,7 @@ export interface ContainerServices {
    * 提示词（§9.2、§11.3、§11.4）。
    *
    * 它同时是 `prompts/registry.ts` 的**进程级渲染器**：容器构造时把默认实现
-   * （只读 `prompts/*.md`）换成「覆盖优先」的实现，四条提示词的调用点才能看到
+   * （只读 `prompts/*.md`）换成「覆盖优先」的实现，五条提示词链路的调用点才能看到
    * 控制台里的修改。推导写在 `services/prompts/registry.ts`。
    */
   readonly prompts: PromptService;
