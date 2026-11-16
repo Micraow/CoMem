@@ -38,7 +38,7 @@ const ALL_STEPS = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
-  'experience_distill',
+  'dreamer',
 ] as const;
 
 let dataDir: string;
@@ -111,7 +111,7 @@ describe('没有可用 LLM 时归档能完成', () => {
     expect(meta?.skippedSteps).toEqual([
       { step: 'memory_extract', reason: 'llm_disabled' },
       { step: 'memory_merge', reason: 'llm_disabled' },
-      { step: 'experience_distill', reason: 'llm_disabled' },
+      { step: 'dreamer', reason: 'llm_disabled' },
     ]);
 
     // 3. 跳过必须可见：归档会走到 `.done`，用户不会收到任何错误。

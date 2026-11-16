@@ -12,8 +12,8 @@ import { Uri } from '../../domain/uri.js';
 import type { MemoryRecord } from '../memory.js';
 
 import type {
-  ConsolidateOptions,
-  ConsolidationPorts,
+  DreamerOptions,
+  DreamerPorts,
   InventoryEntry,
   ScopeInventory,
 } from './types.js';
@@ -53,9 +53,9 @@ function summarize(record: MemoryRecord): string {
 }
 
 export async function collectInventory(
-  ports: Pick<ConsolidationPorts, 'search' | 'memory' | 'logger'>,
+  ports: Pick<DreamerPorts, 'search' | 'memory' | 'logger'>,
   memoriesDirectory: Uri,
-  options: ConsolidateOptions,
+  options: DreamerOptions,
 ): Promise<ScopeInventory> {
   const { search, memory, logger } = ports;
   const uris = await search.glob(GLOB_PATTERN, {
@@ -76,7 +76,7 @@ export async function collectInventory(
   const all = new Set<string>();
   for (const value of [...uris].sort()) {
     const uri = Uri.tryParse(value);
-    if (uri === null || isVersionFile(uri)) {
+    if (uri === null || !memoriesDirectory.isAncestorOf(uri) || isVersionFile(uri) || (options.canRead !== undefined && !(await options.canRead(uri)))) {
       // 版本文件是**已经失效的旧值**（W98）：`status` 仍是 `active`，靠 `valid_until`
       // 才和当前值区分开。合并清单问的是「当前有哪些记忆」，所以它不进候选清单
       // （`candidates`），也就不会被模型当成一条可以 `delete` 的记忆（删掉一份版本

@@ -5,7 +5,7 @@
  *
  * 四条提示词的调用点不在本 wave 的文件所有权里（`services/search.ts`、
  * `services/summary.ts`、`services/commit/steps/memory-extract.ts`、
- * `services/commit/steps/experience-distill.ts`），而
+ * `services/dreamer/experience.ts`），而
  * `REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
  * 不是函数调用——它没法通过参数注入。
  *

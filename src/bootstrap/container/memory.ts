@@ -9,11 +9,12 @@
  *
  * 记忆合并（§11.8）排在 `MemoryService` 与 `SearchService` 之后：清单来自检索索引，
  * 写回走 `MemoryService`。检索端口用**请求身份**而不是服务图身份（见
- * `ConsolidateOptions.subject`）——合并是写操作，`restricted` 切断的节点不能因为
+ * `DreamerOptions.subject`）——合并是写操作，`restricted` 切断的节点不能因为
  * 「scope 根是调用方」就被读出来。
  */
 
-import { ConsolidationService } from '../../services/consolidation.js';
+import { recentUserEvidence, sharesScopeAcl } from '../../services/dreamer/evidence.js';
+import { DreamerService } from '../../services/dreamer/service.js';
 import { MemoryService } from '../../services/memory.js';
 import type { MemoryServicePorts } from '../../services/memory.js';
 import { ReconcileService } from '../../services/reconcile.js';
@@ -36,7 +37,7 @@ import { retrievalConfigured } from '../../config/readiness.js';
 /** 记忆栈产物。`principals` 是调度器求权用的主体集合，与 API 请求同源。 */
 export interface MemoryStack {
   readonly memory: MemoryService;
-  readonly consolidation: ConsolidationService;
+  readonly dreamer: DreamerService;
   readonly resource: ResourceService;
   readonly reconcile: ReconcileService;
   readonly skill: SkillService;
@@ -108,13 +109,20 @@ export function createMemory(
     logger,
   });
 
-  const consolidation = new ConsolidationService({
+  const dreamer = new DreamerService({
     memory,
     stat: store,
     search,
     llm,
     logger,
-    maxIterations: config.memory.consolidation.maxIterations,
+    maxIterations: config.memory.dreamer.maxIterations,
+    archive: {
+      memory, links: core.memoryLink, logger,
+      canUse: (scope, directory) => sharesScopeAcl(core.aclFile, scope, directory),
+      evidence: (scope, currentArchive) => recentUserEvidence(store, core.aclFile, core.metadata, scope, currentArchive),
+    },
+    canShare: (scope, uri) => sharesScopeAcl(core.aclFile, scope, uri.parent() ?? uri),
+    invalidate: (uri) => summary.invalidate(uri),
   });
 
   const resource = new ResourceService({
@@ -152,5 +160,5 @@ export function createMemory(
     authorizer,
   });
 
-  return { memory, consolidation, resource, reconcile, skill, principals };
+  return { memory, dreamer, resource, reconcile, skill, principals };
 }

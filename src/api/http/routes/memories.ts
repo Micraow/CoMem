@@ -4,7 +4,7 @@
  * `experiences` / `rules` 写入时是 `pending`（§11.6）：它们在被 `approve` 之前不进
  * 检索结果。控制台的「记忆复核」页用这三个端点。
  *
- * `POST /consolidate` 是记忆合并（§11.8）：**破坏性操作**（会 `delete`），所以
+ * `POST /dreamer` 是记忆合并（§11.8）：**破坏性操作**（会 `delete`），所以
  * 需要 `manage`、`dryRun` 默认 `true`、并且配置里没开启时明确拒绝。它**不进 MCP**
  * （§3：16 个工具，不多不少）。
  *
@@ -13,16 +13,12 @@
  * `decodeURIComponent`，这里直接 `Uri.parse`。
  */
 
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 import { ComemError } from '../../../domain/errors.js';
 import type { MemoryLink } from '../../../domain/memory-link.js';
 import type { NodeStatus } from '../../../domain/node.js';
 import { Uri } from '../../../domain/uri.js';
-import type {
-  ConsolidationResult,
-  ConsolidationTraceEntry,
-} from '../../../services/consolidation.js';
 import type { MemoryRecord } from '../../../services/memory.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -123,7 +119,7 @@ function serializeRecord(record: MemoryRecord): SerializedMemoryRecord {
 }
 
 export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { memory, memoryLink, authorizer, consolidation, config } = services;
+  const { memory, memoryLink, authorizer } = services;
 
   return {
     prefix: '/memories',
@@ -141,8 +137,7 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         // 而一条待复核记录的 URI、`fields`、`sources` 全都是内容。所以按**记录自己的
         // URI** 逐条求 read，无权限的整条不返回——不返回空字段，也不打码。
         //
-        // `limit` 约束的是扫描条数（`listPending` 在服务层），不是返回条数：被过滤掉
-        // 的条目不会换成更深处的记录。
+        // `limit` 约束扫描条数；被过滤掉的条目不会换成更深处的记录。
         //
         // 不逐条 `assert` + try/catch：那会把 SQL / 物化表 / IO 故障也归成「无权限」，
         // 把真实的存储问题静默隐藏成「这里没有记录」。
@@ -158,33 +153,9 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         });
       });
 
-      app.post<{ Body: unknown }>('/consolidate', async (request) => {
-        const context = requestContextOf(request);
-        const body = requireRecord(request.body, 'memories/consolidate');
-        const scope = requireUri(body, 'scope');
-        const dryRun = optionalBoolean(body, 'dryRun');
-
-        // **不展开组**：合并是写操作，scope 必须显式指定（§11.8）。
-        await authorizer.assert(scope, MANAGE, context.principals);
-
-        if (!config.memory.consolidation.enabled) {
-          // 不返回空结果：那会让「没开」看起来像「没有可合并的记忆」。
-          throw new ComemError(
-            'PERMISSION_DENIED',
-            '记忆合并未开启：它是一次会删除记忆的破坏性操作，需要显式把 memory.consolidation.enabled 设为 true。',
-            { field: 'memory.consolidation.enabled' },
-          );
-        }
-
-        const result = await consolidation.consolidate(scope, {
-          // 不传就是预览：合并会 delete，误点的代价不可逆。
-          dryRun: dryRun ?? true,
-          subject: context.subject,
-          principals: context.principals,
-        });
-        return ok(serializeConsolidation(result));
-      });
-
+      // `/consolidate` 是破坏性操作的旧名称，继续作为同一契约的兼容别名。
+      app.post<{ Body: unknown }>('/dreamer', (request) => runDreamer(services, request));
+      app.post<{ Body: unknown }>('/consolidate', (request) => runDreamer(services, request));
       app.post<{ Params: { uri: string } }>('/:uri/approve', async (request) => {
         const context = requestContextOf(request);
         const uri = parseMemoryUri(request.params.uri);
@@ -273,22 +244,19 @@ function serializeLink(link: MemoryLink): SerializedLink {
   };
 }
 
-/**
- * 合并结果就是响应体：`adds` / `updates` / `deletes` 是 URI 列表，`trace` 是每一轮
- * 模型输出的摘要。**不返回正文**：正文在 `read` 里拿，响应体只说明「谁被改了」。
- */
-interface SerializedConsolidation {
-  readonly adds: readonly string[];
-  readonly updates: readonly string[];
-  readonly deletes: readonly string[];
-  readonly trace: readonly ConsolidationTraceEntry[];
-}
-
-function serializeConsolidation(result: ConsolidationResult): SerializedConsolidation {
-  return {
-    adds: result.adds,
-    updates: result.updates,
-    deletes: result.deletes,
-    trace: result.trace,
-  };
+async function runDreamer({ authorizer, config, dreamer }: HttpRouteServices, request: FastifyRequest) {
+  const { subject, principals } = requestContextOf(request);
+  const body = requireRecord(request.body, 'memories/dreamer');
+  const scope = requireUri(body, 'scope');
+  const dryRun = optionalBoolean(body, 'dryRun');
+  if (!scope.isRoot && !scope.isProject) throw new ComemError('INVALID_ARGUMENT', 'Dreamer 需要用户、组或项目作用域。');
+  await authorizer.assert(scope, MANAGE, principals);
+  if (!config.memory.dreamer.manualConsolidation) {
+    throw new ComemError('PERMISSION_DENIED', '记忆合并未开启，请启用 Dreamer 手动整理。', { field: 'memory.dreamer.manualConsolidation' });
+  }
+  return ok(await dreamer.run(scope, {
+    dryRun, subject, principals,
+    canRead: (uri) => authorizer.check(uri, READ, principals),
+    authorize: (uri, kind) => authorizer.assert(uri, kind === 'delete' ? MANAGE : WRITE, principals),
+  }));
 }

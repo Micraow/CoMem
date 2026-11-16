@@ -1,5 +1,5 @@
 /**
- * 经验归纳提示词（架构文档 §10.1 的第 5 步 `experience_distill`、§11.6 的复核闸门；
+ * 经验归纳提示词（架构文档 §10.1 的第 5 步 `dreamer`、§11.6 的复核闸门；
  * 已有经验的预取见 §11.3）。
  *
  * 提示词的静态骨架在 `prompts/experience-system.md` 与 `prompts/experience-user.md`，
@@ -20,7 +20,7 @@
 
 import type { LlmMessage, LlmPrompt } from '../../domain/llm.js';
 
-import { promptRenderer } from './registry.js';
+import { promptRenderer } from '../prompts/registry.js';
 
 /**
  * 一条已经在盘上的经验。

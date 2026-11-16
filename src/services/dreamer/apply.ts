@@ -1,9 +1,8 @@
 /**
  * 写盘与预览（架构文档 §11.8「写回」「回滚语义」）。
  *
- * 写盘按 URI 升序**执行**（不是为了加锁）：`adds` / `updates` / `deletes` 的顺序因此
- * 是确定的，报告与日志可以直接比对。`dryRun` 走预览：不写任何东西，按操作原顺序
- * 报告「将要应用」的 URI。
+ * 先写保留者，再删被取代项。写保留者失败时，原记忆仍在。
+ * 每组按 URI 排序；预览按计划顺序返回。
  */
 
 import { ComemError } from '../../domain/errors.js';
@@ -11,7 +10,7 @@ import type { Uri } from '../../domain/uri.js';
 
 import { renderMemoryUri } from '../memory.js';
 
-import type { ConsolidationPorts, ConsolidationResult, WritePlan } from './types.js';
+import type { DreamerPorts, DreamerResult, WritePlan } from './types.js';
 
 function compareByUri(left: WritePlan, right: WritePlan): number {
   const leftUri = left.operation.uri;
@@ -23,11 +22,11 @@ function compareByUri(left: WritePlan, right: WritePlan): number {
 }
 
 export async function applyPlans(
-  ports: Pick<ConsolidationPorts, 'memory' | 'logger'>,
+  ports: Pick<DreamerPorts, 'memory' | 'logger'>,
   scope: Uri,
   plans: readonly WritePlan[],
   dryRun: boolean,
-): Promise<Pick<ConsolidationResult, 'adds' | 'updates' | 'deletes'>> {
+): Promise<Pick<DreamerResult, 'adds' | 'updates' | 'deletes'>> {
   const { memory, logger } = ports;
   const adds: string[] = [];
   const updates: string[] = [];
@@ -53,7 +52,7 @@ export async function applyPlans(
   }
 
   try {
-    for (const plan of [...plans].sort(compareByUri)) {
+    for (const plan of [...plans].sort((left, right) => Number(left.schema === null) - Number(right.schema === null) || compareByUri(left, right))) {
       if (plan.schema === null) {
         // 删除必须可解释：`reason` 是模型给的理由，进日志（§11.8）。
         await memory.remove(plan.uri);

@@ -60,7 +60,6 @@ export const ABSTRACT_FILE_NAME = '.abstract.md';
 /** L1 概览文件名（同上）。 */
 export const OVERVIEW_FILE_NAME = '.overview.md';
 
-/** 会话 / 归档目录里元数据的文件名（同上）。 */
 export const META_FILE_NAME = '.meta.json';
 
 /**
@@ -233,9 +232,11 @@ function toArchiveMeta(value: unknown, uri: Uri): ArchiveMeta {
     throw corruptMetadata(uri, '不是对象');
   }
   const archiveId = value['archiveId'];
-  const stepsDone = value['stepsDone'];
-  // 旧版本的归档没有这个字段：缺省是「没有任何步骤被跳过」，不是数据损坏。
-  const skippedSteps = value['skippedSteps'] ?? [];
+  const rawDone = value['stepsDone'];
+  const stepsDone = Array.isArray(rawDone) ? rawDone.map((step: unknown) => step === 'experience_distill' ? 'dreamer' : step) : rawDone;
+  const rawSkipped = value['skippedSteps'] ?? [];
+  const skippedSteps = Array.isArray(rawSkipped) ? rawSkipped.map((item: unknown) =>
+    isRecord(item) && item['step'] === 'experience_distill' ? { ...item, step: 'dreamer' } : item) : rawSkipped;
   const taskId = value['taskId'];
   if (typeof archiveId !== 'string') {
     throw corruptMetadata(uri, 'archiveId 不是字符串');

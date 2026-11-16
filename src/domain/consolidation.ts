@@ -11,7 +11,7 @@
  *
  * 领域层只放纯函数：校验（`validateOperations`）与「URI → 记忆类型 + identity」
  * 的还原（`resolveMemoryTarget`）。模型调用、加锁、写盘在
- * `services/consolidation.ts`。
+ * `services/dreamer/service.ts`。
  */
 
 import type { MemoryTypeSchema } from './memory-type.js';

@@ -112,7 +112,7 @@ export interface MemoryExtractStepDeps {
 /**
  * 每个多文件记忆类型预取的条数（默认 5）。
  *
- * 导出给 `experience_distill`：归纳也要预取已有经验，条数用同一个下界，避免两处
+ * 导出给 `dreamer`：归纳也要预取已有经验，条数用同一个下界，避免两处
  * 各自写一个数字后慢慢漂移。
  */
 export const DEFAULT_PREFETCH_TOP_N = 5;
@@ -186,12 +186,7 @@ export function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['
   return result;
 }
 
-/**
- * 预取的检索 query：本批用户文本；没有文本时使用受控环境观察。
- *
- * 导出给 `experience_distill`：两条步骤都要「按这次会话找相关记忆」，查询构造只应
- * 有一份（改了一处、另一处不跟着改，预取就会悄悄取到不相干的记忆）。
- */
+/** 用本批用户原话预取相关记忆；没有用户原话时使用受控环境观察。 */
 export function retrievalQuery(messages: readonly SessionMessage[]): string {
   const query = messages.filter((message) => message.role === 'user')
     .map((message) => renderMessageText({ ...message, parts: message.parts.filter((part) => part.kind === 'text') }))
@@ -203,7 +198,7 @@ export function retrievalQuery(messages: readonly SessionMessage[]): string {
  * 页面正文取 `content` 字段。
  *
  * 规则本体在 `domain/memory-type.ts` 的 `memoryContentOf()`；这里只把记录形状适配成
- * `fields`。保留这个导出是因为 `commit/steps/experience-distill.ts` 从这里取它。
+ * `fields`。保留这个导出是因为 `dreamer/experience.ts` 从这里取它。
  */
 export function pageContent(record: MemoryRecord): string {
   return memoryContentOf(record.fields);
@@ -287,6 +282,9 @@ function resolveOperations(
       continue;
     }
     const uriString = uri.toString();
+    if (schema.type === 'preferences' && uri.name.startsWith('inferred-')) {
+      skipped.push(skip(operation.type, 'dreamer_preference', '推断偏好必须通过 Dreamer 的证据校验。')); continue;
+    }
     if (!Number.isInteger(operation.pageId) || operation.pageId <= 0 || newPages.has(operation.pageId)) {
       skipped.push(skip(operation.type, 'duplicate_page_id', `编号 ${operation.pageId} 非法或重复，跳过。`)); continue;
     }

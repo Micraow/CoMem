@@ -8,7 +8,7 @@ providers:
       #
       # type: disabled 表示「没有模型，不产生任何调用」（与 embedding / rerank 的
       # 同名档一致）。关掉时必须同时把 summary.generator 改成 rule、保持
-      # memory.consolidation.enabled: false——否则 loadConfig 在启动期抛
+      # memory.dreamer.manualConsolidation: false——否则 loadConfig 在启动期抛
       # INVALID_ARGUMENT，而不是让摘要静默失败。
       type: openai-compatible
       # 下面是**占位值**：api.example.com 是 IANA 保留域名（RFC 2606），永远不可达。
@@ -134,13 +134,10 @@ memory:
     defaultDays: 0         # 记忆默认存活天数。0 = 永不过期（默认）
     sweepBatchSize: 100    # 每轮最多清扫多少条，防止一次清太多把库锁住
     retentionDays: 0       # 归档后保留多少天再物理删除。0 = 永不物理删除（默认）
-  # 记忆合并（agentic 循环：模型先读正文再给 add / update / delete）。
-  #
-  # 默认关：合并会 delete，是破坏性操作，必须显式开启。关着的时候端点明确拒绝。
-  # 开启时 summary.generator 必须是 llm，否则 loadConfig 抛 INVALID_ARGUMENT。
-  consolidation:
-    enabled: false
-    maxIterations: 10      # 探索轮次上限；到上限还没给出操作就整次失败（不做部分应用）
+  # Dreamer 随归档提炼经验、提出待复核偏好。手动整理可合并和删除记忆，需显式开启。
+  dreamer:
+    manualConsolidation: false
+    maxIterations: 10      # 手动整理未在轮次内完成时不应用计划
 
 acl:
   groupDefaultLevel: write   # write | read

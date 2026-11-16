@@ -102,7 +102,7 @@ function expectedDefaults(dataDir: string): unknown {
       profile: { maxChars: 800 },
       workingMemory: { enabled: false },
       ttl: { defaultDays: 0, sweepBatchSize: 100, retentionDays: 0 },
-      consolidation: { enabled: false, maxIterations: 10 },
+      dreamer: { manualConsolidation: false, maxIterations: 10 },
     },
     acl: { groupDefaultLevel: 'write' },
     auth: { trustLoopback: true, adminUserIds: [], sessionSecret: '', sessionTtlSeconds: 86400 },
@@ -345,7 +345,7 @@ describe('loadConfig', () => {
       expect(config.logging.file).toBe('/var/log/comem/error.log');
       expect(config.retrieval.queryFilters).toEqual(['^recall']);
       expect(config.memory.reviewRequired).toEqual(['rules']);
-      expect(config.memory.consolidation.maxIterations).toBe(5);
+      expect(config.memory.dreamer.maxIterations).toBe(5);
     });
 
     it('环境变量优先于配置文件', () => {
@@ -538,26 +538,9 @@ describe('loadConfig', () => {
       expect(config.retrieval.rerank.enabled).toBe(false);
     });
 
-    it('memory.consolidation.enabled 为 true 而 summary.generator 是 rule 时抛 INVALID_ARGUMENT', () => {
-      const error = loadError({
-        path: writeConfig(
-          [
-            'summary:',
-            '  generator: rule',
-            'memory:',
-            '  consolidation:',
-            '    enabled: true',
-          ].join('\n'),
-        ),
-        env: testEnv(),
-      });
-
-      expect(error.code).toBe('INVALID_ARGUMENT');
-      expect(error.message).toContain('memory.consolidation.enabled');
-      expect(error.details).toMatchObject({
-        field: 'memory.consolidation.enabled',
-        summaryGenerator: 'rule',
-      });
+    it('Dreamer 可配合规则摘要运行，手动整理仍要求 LLM', () => {
+      const config = loadConfig({ path: writeConfig('summary:\n  generator: rule\nmemory:\n  dreamer:\n    manualConsolidation: true\nproviders:\n  llm:\n    default:\n      baseUrl: http://model.invalid/v1\n'), env: testEnv() });
+      expect(config.memory.dreamer.manualConsolidation).toBe(true);
     });
 
     it('summary.generator 是 llm 时记忆合并可用，maxIterations 真的生效', () => {
@@ -578,13 +561,13 @@ describe('loadConfig', () => {
       });
 
       expect(config.summary.generator).toBe('llm');
-      expect(config.memory.consolidation).toEqual({ enabled: true, maxIterations: 3 });
+      expect(config.memory.dreamer).toEqual({ manualConsolidation: true, maxIterations: 3 });
     });
 
     it('记忆合并默认关：不写配置时 enabled 是 false', () => {
       const config = loadConfig({ path: join(tempDir, 'missing.yaml'), env: testEnv() });
 
-      expect(config.memory.consolidation).toEqual({ enabled: false, maxIterations: 10 });
+      expect(config.memory.dreamer).toEqual({ manualConsolidation: false, maxIterations: 10 });
     });
 
     it('workingMemory.enabled 在配置真实 LLM 地址时合法', () => {
@@ -669,10 +652,9 @@ describe('loadConfig', () => {
         });
 
         expect(error.code, generator).toBe('INVALID_ARGUMENT');
-        expect(error.message, generator).toContain('memory.consolidation.enabled');
+        expect(error.message, generator).toContain('memory.dreamer.manualConsolidation');
         expect(error.details, generator).toMatchObject({
-          field: 'memory.consolidation.enabled',
-          summaryGenerator: generator,
+          field: 'memory.dreamer.manualConsolidation',
           llmType: 'disabled',
         });
       }

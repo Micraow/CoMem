@@ -3,6 +3,8 @@
  */
 
 import { z } from 'zod';
+import { experienceSchema } from './experience.js';
+import { inferenceSchema } from './preferences.js';
 
 import type { ConsolidationOperation } from '../../domain/consolidation.js';
 
@@ -14,7 +16,9 @@ import type { ConsolidationOperation } from '../../domain/consolidation.js';
  * `validateOperations` 会给出「content 不能为空」这种能定位的消息。
  */
 export const consolidationOutputSchema = z.object({
-  action: z.enum(['read', 'finish']),
+  action: z.enum(['read', 'finish']).optional(),
+  experiences: z.array(experienceSchema).optional(),
+  inferences: z.array(inferenceSchema).optional(),
   uris: z.array(z.string()).optional(),
   operations: z
     .array(
@@ -28,7 +32,7 @@ export const consolidationOutputSchema = z.object({
     .optional(),
 });
 
-type ConsolidationOutput = z.infer<typeof consolidationOutputSchema>;
+export type ConsolidationOutput = z.infer<typeof consolidationOutputSchema>;
 
 /** `operations` 缺省时是空列表（模型认为不需要改）。 */
 export function normalizeOperations(output: ConsolidationOutput): readonly ConsolidationOperation[] {

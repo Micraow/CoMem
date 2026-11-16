@@ -103,6 +103,8 @@ function resolveLayers(options: LoadConfigOptions): ConfigLayers {
   const defaults = configSchema.parse({}) as ConfigRecord;
   const fileConfig = readConfigFile(configPath, env, 'config');
 
+  env.COMEM_MEMORY_DREAMER_MANUAL_CONSOLIDATION ??= env.COMEM_MEMORY_CONSOLIDATION_ENABLED;
+  env.COMEM_MEMORY_DREAMER_MAX_ITERATIONS ??= env.COMEM_MEMORY_CONSOLIDATION_MAX_ITERATIONS;
   let envOverrides: ConfigRecord = {};
   for (const leaf of collectLeaves(defaults)) {
     const envName = envNameFor(leaf.path);

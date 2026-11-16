@@ -17,8 +17,16 @@ import type { Uri } from '../../domain/uri.js';
 
 import type { MemoryService } from '../memory.js';
 import type { SearchService } from '../search.js';
+import type { ExperiencePorts } from './experience.js';
+import type { PreferenceEvidence } from './evidence.js';
 
-export interface ConsolidationServiceDeps {
+export interface DreamerServiceDeps {
+  readonly canShare?: (scope: Uri, uri: Uri) => Promise<boolean>;
+  readonly invalidate?: (uri: Uri) => Promise<unknown>;
+  readonly archive?: ExperiencePorts & {
+    canUse(scope: Uri, directory: Uri): Promise<boolean>;
+    evidence(scope: Uri, currentArchive?: Uri): Promise<readonly PreferenceEvidence[]>;
+  };
   readonly memory: Pick<MemoryService, 'read' | 'upsertMemory' | 'remove'>;
   /**
    * 文件系统层面的存在性判断（`ContentStore.stat` 的 `Pick`）：按**路径**看磁盘上
@@ -36,7 +44,7 @@ export interface ConsolidationServiceDeps {
    * 枚举 scope 下记忆文件的检索端口。
    *
    * `FindOptions` 要调用方身份（`subject` / `principals`），而服务本身拿不到请求
-   * 上下文——身份走 `consolidate` 的选项（见那里的说明）。
+   * 上下文——身份走 `run` 的选项（见那里的说明）。
    */
   readonly search: Pick<SearchService, 'glob'>;
   /**
@@ -50,11 +58,13 @@ export interface ConsolidationServiceDeps {
     generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
   };
   readonly logger: Logger;
-  /** 最大轮次。默认 10，来源见 `DEFAULT_MAX_ITERATIONS`。 */
+  /** 最大轮次。默认 10，限制模型调用次数。 */
   readonly maxIterations?: number;
 }
 
-export interface ConsolidateOptions {
+export interface DreamerOptions {
+  readonly authorize?: (uri: Uri, kind: ConsolidationOperation['kind']) => Promise<void>;
+  readonly canRead?: (uri: Uri) => Promise<boolean>;
   /**
    * 只返回 `adds` / `updates` / `deletes`，不写任何东西。
    *
@@ -74,7 +84,7 @@ export interface ConsolidateOptions {
 }
 
 /** 每一轮的模型输出摘要，用于排查「为什么它做了这个决定」。 */
-export interface ConsolidationTraceEntry {
+export interface DreamerTraceEntry {
   readonly iteration: number;
   readonly action: 'read' | 'finish';
   /** 这一轮请求读取的 URI；`finish` 轮为空。 */
@@ -83,20 +93,20 @@ export interface ConsolidationTraceEntry {
   readonly summary: string;
 }
 
-export interface ConsolidationResult {
+export interface DreamerResult {
   readonly adds: readonly string[];
   readonly updates: readonly string[];
   readonly deletes: readonly string[];
   /** 每一轮的模型输出摘要，用于排查「为什么它做了这个决定」 */
-  readonly trace: readonly ConsolidationTraceEntry[];
+  readonly trace: readonly DreamerTraceEntry[];
 }
 
 /** 跨文件函数用的依赖子集：显式传端口，不读类实例。 */
-export interface ConsolidationPorts {
-  readonly memory: ConsolidationServiceDeps['memory'];
-  readonly stat: ConsolidationServiceDeps['stat'];
-  readonly search: ConsolidationServiceDeps['search'];
-  readonly logger: ConsolidationServiceDeps['logger'];
+export interface DreamerPorts {
+  readonly memory: DreamerServiceDeps['memory'];
+  readonly stat: DreamerServiceDeps['stat'];
+  readonly search: DreamerServiceDeps['search'];
+  readonly logger: DreamerServiceDeps['logger'];
 }
 
 /**

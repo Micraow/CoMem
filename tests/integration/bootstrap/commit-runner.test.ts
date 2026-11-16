@@ -51,7 +51,8 @@ import {
   type StepContextPorts,
 } from '../../../src/services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-summary.js';
-import { ExperienceDistillStep } from '../../../src/services/commit/steps/experience-distill.js';
+import { DreamerService } from '../../../src/services/dreamer/service.js';
+import { DreamerStep } from '../../../src/services/commit/steps/dreamer.js';
 import { MemoryExtractStep } from '../../../src/services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../../../src/services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summary-invalidate.js';
@@ -79,7 +80,7 @@ const ALL_STEPS = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
-  'experience_distill',
+  'dreamer',
 ] as const;
 
 /** §18 的 `task.maxAttempts` 默认值：3 次。坏载荷用完它之后进死信。 */
@@ -288,7 +289,12 @@ function createRunner(
           }),
           new MemoryMergeStep({ memory, archive: archiveArtifacts, links: memoryLink, logger }),
           new SummaryInvalidateStep({ summary, logger }),
-          new ExperienceDistillStep({ memory, llm, archive: archiveArtifacts, links: memoryLink, logger }),
+          new DreamerStep({
+            dreamer: new DreamerService({ memory, llm, logger, stat: store, search: { glob: async () => [] },
+              archive: { memory, links: memoryLink, logger, canUse: async () => true, evidence: async () => [] } }),
+            archive: archiveArtifacts,
+            invalidate: (uri) => summary.invalidate(uri),
+          }),
         ],
         ports: createArchivePorts(archiveUri, deps),
         ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),
@@ -435,7 +441,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     await runner.stop();
   });
 
-  it('重放幂等：重新入队后四步全部跳过，不重复写', async () => {
+  it('旧经验检查点重放幂等：重新入队后全部跳过，不重复写', async () => {
     const { runner, provider } = createRunner([{ json: EXTRACT_RESPONSE }, DISTILL_RESPONSE]);
 
     const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, { sessionId: 'sess_1' });
@@ -446,6 +452,10 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     const experiencePath = join(dataDir, 'user', 'alice', 'memories', 'experiences', 'code-style.md');
     const before = await readFile(experiencePath, 'utf8');
     const metaBefore = await metadata.readArchive(committed.archiveUri);
+
+    // 模拟升级前的磁盘格式，确保不是只有新写的检查点才能重放。
+    const metaPath = join(archiveDirectory(ARCHIVE), '.meta.json');
+    await writeFile(metaPath, (await readFile(metaPath, 'utf8')).replace('"dreamer"', '"experience_distill"'));
 
     // 模拟「租约过期后被重新认领」：`stepsDone` 里的四步一个都不能重跑。
     taskStore.requeue(committed.taskId, new Date());
@@ -676,7 +686,7 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
       'memory_extract',
       'memory_merge',
       'summary_invalidate',
-      'experience_distill',
+      'dreamer',
     ]);
     expect(taskRow?.stepsDone).toEqual(meta?.stepsDone);
 

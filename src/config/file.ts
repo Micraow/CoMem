@@ -130,6 +130,14 @@ export function readConfigFile(
       { path: filePath },
     );
   }
+  const memory = parsed['memory'];
+  if (isRecord(memory) && isRecord(memory['consolidation'])) {
+    const { consolidation, ...rest } = memory;
+    const { enabled, ...legacy } = consolidation as ConfigRecord;
+    const migrated = { ...legacy, ...(enabled === undefined ? {} : { manualConsolidation: enabled }) };
+    const dreamer = rest['dreamer'];
+    return { ...parsed, memory: { ...rest, dreamer: dreamer === undefined || isRecord(dreamer) ? { ...migrated, ...dreamer } : dreamer } };
+  }
   return parsed;
 }
 

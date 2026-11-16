@@ -292,7 +292,7 @@ describe('被动捕获：普通 Codex 会话 → 记忆（真实容器 + 假模�
         'memory_extract',
         'memory_merge',
         'summary_invalidate',
-        'experience_distill',
+        'dreamer',
       ],
       skippedSteps: [],
     });
@@ -506,5 +506,89 @@ describe('实时会话：没有宿主 Hook 时的自动提交', () => {
     await expect(
       container.services.memory.read(Uri.parse(EVENT_URI)),
     ).resolves.toBeNull();
+  });
+});
+
+describe('Dreamer 跨会话偏好', () => {
+  const first = '讲 TCP 拥塞时先带我走一个实际报文。';
+  const second = '讲 P4 转发时先给一个能运行的例子。';
+  const topic = 'network-learning';
+  const inferred = Uri.parse(`${SCOPE}/memories/preferences/inferred-${topic}.md`);
+
+  async function configureDreamer(quotes: readonly string[]) {
+    llm = await startFakeLlmHttp((body) => JSON.stringify(body.includes('经验归纳器') ? {
+      experiences: [],
+      inferences: [{ topic, condition: '学习陌生的网络机制时', preference: '先用具体例子走一遍。',
+        evidence: quotes.map((quote, index) => ({ id: index + 1, quote })) }],
+    } : { operations: [] }));
+    const configPath = await writeConfig(llm.baseUrl);
+    container = await createContainer({ configPath, env: { ...process.env, COMEM_DATA_DIR: dataDir, COMEM_LOGGING_LEVEL: 'error' } });
+    return container;
+  }
+
+  async function archiveConversation(current: Container, texts: readonly string[], restricted = false) {
+    const session = current.services.session;
+    const sessionUri = await session.create(Uri.parse(SCOPE), PRINCIPALS);
+    if (restricted) {
+      await writeFile(join(toDiskPath(dataDir, sessionUri), '.acl.json'), '{"mode":"restricted","entries":[]}');
+    }
+    for (const [index, text] of texts.entries()) {
+      await session.addMessage(sessionUri, { id: `evidence-${index}`, role: 'user', parts: [{ kind: 'text', text }],
+        createdAt: `2026-11-10T02:00:0${index}.000Z` });
+    }
+    const { archiveUri } = await session.commitPhase1(sessionUri);
+    await current.commitRunner.tick();
+    return archiveUri;
+  }
+
+  it('核对两个真实归档的原话，再写待复核偏好和溯源；拒绝后同批旧证据不再生成', async () => {
+    const current = await configureDreamer([second, first]);
+    const one = await archiveConversation(current, [first]);
+    expect(await current.services.memory.read(inferred)).toBeNull();
+    const two = await archiveConversation(current, [second]);
+    const record = await current.services.memory.read(inferred);
+    expect(record).toMatchObject({ status: 'pending', memoryType: 'preferences' });
+    expect(new Set(record?.sources)).toEqual(new Set([one.toString(), two.toString()]));
+    expect(record?.fields['content']).toContain(first);
+    expect(current.services.memoryLink.linksOf(inferred)).toHaveLength(2);
+    expect(await readArchiveJson(two.toString(), 'memory_diff.json')).toMatchObject({
+      operations: { adds: [expect.objectContaining({ uri: inferred.toString() })] },
+    });
+    expect(await current.services.memory.read(Uri.parse(PROFILE_URI))).toBeNull();
+    await current.services.memory.reject(inferred, '这只适用于这两件事。');
+    await archiveConversation(current, [second]);
+    expect(await current.services.memory.read(inferred)).toBeNull();
+  });
+
+  it('排除受限会话，即使模型编造成立的引用编号也不写入', async () => {
+    const current = await configureDreamer([second, first]);
+    await archiveConversation(current, [first], true);
+    await archiveConversation(current, [second]);
+    expect(await current.services.memory.read(inferred)).toBeNull();
+    expect(llm?.requests.filter((request) => request.includes('经验归纳器')).every((request) => !request.includes(first))).toBe(true);
+  });
+
+  it('同主题已经有明确偏好时，保留原偏好，不再创建推断项', async () => {
+    const current = await configureDreamer([second, first]);
+    const { preferencesMemoryType } = await import('../../../src/domain/memory-types/preferences.js');
+    await current.services.memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, { topic, content: '先解释原理，再给例子。' });
+    await archiveConversation(current, [first]);
+    await archiveConversation(current, [second]);
+    expect(await current.services.memory.read(inferred)).toBeNull();
+    expect((await current.services.memory.read(Uri.parse(`${SCOPE}/memories/preferences/${topic}.md`)))?.fields['content']).toBe('先解释原理，再给例子。');
+  });
+
+  it.each([
+    { separate: false, quotes: [first, second] },
+    { separate: true, quotes: [second, '编造的原话'] },
+  ])('拒绝同一会话和虚构原话（$separate）', async ({ separate, quotes }) => {
+    const current = await configureDreamer(quotes);
+    if (separate) {
+      await archiveConversation(current, [first]);
+      await archiveConversation(current, [second]);
+    } else {
+      await archiveConversation(current, [first, second]);
+    }
+    expect(await current.services.memory.read(inferred)).toBeNull();
   });
 });

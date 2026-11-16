@@ -32,10 +32,10 @@ import {
   type StepContextPorts,
 } from '../../../src/services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-summary.js';
-import {
-  ExperienceDistillStep,
-  type ExperienceDistillStepDeps,
-} from '../../../src/services/commit/steps/experience-distill.js';
+import { DreamerStep } from '../../../src/services/commit/steps/dreamer.js';
+import type { DreamerDiffArchive } from '../../../src/services/dreamer/archive-diff.js';
+import type { ExperiencePorts } from '../../../src/services/dreamer/experience.js';
+import { DreamerService } from '../../../src/services/dreamer/service.js';
 import {
   EXTRACT_RESULT_KEY,
   isMemoryExtractResult,
@@ -749,7 +749,7 @@ function mergeContext(
  * 初始是一份**空的清单**：`experience_distill` 排在 `memory_merge` 之后，后者无论
  * 有没有操作都会写这份文件。单独跑这一步时用一个空清单模拟「合并已经跑过」。
  */
-function createDistillArchive(): ExperienceDistillStepDeps['archive'] & {
+function createDistillArchive(): DreamerDiffArchive & {
   readonly diffs: MemoryDiff[];
 } {
   const diffs: MemoryDiff[] = [
@@ -774,19 +774,21 @@ function createDistillArchive(): ExperienceDistillStepDeps['archive'] & {
 function createDistillStep(
   provider: FakeLlmProvider,
   options: {
-    readonly memory?: ExperienceDistillStepDeps['memory'];
-    readonly links?: ExperienceDistillStepDeps['links'];
-    readonly archive?: ExperienceDistillStepDeps['archive'];
+    readonly memory?: ExperiencePorts['memory'];
+    readonly links?: ExperiencePorts['links'];
+    readonly archive?: DreamerDiffArchive;
   } = {},
-): ExperienceDistillStep {
+): DreamerStep {
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
-  return new ExperienceDistillStep({
-    memory: options.memory ?? memory,
-    llm,
-    archive: options.archive ?? createDistillArchive(),
-    links: options.links ?? linkService,
-    logger,
+  const dreamer = new DreamerService({
+    memory, llm, logger,
+    stat: { stat: async () => null }, search: { glob: async () => [] },
+    archive: {
+      memory: options.memory ?? memory, links: options.links ?? linkService, logger,
+      canUse: async () => true, evidence: async () => [],
+    },
   });
+  return new DreamerStep({ dreamer, archive: options.archive ?? createDistillArchive(), invalidate: async () => {} });
 }
 
 describe('MemoryMergeStep', () => {
@@ -1281,7 +1283,7 @@ describe('MemoryMergeStep', () => {
 });
 
 
-describe('ExperienceDistillStep', () => {
+describe('DreamerStep', () => {
   const EXPERIENCE = `${SCOPE}/memories/experiences/monorepo-migration.md`;
 
   it('经验归纳可将新经验关联到已预取的设备实体', async () => {
@@ -1289,7 +1291,7 @@ describe('ExperienceDistillStep', () => {
       name: 'laptop', aliases: ['ThinkBook'], kind: 'device', content: '主力笔记本运行 Arch Linux。',
     });
     const record = await memory.read(Uri.parse(`${SCOPE}/memories/entities/laptop.md`));
-    const searched: ExperienceDistillStepDeps['memory'] = {
+    const searched: ExperiencePorts['memory'] = {
       upsertMemory: (...args) => memory.upsertMemory(...args),
       prefetch: async () => [record!],
     };
@@ -1429,7 +1431,7 @@ describe('ExperienceDistillStep', () => {
 
     expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(
-      '这次没有可归纳的经验，未写入记忆',
+      'Dreamer 归档整理完成',
       expect.objectContaining({ archive: ARCHIVE }),
     );
     expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual([]);
@@ -1471,7 +1473,7 @@ describe('ExperienceDistillStep', () => {
 
   it('links 写失败不让归档失败：记忆已落盘', async () => {
     const errorSpy = vi.spyOn(logger, 'error');
-    const links: ExperienceDistillStepDeps['links'] = {
+    const links: ExperiencePorts['links'] = {
       addLinks: () => {
         throw new Error('memory_link 写失败');
       },
@@ -1510,20 +1512,20 @@ describe('ExperienceDistillStep', () => {
       steps: [step],
       ports,
       logger,
-      skippedSteps: new Map([['experience_distill', 'llm_disabled']]),
+      skippedSteps: new Map([['dreamer', 'llm_disabled']]),
     });
 
     await pipeline.run(Uri.parse(ARCHIVE), Uri.parse(SCOPE));
 
     // 步骤既不在 `skippedSteps` 里重复判，也不调模型。
     expect(provider.calls).toHaveLength(0);
-    expect(meta.stepsDone).toEqual(['experience_distill']);
-    expect(meta.skippedSteps).toEqual([{ step: 'experience_distill', reason: 'llm_disabled' }]);
+    expect(meta.stepsDone).toEqual(['dreamer']);
+    expect(meta.skippedSteps).toEqual([{ step: 'dreamer', reason: 'llm_disabled' }]);
     // 归档照常走到 `.done`：缺模型不是「无法归档」。
     expect(writeDone).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      'experience_distill 被跳过：providers.llm.default.type 是 disabled',
-      expect.objectContaining({ step: 'experience_distill', reason: 'llm_disabled' }),
+      'dreamer 被跳过：providers.llm.default.type 是 disabled',
+      expect.objectContaining({ step: 'dreamer', reason: 'llm_disabled' }),
     );
     expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
   });

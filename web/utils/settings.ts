@@ -451,12 +451,12 @@ export const SETTING_FIELDS = {
   'memory.ttl.defaultDays': { label: '默认过期天数', control: 'number' },
   'memory.ttl.sweepBatchSize': { label: '每轮清扫条数', control: 'number' },
   'memory.ttl.retentionDays': { label: '归档后保留天数', control: 'number' },
-  'memory.consolidation.enabled': {
-    label: '启用记忆合并',
+  'memory.dreamer.manualConsolidation': {
+    label: '允许 Dreamer 手动整理',
     control: 'boolean',
-    hint: '合并会删除记忆，是破坏性操作。',
+    hint: '手动执行可能删除被取代的记忆。',
   },
-  'memory.consolidation.maxIterations': { label: '合并探索轮次上限', control: 'number' },
+  'memory.dreamer.maxIterations': { label: 'Dreamer 手动整理轮次上限', control: 'number' },
 
   'session.autoCommit.enabled': { label: '自动提交', control: 'boolean' },
   'session.autoCommit.pendingTokenThreshold': { label: '待提交 token 阈值', control: 'number' },

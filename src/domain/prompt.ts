@@ -112,11 +112,11 @@ const PROMPT_BODIES: Readonly<Record<PromptId, Omit<PromptDefinition, 'id'>>> = 
     ],
   },
   'experience-system': {
-    description: '经验归纳 · 系统提示词',
+    description: 'Dreamer · 经验归纳 · 系统提示词',
     variables: [{ name: 'today', description: '今天的日期（YYYY-MM-DD）' }],
   },
   'experience-user': {
-    description: '经验归纳 · 用户消息',
+    description: 'Dreamer · 经验归纳 · 用户消息',
     variables: [
       { name: 'existingExperiences', description: '预取到的已有经验（话题、正文与有效期）' },
       { name: 'messages', description: '这次要归纳的会话消息' },

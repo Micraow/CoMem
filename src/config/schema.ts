@@ -327,22 +327,9 @@ const configObjectSchema = z.object({
           retentionDays: z.number().int().nonnegative().default(0),
         })
         .prefault({}),
-      /**
-       * 记忆合并（架构文档 §11.8）。
-       *
-       * **默认关**：合并会 `delete`，是破坏性操作。关着的时候端点明确拒绝（不是
-       * 返回空结果——那会让「没开」看起来像「没有可合并的记忆」）。
-       */
-      consolidation: z
-        .object({
-          enabled: z.boolean().default(false),
-          /**
-           * 最大轮次。
-           *
-           * 10 是设计约定的上界（来源见 `services/consolidation.ts` 的
-           * `DEFAULT_MAX_ITERATIONS`）：每轮至少一次完整模型调用，10 轮已经足够
-           * 读完一个 scope 的主要记忆；再往上只会让一次合并烧掉几十次调用。
-           */
+      /** Dreamer 自动归档整理随可用 LLM 运行；可删除的手动整理需显式启用。 */
+      dreamer: z.object({
+          manualConsolidation: z.boolean().default(false),
           maxIterations: z.number().int().positive().default(10),
         })
         .prefault({}),

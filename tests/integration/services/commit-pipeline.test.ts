@@ -22,7 +22,7 @@ const ALL_STEPS: readonly CommitStepName[] = [
   'memory_extract',
   'memory_merge',
   'summary_invalidate',
-  'experience_distill',
+  'dreamer',
 ];
 
 class FakeStep extends CommitStep {

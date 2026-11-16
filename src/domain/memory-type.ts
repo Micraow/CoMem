@@ -88,7 +88,7 @@ export function identityFields(schema: MemoryTypeSchema): readonly MemoryTypeFie
  * identity 字段全部必填（§11.1：没有 identity 就判定不了「这是同一条还是新的」）。
  *
  * 两个调用方共用这一份：`MemoryService.upsertMemory` 在**锁内**校验（计划与写入
- * 之间文件可能被别的写者改过，这是最后一道保证），`ConsolidationService.#plan` 在
+ * 之间文件可能被别的写者改过，这是最后一道保证），`DreamerService.#plan` 在
  * **任何写入之前**校验（否则写入循环里的第一次失败会发生在删除已经应用之后）。
  *
  * 导出给抽取步骤：它要在调 `upsertMemory` 之前就知道 identity 是否齐全，缺字段的

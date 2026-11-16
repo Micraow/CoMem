@@ -55,7 +55,7 @@ export function createApi(
   const { summary, filesystem, task, session, assembler, ledger, search, indexObserver, llm, embedding } =
     retrieval;
   const { authorizer } = retrieval;
-  const { memory, consolidation, resource, reconcile, skill } = memoryStack;
+  const { memory, dreamer, resource, reconcile, skill } = memoryStack;
   const { observability } = background;
 
   const mcpRegistry = createToolRegistry();
@@ -130,7 +130,7 @@ export function createApi(
     taskStore: taskRepository,
     memory,
     memoryLink,
-    consolidation,
+    dreamer,
     resource,
     skill,
     search,

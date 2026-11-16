@@ -26,7 +26,7 @@ import {
 } from '../../../src/domain/prompt.js';
 import { BUILTIN_MEMORY_TYPES } from '../../../src/domain/memory-types/index.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { buildExperiencePrompt } from '../../../src/services/prompts/experience.js';
+import { buildExperiencePrompt } from '../../../src/services/dreamer/archive-prompt.js';
 import { buildExtractPrompt } from '../../../src/services/prompts/extract.js';
 import { buildRewriteUserPrompt, REWRITE_SYSTEM_PROMPT } from '../../../src/services/prompts/rewrite.js';
 import { buildSummaryPrompt } from '../../../src/services/prompts/summarize.js';

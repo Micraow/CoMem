@@ -1,13 +1,13 @@
 /**
- * `memory.consolidation.enabled = true` 的接线验收（架构文档 §11.8）。
+ * `memory.dreamer.manualConsolidation = true` 的接线验收（架构文档 §11.8）。
  *
  * 已有的 `tests/integration/services/consolidation.test.ts` 分成两半：
- * - 合并逻辑用 `new ConsolidationService(...)` 直接构造，**绕过了配置开关**；
+ * - 合并逻辑用 `new DreamerService(...)` 直接构造，**绕过了配置开关**；
  * - 开关关闭时 HTTP 端点返回 403。
  *
- * 缺的是中间那一段：配置打开后，`POST /api/v1/memories/consolidate` 真的会调模型、
+ * 缺的是中间那一段：配置打开后，`POST /api/v1/memories/dreamer` 真的会调模型、
  * 真的会写盘。把开关「打开」而测试只断言「不报错」，与「关着时返回 403」加起来仍
- * 证明不了端点走通了合并——`ConsolidationService` 构造了但路由拿到的不是它、或者
+ * 证明不了端点走通了合并——`DreamerService` 构造了但路由拿到的不是它、或者
  * `dryRun` 默认值把写盘吞掉，两种缺陷都只会在真实链路上出现。
  *
  * 模型用回环 HTTP 替身（`tests/helpers/fake-llm-http.ts`）：走真实 `AiSdkLlmProvider`
@@ -21,23 +21,34 @@ import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import type { IdentityResolver } from '../../../src/api/http/middleware.js';
 import { createHttpServer } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import { MANAGE_LEVEL, READ_LEVEL, USER_WILDCARD } from '../../../src/domain/acl.js';
+import { entitiesMemoryType } from '../../../src/domain/memory-types/entities.js';
+import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { startFakeLlmHttp, type FakeLlmHttp } from '../../helpers/fake-llm-http.js';
 
 const SCOPE = 'comem://user/local';
-const PRINCIPALS: readonly string[] = ['user:local', 'user:*'];
+const PRINCIPALS: readonly string[] = ['user:local', USER_WILDCARD];
 
 const CODE_STYLE = `${SCOPE}/memories/preferences/code-style.md`;
 const CODE_STYLE_LEGACY = `${SCOPE}/memories/preferences/code-style-legacy.md`;
 const EDITOR = `${SCOPE}/memories/preferences/editor.md`;
 
+const OTHER_SCOPE = 'comem://user/alice';
+const OTHER_PRINCIPALS: readonly string[] = ['user:alice', USER_WILDCARD];
+const OTHER_ALLOWED = `${OTHER_SCOPE}/memories/preferences/editor.md`;
+const RESTRICTED_EXPERIENCE = `${OTHER_SCOPE}/memories/experiences/restricted-run.md`;
+const DENIED_ENTITY = `${OTHER_SCOPE}/memories/entities/laptop.md`;
+
 let dataDir: string;
 let container: Container;
 let app: FastifyInstance | undefined;
 let llm: FakeLlmHttp;
+let modelResponse: () => string;
 
 /** 模型第 1 轮就 finish：把 legacy 合并进 code-style，并删掉 legacy。 */
 function consolidationDecision(): string {
@@ -60,7 +71,8 @@ function consolidationDecision(): string {
 }
 
 beforeEach(async () => {
-  llm = await startFakeLlmHttp(() => consolidationDecision());
+  modelResponse = consolidationDecision;
+  llm = await startFakeLlmHttp(() => modelResponse());
   dataDir = await mkdtemp(join(tmpdir(), 'comem-consolidation-enabled-'));
   container = await createContainer({
     configPath: join(dataDir, 'config.yaml'),
@@ -77,13 +89,17 @@ beforeEach(async () => {
       COMEM_MEMORY_CONSOLIDATION_ENABLED: 'true',
     },
   });
+  const resolveIdentity: IdentityResolver = async (headers) => {
+    const subject = headers['x-test-subject'] ?? 'user:local';
+    return { subject, principals: [subject, USER_WILDCARD] };
+  };
   app = await createHttpServer({
     config: container.config,
     logger: container.logger,
     observability: container.observability,
     routes: container.routes,
     mcp: container.mcp,
-    resolveIdentity: container.resolveIdentity,
+    resolveIdentity,
   });
 });
 
@@ -101,62 +117,166 @@ async function writePreference(topic: string, content: string): Promise<void> {
   });
 }
 
-describe('memory.consolidation.enabled = true（container → HTTP 端点）', () => {
-  it('打开后端点真的合并：更新正文、删除被取代的记忆，二者在检索面上都可见', async () => {
-    expect(container.config.memory.consolidation.enabled).toBe(true);
-    await writePreference('code-style', '缩进用 2 个空格。');
-    await writePreference('code-style-legacy', '缩进用 4 个空格，且不要用 prettier。');
-    await writePreference('editor', '默认编辑器是 vim。');
-    await container.services.indexObserver.drain();
+function server(): FastifyInstance {
+  if (app === undefined) {
+    throw new Error('HTTP 服务没有启动。');
+  }
+  return app;
+}
 
-    const server = app;
-    if (server === undefined) {
-      throw new Error('HTTP 服务没有启动。');
-    }
-    const response = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories/consolidate',
-      payload: { scope: SCOPE, dryRun: false },
-    });
+async function seedOtherScopesAcl(): Promise<void> {
+  const { acl, indexObserver, memory } = container.services;
+  const scope = Uri.parse(OTHER_SCOPE);
+  await acl.ensureRootPreset(scope);
+  await acl.setAcl(scope, {
+    mode: 'inherit',
+    entries: [
+      { principal: 'user:alice', level: MANAGE_LEVEL, effect: 'allow' },
+      { principal: 'user:bob', level: MANAGE_LEVEL, effect: 'allow' },
+    ],
+  }, 'user:alice', OTHER_PRINCIPALS);
 
-    // 开关关着时这里会是 403；打开后必须是一次真的合并，不是「没有可合并的记忆」。
-    expect(response.statusCode).toBe(200);
-    const body = JSON.parse(response.body) as {
-      readonly status: string;
-      readonly result: {
-        readonly adds: readonly string[];
-        readonly updates: readonly string[];
-        readonly deletes: readonly string[];
-        readonly trace: readonly { readonly action: string }[];
+  await memory.upsertMemory(scope, preferencesMemoryType, {
+    topic: 'editor',
+    content: '先解释原理，再给例子。',
+  });
+  await memory.upsertMemory(scope, experiencesMemoryType, {
+    topic: 'restricted-run',
+    content: '受限经验正文。',
+  });
+  await memory.approve(Uri.parse(RESTRICTED_EXPERIENCE));
+  await memory.upsertMemory(scope, entitiesMemoryType, {
+    name: 'laptop',
+    aliases: [],
+    kind: 'device',
+    content: '被拒绝的实体正文。',
+  });
+  await indexObserver.drain();
+
+  await acl.setAcl(Uri.parse(`${OTHER_SCOPE}/memories/experiences`), {
+    mode: 'restricted',
+    entries: [],
+  }, 'user:alice', OTHER_PRINCIPALS);
+  await acl.setAcl(Uri.parse(`${OTHER_SCOPE}/memories/entities`), {
+    mode: 'inherit',
+    entries: [{ principal: 'user:bob', level: READ_LEVEL, effect: 'deny' }],
+  }, 'user:alice', OTHER_PRINCIPALS);
+}
+
+describe('memory.dreamer.manualConsolidation = true（container → HTTP 端点）', () => {
+  it.each(['/dreamer', '/consolidate'])(
+    '%s 打开后真的合并：更新正文、删除被取代的记忆，二者在检索面上都可见',
+    async (path) => {
+      expect(container.config.memory.dreamer.manualConsolidation).toBe(true);
+      await writePreference('code-style', '缩进用 2 个空格。');
+      await writePreference('code-style-legacy', '缩进用 4 个空格，且不要用 prettier。');
+      await writePreference('editor', '默认编辑器是 vim。');
+      await container.services.indexObserver.drain();
+
+      const response = await server().inject({
+        method: 'POST',
+        url: `/api/v1/memories${path}`,
+        payload: { scope: SCOPE, dryRun: false },
+      });
+
+      // 开关关着时这里会是 403；打开后必须是一次真的合并，不是「没有可合并的记忆」。
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body) as {
+        readonly status: string;
+        readonly result: {
+          readonly adds: readonly string[];
+          readonly updates: readonly string[];
+          readonly deletes: readonly string[];
+          readonly trace: readonly { readonly action: string }[];
+        };
       };
-    };
-    expect(body.status).toBe('ok');
-    expect(body.result.adds).toEqual([]);
-    expect(body.result.updates).toEqual([CODE_STYLE]);
-    expect(body.result.deletes).toEqual([CODE_STYLE_LEGACY]);
+      expect(body.status).toBe('ok');
+      expect(body.result.adds).toEqual([]);
+      expect(body.result.updates).toEqual([CODE_STYLE]);
+      expect(body.result.deletes).toEqual([CODE_STYLE_LEGACY]);
 
-    // 用户可见结果 1：被更新的记忆正文是模型给的合并结果。
-    const updated = await container.services.memory.read(Uri.parse(CODE_STYLE));
-    expect(updated?.fields['content']).toBe('缩进用 2 个空格，统一用 prettier 格式化。');
+      // 用户可见结果 1：被更新的记忆正文是模型给的合并结果。
+      const updated = await container.services.memory.read(Uri.parse(CODE_STYLE));
+      expect(updated?.fields['content']).toBe('缩进用 2 个空格，统一用 prettier 格式化。');
 
-    // 用户可见结果 2：被删除的记忆读不到了。
-    await expect(container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).resolves.toBeNull();
+      // 用户可见结果 2：被删除的记忆读不到了。
+      await expect(container.services.memory.read(Uri.parse(CODE_STYLE_LEGACY))).resolves.toBeNull();
 
-    // 用户可见结果 3：检索面从 3 条变成 2 条，editor 没有被波及。
-    const remaining = await container.services.search.glob('**/*.md', {
-      scopes: [`${SCOPE}/memories`],
-      subject: 'user:local',
-      principals: PRINCIPALS,
+      // 用户可见结果 3：检索面从 3 条变成 2 条，editor 没有被波及。
+      const remaining = await container.services.search.glob('**/*.md', {
+        scopes: [`${SCOPE}/memories`],
+        subject: 'user:local',
+        principals: PRINCIPALS,
+      });
+      // `.history` 里是覆盖写的版本快照（W98）：`glob` 能看到它，但它不是「一条记忆」。
+      expect(
+        remaining
+          .map((uri) => uri.toString())
+          .filter((uri) => !uri.includes('/.history/'))
+          .sort(),
+      ).toEqual([CODE_STYLE, EDITOR].sort());
+
+      // 真的调过模型：没有这条，「端点 200」也可能来自一次空操作。
+      expect(llm.requests.length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each(['/dreamer', '/consolidate'])(
+    '%s 要求调用方对 scope 有 manage；拒绝发生在模型调用前',
+    async (path) => {
+      const response = await server().inject({
+        method: 'POST',
+        url: `/api/v1/memories${path}`,
+        headers: { 'x-test-subject': 'user:bob' },
+        payload: { scope: SCOPE, dryRun: false },
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: { code: 'PERMISSION_DENIED' } });
+      expect(llm.requests).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    { label: 'restricted', uri: RESTRICTED_EXPERIENCE },
+    { label: 'deny', uri: DENIED_ENTITY },
+  ])('$label 子目录里的目标不进入清单，也不能随同批合法操作写盘', async ({ uri }) => {
+    await seedOtherScopesAcl();
+    const requestsBefore = llm.requests.length;
+    modelResponse = () => JSON.stringify({
+      action: 'finish',
+      operations: [
+        {
+          kind: 'update',
+          uri: OTHER_ALLOWED,
+          content: '这条合法操作也必须整批回滚。',
+          reason: '同批包含不可见目标',
+        },
+        {
+          kind: 'delete',
+          uri,
+          content: null,
+          reason: '模型试图删除不可见目标',
+        },
+      ],
     });
-    // `.history` 里是覆盖写的版本快照（W98）：`glob` 能看到它，但它不是「一条记忆」。
-    expect(
-      remaining
-        .map((uri) => uri.toString())
-        .filter((uri) => !uri.includes('/.history/'))
-        .sort(),
-    ).toEqual([CODE_STYLE, EDITOR].sort());
 
-    // 真的调过模型：没有这条，「端点 200」也可能来自一次空操作。
-    expect(llm.requests.length).toBeGreaterThan(0);
+    const response = await server().inject({
+      method: 'POST',
+      url: '/api/v1/memories/dreamer',
+      headers: { 'x-test-subject': 'user:bob' },
+      payload: { scope: OTHER_SCOPE, dryRun: false },
+    });
+
+    expect(response.statusCode, response.body).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } });
+    expect(llm.requests).toHaveLength(requestsBefore + 1);
+    const dreamerRequest = llm.requests.at(-1) ?? '';
+    expect(dreamerRequest).toContain(OTHER_ALLOWED);
+    expect(dreamerRequest).not.toContain(uri);
+    expect(await container.services.memory.read(Uri.parse(OTHER_ALLOWED))).toMatchObject({
+      fields: { content: '先解释原理，再给例子。' },
+    });
+    expect(await container.services.memory.read(Uri.parse(uri))).not.toBeNull();
   });
 });

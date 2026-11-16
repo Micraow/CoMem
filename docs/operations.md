@@ -71,7 +71,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | 键 | 默认值 | 是什么 / 什么时候改 |
 |---|---|---|
 | `dataDir` | `""` | 数据根。空串表示按运行形态推导（§6.5）：容器里 `/var/lib/comem`、root 运行 `/var/lib/comem`、其余 `$XDG_DATA_HOME/comem`。挂卷或备份到别处时显式写 |
-| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule`、`memory.consolidation.enabled` 与 `memory.workingMemory.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
+| `providers.llm.default.type` | `openai-compatible` | 走哪个 AI SDK provider。`anthropic` 走 `@ai-sdk/anthropic`；`disabled` 表示没有模型、不产生任何调用。此时 `summary.generator` 必须是 `rule`、`memory.dreamer.manualConsolidation` 与 `memory.workingMemory.enabled` 必须是 `false`，否则启动失败；`ingest.enabled` 仍可打开，但阶段二会被跳过并在报告里标出来（见「导入本机 Agent 对话」） |
 | `providers.llm.default.baseUrl` | `https://api.example.com/v1` | 兼容 OpenAI 协议的服务地址。**默认值是 IANA 保留域名（RFC 2606），永远不可达**；保持它启动时会打一条 `warn`，说明摘要、记忆抽取、合并与检索改写都不会工作。换成自建网关或真实供应商地址 |
 | `providers.llm.default.model` | `gpt-4o-mini` | 模型名。摘要质量与成本由它决定 |
 | `providers.llm.default.apiKey` | `""` | 密钥。空串 = 没有密钥：能启动，调用时抛 `PROVIDER_UNAVAILABLE`。用 `COMEM_PROVIDERS_LLM_DEFAULT_API_KEY` 覆盖，或直接在 `config.yaml` 里填 |
@@ -1277,45 +1277,32 @@ TTL 是统一策略，没有逐条设置过期时间的接口（`TtlService.setE
 `retentionDays` 配成什么都动不到它们。它们的数量由每次覆盖写的「每个 identity 只留 5 份」
 截断兜住（架构文档 §11.11）。
 
-### 怎么开记忆合并
+### 怎么使用 Dreamer
+
+有可用模型时，Dreamer 随归档提炼经验，并从不同会话的用户原话提出待复核的偏好。可以在控制台的待复核列表查看证据、批准或拒绝；归档任务不删除记忆。
+
+要手动整理某个作用域的重复或失效记忆，在控制台设置中启用「允许 Dreamer 手动整理」，或设下面的配置后重启。这个入口需要可用 LLM，与摘要生成方式无关。
 
 ```yaml
 memory:
-  consolidation:
-    enabled: true        # 默认关：合并会 delete，是破坏性操作，必须显式开启
-    maxIterations: 10    # 探索轮次上限；到上限还没给出操作就整次失败
+  dreamer:
+    manualConsolidation: true
+    maxIterations: 10
 ```
 
-`enabled: true` 而 `summary.generator` 不是 `llm` 时 `loadConfig` 抛
-`INVALID_ARGUMENT`：规则生成器产不出操作列表。关着的时候端点返回 403（不是空结果——
-那会让「没开」看起来像「没有可合并的记忆」）。
-
-**先预览，再执行。** 端点的 `dryRun` 默认 `true`：
-
 ```bash
-# 预览：返回 {adds, updates, deletes, trace}，不写任何东西
-curl -s -X POST http://127.0.0.1:1933/api/v1/memories/consolidate \
+# 预览（默认）：返回 adds、updates、deletes 和 trace
+curl -s -X POST http://127.0.0.1:1933/api/v1/memories/dreamer \
   -H 'content-type: application/json' \
   -d '{"scope": "comem://user/alice"}'
 
-# 真的执行（不可逆）
-curl -s -X POST http://127.0.0.1:1933/api/v1/memories/consolidate \
+# 执行（可能删除记忆）
+curl -s -X POST http://127.0.0.1:1933/api/v1/memories/dreamer \
   -H 'content-type: application/json' \
   -d '{"scope": "comem://user/alice", "dryRun": false}'
 ```
 
-**成本**：一次合并至少一次模型调用，每多一个 `read` 轮就多一次，上限是
-`maxIterations + 1` 次。`trace` 记录每一轮做了什么（读了哪些 URI、产出哪些操作、每条
-操作的理由）；「为什么它删了这条」看 `trace`，删除同时进 `info` 日志。
-
-**它不做什么**：
-
-- 不展开组：`comem://group/eng/` 的记忆不会因为调用者有 `group:eng` 就被合并，
-  scope 必须显式传。
-- 不碰 `pending`（还在复核）与 `archived`（已被 TTL 归档）的记忆。
-- 没有回滚：写盘前的校验全部前置，但 I/O 或加锁失败时已应用的操作不回退，错误
-  `details` 里带清单（见「已知限制」）。
-- 不进 MCP（§3：16 个工具，不多不少）。
+执行会重新生成计划。`trace` 包含读过的正文 URI 和操作理由。未启用时手动入口返回 403；轮次用完还没返回计划时不会写入。I/O 或锁冲突造成部分成功时，错误详情列出已应用的操作。旧配置会自动映射，新配置推荐使用 `memory.dreamer`。旧地址 `/api/v1/memories/consolidate` 保留为同一契约的兼容别名。
 
 ## 本地推理
 
@@ -2418,7 +2405,7 @@ COMEM_SERVER_PORT=8080 pnpm dev
     记忆被删除，不是回到更早的版本（架构文档 §11.11）。
 
 40. **`prefetch` 只返回 `active`，未复核的经验对下一轮归纳不可见。** 经验归纳步骤
-    （`experience_distill`）用 `MemoryService.prefetch` 取同一 topic 的旧正文，而
+    （`dreamer`）用 `MemoryService.prefetch` 取同一 topic 的旧正文，而
     `prefetch` 按 `status = 'active'` 过滤（`src/services/memory/query.ts` 的 `prefetchMemories`）。上一轮写入的
     经验还在 `pending`、没被复核时，下一轮归纳看不到它，模型按「没有旧经验」整段重写，
     旧结论被无合并覆盖（`pending` 旧值也不做版本快照，见架构文档 §11.11）。这是复核闸门

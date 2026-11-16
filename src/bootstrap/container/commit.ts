@@ -2,7 +2,7 @@
  * 装配阶段 6a：阶段二提交执行器（§10.1、§10.3、§10.4）。
  *
  * 五个步骤的顺序 §10.3 定死：`archive_summary` → `memory_extract` → `memory_merge` →
- * `summary_invalidate` → `experience_distill`。合并必须在失效之前（失效步骤读合并写进
+ * `summary_invalidate` → `dreamer`。合并必须在失效之前（失效步骤读合并写进
  * `state` 的「真正写过的文件」集合），经验归纳最后（不读前四步 `state`）。
  */
 
@@ -11,7 +11,7 @@ import type { CommitStepName, CommitStepSkipReason } from '../../domain/archive.
 import { CommitPipeline } from '../../services/commit/pipeline.js';
 import type { CommitPhase, CommitStep } from '../../services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../services/commit/steps/archive-summary.js';
-import { ExperienceDistillStep } from '../../services/commit/steps/experience-distill.js';
+import { DreamerStep } from '../../services/commit/steps/dreamer.js';
 import { MemoryExtractStep } from '../../services/commit/steps/memory-extract.js';
 import { MemoryMergeStep } from '../../services/commit/steps/memory-merge.js';
 import { SummaryInvalidateStep } from '../../services/commit/steps/summary-invalidate.js';
@@ -43,7 +43,7 @@ export function createCommitRunner(
   const { config, logger, dataDir, store, metadata, memoryLink } = core;
   const { llm } = models;
   const { summary, task } = retrieval;
-  const { memory } = memoryStack;
+  const { memory, dreamer } = memoryStack;
 
   const skipReason = llmSkipReason(config);
   const commitSkippedSteps =
@@ -51,7 +51,7 @@ export function createCommitRunner(
       ? new Map<CommitStepName, CommitStepSkipReason>([
           ['memory_extract', skipReason],
           ['memory_merge', skipReason],
-          ['experience_distill', skipReason],
+          ['dreamer', skipReason],
         ])
       : new Map<CommitStepName, CommitStepSkipReason>();
 
@@ -95,13 +95,7 @@ export function createCommitRunner(
           logger,
         }),
         summary_invalidate: new SummaryInvalidateStep({ summary, logger }),
-        experience_distill: new ExperienceDistillStep({
-          memory,
-          llm,
-          archive: archiveArtifacts,
-          links: memoryLink,
-          logger,
-        }),
+        dreamer: new DreamerStep({ dreamer, archive: archiveArtifacts, invalidate: (uri) => summary.invalidate(uri) }),
       };
       return new CommitPipeline({
         steps: COMMIT_STEP_NAMES.map((name) => stepByName[name]),

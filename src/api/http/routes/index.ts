@@ -15,7 +15,7 @@ import type { RetrievalIndex } from '../../../domain/retrieval.js';
 import type { AuthService } from '../../../services/auth.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
-import type { ConsolidationService } from '../../../services/consolidation.js';
+import type { DreamerService } from '../../../services/dreamer/service.js';
 import type { EmbeddingService } from '../../../services/embedding.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
 import type { IdentityService } from '../../../services/identity.js';
@@ -100,8 +100,8 @@ export interface HttpRouteServices {
   readonly memory: MemoryService;
   /** 记忆关联边（§11.10）：`GET /memories/:uri/links` 读它。不进 MCP。 */
   readonly memoryLink: MemoryLinkService;
-  /** 记忆合并（§11.8）。破坏性操作，只在 `POST /memories/consolidate` 上暴露。 */
-  readonly consolidation: ConsolidationService;
+  /** 记忆合并（§11.8）。破坏性操作，只在 `POST /memories/dreamer` 上暴露。 */
+  readonly dreamer: DreamerService;
   readonly resource: ResourceService;
   readonly skill: SkillService;
   readonly search: SearchService;

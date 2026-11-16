@@ -160,7 +160,7 @@ const STEP_PHASE: Readonly<Record<CommitStepName, AsyncPhase>> = {
   memory_extract: 'extract',
   memory_merge: 'merge',
   summary_invalidate: 'summary',
-  experience_distill: 'distill',
+  dreamer: 'distill',
 };
 
 /** 没有装配计时器时原样执行。 */

@@ -24,9 +24,9 @@ import { preferencesMemoryType } from '../../../src/domain/memory-types/preferen
 import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
-  ConsolidationService,
-  type ConsolidationServiceDeps,
-} from '../../../src/services/consolidation.js';
+  DreamerService,
+  type DreamerServiceDeps,
+} from '../../../src/services/dreamer/service.js';
 
 const SUBJECT = 'user:alice';
 const PRINCIPALS = [SUBJECT, 'user:*'];
@@ -89,8 +89,8 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-function createService(llm: ConsolidationServiceDeps['llm']): ConsolidationService {
-  return new ConsolidationService({
+function createService(llm: DreamerServiceDeps['llm']): DreamerService {
+  return new DreamerService({
     memory: container.services.memory,
     stat: contentStore,
     search: container.services.search,
@@ -137,10 +137,10 @@ async function editFrontmatter(uri: string, pattern: RegExp, replacement: string
 
 /** 跑一次真实写盘的合并，把整批失败的错误取出来（成功时返回 `null`）。 */
 async function consolidateCapturingFailure(
-  llm: ConsolidationServiceDeps['llm'],
+  llm: DreamerServiceDeps['llm'],
 ): Promise<unknown> {
   return createService(llm)
-    .consolidate(Uri.parse(SCOPE), {
+    .run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -205,7 +205,7 @@ function inventoryUris(prompt: string): readonly string[] {
     .map((line) => line.slice('- '.length));
 }
 
-describe('ConsolidationService.consolidate', () => {
+describe('DreamerService.consolidate', () => {
   it('真实容器：3 条相似记忆合并成 2 条，正文是模型给的合并结果', async () => {
     await seedThree();
     const llm = new ScriptedLlm([
@@ -228,7 +228,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -274,7 +274,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    await createService(llm).consolidate(Uri.parse(SCOPE), {
+    await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -302,7 +302,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    await createService(llm).consolidate(Uri.parse(SCOPE), {
+    await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -336,7 +336,7 @@ describe('ConsolidationService.consolidate', () => {
     ]);
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -421,7 +421,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -516,7 +516,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -545,7 +545,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -612,7 +612,7 @@ describe('ConsolidationService.consolidate', () => {
     const remove = vi.spyOn(container.services.memory, 'remove');
 
     // 不传 dryRun：默认只预览。
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       subject: SUBJECT,
       principals: PRINCIPALS,
     });
@@ -635,7 +635,7 @@ describe('ConsolidationService.consolidate', () => {
     const remove = vi.spyOn(container.services.memory, 'remove');
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -655,7 +655,7 @@ describe('ConsolidationService.consolidate', () => {
       { action: 'finish', operations: [] },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -686,7 +686,7 @@ describe('ConsolidationService.consolidate', () => {
     const remove = vi.spyOn(container.services.memory, 'remove');
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -709,7 +709,7 @@ describe('ConsolidationService.consolidate', () => {
     ]);
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -724,7 +724,7 @@ describe('ConsolidationService.consolidate', () => {
     });
     const llm = new ScriptedLlm([]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -753,7 +753,7 @@ describe('ConsolidationService.consolidate', () => {
     const upsert = vi.spyOn(container.services.memory, 'upsertMemory');
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -783,7 +783,7 @@ describe('ConsolidationService.consolidate', () => {
     ]);
 
     await expect(
-      createService(llm).consolidate(Uri.parse(SCOPE), {
+      createService(llm).run(Uri.parse(SCOPE), {
         dryRun: false,
         subject: SUBJECT,
         principals: PRINCIPALS,
@@ -817,7 +817,7 @@ describe('ConsolidationService.consolidate', () => {
     expect(await container.services.memory.read(Uri.parse(badTopic))).toBeNull();
   });
 
-  it('HTTP 端点在 memory.consolidation.enabled 为 false 时明确拒绝（不是空结果）', async () => {
+  it('HTTP 端点在 memory.dreamer.manualConsolidation 为 false 时明确拒绝（不是空结果）', async () => {
     const app = await createHttpServer({
       config: container.config,
       logger: container.logger,
@@ -829,7 +829,7 @@ describe('ConsolidationService.consolidate', () => {
     try {
       const response = await app.inject({
         method: 'POST',
-        url: '/api/v1/memories/consolidate',
+        url: '/api/v1/memories/dreamer',
         payload: { scope: SCOPE },
       });
 
@@ -849,7 +849,7 @@ describe('ConsolidationService.consolidate', () => {
     await seedThree();
     const llm = new ScriptedLlm([{ action: 'finish', operations: [] }]);
 
-    await createService(llm).consolidate(Uri.parse(SCOPE), {
+    await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -876,7 +876,7 @@ describe('ConsolidationService.consolidate', () => {
     expect((await container.services.memory.read(Uri.parse(version)))?.status).toBe('active');
 
     const llm = new ScriptedLlm([{ action: 'finish', operations: [] }]);
-    await createService(llm).consolidate(Uri.parse(SCOPE), {
+    await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,
@@ -975,7 +975,7 @@ describe('ConsolidationService.consolidate', () => {
       },
     ]);
 
-    const result = await createService(llm).consolidate(Uri.parse(SCOPE), {
+    const result = await createService(llm).run(Uri.parse(SCOPE), {
       dryRun: false,
       subject: SUBJECT,
       principals: PRINCIPALS,

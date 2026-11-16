@@ -586,7 +586,7 @@ describe('sources 溯源（W97）', () => {
     const kept = await writeWithSources('code-style', '主记忆。', [1]);
     const merged = await writeWithSources('other', '被合并掉的记忆。', [2, 1]);
 
-    // `ConsolidationService` 的写回是同一形态：把被合并记录的 sources 并进保留者。
+    // `DreamerService` 的写回是同一形态：把被合并记录的 sources 并进保留者。
     const mergedSources = (await memory.read(merged.uri))?.sources ?? [];
     await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
       uri: kept.uri,

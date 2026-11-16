@@ -63,10 +63,9 @@ export const COMMIT_STEP_NAMES = [
   'memory_merge',
   'summary_invalidate',
   /**
-   * 经验归纳（§10.1 阶段二的第 5 步）。排在最后：它只消费归档目录与记忆文件，不依赖前四步的
-   * `state`，而新增一步不能改变既有步骤的重放判据。
+   * Dreamer（§10.1 阶段二的第 5 步）只消费归档与记忆文件。
    */
-  'experience_distill',
+  'dreamer',
 ] as const;
 
 export type CommitStepName = (typeof COMMIT_STEP_NAMES)[number];

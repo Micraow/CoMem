@@ -101,7 +101,7 @@ const LEGACY_OPTIONAL_CONFIG_DEPS: ReadonlySet<string> = new Set([
   'TaskServiceOptions.maxAttempts',
   'SearchServiceDeps.engine',
   'MemoryServicePorts.reviewRequired',
-  'ConsolidationServiceDeps.maxIterations',
+  'DreamerServiceDeps.maxIterations',
   'CommitRunnerOptions.concurrency',
   'ObservabilityServiceDeps.hookOverheadEnabled',
   'ObservabilityServiceDeps.includeAccountLabel',

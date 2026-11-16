@@ -15,7 +15,7 @@ import { DERIVED_MATCH_TEXT, derivedEdgeKey, type DerivedEdge } from './edge-key
  *
  * 语义与写路径一致（§11.10）：`sources` 里的每一条归档 URI 对应一条边，
  * `link_type = 'derived_from'`、`weight = 1.0`、`match_text` / `description` 为空
- * ——产生端（`MemoryMergeStep` / `ExperienceDistillStep`）从不给这三个字段填内容。
+ * ——产生端（`MemoryMergeStep` / `DreamerStep`）从不给这三个字段填内容。
  *
  * **只收记忆文件。** `sources` 是记忆的保留键（§6.6）；资源 / 技能文件的 frontmatter
  * 里出现同名键不是溯源，给它建边会让 `backlinks` 混进无关节点。

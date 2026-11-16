@@ -658,7 +658,7 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
     "archivedMessageIds": ["msg_01", "msg_02", "msg_03"],
     "retainedMessageIds": []
   },
-  "stepsDone": ["archive_summary", "memory_extract", "memory_merge", "summary_invalidate", "experience_distill"],
+  "stepsDone": ["archive_summary", "memory_extract", "memory_merge", "summary_invalidate", "dreamer"],
   "skippedSteps": [],
   "taskId": "task_b41e"
 }
@@ -1593,21 +1593,13 @@ commit(sessionId, options)
     2. 从归档消息抽取记忆操作，写 memory_operations.json
     3. 应用补丁合并，写 memory_diff.json
     4. 标记祖先摘要失效并重算
-    5. 归纳经验：读本次会话与已有经验，整段重写该 topic 的经验正文
+    5. Dreamer 整理归档经验、提出待复核偏好
     6. 写 .done（最后写）
 ```
 
 **阶段二的第 3 步在锁内应用补丁。** `memory_merge` 不读正文快照，补丁作为转换函数交给 `upsertMemory`，在 `exact(uri)` 锁内基于磁盘上的最新正文执行（§18「并发控制」）。`task.concurrency: 4` 下四个归档同时合并同一条记忆时，读在锁外会让后写者用陈旧正文覆盖先写者——`profile` 只有一个 `content` 字段，字段级合并保护不到它。
 
-**第 5 步 `experience_distill` 只写 `experiences`。** 它读「本次会话 + 已有经验」（`prefetch`
-只返回 `active`），一次 LLM 调用产出每个 topic 的**整段正文**，服务端用 `upsertMemory`
-整段覆盖；写入后 `status = 'pending'`（默认 `reviewRequired` 含 `experiences`，§11.6）。
-缺模型时它与抽取、合并一起并入 `llm_disabled` 跳过；非法 topic（`renderPath` 拼不出合法
-路径）与空 `content` 记 `warn` 跳过，一条坏经验不让整个归档失败。抽取端不再产出
-`experiences`：`prompts/extract-system.md` 有一句隔离（同一份消息被两条路径各写一次会让
-同一个 topic 被覆盖两次，而抽取是补丁、归纳是整段重写，合并语义不同）。**隔离靠提示词，
-不是代码拒绝**：抽取的类型清单仍然来自 `BUILTIN_MEMORY_TYPES`，提示词被改回时抽取仍然
-可以产出 `experiences` 补丁。
+**第 5 步 `dreamer`** 用一次模型调用整理本次归档：从一次有结果的事件提炼可复用的经验，或从不同会话归纳带适用条件的偏好。写入追加到 `memory_diff.json` 并标记父目录摘要失效。缺少可用模型时随抽取和补丁应用一起跳过。具体证据和复核规则见 §11.8。
 
 **消息的 part 类型。** 一条消息由若干 part 组成，抽取时都参与：
 
@@ -1626,7 +1618,7 @@ commit(sessionId, options)
 
 **「跑过」必须同时意味着「产物还在」。** `stepsDone` 只记进度不记产物的话，重放会跳过产物只存在内存里的步骤，下游拿到空输入。每个步骤的产物都必须落在归档目录里，跳过时由 `CommitStep.rehydrate` 读回 `state`——见 §10.4 的表格。
 
-**部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把 `memory_extract` / `memory_merge` / `experience_distill` 这三步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
+**部署缺少能力时跳过步骤，不让任务失败。** `providers.llm.default.type: disabled` 时 `memory_extract` 每次都会撞上 `DisabledLlmProvider` 的 `INVALID_ARGUMENT`，而它是终态错误——第一次就把任务置 `failed`，归档永远停在 `archive_summary`。阶段一（归档落盘、建任务、`session` 关联）不依赖模型，所以 `CommitPipeline` 的 `skippedSteps` 把 `memory_extract` / `memory_merge` / `dreamer` 这三步登记成「不执行」：跳过也写 `stepsDone`（重放判据），原因另记在 `skippedSteps`（`{ "step": "memory_extract", "reason": "llm_disabled" }`），并记一条 `warn` 日志。判据由装配层从 `providers.llm.default.type` 推出，`services/` 不 import `config/`——与 `ingest` 的 `{ skipped: true, reason: "llm_disabled" }` 同一个模式。
 
 ### 10.2 归档边界
 
@@ -1707,7 +1699,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 | `memory_extract` | 抽取出的操作列表 | `archive_NNN/memory_operations.json` | `rehydrate` 读回 `state` |
 | `memory_merge` | 真正写过 / 删过的文件集合 | `archive_NNN/memory_diff.json` | `rehydrate` 从 diff 推出 `written` / `deleted` |
 | `summary_invalidate` | 无（副作用是摘要的待刷新计数 `node.summary_pending`） | — | 跳过即正确；重跑会重复累加脏计数 |
-| `experience_distill` | 经验记忆文件（`memories/experiences/{topic}.md`） | 盘 | 跳过即恢复：产物本来就在盘上，没有下游步骤读 `state`；重跑会再调一次模型，同一 topic 仍整段覆盖 |
+| `dreamer` | 经验与推断偏好记忆文件、归档差异清单 | 盘 | 跳过即恢复：产物本来就在盘上，没有下游步骤读 `state`；重跑会再调一次模型，经验同一 topic 仍整段覆盖；已写入的推断不重复创建 |
 
 `CommitStep.rehydrate(context)` 是这条契约的落点：管线跳过已完成的步骤时先调用它，把产物从归档目录读回 `state`，再继续。此前 `memory_extract` 与 `memory_merge` 的产物都只存在 `state` 里，`memory_merge` 之后的一次 503 会让归档**永久**停在「`stepsDone` 声称抽取完成、产物却不存在」，而错误信息写着「步骤顺序被改过」——完全指错方向。
 
@@ -2252,126 +2244,15 @@ TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删
 `last_accessed_at`，所以只要第一段还开着，「改回 active 但确实很久没用过」的记忆会在
 下一轮再次被归档——这是滑动窗口的语义，不是缺陷。
 
-### 11.8 记忆合并（agentic 循环）
+### 11.8 Dreamer：经验、偏好与记忆整理
 
-记忆只增不减时，同一个 scope 下会出现大量重复与互相矛盾的条目。合并把它们收敛成
-一份没有重复、没有矛盾的记忆库：**删除**被取代的、**更新**仍然有效但正文要改的、
-**新增**清单里还没有的。
+Dreamer 统一归档整理和手动整理，两种入口使用同一个服务、模型结果协议与记忆写入层。`memory_merge` 仍负责按归档检查点应用抽取补丁；它不负责判断已有记忆是否重复或已被取代。
 
-#### 为什么不是「相似度超阈值就合并」
+- **归档整理**：读取本次对话（剔除工具调用及结果）和相关的已生效经验，输出可独立阅读的做法、前提与已验证的坑。同一 topic 更新整条正文，文件仍为 `memories/experiences/{topic}.md`，复核策略沿用 `memory.reviewRequired`。自动整理不执行删除。原来写入归档元数据的 `experience_distill` 在读取时映射成 `dreamer`，旧检查点不会作废。
+- **偏好推断**：只在个人作用域使用本次用户原话和最近会话的归档证据。历史取最近 8 个会话的末次归档（每个会话最多 1,500 个文本字符，跳过大于 256 KiB 的历史归档）；这些是控制输入成本的预算，不代表覆盖了全部历史。服务端校验至少两个不同会话、不同的可逐字匹配的原话，并要求自动运行引用本次归档；模型根据反例、纠正与适用条件决定是否提议。推断写入 `memories/preferences/inferred-{topic}.md`，保留引用归档与原话，始终待复核。已存在同 topic 的明确偏好或推断项时不写，不改 `profile.md`；拒绝会阻止同路径被拒绝前的材料重建。词义相近但 topic 不同的冲突目前仍由模型提示与人工复核判断。引用校验验证材料存在，不证明结论正确。
+- **手动整理**：默认不开放，需要 `memory.dreamer.manualConsolidation: true` 和可用 LLM。`POST /api/v1/memories/dreamer` 接收 `{scope, dryRun?}`；默认预览，显式 `dryRun: false` 才写。调用者需要作用域管理权，对目标另查写入或删除权限。模型在有界的 `read` / `finish` 循环内读取可见的生效记忆，然后给出带理由的 add/update/delete 与可选的待复核偏好。默认最多 10 轮，是控制成本的设计上限；没有完成就不写。共享材料不会跨带独立 ACL 的子目录，清单之外的正文不能读；不自动展开组或项目。
 
-相似度只能回答「这两条像不像」，回答不了「这两条里是不是有一条已经被取代」。两条
-互相矛盾的约定同样相似，按阈值合并的两种结果都不对：都留下（矛盾仍在），或者不分
-青红地删一条（可能删掉仍然有效的那条）。判断需要读正文、需要说明理由，所以决策交给
-模型。
-
-#### 循环
-
-`LlmProvider` 只有 `complete` / `completeJson`，没有 tool calling（§4.4）。合并用
-**多轮 `completeJson`**，每一轮输出一个 JSON 对象：
-
-```json
-{ "action": "read", "uris": ["comem://user/alice/memories/preferences/code-style.md"] }
-{ "action": "finish", "operations": [
-  { "kind": "update", "uri": "comem://.../code-style.md", "content": "...", "reason": "..." },
-  { "kind": "delete", "uri": "comem://.../code-style-legacy.md", "content": null, "reason": "..." }
-] }
-```
-
-| 轮次动作 | 服务端行为 |
-|---|---|
-| `read` | 读这些 URI 的正文，塞进下一轮上下文（只允许 `memories/` 下、且确实存在的记忆） |
-| `finish` | 用 `operations` 结束循环；缺省是空列表（模型认为不需要改） |
-
-每轮的 prompt 含：scope 下**全部**生效中记忆的清单（URI + 类型 + 摘要 + 更新时间，
-**不带正文**）、已经读过的正文、当前轮次。
-
-| 配置 | 默认 | 语义 |
-|---|---|---|
-| `memory.consolidation.enabled` | `false` | 关着时 `POST /memories/consolidate` 明确拒绝（403），不返回空结果 |
-| `memory.consolidation.maxIterations` | `10` | 轮次上限。**来源是设计约定**：每轮至少一次模型调用，10 轮足够读完一个 scope 的主要记忆；收敛通常发生在前几轮 |
-
-到上限还没 `finish` 抛 `RESOURCE_EXHAUSTED`，**不做部分应用**：只合并了一半的记忆库
-比没合并更难解释。
-
-#### 校验：整批失败
-
-`validateOperations`（`domain/consolidation.ts`）逐条检查，**任意一条不满足就整批
-失败**，不逐条丢弃：
-
-| 拒绝条件 | 为什么 |
-|---|---|
-| `delete` / `update` 的 URI 不在清单里 | 模型幻觉出不存在的路径 |
-| `add` 的 URI 已存在 | 应该用 `update` |
-| URI 不在允许的 scope 内 | 隔离：只能操作显式给出的 scope |
-| `content` 为空而 `kind !== 'delete'` | 空正文等于删除，但走了 update 的路径 |
-| `reason` 为空 | 没有理由的删除不可接受 |
-| 同一个 URI 出现两次 | 同一批里 update 又 delete 是自相矛盾的；写盘阶段也会对同一条记忆重复加锁 |
-
-**为什么整批失败而不是逐条丢弃**：模型产出的一半操作被执行、一半被丢弃，得到的是一份
-自相矛盾的记忆库——比如「这条被那条取代了」的删除被丢掉，两条就都留下了。要么全做，
-要么全不做。
-
-#### 写回
-
-- 操作只带 URI，`MemoryService.upsertMemory` 要的是「记忆类型 + identity 值」。
-  中间这一步由 `resolveMemoryTarget`（`domain/consolidation.ts`）还原：**不切字符串**，
-  目录与文件名模板都来自记忆类型定义（`renderPath` 的逆运算）。`profile` 这类固定
-  文件名的类型 identity 不能由路径推出，所以只能 `update`，`add` 会被拒绝。
-- 写盘前完成全部校验，然后**按 URI 升序逐条写入**。加锁不在这一层：`MemoryService`
-  的 `upsertMemory` / `remove` 各自在自己的单文件 `exact` 锁内完成；这一层再持锁会
-  等自己（`PathLockManager` 不可重入）。因此这**不是原子批次**——中途 `CONFLICT` 或
-  I/O 失败时，前面已应用的操作不会回滚，错误 `details` 带上已应用的清单（下一节）。
-  URI 升序只让报告与日志的顺序确定。
-- `delete` 必进日志，带模型给的 `reason`。
-
-#### 溯源
-
-被合并掉的记忆删除之后只剩磁盘历史，所以**本批被删除记忆的 `sources` 会并进本批写出的
-每一条**：保留者自己的在前（顺序不变），被删的按操作顺序追加，去重与 20 条上限沿用
-§11.1 的同一套规则。`entity_refs` 与 `memory_links` 属于各自文件，自动 consolidation 不转移它们；如需保留已删除记忆的关联，应在删除前显式纠正目标文件。
-
-**已知限制：`add` 一条「参考了现有多条、但把原条目留着」的新记忆，不会继承它们的
-来源。** 模型输出里没有「我参考了哪几条」这个信号，按正文猜就是编。这类记忆的溯源从
-它自己被归档的那一次开始。
-
-**被删记录的 `sources` 里出现不合法的 URI 时整批失败**（`INVALID_ARGUMENT`），一条
-记忆都不删：打错的 frontmatter 必须在写盘之前拦住，否则删除已经应用、没有回滚
-（下一节「回滚语义」）。
-
-**这条校验是不对称的。** 只有**被删除**的记录会被逐个 `Uri.tryParse`——它们的来源要
-并进保留者，坏值会在写盘中途炸掉整批。**保留者自己**从磁盘读出的坏 `sources` 不参与
-校验，会原样留在文件里、不报错；写入侧只做字符串去重与 20 条截断，不校验已有条目的
-URI。这是当前行为：保留者路径没有崩溃风险，来源字符串原样展示即可，所以没有把它升级
-成整批失败。
-
-#### 回滚语义
-
-`MemoryService` 没有事务（一条记忆一个文件），`filesystem` 端口也拿不回逐字节前像
-（`created_at`、`status` 会在重写时被重新计算）。所以**不做假回滚**：全部校验前置，
-把「中途失败」压到只剩 I/O 与加锁失败；真的中途失败时错误 `details` 里带上已经应用
-过的 `adds` / `updates` / `deletes`，由运维按这份清单收尾。
-
-#### 隔离
-
-- 只允许操作 `scope` 下的记忆（`validateOperations` 的 `allowedScopes`）。
-- **不展开组**：`comem://group/eng/` 的记忆不会因为调用者有 `group:eng` 就被合并。
-  合并是**写**操作，scope 必须显式指定。
-- 清单与正文用**调用方自己的 principals** 读取：`restricted` 切断的节点不能因为
-  「scope 根是调用方」就被读出来，然后删掉一条调用方本来无权看到的记忆。
-- **`pending` / `archived` 不是候选**：`pending` 还在复核（§11.6），删掉它等于绕过
-  复核闸门；`archived` 已被 TTL 归档（§11.7），清理要按 TTL 的策略走。清单过滤之外，
-  写回前还会再读一次状态：`add` 的 `existing` 用的是**全部**记忆文件，`update` /
-  `delete` 的目标必须是 `active`——模型可以凭空写出一条真实存在的路径（不算幻觉），
-  只靠清单过滤会让它通过「存在」校验然后被删掉。
-- 清单来自检索索引（文件是真相，索引是派生，§7）。文件写了但索引还没同步时不会出现
-  在清单里，也就不会被合并——漏合并比「合并了一份陈旧的正文」安全。
-
-#### 入口
-
-`POST /api/v1/memories/consolidate`，body `{ "scope": "...", "dryRun": true }`，
-需要 `manage`。**`dryRun` 默认 `true`**：合并会 `delete`，不传就等于预览，误点的代价
-不可逆。**不进 MCP**（§3：16 个工具，不多不少）。
+手动端点返回 `adds` / `updates` / `deletes` 和逐轮 `trace`。旧地址 `POST /api/v1/memories/consolidate` 保留为同一处理器的兼容别名，权限、默认预览与写入语义相同。合并计划应用前验证目标合法、已有记忆状态与路径、ACL 及字段；先写保留项，再删被取代项。I/O 或锁冲突造成部分成功时，错误详情会列出已执行的操作。MCP 工具集合不变。旧配置文件里的 `memory.consolidation.enabled` / `maxIterations` 及对应环境变量兼容读取，新键优先。
 
 ### 11.9 本机 Agent 对话导入
 
@@ -3229,7 +3110,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/consolidate`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
+| 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源/技能 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
@@ -3707,7 +3588,7 @@ comem_hook_overhead_total_seconds{event}        # 单轮合计
 comem_hook_async_seconds{phase}                 # 后台部分耗时，phase = archive | extract | merge | summary | distill
 ```
 
-**五段后台计时落在 `CommitPipeline` 的五个步骤上**：`archive` → `archive_summary`（生成 `archive_NNN/` 的摘要）、`extract` → `memory_extract`、`merge` → `memory_merge`、`summary` → `summary_invalidate`、`distill` → `experience_distill`。阶段一（写归档目录、建任务）是请求内的同步工作，不计入后台；把它算进来会把用户等过的时间重复计一次。管线用 `phase()` 包住整段 `run`（含重试），后台任务不在请求作用域里，因此值写进进程级 `#asyncPhases`，`/metrics` 直接按阶段输出 `comem_hook_async_seconds{phase}`——**不依赖下一次 hook 上报，也不挂任何事件**。`phase` 是真维度（五个操作各记各的耗时），`event` 是假维度（同一份进程级快照会被贴到多个事件上，看起来像每个事件都有各自的后台耗时）。省略 `phase` 的管线（单测直接构造）原样执行，不记。
+**五段后台计时落在 `CommitPipeline` 的五个步骤上**：`archive` → `archive_summary`（生成 `archive_NNN/` 的摘要）、`extract` → `memory_extract`、`merge` → `memory_merge`、`summary` → `summary_invalidate`、`distill` → `dreamer`。阶段一（写归档目录、建任务）是请求内的同步工作，不计入后台；把它算进来会把用户等过的时间重复计一次。管线用 `phase()` 包住整段 `run`（含重试），后台任务不在请求作用域里，因此值写进进程级 `#asyncPhases`，`/metrics` 直接按阶段输出 `comem_hook_async_seconds{phase}`——**不依赖下一次 hook 上报，也不挂任何事件**。`phase` 是真维度（五个操作各记各的耗时），`event` 是假维度（同一份进程级快照会被贴到多个事件上，看起来像每个事件都有各自的后台耗时）。省略 `phase` 的管线（单测直接构造）原样执行，不记。
 
 **报告路径**：hook 在退出前 `POST /api/v1/telemetry/hook`，带 `{event, sessionId, phases: {processStartMs, recallMs, serializeMs, captureMs}}`。服务端**按事件覆盖保存最近一次的值**（gauge），不存直方图：历史分布由 Prometheus 按抓取间隔自己算（§17.10）。
 
@@ -3989,10 +3870,9 @@ memory:
     defaultDays: 0        # 滑动窗口：最后一次使用后多少天过期。0 = 永不过期（默认）
     sweepBatchSize: 100   # 每轮最多清扫多少条，防止一次清太多把库锁住
     retentionDays: 0      # 归档后保留多少天再物理删除。0 = 永不物理删除（默认）
-  # 记忆合并（§11.8）。默认关：它会 delete，是破坏性操作，必须显式开启。
-  # 开启时 summary.generator 必须是 llm，否则 loadConfig 抛 INVALID_ARGUMENT。
-  consolidation:
-    enabled: false
+  # Dreamer 手动整理（§11.8），可能删除记忆，需显式开启。
+  dreamer:
+    manualConsolidation: false
     maxIterations: 10     # 探索轮次上限；到上限还没给出操作就整次失败
 
 acl:
@@ -4178,7 +4058,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
 
 **渲染器是进程级绑定。** 提示词的调用点有四个（`services/retrieval/intent.ts`、`services/summary.ts`、
-`services/commit/steps/memory-extract.ts`、`services/commit/steps/experience-distill.ts`，
+`services/commit/steps/memory-extract.ts`、`services/dreamer/archive-prompt.ts`，
 每处渲染一对系统 / 用户提示词），这些文件不在本 wave 的文件所有权内，而
 `REWRITE_SYSTEM_PROMPT` 在 `retrieval/intent.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
 没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入

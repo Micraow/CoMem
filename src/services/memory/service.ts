@@ -93,6 +93,7 @@ export type MemoryUpdate = (current: MemoryFields) => MemoryFields | null;
  * 比对，补丁改掉 identity 时直接拒绝，不做隐式 move。
  */
 export interface MemoryUpdateInput {
+  readonly reviewRequired?: true;
   readonly structure?: MemoryStructure | ((current: MemoryStructure) => MemoryStructure);
   readonly uri: Uri;
   readonly update: MemoryUpdate;
@@ -264,7 +265,7 @@ export class MemoryService {
         if (schema.fields.some((field) => field.name === UPDATED_AT_FIELD)) {
           fields[UPDATED_AT_FIELD] = now;
         }
-        const status: MemoryStatus = this.#reviewRequired.has(schema.type) ? 'pending' : 'active';
+        const status: MemoryStatus = (target.reviewRequired === true || this.#reviewRequired.has(schema.type)) ? 'pending' : 'active';
         // 溯源只在**真的写盘**时追加：合并循环里所有字段操作都失败时（`next === null`）
         // 这条记忆没有因为这次归档改变，给它记上一笔归档来源是错的。
         const sources = appendSources(
@@ -332,11 +333,10 @@ export class MemoryService {
    * 锁在这里取（§18）。
    */
   async reject(uri: Uri, reason: string): Promise<MemoryRejectResult> {
-    return await this.#locks.withLock(
-      uri,
-      'exact',
-      (): Promise<MemoryRejectResult> => rejectMemory(this.#filesystem, this.#logger, uri, reason),
-    );
+    return this.#locks.withLock(uri, 'exact', async () => {
+      if (uri.parent()?.name === 'preferences' && uri.name.startsWith('inferred-')) await this.#forgetBarriers?.record(uri);
+      return rejectMemory(this.#filesystem, this.#logger, uri, reason);
+    });
   }
 
   /**

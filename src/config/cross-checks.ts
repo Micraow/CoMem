@@ -75,29 +75,11 @@ export function assertCrossChecks(config: ComemConfig): void {
     );
   }
 
-  /**
-   * 交叉校验：开了记忆合并就必须有真的模型。
-   *
-   * 规则生成器（`summary.generator: rule`）产不出操作列表——它的存在是为了让没有
-   * 模型凭据的部署（以及不需要模型的测试）仍能生成摘要。开着合并却用它，端点的
-   * 每一次调用都会停在模型之前，看起来像「没有可合并的记忆」而实际是配置没生效。
-   * `providers.llm.default.type: disabled` 是同一个判据的另一种写法：两者都表示
-   * 「没有可用的模型」。这种错误在启动时抛，比在第一次合并时发现好。
-   */
   const llmEnabled = llmConfigured(config);
-  if (
-    config.memory.consolidation.enabled &&
-    (config.summary.generator !== 'llm' || !llmEnabled)
-  ) {
-    throw new ComemError(
-      'INVALID_ARGUMENT',
-      'memory.consolidation.enabled 需要可用的 LLM：summary.generator 必须是 llm，且 providers.llm.default 需要配置真实的供应商地址。',
-      {
-        field: 'memory.consolidation.enabled',
-        summaryGenerator: config.summary.generator,
-        llmType: config.providers.llm.default.type,
-      },
-    );
+  if (config.memory.dreamer.manualConsolidation && !llmEnabled) {
+    throw new ComemError('INVALID_ARGUMENT', 'memory.dreamer.manualConsolidation 需要可用的 LLM。', {
+      field: 'memory.dreamer.manualConsolidation', llmType: config.providers.llm.default.type,
+    });
   }
 
   /**
