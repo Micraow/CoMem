@@ -5,8 +5,8 @@
 # 两个进程生命周期绑在一起——关掉一个另一个也必须停，否则再跑一次会撞端口
 # （EADDRINUSE），而报错信息指向的是「端口被占用」不是「上次没关干净」。
 #
-# `set -m` 让后台 job 各自成为进程组。清理时只终止这两个子进程组，避免
-# `pnpm` 自身的多层子进程留下孤儿，也不会向启动脚本的父 shell 发信号。
+# `set -m` 让两个后台 job 各自成为进程组。直接运行 Node，避免 pnpm 为子命令
+# 另建进程组；清理时只向这两个 job 发信号。
 
 set -euo pipefail
 set -m
@@ -68,7 +68,7 @@ for port in "$BACKEND_PORT" "$WEB_PORT"; do
 done
 
 echo "==> 后端 ${BACKEND_URL}"
-pnpm dev:server "$@" &
+node --import tsx src/bootstrap/main.ts "$@" &
 BACKEND_PID=$!
 
 # 等后端完成启动和数据库迁移，再启动控制台。
@@ -99,7 +99,11 @@ fi
 
 echo "==> 控制台 http://127.0.0.1:${WEB_PORT}"
 # 把端口传给控制台的 devProxy：两边必须指向同一个后端。
-COMEM_SERVER_PORT="$BACKEND_PORT" pnpm --dir web exec nuxt dev --host 127.0.0.1 --port "$WEB_PORT" &
+(
+  cd web
+  export COMEM_SERVER_PORT="$BACKEND_PORT"
+  exec node node_modules/nuxt/bin/nuxt.mjs dev --host 127.0.0.1 --port "$WEB_PORT"
+) &
 WEB_PID=$!
 
 while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$WEB_PID" 2>/dev/null; do
