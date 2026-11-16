@@ -189,7 +189,12 @@ async function waitReady() {
   for (;;) {
     try {
       const health = await api.get('/health');
-      detail(`服务已就绪（${Date.now() - startedAt}ms）：status=${health.status}，版本 ${health.version}，索引 ${health.index.nodes} 个节点`);
+      // 字段名跟着 `/health` 的响应走，写错会静默打印 `undefined`，所以不认识就报错。
+      const nodes = health.index?.totalNodes;
+      if (typeof nodes !== 'number') {
+        throw new Error(`/health 响应里没有 index.totalNodes：${JSON.stringify(health.index)}`);
+      }
+      detail(`服务已就绪（${Date.now() - startedAt}ms）：status=${health.status}，版本 ${health.version}，索引 ${nodes} 个节点`);
       return;
     } catch (error) {
       if (Date.now() >= deadline) {
@@ -305,12 +310,14 @@ async function showArchive() {
   detail(`任务 ${task.task.id}：status=${task.task.status}，stepsDone=[${task.task.stepsDone.join(', ')}]`);
 
   const archiveDir = join(DATA_DIR, 'user', 'local', 'sessions', sessionId, 'history', archiveUri.slice(archiveUri.lastIndexOf('/') + 1));
-  const meta = JSON.parse(readFileSync(join(archiveDir, '.meta.json'), 'utf8'));
-  detail(`归档元数据 ${archiveDir}/.meta.json：`);
+  const metaPath = join(archiveDir, '.meta.json');
+  const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+  detail(`归档元数据 ${metaPath}：`);
   detail(`  phase1.status=${meta.phase1.status}，archived=${meta.phase1.archivedMessageIds.length} 条，stepsDone=[${meta.stepsDone.join(', ')}]`);
 
-  const messages = readFileSync(join(archiveDir, 'messages.jsonl'), 'utf8').trim().split('\n');
-  detail(`归档消息 ${archiveDir}/messages.jsonl：${messages.length} 行（每行一条消息）`);
+  const messagesPath = join(archiveDir, 'messages.jsonl');
+  const messages = readFileSync(messagesPath, 'utf8').trim().split('\n');
+  detail(`归档消息 ${messagesPath}：${messages.length} 行（每行一条消息）`);
 
   if (!llmEnabled) {
     detail('阶段二需要模型：设置 COMEM_LLM_KEY 后重跑，会真实执行四步并写 .done。');
