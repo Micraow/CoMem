@@ -1,6 +1,7 @@
 # Local builds and isolated Hermes/Chromium validation
 node_modules/
 desktop/plugin.js
+desktop/maplibre-gl-worker.mjs
 evidence/
 reference/
 local/

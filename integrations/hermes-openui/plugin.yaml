@@ -10,3 +10,14 @@ tags:
   - desktop
   - webapp
   - interaction
+config_schema:
+  query_url:
+    type: str
+    default: ""
+    label: Read-only query URL
+    description: "Optional HTTPS endpoint returned by Query(\"query_data\", ...). Loopback HTTP is allowed for local services. The plugin sends GET requests only and never follows redirects."
+  query_token:
+    type: secret
+    env: HERMES_OPENUI_QUERY_TOKEN
+    label: Query bearer token
+    description: "Optional bearer token for the configured query URL. It stays in the Hermes profile's .env and is never exposed to the browser."

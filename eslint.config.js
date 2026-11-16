@@ -29,6 +29,7 @@ export default tseslint.config(
       'docs/**',
       'web/**',
       'integrations/hermes-openui/desktop/plugin.js',
+      'integrations/hermes-openui/desktop/maplibre-gl-worker.mjs',
       'integrations/hermes-openui/.plugin-test-*/**',
     ],
   },

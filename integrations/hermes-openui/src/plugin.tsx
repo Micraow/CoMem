@@ -12,6 +12,31 @@ import { OpenUIStreamStore } from './stream.ts'
 
 const OPENUI_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 export const OPENUI_UNAVAILABLE = 'Interactive card unavailable.'
+const QUERY_REST_TIMEOUT_MS = 15_000
+
+type QueryToolProvider = Record<
+  string,
+  (args: Record<string, unknown>) => Promise<unknown>
+>
+type PluginRest = <T>(
+  path: string,
+  options?: {
+    readonly body?: unknown
+    readonly method?: string
+    readonly timeoutMs?: number
+  }
+) => Promise<T>
+
+export function createOpenUIQueryTools(rest: PluginRest): QueryToolProvider {
+  return {
+    query_data: args =>
+      rest('/query', {
+        body: { arguments: args },
+        method: 'POST',
+        timeoutMs: QUERY_REST_TIMEOUT_MS
+      })
+  }
+}
 
 type SessionPayload = Readonly<{
   stored_session_id?: unknown
@@ -71,10 +96,12 @@ function OpenUIDirective({
   id,
   sessionId,
   status,
-  streaming
+  streaming,
+  queryTools
 }: {
   readonly bridge: OpenUIBridge
   readonly id: null | string
+  readonly queryTools: QueryToolProvider
   readonly sessionId: null | string
   readonly status?: 'complete' | 'error' | 'interrupted' | 'streaming'
   readonly streaming: boolean
@@ -103,6 +130,7 @@ function OpenUIDirective({
           sessionId={sessionId}
           source={card.source}
           streaming={streaming || card.streaming}
+          toolProvider={queryTools}
         />
       ) : finished ? (
         <p className="hermes-openui-unavailable" role="status">
@@ -136,6 +164,7 @@ const plugin: HermesPlugin = {
   description: 'Renders interactive OpenUI cards inside assistant replies.',
   register(ctx) {
     const bridge = new OpenUIBridge()
+    const queryTools = createOpenUIQueryTools(ctx.rest)
     const contribution: TranscriptDirectiveContribution = {
       name: 'openui',
       render: ({ attrs, sessionId, status, streaming }) => {
@@ -145,6 +174,7 @@ const plugin: HermesPlugin = {
           <OpenUIDirective
             bridge={bridge}
             id={id}
+            queryTools={queryTools}
             sessionId={sessionId}
             status={status}
             streaming={streaming}

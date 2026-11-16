@@ -12,4 +12,5 @@
 
 - 原版 Hermes v0.23.1 + 测试模型：卡片先于结束标记出现；标题在 411 个浏览器采样帧中持续可见。宿主替换了原节点，卡片仍可操作。刷新、会话切换、回原会话的追问及中断均通过。
 - 真实 Comate DeepSeek V4.1 Flash + 同一版本 Webapp：独立生成了可本地切换的证据简报；在提问提供照片和位置来源时，生成了带署名照片和可切换地点的地图。Chrome 实际解码了照片并收到 OpenStreetMap 瓦片。未测模型自动搜图或路线规划。
-- 插件的 25 项流与桥接测试、10 项渲染与浏览器测试通过；Hermes 插件 Doctor 通过，构建产物为 456,739 字节。CoMem 的类型检查、lint 和文档检查通过；`check:shape` 仍报告现有 `src/` 基线超限，本分支没有修改该检查或 `src/`。
+- 完整组件库移植后，26 项 Node 测试、4 项 Python Query 桥接测试、8 项 Chromium 测试通过。原版 Webapp 再次通过增量、局部控件、刷新恢复、追问、换会话、中断和真实回环查询；卡片标题在 408 个采样帧中持续可见，宿主替换了底层节点。构建产物 `plugin.js` 为 3,186,168 字节，MapLibre worker 为 508,314 字节。见 [PARITY.md](docs/PARITY.md)。
+- 完整新版在独立的 Comate DeepSeek V4.1 Flash 会话中也生成了交互式卡片，内容来自 CoMem 自动召回。见 [联合验收](../../docs/experiments/1116-hermes-comem-import/provider.md)。

@@ -36,6 +36,13 @@ declare module '@hermes/plugin-sdk' {
   export interface PluginContext {
     readonly register: (contribution: PluginContribution) => () => void
     readonly onEvent: (type: string, listener: (event: HermesGatewayEvent) => void) => () => void
+    readonly rest: <T>(path: string, options?: PluginRestOptions) => Promise<T>
+  }
+
+  export interface PluginRestOptions {
+    readonly body?: unknown
+    readonly method?: string
+    readonly timeoutMs?: number
   }
 
   export interface HermesPlugin {

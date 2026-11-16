@@ -8,5 +8,5 @@ def register(ctx) -> None:
     ctx.register_skill(
         "openui",
         Path(__file__).resolve().parent / "skills" / "openui" / "SKILL.md",
-        "Create an interactive answer when a comparison, metric set, or local trade-off benefits from it.",
+        "Create a progressive, locally interactive OpenUI answer for comparisons, calculators, data views, diagrams, maps, and other results that work better than prose alone.",
     )

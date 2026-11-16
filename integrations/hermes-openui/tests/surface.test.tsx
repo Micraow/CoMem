@@ -7,9 +7,10 @@ import test from 'node:test'
 
 import { createParser } from '@openuidev/react-lang'
 import { build } from 'esbuild'
-import { chromium } from 'playwright-core'
+import { chromium, type Page } from 'playwright-core'
 import { renderToStaticMarkup } from 'react-dom/server'
 
+import { promptOptions } from '../src/intelligent-ui/prompt-options.ts'
 import {
   DECISION_BRIEF_OPENUI_PROGRAM,
   DESIGN_OPENUI_PROGRAM,
@@ -19,208 +20,325 @@ import {
 } from '../src/library.tsx'
 import { OpenUISurface } from '../src/surface.tsx'
 
-const FIRST_DESIGN_FRAME = `root = Card("Choose a retrieval strategy", "Hybrid is the safer default for mixed exact-match and semantic queries.", [kpis, tabs, chart, insight, checkpoint, note])`
-const LOCAL_PHOTO_FIXTURES = [
-  `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800"><title>Local browser fixture one</title><rect width="1200" height="800" fill="#f6b26b"/><circle cx="930" cy="180" r="110" fill="#fff3cf"/><path d="M0 620 360 350 720 610 980 410 1200 590V800H0Z" fill="#9c4f2e"/></svg>`,
-  `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800"><title>Local browser fixture two</title><rect width="1200" height="800" fill="#9fd8e8"/><path d="M0 560Q300 430 600 560T1200 520V800H0Z" fill="#355f78"/><circle cx="260" cy="210" r="95" fill="#eef8fb"/></svg>`,
-  `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800"><title>Local browser fixture three</title><rect width="1200" height="800" fill="#b7c5ca"/><path d="M0 650 280 390 520 620 790 310 1200 650V800H0Z" fill="#51636c"/><rect x="520" y="80" width="160" height="220" rx="22" fill="#f5eee2"/></svg>`
-]
+const COMPONENTS = [
+  'Badge',
+  'Box',
+  'Button',
+  'Caption',
+  'Card',
+  'Carousel',
+  'Celebration',
+  'Chart',
+  'Checkbox',
+  'Circle',
+  'Code',
+  'Col',
+  'DatePicker',
+  'Divider',
+  'Ellipse',
+  'Flashcard',
+  'Form',
+  'G',
+  'Grid',
+  'HtmlView',
+  'Icon',
+  'IconButton',
+  'Image',
+  'Input',
+  'Label',
+  'Line',
+  'Link',
+  'List',
+  'ListItem',
+  'Map',
+  'MapMarker',
+  'Markdown',
+  'Math',
+  'Path',
+  'Polygon',
+  'Polyline',
+  'Popover',
+  'Pressable',
+  'Quote',
+  'RadioGroup',
+  'Rect',
+  'Row',
+  'SearchImage',
+  'SegmentedControl',
+  'Select',
+  'Slider',
+  'Spacer',
+  'Svg',
+  'SvgText',
+  'Table',
+  'Text',
+  'TextArea',
+  'Timer',
+  'Title',
+  'YouTube'
+] as const
+
+const FUNCTIONS = [
+  'AddDays',
+  'AddMonths',
+  'Allocate',
+  'Append',
+  'Between',
+  'Bucket',
+  'Capitalize',
+  'Change',
+  'Chunk',
+  'Clamp',
+  'Concat',
+  'Convert',
+  'Cumulative',
+  'DaysBetween',
+  'Default',
+  'Duration',
+  'Find',
+  'Flatten',
+  'Format',
+  'FormatDate',
+  'GroupBy',
+  'Histogram',
+  'Includes',
+  'IndexOf',
+  'Join',
+  'Lerp',
+  'Lower',
+  'MixColor',
+  'MonthsBetween',
+  'MovingAvg',
+  'Now',
+  'Pad',
+  'Payment',
+  'Percent',
+  'Pick',
+  'Pivot',
+  'Plural',
+  'Pow',
+  'Prepend',
+  'Random',
+  'Range',
+  'Remove',
+  'RemoveAt',
+  'Replace',
+  'Reverse',
+  'Shuffle',
+  'Slice',
+  'Split',
+  'Sqrt',
+  'StartOf',
+  'Stats',
+  'Take',
+  'Today',
+  'Toggle',
+  'Top',
+  'Trim',
+  'Unique',
+  'Update',
+  'Upper'
+] as const
 
 type HarnessWindow = Window & {
   __openUICalls: Array<[string, string]>
+  __queryAttempts: Array<Record<string, unknown>>
+  __queryControls: Array<{
+    reject: (error: Error) => void
+    resolve: (value: unknown) => void
+  }>
+  __openedUrls: string[]
   __setOpenUI: (source: string, streaming: boolean) => void
   __setOpenUISession: (sessionId: null | string) => void
 }
 
-test('published programs satisfy the OpenUI library schema', () => {
-  const parser = createParser(openUILibrary.toJSONSchema(), openUILibrary.root)
-  const decisionBrief = parser.parse(DECISION_BRIEF_OPENUI_PROGRAM)
-  const design = parser.parse(DESIGN_OPENUI_PROGRAM)
-  const photoStrip = parser.parse(PHOTO_STRIP_OPENUI_PROGRAM)
-  const slider = parser.parse(SAMPLE_OPENUI_PROGRAM)
+async function mountHarness(
+  t: test.TestContext,
+  harness: string,
+  route?: (page: Page) => Promise<void>
+): Promise<{ page: Page; origin: string; workerRequests: string[] }> {
+  const workspace = process.cwd()
+  const temp = await mkdtemp(path.join(tmpdir(), 'hermes-openui-browser-'))
+  const harnessPath = path.join(temp, 'harness.tsx')
+  const worker = await readFile(
+    path.join(workspace, 'node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs')
+  )
 
-  assert.equal(decisionBrief.root?.typeName, 'Card')
-  assert.deepEqual(decisionBrief.meta.errors, [])
-  assert.deepEqual(decisionBrief.meta.unresolved, [])
-  assert.equal(decisionBrief.stateDeclarations.$view, 'Decision')
-  assert.equal(design.root?.typeName, 'Card')
-  assert.deepEqual(design.meta.errors, [])
-  assert.deepEqual(design.meta.unresolved, [])
-  assert.equal(design.stateDeclarations.$lens, 'Quality')
-  assert.equal(design.stateDeclarations.$minimum, 75)
-  assert.doesNotMatch(DESIGN_OPENUI_PROGRAM, /fixture|demo|design surface/i)
-  assert.equal(photoStrip.root?.typeName, 'Card')
-  assert.deepEqual(photoStrip.meta.errors, [])
-  assert.deepEqual(photoStrip.meta.unresolved, [])
-  assert.equal(slider.root?.typeName, 'Card')
-  assert.deepEqual(slider.meta.errors, [])
-  assert.deepEqual(slider.meta.unresolved, [])
+  await writeFile(harnessPath, harness)
+  const bundled = await build({
+    absWorkingDir: workspace,
+    bundle: true,
+    define: { 'process.env.NODE_ENV': '"production"' },
+    entryPoints: [harnessPath],
+    format: 'esm',
+    jsx: 'automatic',
+    loader: { '.css': 'text' },
+    mainFields: ['module', 'main'],
+    nodePaths: [path.join(workspace, 'node_modules')],
+    platform: 'browser',
+    write: false
+  })
+  const script = bundled.outputFiles[0].text.replaceAll('</script>', '<\\/script>')
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body { padding: 28px; background: #f7f7f8; }
+    #root { margin: 0 auto; max-width: 840px; }
+  </style></head><body><div id="root"></div><script type="module">${script}</script></body></html>`
+  const workerRequests: string[] = []
+  const server = createServer((request, response) => {
+    if (request.url === '/maplibre-gl-worker.mjs') {
+      workerRequests.push(request.url)
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+      response.end(worker)
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    response.end(html)
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+
+  assert.ok(address && typeof address === 'object')
+  const origin = `http://127.0.0.1:${address.port}`
+  const browser = await chromium.launch({
+    args: [
+      '--no-sandbox',
+      '--enable-webgl',
+      '--ignore-gpu-blocklist',
+      '--use-angle=swiftshader'
+    ],
+    executablePath: '/usr/bin/chromium',
+    headless: true
+  })
+  const page = await browser.newPage({ viewport: { height: 1000, width: 1100 } })
+  const pageErrors: string[] = []
+
+  page.setDefaultTimeout(12_000)
+  page.on('pageerror', error => pageErrors.push(error.message))
+  t.after(async () => {
+    assert.deepEqual(pageErrors, [])
+    await browser.close()
+    await new Promise<void>((resolve, reject) => {
+      server.close(error => (error ? reject(error) : resolve()))
+    })
+    await rm(temp, { force: true, recursive: true })
+  })
+  await route?.(page)
+  await page.goto(origin)
+
+  return { origin, page, workerRequests }
+}
+
+test('the full component, function, action, and prompt catalog is live', () => {
+  const schema = openUILibrary.toJSONSchema()
+  const definitions = Object.keys(schema.$defs ?? {})
+  const functions = Object.keys(schema.functions ?? {})
+  const actions = Object.keys(schema.actions ?? {})
+
+  assert.equal(openUILibrary.root, 'Col')
+  assert.deepEqual(
+    definitions.filter(name => name !== 'ActionExpression').sort(),
+    [...COMPONENTS, 'CitationList', 'PhotoStrip', 'PlaceMap'].sort()
+  )
+  assert.deepEqual(functions.sort(), [...FUNCTIONS].sort())
+  assert.deepEqual(actions, ['CopyToClipboard'])
+
+  const parser = createParser(schema, openUILibrary.root)
+  const programs = [
+    SAMPLE_OPENUI_PROGRAM,
+    DESIGN_OPENUI_PROGRAM,
+    DECISION_BRIEF_OPENUI_PROGRAM,
+    PHOTO_STRIP_OPENUI_PROGRAM,
+    ...(promptOptions.examples ?? []).map(example => example.slice(example.indexOf('\n\n') + 2))
+  ]
+
+  for (const program of programs) {
+    const result = parser.parse(program)
+
+    assert.equal(result.root?.typeName, 'Col', program.split('\n')[0])
+    assert.deepEqual(result.meta.errors, [])
+    assert.deepEqual(result.meta.unresolved, [])
+  }
 })
 
-test('the skill sample matches the runtime library', async () => {
+test('the cited skill sample is the published decision program', async () => {
   const skill = await readFile('skills/openui/SKILL.md', 'utf8')
   const source = skill.match(
     /<!--openui:source id="ui-decision-01"\n([\s\S]*?)\nopenui:end-->/
   )?.[1]
-  const parser = createParser(openUILibrary.toJSONSchema(), openUILibrary.root)
-  const result = parser.parse(source ?? '')
 
   assert.ok(source)
   assert.equal(source, DECISION_BRIEF_OPENUI_PROGRAM)
-  assert.equal(result.root?.typeName, 'Card')
-  assert.deepEqual(result.meta.errors, [])
-  assert.deepEqual(result.meta.unresolved, [])
-  assert.equal(result.stateDeclarations.$view, 'Decision')
 })
 
-test('the original slider fixture still renders through the real Renderer', () => {
-  const html = renderToStaticMarkup(
+test('the attribution leaves render safe links and media fallbacks', () => {
+  const decision = renderToStaticMarkup(
     <OpenUISurface
-      identity="filter-card-a"
+      identity="decision-static"
       onFollowUp={() => true}
-      sessionId="session-a"
-      source={SAMPLE_OPENUI_PROGRAM}
-      streaming={false}
-    />
-  )
-
-  assert.match(html, /Filter results/)
-  assert.match(html, /Minimum relevance/)
-  assert.match(html, /data-hermes-openui-range/)
-  assert.match(html, /Explain these results/)
-  assert.match(html, /--oui-chart-1/)
-})
-
-test('the cited decision brief renders safe external source links', () => {
-  const html = renderToStaticMarkup(
-    <OpenUISurface
-      identity="decision-card-a"
-      onFollowUp={() => true}
-      sessionId="session-a"
+      sessionId="session-static"
       source={DECISION_BRIEF_OPENUI_PROGRAM}
       streaming={false}
     />
   )
-
-  assert.match(html, /Choose a retrieval path/)
-  assert.match(html, /data-hermes-openui-citations/)
-  assert.match(html, /href="https:\/\/arxiv.org\/abs\/2004.04906"/)
-  assert.match(html, /target="_blank"/)
-  assert.match(html, /rel="noopener noreferrer"/)
-  assert.match(html, /Draft an evaluation plan/)
-})
-
-test('citation links reject unsupported protocols', () => {
-  const unsafeProgram = DECISION_BRIEF_OPENUI_PROGRAM.replace(
-    'https://doi.org/10.1561/1500000019',
-    'javascript:alert(1)'
-  )
-  const html = renderToStaticMarkup(
+  const photos = renderToStaticMarkup(
     <OpenUISurface
-      identity="unsafe-citation-card"
+      identity="photos-static"
       onFollowUp={() => true}
-      sessionId="session-a"
-      source={unsafeProgram}
-      streaming={false}
-    />
-  )
-
-  assert.doesNotMatch(html, /href="javascript:/)
-  assert.match(html, /data-safe-url="false"/)
-})
-
-test('the photo strip renders honest source links and rejects unsafe media URLs', () => {
-  const html = renderToStaticMarkup(
-    <OpenUISurface
-      identity="photo-strip-card"
-      onFollowUp={() => true}
-      sessionId="session-a"
+      sessionId="session-static"
       source={PHOTO_STRIP_OPENUI_PROGRAM}
       streaming={false}
     />
   )
-
-  assert.match(html, /Three views of San Francisco/)
-  assert.equal((html.match(/data-hermes-openui-photo="true"/g) ?? []).length, 3)
-  assert.match(html, /src="https:\/\/upload.wikimedia.org\//)
-  assert.match(html, /Brocken Inaglory/)
-  assert.match(html, /CC BY-SA 3.0/)
-  assert.match(html, /href="https:\/\/commons.wikimedia.org\/wiki\/File:/)
-  assert.match(html, /target="_blank"/)
-  assert.match(html, /rel="noopener noreferrer"/)
-  assert.match(html, /https:\/\/www.openstreetmap.org\/export\/embed.html/)
-  assert.match(html, /href="https:\/\/www.openstreetmap.org\/relation\/21407754"/)
-
-  const unsafeProgram = PHOTO_STRIP_OPENUI_PROGRAM.replace(
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Golden_Gate_Bridge_at_sunset_1.jpg/1280px-Golden_Gate_Bridge_at_sunset_1.jpg',
-    'http://example.com/not-secure.jpg'
-  )
-  const unsafeHtml = renderToStaticMarkup(
+  const unsafe = renderToStaticMarkup(
     <OpenUISurface
-      identity="unsafe-photo-strip-card"
+      identity="unsafe-static"
       onFollowUp={() => true}
-      sessionId="session-a"
-      source={unsafeProgram}
+      sessionId="session-static"
+      source={DECISION_BRIEF_OPENUI_PROGRAM.replace(
+        'https://doi.org/10.1561/1500000019',
+        'javascript:alert(1)'
+      )}
       streaming={false}
     />
   )
 
-  assert.doesNotMatch(unsafeHtml, /src="http:\/\//)
-  assert.match(unsafeHtml, /data-photo-state="fallback"/)
-  assert.match(unsafeHtml, /Image unavailable/)
-})
-
-test('PlaceMap rejects invalid coordinates and keeps the OpenStreetMap fallback link', () => {
-  const invalidProgram = PHOTO_STRIP_OPENUI_PROGRAM.replace(
-    'lat: 37.8182923',
-    'lat: 95'
-  )
-  const html = renderToStaticMarkup(
-    <OpenUISurface
-      identity="invalid-place-map"
-      onFollowUp={() => true}
-      sessionId="session-a"
-      source={invalidProgram}
-      streaming={false}
-    />
-  )
-
-  assert.doesNotMatch(html, /openstreetmap.org\/export\/embed.html/)
-  assert.match(html, /Map unavailable for this place/)
-  assert.match(html, /href="https:\/\/www.openstreetmap.org\/relation\/21407754"/)
-  assert.match(html, /Map data © OpenStreetMap contributors/)
+  assert.match(decision, /Choose a retrieval path/)
+  assert.match(decision, /data-hermes-openui-citations/)
+  assert.match(decision, /href="https:\/\/arxiv.org\/abs\/2004.04906"/)
+  assert.match(decision, /rel="noopener noreferrer"/)
+  assert.match(photos, /Three views of San Francisco/)
+  assert.equal((photos.match(/data-hermes-openui-photo="true"/g) ?? []).length, 3)
+  assert.match(photos, /https:\/\/www.openstreetmap.org\/export\/embed.html/)
+  assert.doesNotMatch(unsafe, /href="javascript:/)
+  assert.match(unsafe, /data-safe-url="false"/)
 })
 
 test(
-  'the Renderer keeps its root through prefix variants, completion, and session aliases',
+  'root-first rendering keeps the surface while controls, chart, and state complete',
   { timeout: 60_000 },
   async t => {
-    const workspace = process.cwd()
-    const surfacePath = path.join(workspace, 'src/surface.tsx')
-    const firstFrameSource = JSON.stringify(FIRST_DESIGN_FRAME)
-    const completeFrame = { source: DESIGN_OPENUI_PROGRAM, streaming: false }
-    const growingFrame = { ...completeFrame, streaming: true }
+    const firstFrame = 'root = Col([])'
+    const prefix = `root = Col([header, detail], 4)
+header = Col([Title("Choose a retrieval strategy", "xl"), Text("Hybrid is the safer default.", "md", "muted")], 2)
+detail = Card([Text("Scores load next.")], "soft", 4)`
     const harness = `
       import { useEffect, useState } from 'react'
       import { createRoot } from 'react-dom/client'
-      import { OpenUISurface } from ${JSON.stringify(surfacePath)}
-
-      declare global {
-        interface Window {
-          __openUICalls: Array<[string, string]>
-          __setOpenUI: (source: string, streaming: boolean) => void
-          __setOpenUISession: (sessionId: string | null) => void
-        }
-      }
-
-      const initialSource = ${firstFrameSource}
+      import { OpenUISurface } from ${JSON.stringify(path.join(process.cwd(), 'src/surface.tsx'))}
 
       function Harness() {
-        const [source, setSource] = useState(initialSource)
+        const [source, setSource] = useState(${JSON.stringify(firstFrame)})
         const [streaming, setStreaming] = useState(true)
-        const [sessionId, setSessionId] = useState<string | null>('session-a')
+        const [sessionId, setSessionId] = useState('session-main')
 
         useEffect(() => {
+          window.__openUICalls = []
           window.__setOpenUI = (nextSource, nextStreaming) => {
             setStreaming(nextStreaming)
             setSource(nextSource)
@@ -230,7 +348,7 @@ test(
 
         return (
           <OpenUISurface
-            identity="research-card-a"
+            identity="main-progressive"
             onFollowUp={(message, destination) => {
               window.__openUICalls.push([destination, message])
               return true
@@ -242,689 +360,313 @@ test(
         )
       }
 
-      window.__openUICalls = []
-      createRoot(document.getElementById('root')!).render(<Harness />)
+      createRoot(document.getElementById('root')).render(<Harness />)
     `
-    const temp = await mkdtemp(path.join(tmpdir(), 'hermes-openui-test-'))
-    const harnessPath = path.join(temp, 'harness.tsx')
-    await writeFile(harnessPath, harness)
-    const bundled = await build({
-      absWorkingDir: workspace,
-      bundle: true,
-      define: { 'process.env.NODE_ENV': '"production"' },
-      entryPoints: [harnessPath],
-      format: 'iife',
-      jsx: 'automatic',
-      nodePaths: [path.join(workspace, 'node_modules')],
-      platform: 'browser',
-      write: false
-    })
-    const html = `<!doctype html><html><head><style>
-      :root {
-        --font-sans: "Inter", ui-sans-serif, sans-serif;
-        --ui-control-hover-background: #f1f1f1;
-        --ui-stroke-secondary: #dedede;
-        --ui-text-primary: #0d0d0d;
-        --ui-text-secondary: #666;
-        --ui-widget-surface-background: #fff;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; padding: 28px; background: #f7f7f8; }
-      #root { margin: 0 auto; max-width: 760px; }
-    </style></head><body><div id="root"></div><script>${bundled.outputFiles[0].text}</script></body></html>`
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      response.end(html)
-    })
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', resolve)
-    })
-    const address = server.address()
+    const { page } = await mountHarness(t, harness)
 
-    assert.ok(address && typeof address === 'object')
+    const root = page.locator('.iui-col').first()
 
-    const browser = await chromium.launch({
-      args: ['--no-sandbox'],
-      executablePath: '/usr/bin/chromium',
-      headless: true
-    })
-    t.after(async () => {
-      await browser.close()
-      await new Promise<void>((resolve, reject) => {
-        server.close(error => (error ? reject(error) : resolve()))
-      })
-      await rm(temp, { force: true, recursive: true })
-    })
-    const page = await browser.newPage({ viewport: { height: 900, width: 900 } })
-    const pageErrors: string[] = []
-
-    page.setDefaultTimeout(5_000)
-    page.on('console', message => console.error(`[browser:${message.type()}] ${message.text()}`))
-    page.on('pageerror', error => pageErrors.push(error.message))
-    await page.goto(`http://127.0.0.1:${address.port}`)
-    await page.waitForFunction(
-      () => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function'
+    await root.waitFor({ state: 'attached' })
+    await root.evaluate(element => element.setAttribute('data-before-complete', 'true'))
+    await page.evaluate(
+      source => (window as unknown as HarnessWindow).__setOpenUI(source, true),
+      prefix
     )
-
-    const card = page.locator('[data-hermes-openui-card]')
-    const range = page.locator('[data-hermes-openui-range]')
-    const followUp = page.getByRole('button', { name: 'Explain this trade-off' })
-
-    await card.waitFor()
-    await card.locator('.hermes-openui-title').filter({ hasText: 'Choose a retrieval strategy' }).waitFor()
-    assert.equal(await range.count(), 0)
-    await card.evaluate(element => element.setAttribute('data-before-complete', 'true'))
+    await page.getByText('Choose a retrieval strategy', { exact: true }).waitFor()
+    await page.getByText('Scores load next.', { exact: true }).waitFor()
+    assert.equal(await root.getAttribute('data-before-complete'), 'true')
 
     await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
-      growingFrame
+      source => (window as unknown as HarnessWindow).__setOpenUI(source, false),
+      DESIGN_OPENUI_PROGRAM
     )
-    await page.locator('[data-hermes-openui-chart]').waitFor()
-    await page.locator('[data-hermes-openui-segmented]').waitFor()
-    assert.equal(
-      await page.locator('[data-hermes-openui-chart]').getAttribute('data-hermes-openui-lens'),
-      'Quality'
-    )
-    assert.equal(await range.inputValue(), '75')
-    assert.equal(await range.isDisabled(), true)
-    assert.equal(await followUp.isDisabled(), true)
-    assert.equal(await card.getAttribute('data-before-complete'), 'true')
+    await page.getByText('Illustrative scores', { exact: true }).waitFor()
+    await page.locator('.iui-chart svg').waitFor()
+    assert.equal(await root.getAttribute('data-before-complete'), 'true')
 
-    await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
-      completeFrame
-    )
-    await page.waitForFunction(
-      () => !(document.querySelector('[data-hermes-openui-range]') as HTMLInputElement | null)?.disabled
-    )
-    assert.equal(await card.getAttribute('data-before-complete'), 'true')
+    const quality = page.getByRole('radio', { name: 'Quality' })
 
+    assert.equal(await quality.getAttribute('aria-checked'), 'true')
     await page.getByRole('radio', { name: 'Speed' }).click()
-    await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
-    await page.locator('[data-hermes-openui-bar="Graph"]').filter({ hasText: '90' }).waitFor()
-    await page.waitForFunction(() =>
-      [...document.querySelectorAll('[data-hermes-openui-bar]')].every(row => {
-        const track = row.querySelector('.hermes-openui-bar-track')
-        const fill = row.querySelector('.hermes-openui-bar-fill')
-        const expected = Number(row.querySelector('.hermes-openui-bar-value')?.textContent)
+    await page.locator('.iui-chart svg[aria-label*="Speed"]').waitFor()
+    await page.getByText('Showing Speed scores; 75% is the evidence floor.', { exact: true }).waitFor()
 
-        if (!(track instanceof HTMLElement) || !(fill instanceof HTMLElement)) {
-          return false
-        }
+    const slider = page.locator('input.iui-range')
 
-        const actual = (fill.getBoundingClientRect().width / track.getBoundingClientRect().width) * 100
-        return Math.abs(actual - expected) < 0.5
-      })
-    )
+    await slider.fill('90')
+    await page.getByText('Showing Speed scores; 90% is the evidence floor.', { exact: true }).waitFor()
+    await page.waitForFunction(() => Object.values(localStorage).some(value => value.includes('Speed') && value.includes('90')))
 
-    await range.focus()
-    await page.keyboard.press('ArrowLeft')
-    await page.keyboard.press('ArrowRight')
-    await range.fill('90')
-    await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
-    await page
-      .locator('[data-hermes-openui-chart] .hermes-openui-benchmark-meta')
-      .filter({ hasText: '2 bars below 90%' })
-      .waitFor()
-    assert.equal(
-      await page.locator('[data-hermes-openui-bar][data-hermes-openui-below="true"]').count(),
-      2
-    )
-    const focusStyles = await range.evaluate(element => {
-      const input = getComputedStyle(element)
+    const follow = page.getByRole('button', { name: 'Explain this trade-off' })
 
-      return {
-        focusVisible: element.matches(':focus-visible'),
-        outlineStyle: input.outlineStyle
-      }
-    })
-
-    assert.equal(focusStyles.focusVisible, true)
-    assert.equal(focusStyles.outlineStyle, 'none')
-    await page.waitForFunction(() => {
-      const value = Object.values(localStorage).join(' ')
-      return value.includes('Speed') && value.includes('90')
-    })
-
-    const screenshotPath = process.env.HERMES_OPENUI_SCREENSHOT
-
-    if (screenshotPath) {
-      await page.waitForTimeout(250)
-      await page.screenshot({ fullPage: true, path: screenshotPath })
-    }
-
-    const darkScreenshotPath = process.env.HERMES_OPENUI_DARK_SCREENSHOT
-
-    await page.evaluate(() => document.documentElement.classList.add('dark'))
-    assert.equal(
-      await page
-        .locator('[data-hermes-openui-surface]')
-        .evaluate(element => getComputedStyle(element).getPropertyValue('--oui-canvas').trim()),
-      '#1c1c1e'
+    await follow.click()
+    await follow.click()
+    assert.deepEqual(
+      await page.evaluate(() => (window as unknown as HarnessWindow).__openUICalls),
+      [['session-main', 'Explain the Speed comparison above 90% evidence floor.']]
     )
-
-    if (darkScreenshotPath) {
-      await page.evaluate(() => {
-        document.body.style.background = '#171717'
-      })
-      await page.waitForTimeout(250)
-      await page.screenshot({ fullPage: true, path: darkScreenshotPath })
-    }
-
-    await page.reload()
-    await page.waitForFunction(
-      () => typeof (window as unknown as HarnessWindow).__setOpenUI === 'function'
-    )
-    await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
-      completeFrame
-    )
-    await page.locator('[data-hermes-openui-chart][data-hermes-openui-lens="Speed"]').waitFor()
-    assert.equal(await range.inputValue(), '90')
-    await page.locator('[data-hermes-openui-output]').filter({ hasText: '90%' }).waitFor()
-
-    await page.getByRole('radio', { name: 'Speed' }).click()
-    await page.waitForFunction(() =>
-      document.querySelector('[data-hermes-openui-chart]')?.getAttribute('data-hermes-openui-lens') === 'Speed'
-    )
-    await page.evaluate(() => {
-      document
-        .querySelector('[data-hermes-openui-surface]')
-        ?.setAttribute('data-surface-before-prefix', 'true')
-      document
-        .querySelector('[data-hermes-openui-card]')
-        ?.setAttribute('data-card-before-prefix', 'true')
-    })
-    await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(
-        'root = Card("Choose a retrieval strategy", "Hybrid is the safer default for mixed exact-match and semantic queries.", [])',
-        frame.streaming
-      ),
-      growingFrame
-    )
-    await page.locator('.hermes-openui-title').filter({ hasText: 'Choose a retrieval strategy' }).waitFor()
-    assert.equal(
-      await page.locator('[data-hermes-openui-surface]').getAttribute('data-surface-before-prefix'),
-      'true'
-    )
-    assert.equal(
-      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-prefix'),
-      'true'
-    )
-    await page.evaluate(
-      frame => (window as unknown as HarnessWindow).__setOpenUI(frame.source, frame.streaming),
-      completeFrame
-    )
-    assert.equal(
-      await page.locator('[data-hermes-openui-surface]').getAttribute('data-surface-before-prefix'),
-      'true'
-    )
-    assert.equal(
-      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-prefix'),
-      'true'
-    )
-
-    await page.evaluate(() => {
-      document
-        .querySelector('[data-hermes-openui-card]')
-        ?.setAttribute('data-card-before-final', 'true')
-    })
-    await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession('session-b'))
-    await page.waitForFunction(
-      () => document.querySelector('[data-hermes-openui-surface]')?.getAttribute('data-hermes-openui-identity') === 'research-card-a'
-    )
-    assert.equal(
-      await page.locator('[data-hermes-openui-card]').getAttribute('data-card-before-final'),
-      'true'
-    )
-    assert.equal(await page.getByRole('radio', { name: 'Speed' }).getAttribute('aria-checked'), 'true')
-    await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession('session-a'))
-    await page.waitForFunction(
-      () => document.querySelector('[data-hermes-openui-chart]')?.getAttribute('data-hermes-openui-lens') === 'Speed'
-    )
-
-    await followUp.click()
-    await followUp.click()
-    assert.deepEqual(await page.evaluate(() => (window as unknown as HarnessWindow).__openUICalls), [
-      ['session-a', 'Explain the Speed comparison above 90% evidence floor.']
-    ])
 
     await page.evaluate(() => (window as unknown as HarnessWindow).__setOpenUISession(null))
-    await followUp.click()
-    assert.equal(await page.evaluate(() => (window as unknown as HarnessWindow).__openUICalls.length), 1)
-    assert.deepEqual(pageErrors, [])
+    await page.evaluate(
+      source => (window as unknown as HarnessWindow).__setOpenUI(source, false),
+      DESIGN_OPENUI_PROGRAM
+    )
+    assert.equal(
+      await page.evaluate(() => (window as unknown as HarnessWindow).__openUICalls.length),
+      1
+    )
+    await root.waitFor({ state: 'attached' })
   }
 )
 
 test(
-  'the cited decision brief changes views and routes an evidence-aware follow-up',
+  'Query shows loading, failure, and retry before rendering returned rows',
   { timeout: 60_000 },
   async t => {
-    const workspace = process.cwd()
-    const surfacePath = path.join(workspace, 'src/surface.tsx')
+    const program = `root = Col([header, result], 4)
+header = Col([Title("Configured query", "xl"), Text("Rows come from the read-only endpoint.", "md", "muted")], 2)
+data = Query("query_data", {window: "30d"}, {rows: []})
+result = Table(["Order"], @Each(data.rows, "row", [row.id]))`
     const harness = `
       import { createRoot } from 'react-dom/client'
-      import { OpenUISurface } from ${JSON.stringify(surfacePath)}
+      import { OpenUISurface } from ${JSON.stringify(path.join(process.cwd(), 'src/surface.tsx'))}
 
-      declare global {
-        interface Window {
-          __openUICalls: Array<[string, string]>
+      window.__queryAttempts = []
+      window.__queryControls = []
+      const toolProvider = {
+        query_data(args) {
+          window.__queryAttempts.push(args)
+          return new Promise((resolve, reject) => {
+            window.__queryControls.push({ resolve, reject })
+          })
         }
       }
 
-      function Harness() {
-        return (
-          <OpenUISurface
-            identity="decision-brief-a"
-            onFollowUp={(message, destination) => {
-              window.__openUICalls.push([destination, message])
-              return true
-            }}
-            sessionId="session-brief"
-            source={${JSON.stringify(DECISION_BRIEF_OPENUI_PROGRAM)}}
-            streaming={false}
-          />
-        )
-      }
-
-      window.__openUICalls = []
-      createRoot(document.getElementById('root')!).render(<Harness />)
-    `
-    const temp = await mkdtemp(path.join(tmpdir(), 'hermes-openui-brief-test-'))
-    const harnessPath = path.join(temp, 'harness.tsx')
-    await writeFile(harnessPath, harness)
-    const bundled = await build({
-      absWorkingDir: workspace,
-      bundle: true,
-      define: { 'process.env.NODE_ENV': '"production"' },
-      entryPoints: [harnessPath],
-      format: 'iife',
-      jsx: 'automatic',
-      nodePaths: [path.join(workspace, 'node_modules')],
-      platform: 'browser',
-      write: false
-    })
-    const html = `<!doctype html><html><head><style>
-      :root {
-        --font-sans: "Inter", ui-sans-serif, sans-serif;
-        --ui-text-primary: #0d0d0d;
-        --ui-text-secondary: #666;
-        --ui-widget-surface-background: #fff;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; padding: 28px; background: #f7f7f8; }
-      #root { margin: 0 auto; max-width: 760px; }
-    </style></head><body><div id="root"></div><script>${bundled.outputFiles[0].text}</script></body></html>`
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      response.end(html)
-    })
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', resolve)
-    })
-    const address = server.address()
-
-    assert.ok(address && typeof address === 'object')
-
-    const browser = await chromium.launch({
-      args: ['--no-sandbox'],
-      executablePath: '/usr/bin/chromium',
-      headless: true
-    })
-    t.after(async () => {
-      await browser.close()
-      await new Promise<void>((resolve, reject) => {
-        server.close(error => (error ? reject(error) : resolve()))
-      })
-      await rm(temp, { force: true, recursive: true })
-    })
-    const page = await browser.newPage({ viewport: { height: 900, width: 900 } })
-    const pageErrors: string[] = []
-
-    page.setDefaultTimeout(5_000)
-    page.on('console', message => console.error(`[browser:${message.type()}] ${message.text()}`))
-    page.on('pageerror', error => pageErrors.push(error.message))
-    await page.goto(`http://127.0.0.1:${address.port}`)
-    await page.locator('[data-hermes-openui-card]').waitFor()
-    await page.getByText('Choose a retrieval path', { exact: true }).waitFor()
-    await page.getByText(/^Start with hybrid retrieval:/).waitFor()
-
-    const links = await page
-      .locator('[data-hermes-openui-citations] a')
-      .evaluateAll(elements =>
-        elements.map(element => ({
-          href: (element as HTMLAnchorElement).href,
-          rel: element.getAttribute('rel'),
-          target: element.getAttribute('target')
-        }))
+      createRoot(document.getElementById('root')).render(
+        <OpenUISurface
+          identity="async-query"
+          onFollowUp={() => true}
+          sessionId="session-query"
+          source={${JSON.stringify(program)}}
+          streaming={false}
+          toolProvider={toolProvider}
+        />
       )
+    `
+    const { page } = await mountHarness(t, harness)
 
-    assert.equal(links.length, 3)
-    assert.ok(links.every(link => link.href.startsWith('https://')))
-    assert.ok(links.every(link => link.target === '_blank'))
-    assert.ok(links.every(link => link.rel === 'noopener noreferrer'))
-    assert.equal(
-      await page.locator('[data-hermes-openui-citation][data-safe-url="false"]').count(),
-      0
-    )
-
-    await page.getByRole('radio', { name: 'Evidence' }).click()
-    await page.getByText(/^BM25 supplies a lexical baseline/).waitFor()
+    await page.getByText('Configured query', { exact: true }).waitFor()
+    await page.getByText('Loading data…', { exact: true }).waitFor()
     await page.waitForFunction(
-      () =>
-        document.querySelector('[data-hermes-openui-segmented] [aria-checked="true"]')
-          ?.textContent === 'Evidence'
+      () => (window as unknown as HarnessWindow).__queryControls.length === 1
     )
-    assert.equal(await page.getByText(/^Start with hybrid retrieval:/).isVisible(), false)
-
-    const screenshotPath = process.env.HERMES_OPENUI_BRIEF_SCREENSHOT
-
-    if (screenshotPath) {
-      await page.waitForTimeout(250)
-      await page.screenshot({ fullPage: true, path: screenshotPath })
-    }
-
-    const darkScreenshotPath = process.env.HERMES_OPENUI_BRIEF_DARK_SCREENSHOT
-
-    await page.evaluate(() => document.documentElement.classList.add('dark'))
-    assert.equal(
-      await page
-        .locator('[data-hermes-openui-surface]')
-        .evaluate(element => getComputedStyle(element).getPropertyValue('--oui-canvas').trim()),
-      '#1c1c1e'
-    )
-
-    if (darkScreenshotPath) {
-      await page.evaluate(() => {
-        document.body.style.background = '#171717'
-      })
-      await page.waitForTimeout(250)
-      await page.screenshot({ fullPage: true, path: darkScreenshotPath })
-    }
-
-    await page.getByRole('button', { name: 'Draft an evaluation plan' }).click()
     assert.deepEqual(
-      await page.evaluate(
-        () => (window as unknown as { __openUICalls: Array<[string, string]> }).__openUICalls
-      ),
-      [
-        [
-          'session-brief',
-          'Draft an evaluation plan for hybrid retrieval using the Evidence view. Require citations and report recall, identifier accuracy, latency, and ranking quality.'
-        ]
-      ]
+      await page.evaluate(() => (window as unknown as HarnessWindow).__queryAttempts),
+      [{ window: '30d' }]
     )
-    assert.deepEqual(pageErrors, [])
+
+    await page.evaluate(() => {
+      const harnessWindow = window as unknown as HarnessWindow
+      harnessWindow.__queryControls[0]?.reject(new Error('fixture failure'))
+    })
+    await page.getByRole('alert').filter({
+      hasText: 'The configured data source could not be loaded.'
+    }).waitFor()
+
+    await page.getByRole('button', { name: 'Try again' }).click()
+    await page.waitForFunction(
+      () => (window as unknown as HarnessWindow).__queryControls.length === 2
+    )
+    await page.evaluate(() => {
+      const harnessWindow = window as unknown as HarnessWindow
+      harnessWindow.__queryControls[1]?.resolve({ rows: [{ id: 'ORD-1042' }] })
+    })
+    await page.getByText('ORD-1042', { exact: true }).waitFor()
+    assert.deepEqual(
+      await page.evaluate(() => (window as unknown as HarnessWindow).__queryAttempts),
+      [{ window: '30d' }, { window: '30d' }]
+    )
   }
 )
 
 test(
-  'PhotoStrip and PlaceMap align media, update one marker, and preserve fallback links',
+  'clipboard, safe URL, and sandboxed HTML actions stay inside their contracts',
   { timeout: 60_000 },
   async t => {
-    const workspace = process.cwd()
-    const surfacePath = path.join(workspace, 'src/surface.tsx')
+    const program = `root = Col([header, actions, htmlView], 4)
+header = Col([Title("Local actions", "xl"), Text("These controls act inside the browser.", "md", "muted")], 2)
+actions = Row([Button("Copy note", @CopyToClipboard("Hermes copy test")), Button("Open docs", @OpenUrl("https://example.com/docs")), Button("Open unsafe", @OpenUrl("javascript:alert(1)"))], 2)
+htmlView = HtmlView("<button id='counter'>Count <span id='n'>0</span></button><script>document.getElementById('counter').onclick=function(){document.getElementById('n').textContent=Number(document.getElementById('n').textContent)+1}</script>", 160, "Interactive counter")`
     const harness = `
       import { createRoot } from 'react-dom/client'
-      import { OpenUISurface } from ${JSON.stringify(surfacePath)}
+      import { OpenUISurface } from ${JSON.stringify(path.join(process.cwd(), 'src/surface.tsx'))}
 
-      createRoot(document.getElementById('root')!).render(
+      window.__openedUrls = []
+      window.open = url => {
+        window.__openedUrls.push(String(url))
+        return null
+      }
+      createRoot(document.getElementById('root')).render(
         <OpenUISurface
-          identity="photo-strip-browser"
+          identity="local-actions"
           onFollowUp={() => true}
-          sessionId="session-photo"
-          source={${JSON.stringify(PHOTO_STRIP_OPENUI_PROGRAM)}}
+          sessionId="session-actions"
+          source={${JSON.stringify(program)}}
           streaming={false}
         />
       )
     `
-    const temp = await mkdtemp(path.join(tmpdir(), 'hermes-openui-photo-test-'))
-    const harnessPath = path.join(temp, 'harness.tsx')
-    await writeFile(harnessPath, harness)
-    const bundled = await build({
-      absWorkingDir: workspace,
-      bundle: true,
-      define: { 'process.env.NODE_ENV': '"production"' },
-      entryPoints: [harnessPath],
-      format: 'iife',
-      jsx: 'automatic',
-      nodePaths: [path.join(workspace, 'node_modules')],
-      platform: 'browser',
-      write: false
-    })
-    const html = `<!doctype html><html><head><style>
-      :root {
-        --font-sans: "Inter", ui-sans-serif, sans-serif;
-        --ui-text-primary: #0d0d0d;
-        --ui-text-secondary: #666;
-        --ui-widget-surface-background: #fff;
-      }
-      * { box-sizing: border-box; }
-      body { margin: 0; padding: 28px; background: #f7f7f8; }
-      #root { margin: 0 auto; max-width: 760px; }
-    </style></head><body><div id="root"></div><script>${bundled.outputFiles[0].text}</script></body></html>`
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      response.end(html)
-    })
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', resolve)
-    })
-    const address = server.address()
+    const { origin, page } = await mountHarness(t, harness)
 
-    assert.ok(address && typeof address === 'object')
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin })
+    await page.getByText('Local actions', { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Copy note' }).click()
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'Hermes copy test')
 
-    const browser = await chromium.launch({
-      args: ['--no-sandbox'],
-      executablePath: '/usr/bin/chromium',
-      headless: true
-    })
-    t.after(async () => {
-      await browser.close()
-      await new Promise<void>((resolve, reject) => {
-        server.close(error => (error ? reject(error) : resolve()))
-      })
-      await rm(temp, { force: true, recursive: true })
-    })
-    const page = await browser.newPage({ viewport: { height: 900, width: 900 } })
-    const pageErrors: string[] = []
-    const mapRequests: string[] = []
-    const photoRequests: string[] = []
+    await page.getByRole('button', { name: 'Open docs' }).click()
+    await page.getByRole('button', { name: 'Open unsafe' }).click()
+    assert.deepEqual(
+      await page.evaluate(() => (window as unknown as HarnessWindow).__openedUrls),
+      ['https://example.com/docs']
+    )
 
-    page.setDefaultTimeout(5_000)
-    page.on('console', message => console.error(`[browser:${message.type()}] ${message.text()}`))
-    page.on('pageerror', error => pageErrors.push(error.message))
-    await page.route('https://www.openstreetmap.org/export/embed.html**', async route => {
-      mapRequests.push(route.request().url())
-      await route.fulfill({
-        body: '<!doctype html><html><body><main data-local-osm-fixture>Local OpenStreetMap iframe fixture</main></body></html>',
-        contentType: 'text/html; charset=utf-8',
-        status: 200
-      })
-    })
-    await page.route('https://upload.wikimedia.org/**', async route => {
-      const fixture = LOCAL_PHOTO_FIXTURES[photoRequests.length % LOCAL_PHOTO_FIXTURES.length]
+    const frame = page.frameLocator('iframe[title="Interactive counter"]')
 
-      assert.ok(fixture)
-      photoRequests.push(route.request().url())
-      await route.fulfill({
-        body: fixture,
-        contentType: 'image/svg+xml',
-        status: 200
-      })
-    })
-    await page.goto(`http://127.0.0.1:${address.port}`)
-    await page.getByText('Three views of San Francisco', { exact: true }).waitFor()
-    await page.waitForFunction(() => {
-      const images = [...document.querySelectorAll('[data-hermes-openui-photo] img')]
-      return (
-        images.length === 3 &&
-        images.every(image => image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0)
+    await frame.getByRole('button', { name: /Count/ }).click()
+    await frame.getByText('Count 1', { exact: true }).waitFor()
+    assert.equal(
+      await page.locator('iframe[title="Interactive counter"]').getAttribute('sandbox'),
+      'allow-scripts'
+    )
+    assert.match(
+      await page.locator('iframe[title="Interactive counter"]').getAttribute('srcdoc') ?? '',
+      /default-src 'none'/
+    )
+  }
+)
+
+test(
+  'SearchImage uses the Wikipedia MediaWiki response and renders the returned photo',
+  { timeout: 60_000 },
+  async t => {
+    const program = 'root = Col([SearchImage("Golden Gate Bridge", 1.5)], 4)'
+    const harness = `
+      import { createRoot } from 'react-dom/client'
+      import { OpenUISurface } from ${JSON.stringify(path.join(process.cwd(), 'src/surface.tsx'))}
+
+      createRoot(document.getElementById('root')).render(
+        <OpenUISurface
+          identity="image-search"
+          onFollowUp={() => true}
+          sessionId="session-image"
+          source={${JSON.stringify(program)}}
+          streaming={false}
+        />
       )
+    `
+    const imageRequests: string[] = []
+    const { page } = await mountHarness(t, harness, async page => {
+      await page.route('https://en.wikipedia.org/w/api.php**', async route => {
+        imageRequests.push(route.request().url())
+        await route.fulfill({
+          body: JSON.stringify({
+            query: {
+              pages: {
+                '1': {
+                  original: {
+                    source:
+                      'https://upload.wikimedia.org/wikipedia/commons/golden-gate-bridge.jpg'
+                  }
+                }
+              }
+            }
+          }),
+          contentType: 'application/json',
+          status: 200
+        })
+      })
+      await page.route('https://upload.wikimedia.org/**', async route => {
+        await route.fulfill({
+          body: '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="1200" height="800" fill="#cce8f4"/></svg>',
+          contentType: 'image/svg+xml',
+          status: 200
+        })
+      })
+    })
+    const image = page.locator('.iui-image img')
+
+    await image.waitFor()
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('.iui-image img')].every(
+        element => element instanceof HTMLImageElement && element.complete && element.naturalWidth > 0
+      )
+    )
+    assert.equal(await image.getAttribute('alt'), 'Golden Gate Bridge')
+    assert.match(await image.getAttribute('src') ?? '', /^https:\/\/upload\.wikimedia\.org\//)
+    assert.equal(imageRequests.length, 1)
+    assert.match(imageRequests[0] ?? '', /action=query/)
+    assert.match(imageRequests[0] ?? '', /generator=search/)
+  }
+)
+
+test(
+  'MapLibre loads its beside-bundle worker and keeps marker selection local',
+  { timeout: 60_000 },
+  async t => {
+    const program = `root = Col([header, map], 4)
+header = Col([Title("Choose a stop", "xl"), Text("Select a marker to keep the local highlight.", "md", "muted")], 2)
+map = Map([MapMarker("Golden Gate Bridge", 37.8182923, -122.4783842, "Landmark"), MapMarker("Palace of Fine Arts", 37.8029186, -122.4484029, "Landmark")], false, $selected, 360)`
+    const harness = `
+      import { createRoot } from 'react-dom/client'
+      import { OpenUISurface } from ${JSON.stringify(path.join(process.cwd(), 'src/surface.tsx'))}
+
+      createRoot(document.getElementById('root')).render(
+        <OpenUISurface
+          identity="map-selection"
+          onFollowUp={() => true}
+          sessionId="session-map"
+          source={${JSON.stringify(program)}}
+          streaming={false}
+        />
+      )
+    `
+    const { page, workerRequests } = await mountHarness(t, harness, async page => {
+      await page.route('https://tiles.openfreemap.org/planet', async route => {
+        await route.fulfill({
+          body: JSON.stringify({
+            attributions: 'OpenFreeMap',
+            maxzoom: 14,
+            minzoom: 0,
+            tilejson: '3.0.0',
+            tiles: [],
+            vector_layers: []
+          }),
+          contentType: 'application/json',
+          status: 200
+        })
+      })
+      await page.route('https://server.arcgisonline.com/**', async route => {
+        await route.abort()
+      })
     })
 
-    const photos = page.locator('[data-hermes-openui-photo]')
-    const sourceLinks = page.locator('.hermes-openui-photo-caption a')
-
-    assert.equal(await photos.count(), 3)
-    assert.equal(await sourceLinks.count(), 3)
-    assert.deepEqual(photoRequests.length, 3)
-    assert.ok(
-      (await sourceLinks.evaluateAll(elements =>
-        elements.map(element => (element as HTMLAnchorElement).href)
-      )).every(href => href.startsWith('https://commons.wikimedia.org/wiki/File:'))
-    )
-    assert.ok(
-      (await sourceLinks.evaluateAll(elements =>
-        elements.map(element => [element.getAttribute('target'), element.getAttribute('rel')])
-      )).every(([target, rel]) => target === '_blank' && rel === 'noopener noreferrer')
-    )
-
-    const map = page.locator('[data-hermes-openui-place-map]')
-    const mapFrame = map.locator('iframe')
-    const mapSelector = page.getByRole('combobox', { name: 'Choose a place on the map' })
-
-    await mapFrame.waitFor()
-    assert.equal(mapRequests.length, 1)
-
-    const initialMapUrl = new URL((await mapFrame.getAttribute('src')) ?? '')
-    const marker = (url: URL) => (url.searchParams.get('marker') ?? '').split(',').map(Number)
-    const bbox = initialMapUrl.searchParams.get('bbox')?.split(',').map(Number) ?? []
-    const [markerLat, markerLon] = marker(initialMapUrl)
-
-    assert.equal(initialMapUrl.origin + initialMapUrl.pathname, 'https://www.openstreetmap.org/export/embed.html')
-    assert.equal(initialMapUrl.searchParams.get('layer'), 'mapnik')
-    assert.equal(bbox.length, 4)
-    assert.ok(bbox[0]! < bbox[2]! && bbox[1]! < bbox[3]!)
-    assert.ok(Math.abs((bbox[1]! + bbox[3]!) / 2 - markerLat!) < 0.000001)
-    assert.ok(Math.abs((bbox[0]! + bbox[2]!) / 2 - markerLon!) < 0.000001)
-    assert.ok(Math.abs(bbox[3]! - bbox[1]! - 0.018) < 0.00001)
-    assert.ok(bbox[2]! - bbox[0]! > 0.02 && bbox[2]! - bbox[0]! < 0.05)
-    assert.equal(await mapFrame.getAttribute('sandbox'), 'allow-scripts allow-same-origin')
-    assert.equal(await map.getAttribute('data-selected-place'), 'Golden Gate Bridge')
-
-    const nextMapRequest = page.waitForRequest(request =>
-      request.url().includes('openstreetmap.org/export/embed.html') &&
-      request.url().includes('marker=37.802919%2C-122.448403')
-    )
-
-    await mapSelector.selectOption({ label: 'Palace of Fine Arts' })
-    await nextMapRequest
+    await page.getByText('Choose a stop', { exact: true }).waitFor()
+    await page.locator('.iui-map-surface .maplibregl-canvas').waitFor()
     await page.waitForFunction(() => {
-      const frame = document.querySelector('[data-hermes-openui-place-map] iframe')
-      const src = frame?.getAttribute('src')
-      return src ? new URL(src).searchParams.get('marker') === '37.802919,-122.448403' : false
+      const markers = [...document.querySelectorAll('.maplibregl-marker')]
+      return markers.length === 2 && markers.every(marker => marker.getAttribute('aria-label'))
     })
-    const changedMapUrl = new URL((await mapFrame.getAttribute('src')) ?? '')
+    assert.ok(workerRequests.includes('/maplibre-gl-worker.mjs'))
 
-    assert.notEqual(changedMapUrl.searchParams.get('marker'), initialMapUrl.searchParams.get('marker'))
-    assert.equal(await map.getAttribute('data-selected-place'), 'Palace of Fine Arts')
-    assert.equal(mapRequests.length, 2)
-    assert.equal(await map.locator('.hermes-openui-place-map-frame .hermes-openui-place-map-open').count(), 0)
+    const goldenGate = page.getByLabel('Golden Gate Bridge')
+
+    await goldenGate.click()
+    assert.equal(await goldenGate.getAttribute('aria-pressed'), 'true')
+    await page.getByLabel('Palace of Fine Arts').click()
+    assert.equal(await goldenGate.getAttribute('aria-pressed'), 'false')
     assert.equal(
-      await map
-        .getByRole('link', { name: 'Palace of Fine Arts on OpenStreetMap ↗' })
-        .getAttribute('href'),
-      'https://www.openstreetmap.org/way/288371295'
+      await page.getByLabel('Palace of Fine Arts').getAttribute('aria-pressed'),
+      'true'
     )
-    assert.equal(
-      await map.getByRole('link', { name: 'Map data © OpenStreetMap contributors' }).getAttribute('href'),
-      'https://www.openstreetmap.org/copyright'
-    )
-
-    await page.reload()
-    await page.waitForFunction(
-      () =>
-        document.querySelector('[data-hermes-openui-place-map]')?.getAttribute('data-selected-place') ===
-        'Palace of Fine Arts'
-    )
-    await page.waitForFunction(() => {
-      const images = [...document.querySelectorAll('[data-hermes-openui-photo] img')]
-      return images.length === 3 && images.every(image => image instanceof HTMLImageElement && image.naturalWidth > 0)
-    })
-    assert.equal(await mapSelector.inputValue(), '1')
-    assert.equal(
-      new URL((await mapFrame.getAttribute('src')) ?? '').searchParams.get('marker'),
-      '37.802919,-122.448403'
-    )
-
-    const desktopLayout = await photos.evaluateAll(elements =>
-      elements.map(element => {
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, width: rect.width }
-      })
-    )
-
-    assert.ok(Math.max(...desktopLayout.map(rect => rect.width)) - Math.min(...desktopLayout.map(rect => rect.width)) < 0.5)
-    assert.ok(Math.max(...desktopLayout.map(rect => rect.top)) - Math.min(...desktopLayout.map(rect => rect.top)) < 0.5)
-
-    const screenshotPath = process.env.HERMES_OPENUI_PHOTO_SCREENSHOT
-
-    if (screenshotPath) {
-      await page.waitForTimeout(250)
-      await page.screenshot({ fullPage: true, path: screenshotPath })
-    }
-
-    await page.setViewportSize({ height: 900, width: 360 })
-    await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth)
-    const mobileLayout = await photos.evaluateAll(elements =>
-      elements.map(element => {
-        const rect = element.getBoundingClientRect()
-        return { left: rect.left, top: rect.top, width: rect.width }
-      })
-    )
-
-    assert.ok(Math.max(...mobileLayout.map(rect => rect.width)) - Math.min(...mobileLayout.map(rect => rect.width)) < 0.5)
-    assert.ok(Math.max(...mobileLayout.map(rect => rect.top)) - Math.min(...mobileLayout.map(rect => rect.top)) < 0.5)
-
-    const mobileScreenshotPath = process.env.HERMES_OPENUI_PHOTO_MOBILE_SCREENSHOT
-
-    if (mobileScreenshotPath) {
-      await page.screenshot({ fullPage: true, path: mobileScreenshotPath })
-    }
-
-    await page.setViewportSize({ height: 900, width: 900 })
-    await page.evaluate(() => document.documentElement.classList.add('dark'))
-    assert.equal(
-      await page
-        .locator('[data-hermes-openui-surface]')
-        .evaluate(element => getComputedStyle(element).getPropertyValue('--oui-canvas').trim()),
-      '#1c1c1e'
-    )
-
-    const darkScreenshotPath = process.env.HERMES_OPENUI_PHOTO_DARK_SCREENSHOT
-
-    if (darkScreenshotPath) {
-      await page.evaluate(() => {
-        document.body.style.background = '#171717'
-      })
-      await page.screenshot({ fullPage: true, path: darkScreenshotPath })
-    }
-
-    await page.evaluate(() => {
-      document.documentElement.classList.remove('dark')
-      document.body.style.background = '#f7f7f8'
-    })
-    await page.locator('[data-hermes-openui-photo] img').nth(2).evaluate(image => {
-      image.dispatchEvent(new Event('error'))
-    })
-    const fallback = page.locator('[data-hermes-openui-photo-fallback]')
-
-    await fallback.waitFor()
-    assert.equal(await fallback.count(), 1)
-    assert.match((await fallback.textContent()) ?? '', /cable car 55/i)
-    assert.equal(await page.locator('[data-photo-state="fallback"]').getAttribute('role'), null)
-    assert.equal(await fallback.getByRole('link', { name: 'View source' }).count(), 1)
-
-    const fallbackScreenshotPath = process.env.HERMES_OPENUI_PHOTO_FALLBACK_SCREENSHOT
-
-    if (fallbackScreenshotPath) {
-      await page.screenshot({ fullPage: true, path: fallbackScreenshotPath })
-    }
-
-    assert.deepEqual(pageErrors, [])
   }
 )

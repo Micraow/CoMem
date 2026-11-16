@@ -12,18 +12,26 @@ export const FIXTURE_MODEL_ID = 'stream-fixture'
 export const PRIMARY_PROMPT = 'Please make a streaming card for this test.'
 export const SECOND_SESSION_PROMPT =
   'Please make the second OpenUI example in a separate session.'
+export const QUERY_PROMPT =
+  'Please show rows from the configured read-only query source.'
 export const FOLLOW_UP_TEXT =
   'Explain the current results at this relevance threshold.'
 
 export const DEFAULT_PRIMARY_PROGRAM = `$minimum = 70
+root = Col([header, filter], 4)
+header = Col([Title("Filter results", "xl"), Text("Move the threshold to narrow the set locally.", "md", "muted")], 2)
 readout = Text("Showing results with at least " + $minimum + "% relevance.")
 slider = Slider($minimum, 0, 100, 5, "Minimum relevance", "%")
 follow = Button("Explain these results", @ToAssistant("Explain the current results at this relevance threshold."))
-root = Card("Filter results", "Move the threshold to narrow the set locally.", [readout, slider, follow])`
+filter = Card([slider, readout, follow], "soft", 4, 3)`
 
 // A reference integration can replace this at startup. Keeping a local
 // fallback lets this Node fixture run without importing application TSX.
 export const DEFAULT_SECONDARY_PROGRAM = DEFAULT_PRIMARY_PROGRAM
+export const DEFAULT_QUERY_PROGRAM = `root = Col([header, result], 4)
+header = Col([Title("Configured query", "xl"), Text("Rows come from the configured read-only endpoint.", "md", "muted")], 2)
+data = Query("query_data", {window: "30d"}, {rows: []})
+result = Table(["Order", "Region"], @Each(data.rows, "row", [row.id, row.region]))`
 
 export const FIXTURE_PHASES = Object.freeze([
   'idle',
@@ -102,6 +110,13 @@ export function classifyFixturePrompt(request) {
   const prompt = promptFromRequest(request)
   const lower = prompt.toLowerCase()
   const messages = Array.isArray(request?.messages) ? request.messages : []
+
+  if (
+    lower.includes('configured read-only query') ||
+    prompt.includes(QUERY_PROMPT)
+  ) {
+    return { kind: 'query', prompt }
+  }
 
   if (
     lower.includes('second openui') ||
@@ -271,6 +286,7 @@ export async function startModelFixture(options = {}) {
     })
   const primaryProgram = options.primaryProgram ?? DEFAULT_PRIMARY_PROGRAM
   const secondaryProgram = options.secondaryProgram ?? DEFAULT_SECONDARY_PROGRAM
+  const queryProgram = options.queryProgram ?? DEFAULT_QUERY_PROGRAM
 
   const counters = {
     requests: 0,
@@ -283,7 +299,8 @@ export async function startModelFixture(options = {}) {
     responsesCompleted: 0,
     responsesInterrupted: 0,
     followups: 0,
-    secondSessionStarts: 0
+    secondSessionStarts: 0,
+    queryStarts: 0
   }
   const sessions = new Map()
   const activeControllers = new Map()
@@ -397,7 +414,7 @@ export async function startModelFixture(options = {}) {
     const session = {
       id: streamId,
       kind,
-      card: kind === 'primary' || kind === 'secondary',
+      card: kind === 'primary' || kind === 'secondary' || kind === 'query',
       prompt,
       phase: 'streaming',
       chunksSent: 0,
@@ -416,6 +433,9 @@ export async function startModelFixture(options = {}) {
     } else if (kind === 'secondary') {
       counters.cardStarts += 1
       counters.secondSessionStarts += 1
+    } else if (kind === 'query') {
+      counters.cardStarts += 1
+      counters.queryStarts += 1
     } else if (kind === 'followup') {
       counters.followups += 1
     }
@@ -424,7 +444,9 @@ export async function startModelFixture(options = {}) {
       ? createFixtureResponse({ id: cardId, program: primaryProgram })
       : kind === 'secondary'
         ? createFixtureResponse({ id: cardId, program: secondaryProgram })
-        : null
+        : kind === 'query'
+          ? createFixtureResponse({ id: cardId, program: queryProgram })
+          : null
 
     if (!generated) {
       const text = kind === 'followup'
