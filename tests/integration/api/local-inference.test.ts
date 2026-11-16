@@ -212,51 +212,57 @@ describe('POST /api/v1/inference/local/start', () => {
     });
   });
 
-  it('启动假服务后等到就绪，stop 收掉同一个 pid', async () => {
-    newRoot();
-    const port = await freePort();
-    writeFakeInference(port);
-    app = await createApp(managerOf({ baseUrl: `http://127.0.0.1:${String(port)}/v1` }));
+  // TODO: 启动路径写死了 POSIX 命令（`nice` / `taskset` / `.venv/bin/python`, 见
+  // `src/adapters/local-inference/manager.ts:166`）, 假推理服务本身也是 `#!/bin/sh`
+  // 本机推理在 Windows 上不可用
+  it.skipIf(process.platform === 'win32')(
+    '启动假服务后等到就绪，stop 收掉同一个 pid',
+    async () => {
+      newRoot();
+      const port = await freePort();
+      writeFakeInference(port);
+      app = await createApp(managerOf({ baseUrl: `http://127.0.0.1:${String(port)}/v1` }));
 
-    const started = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/start',
-      payload: {},
-    });
-    expect(started.statusCode).toBe(200);
-    expect(resultOf(started)).toEqual({
-      started: true,
-      ready: true,
-      endpoint: `http://127.0.0.1:${String(port)}`,
-      dimension: 1024,
-    });
+      const started = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/start',
+        payload: {},
+      });
+      expect(started.statusCode).toBe(200);
+      expect(resultOf(started)).toEqual({
+        started: true,
+        ready: true,
+        endpoint: `http://127.0.0.1:${String(port)}`,
+        dimension: 1024,
+      });
 
-    const status = resultOf(
-      await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
-    );
-    expect(status).toMatchObject({
-      available: true,
-      running: true,
-      dimension: 1024,
-      backend: 'fake',
-      device: 'cpu',
-      model: 'Qwen3-Embedding-0.6B',
-      missing: ['rerank-model'],
-      startCommand: null,
-    });
+      const status = resultOf(
+        await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
+      );
+      expect(status).toMatchObject({
+        available: true,
+        running: true,
+        dimension: 1024,
+        backend: 'fake',
+        device: 'cpu',
+        model: 'Qwen3-Embedding-0.6B',
+        missing: ['rerank-model'],
+        startCommand: null,
+      });
 
-    const pidPath = join(dataDir, '_meta', 'local-inference.pid');
-    const pid = Number(readFileSync(pidPath, 'utf8'));
-    expect(pid).toBeGreaterThan(0);
+      const pidPath = join(dataDir, '_meta', 'local-inference.pid');
+      const pid = Number(readFileSync(pidPath, 'utf8'));
+      expect(pid).toBeGreaterThan(0);
 
-    const stopped = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/stop',
-      payload: {},
-    });
-    expect(stopped.statusCode).toBe(200);
-    expect(resultOf(stopped)).toEqual({ stopped: true });
-    await waitUntilGone(pid);
-    expect(existsSync(pidPath)).toBe(false);
-  });
+      const stopped = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/stop',
+        payload: {},
+      });
+      expect(stopped.statusCode).toBe(200);
+      expect(resultOf(stopped)).toEqual({ stopped: true });
+      await waitUntilGone(pid);
+      expect(existsSync(pidPath)).toBe(false);
+    },
+  );
 });
