@@ -6,7 +6,8 @@
     "build": "esbuild src/plugin.tsx --bundle --minify --format=esm --target=es2022 --jsx=automatic --external:@hermes/plugin-sdk --external:react --external:react/jsx-runtime --external:react-dom --define:process.env.NODE_ENV='\"production\"' --outfile=desktop/plugin.js",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
-    "test:browser": "node --import ./tests/register-tsx.mjs --test tests/surface.test.tsx"
+    "test:browser": "node --import ./tests/register-tsx.mjs --test tests/surface.test.tsx",
+    "test:webapp": "node --import ./tests/register-tsx.mjs tests/webapp.mjs"
   },
   "dependencies": {
     "@openuidev/react-lang": "1.1.0",
