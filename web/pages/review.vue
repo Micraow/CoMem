@@ -28,6 +28,7 @@ import {
 } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import { memoryBodyText } from '~/utils/memoryBody'
+import { memoryReviewTitleOf } from '~/components/domain/memoryReview'
 import type {
   PendingListPayload,
   PendingMemoryPayload,
@@ -42,6 +43,7 @@ import type {
  */
 interface BatchFailure {
   readonly uri: string
+  readonly title: string
   readonly reason: string
 }
 
@@ -63,10 +65,12 @@ const baselineLoading = ref(false)
 const baselineError = ref<string | null>(null)
 
 const busy = ref(false)
+const actionBusy = ref<ReviewAction | null>(null)
+const batchProgress = ref<{ readonly done: number; readonly total: number } | null>(null)
 const batchRejectOpen = ref(false)
 const batchReason = ref('')
 
-/** 上一轮批量操作里没成功的条目；名称在模板里由 URI 推，不重复存一份。 */
+/** 上一轮批量操作里没成功的条目。 */
 const batchFailures = ref<readonly BatchFailure[]>([])
 
 /** 请求序号：切换选中或作用域后丢弃迟到响应，避免旧队列/旧正文覆盖当前页面。 */
@@ -263,18 +267,20 @@ async function reviewSelected(action: ReviewAction, reason = ''): Promise<void> 
 
   const token = ++operationToken
   busy.value = true
+  actionBusy.value = action
   const failure = await reviewOne(memory.uri, action, reason)
   if (token !== operationToken) {
     return
   }
 
   busy.value = false
+  actionBusy.value = null
   if (failure !== null) {
     toast.show('error', failure)
     return
   }
   dropFromQueue(memory.uri)
-  toast.show('success', `${action === 'approve' ? '已通过' : '已拒绝'}：${nameOf(memory.uri)}`)
+  toast.show('success', `${action === 'approve' ? '已通过' : '已拒绝'}：${memoryReviewTitleOf(memory)}`)
 }
 
 async function runBatch(action: ReviewAction, reason: string): Promise<void> {
@@ -285,11 +291,12 @@ async function runBatch(action: ReviewAction, reason: string): Promise<void> {
 
   const token = ++operationToken
   busy.value = true
+  batchProgress.value = { done: 0, total: uris.length }
   // 上一次的结果在这里清空：失败列表只描述「刚才那一轮」，不跨轮累积。
   batchFailures.value = []
   let succeeded = 0
 
-  for (const uri of uris) {
+  for (const [index, uri] of uris.entries()) {
     const failure = await reviewOne(uri, action, reason)
     if (token !== operationToken) {
       return
@@ -298,11 +305,15 @@ async function runBatch(action: ReviewAction, reason: string): Promise<void> {
       succeeded += 1
       dropFromQueue(uri)
     } else {
-      batchFailures.value = [...batchFailures.value, { uri, reason: failure }]
+      const memory = memories.value?.find((entry) => entry.uri === uri)
+      const title = memory === undefined ? nameOf(uri) : memoryReviewTitleOf(memory)
+      batchFailures.value = [...batchFailures.value, { uri, title, reason: failure }]
     }
+    batchProgress.value = { done: index + 1, total: uris.length }
   }
 
   busy.value = false
+  batchProgress.value = null
   const failed = uris.length - succeeded
   toast.show(
     failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'warning',
@@ -345,6 +356,8 @@ watch(scopeRoot, () => {
   baselineLoading.value = false
   baselineError.value = null
   busy.value = false
+  actionBusy.value = null
+  batchProgress.value = null
   batchFailures.value = []
   batchRejectOpen.value = false
   void load()
@@ -363,7 +376,7 @@ watch(scopeRoot, () => {
         <p><b>{{ batchFailures.length }} 条没有处理成功：</b></p>
         <ul class="batch-failures__list">
           <li v-for="item in batchFailures" :key="item.uri" class="batch-failures__row">
-            <span class="batch-failures__name" :title="item.uri">{{ nameOf(item.uri) }}</span>
+            <span class="batch-failures__name" :title="item.uri">{{ item.title }}</span>
             <span class="batch-failures__reason">{{ item.reason }}</span>
           </li>
         </ul>
@@ -380,6 +393,8 @@ watch(scopeRoot, () => {
         :loading="loading"
         :error="error"
         :selected-uri="selectedUri"
+        :operation-busy="busy"
+        :batch-progress="batchProgress"
         @select="selectUri"
         @refresh="load"
         @batch-approve="runBatch('approve', '')"
@@ -395,6 +410,7 @@ watch(scopeRoot, () => {
         :baseline-loading="baselineLoading"
         :baseline-error="baselineError"
         :busy="busy || loading"
+        :action-busy="actionBusy"
         @approve="reviewSelected('approve')"
         @reject="reviewSelected('reject', $event)"
       />
@@ -421,7 +437,7 @@ watch(scopeRoot, () => {
       </div>
     </UiDialog>
 
-    <UiToast />
+    <UiToast class="review-toast" />
   </div>
 </template>
 
@@ -430,6 +446,10 @@ watch(scopeRoot, () => {
    移动端（≤900px）`.content--split` 回到 block，这条规则不再起作用。 */
 .review-page {
   flex-direction: column;
+}
+
+:global(.toast-stack.review-toast) {
+  bottom: 80px;
 }
 
 .batch-failures {
@@ -470,7 +490,6 @@ watch(scopeRoot, () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--mono);
   color: var(--label);
 }
 

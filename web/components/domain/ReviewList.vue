@@ -14,23 +14,27 @@ export type { PendingListPayload, PendingMemoryPayload }
 /**
  * 待复核队列（记忆复核页的左侧）。
  *
- * 每行三件事：名字（URI 末段）、类型、相对时间。URI 全量放在 `title` 里，
- * 列表宽度放不下完整 URI，但鼠标停一下要能看到。
- *
- * 多选用原生 checkbox + `accent-color`：自绘复选框要自己补「半选」态与键盘
- * 行为，收益为零。批量操作放在列表底部，勾选后才有意义。
+ * 标题取记忆自己的身份字段，不把文件名或 URI 当内容。多选用原生 checkbox；
+ * 批处理期间锁定队列操作，并在底部显示真实完成数。
  */
 import { ClipboardCheck } from 'lucide-vue-next'
 
-import { formatMonthDay } from '~/utils/format'
+import { formatRelativeTime } from '~/utils/format'
 import { memoryTypeLabelOf, memoryTypeVariantOf } from '~/utils/memoryTypeLabels'
+
+import { memoryReviewNarrativeOf, memoryReviewTitleOf } from './memoryReview'
 
 const props = defineProps<{
   memories: readonly PendingMemoryPayload[]
   loading: boolean
   error: string | null
   selectedUri: string | null
+  operationBusy?: boolean
+  batchProgress?: { readonly done: number; readonly total: number } | null
 }>()
+
+const operationBusy = computed(() => props.operationBusy === true)
+const batchProgress = computed(() => props.batchProgress ?? null)
 
 const checked = defineModel<readonly string[]>('checked', { required: true })
 
@@ -43,48 +47,14 @@ const emit = defineEmits<{
 
 const SKELETON_ROWS = 6
 
-const MINUTE_MS = 60_000
-const HOUR_MS = 60 * MINUTE_MS
-const DAY_MS = 24 * HOUR_MS
-
-function nameOf(uri: string): string {
-  const trimmed = uri.endsWith('/') ? uri.slice(0, -1) : uri
-  const index = trimmed.lastIndexOf('/')
-  return index < 0 ? trimmed : trimmed.slice(index + 1)
-}
-
-/** 来源是归档 URI：列表里只留末段目录名，完整 URI 放在 `title` 里。 */
-function sourceNamesOf(sources: readonly string[]): string {
-  return sources.map(nameOf).join('、')
-}
-
-function relativeTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-
-  const elapsed = Date.now() - date.getTime()
-  if (elapsed < MINUTE_MS) {
-    return '刚刚'
-  }
-  if (elapsed < HOUR_MS) {
-    return `${Math.floor(elapsed / MINUTE_MS)} 分钟前`
-  }
-  if (elapsed < DAY_MS) {
-    return `${Math.floor(elapsed / HOUR_MS)} 小时前`
-  }
-  if (elapsed < 7 * DAY_MS) {
-    return `${Math.floor(elapsed / DAY_MS)} 天前`
-  }
-  return formatMonthDay(value)
-}
-
 function isChecked(uri: string): boolean {
   return checked.value.includes(uri)
 }
 
 function toggle(uri: string): void {
+  if (operationBusy.value) {
+    return
+  }
   checked.value = isChecked(uri)
     ? checked.value.filter((item) => item !== uri)
     : [...checked.value, uri]
@@ -94,7 +64,11 @@ const hasChecked = computed(() => checked.value.length > 0)
 </script>
 
 <template>
-  <section class="split__aside" aria-label="待复核队列">
+  <section
+    class="split__aside review-queue"
+    aria-label="待复核队列"
+    :aria-busy="operationBusy"
+  >
     <div class="aside-head">
       <span class="aside-head__title">待复核</span>
       <UiBadge :variant="props.memories.length > 0 ? 'orange' : 'gray'">
@@ -102,14 +76,18 @@ const hasChecked = computed(() => checked.value.length > 0)
       </UiBadge>
       <span class="spacer" />
       <slot name="actions" />
-      <UiRefreshButton label="重新拉取待复核队列" :disabled="props.loading" @click="emit('refresh')" />
+      <UiRefreshButton
+        label="重新拉取待复核队列"
+        :disabled="props.loading || operationBusy"
+        @click="emit('refresh')"
+      />
     </div>
 
     <div class="aside-scroll">
       <div v-if="props.loading && props.memories.length === 0" class="stack-8" aria-busy="true">
         <div v-for="index in SKELETON_ROWS" :key="index" class="rrow rrow--skeleton">
-          <UiSkeleton :width="`${46 + (index % 4) * 12}%`" height="12px" />
-          <UiSkeleton width="58%" height="11px" />
+          <UiSkeleton :width="`${58 + (index % 4) * 8}%`" height="14px" />
+          <UiSkeleton width="42%" height="12px" />
         </div>
       </div>
 
@@ -136,7 +114,8 @@ const hasChecked = computed(() => checked.value.length > 0)
             type="checkbox"
             class="rrow__check"
             :checked="isChecked(memory.uri)"
-            :aria-label="`选择 ${nameOf(memory.uri)}`"
+            :disabled="operationBusy"
+            :aria-label="`选择 ${memoryReviewTitleOf(memory)}`"
             @change="toggle(memory.uri)"
           >
           <button
@@ -144,38 +123,62 @@ const hasChecked = computed(() => checked.value.length > 0)
             class="rrow__main"
             :title="memory.uri"
             :aria-current="memory.uri === props.selectedUri ? 'true' : undefined"
+            :disabled="operationBusy"
             @click="emit('select', memory.uri)"
           >
-            <span class="rrow__top">
+            <span class="rrow__title">{{ memoryReviewTitleOf(memory) }}</span>
+            <span class="rrow__meta">
               <UiBadge :variant="memoryTypeVariantOf(memory.memoryType)">
                 {{ memoryTypeLabelOf(memory.memoryType) }}
               </UiBadge>
-              <span class="rrow__name">{{ nameOf(memory.uri) }}</span>
-            </span>
-            <span
-              v-if="memory.sources.length > 0"
-              class="rrow__sources"
-              :title="memory.sources.join('\n')"
-            >
-              来源 {{ sourceNamesOf(memory.sources) }}
-            </span>
-            <span class="rrow__meta">
-              <span>{{ relativeTime(memory.updatedAt) }}</span>
+              <span>
+                {{
+                  memory.supersedes !== null
+                    ? '更新'
+                    : memoryReviewNarrativeOf(memory).inferred
+                      ? '推断'
+                      : '新增'
+                }}
+              </span>
               <span class="rrow__dot" aria-hidden="true">·</span>
-              <span>待复核</span>
+              <time :datetime="memory.updatedAt" :title="memory.updatedAt">
+                {{ formatRelativeTime(memory.updatedAt) }}
+              </time>
             </span>
           </button>
         </li>
       </ul>
     </div>
 
-    <div class="aside-foot">
-      <div class="rowflex">
-        <UiButton variant="secondary" size="sm" :disabled="!hasChecked" @click="emit('batch-reject')">
+    <div v-if="hasChecked || batchProgress !== null" class="aside-foot">
+      <div
+        v-if="batchProgress !== null"
+        class="batch-progress"
+        role="status"
+        aria-live="polite"
+      >
+        <UiProgress
+          :value="batchProgress.done"
+          :max="batchProgress.total"
+          :label="`正在处理 ${batchProgress.done} / ${batchProgress.total}`"
+        />
+      </div>
+      <div v-else class="rowflex">
+        <UiButton
+          variant="secondary"
+          size="sm"
+          :disabled="!hasChecked || operationBusy || props.loading"
+          @click="emit('batch-reject')"
+        >
           拒绝所选
         </UiButton>
         <span class="spacer" />
-        <UiButton variant="primary" size="sm" :disabled="!hasChecked" @click="emit('batch-approve')">
+        <UiButton
+          variant="primary"
+          size="sm"
+          :disabled="!hasChecked || operationBusy || props.loading"
+          @click="emit('batch-approve')"
+        >
           通过所选（{{ checked.length }}）
         </UiButton>
       </div>
@@ -184,9 +187,17 @@ const hasChecked = computed(() => checked.value.length > 0)
 </template>
 
 <style scoped>
+.review-queue {
+  flex-basis: 348px;
+  width: 348px;
+  background:
+    linear-gradient(180deg, var(--surface-2), transparent 180px),
+    var(--bg-2);
+}
+
 .rrows {
   display: grid;
-  gap: 2px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -195,10 +206,14 @@ const hasChecked = computed(() => checked.value.length > 0)
 .rrow {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 9px 8px;
+  gap: 10px;
+  padding: 12px 11px;
+  border: 0.5px solid transparent;
   border-radius: var(--r-control);
-  transition: background var(--dur-fast) var(--ease);
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .rrow:hover {
@@ -206,29 +221,35 @@ const hasChecked = computed(() => checked.value.length > 0)
 }
 
 .rrow.is-selected {
-  background: var(--accent-tint-2);
+  background: var(--surface);
+  border-color: var(--accent-tint);
+  box-shadow: var(--shadow-card), var(--inset-hair);
 }
 
 .rrow--skeleton {
   display: grid;
-  gap: 7px;
-  padding: 12px 10px;
+  gap: 9px;
+  padding: 14px 12px;
 }
 
 .rrow__check {
   flex: none;
-  width: 15px;
-  height: 15px;
-  margin: 3px 0 0;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.rrow__check:disabled {
+  cursor: default;
 }
 
 .rrow__main {
   flex: 1;
   min-width: 0;
   display: grid;
-  gap: 5px;
+  gap: 6px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -244,39 +265,29 @@ const hasChecked = computed(() => checked.value.length > 0)
   border-radius: var(--r-xs);
 }
 
-.rrow__top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.rrow__name {
-  min-width: 0;
+.rrow__title {
+  display: -webkit-box;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 590;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.004em;
   color: var(--label);
-}
-
-.rrow__sources {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  color: var(--label-3);
 }
 
 .rrow__meta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
   color: var(--label-3);
+}
+
+.rrow__meta time {
+  font-variant-numeric: tabular-nums;
 }
 
 .rrow__dot {
@@ -285,7 +296,22 @@ const hasChecked = computed(() => checked.value.length > 0)
 
 .aside-foot {
   flex: none;
-  padding: 10px 12px 12px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
   border-top: 0.5px solid var(--separator);
+  background: var(--material-thick);
+}
+
+.batch-progress {
+  display: grid;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .review-queue {
+    width: auto;
+    flex-basis: auto;
+  }
 }
 </style>
