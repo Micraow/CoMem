@@ -3,9 +3,8 @@
  * 设置（架构文档 §18 的配置模型、`docs/operations.md` 的「在控制台里改设置」）。
  *
  * 页面把 `GET /api/v1/config` 的 84 个叶子按 `group` 分组，首屏只展开「模型 /
- * 向量」两组，其余折叠，高级参数另行展开。每一项显示中文名、当前值与**来源徽章**
- * （默认值 / 配置文件 / 覆盖文件 / 环境变量）——来源是本页最有价值的一列，它回答
- * 「为什么我改了不生效」。不可编辑项不隐藏，显示原因并禁用控件。
+ * 向量」两组，其余折叠，高级参数另行展开。普通行以表单为主，只显示中文名与必要的
+ * 说明；技术路径留在悬停提示里，默认来源不占视觉层级。
  *
  * ## 保存不等于生效
  *
@@ -36,6 +35,7 @@ import {
   RESTART_COMMANDS,
   TEST_SCOPE_NOTE,
   buildPatchValues,
+  configRowStateOf,
   draftOf,
   errorHintOf,
   fieldControlOf,
@@ -46,20 +46,20 @@ import {
   groupSettings,
   inferenceFillDrafts,
   restartNoticeOf,
-  sourceLabelOf,
-  sourceNoteOf,
-  sourceToneOf,
+  secretPlaceholderOf,
   testSummaryOf,
   testTypePathOf,
   valueDisplayOf,
   type ConfigGroup,
   type ConfigItemView,
+  type ConfigRowState,
   type ConfigTestPayload,
   type ConfigTestTarget,
   type ConfigViewPayload,
   type LocalInferenceFillKind,
   type LocalInferenceStartPayload,
   type LocalInferenceStatusPayload,
+  type PendingConfigSave,
 } from '~/utils/settings'
 
 useHead({ title: '设置 · CoMem 控制台' })
@@ -96,12 +96,7 @@ const saving = ref(false)
  * 保存后**不重新 GET**：`GET /config` 回的是启动快照，重新拉取会把刚填的值
  * 覆盖回旧值。表单继续用用户填的值，等重启（或用户点「重新读取运行中配置」）。
  */
-interface PendingSave {
-  readonly draft: string
-  readonly value: unknown
-}
-
-const pending = ref<Readonly<Record<string, PendingSave>>>({})
+const pending = ref<Readonly<Record<string, PendingConfigSave>>>({})
 
 const expanded = ref<ReadonlySet<ConfigGroup>>(new Set(INITIALLY_EXPANDED_GROUPS))
 const showAdvanced = ref(false)
@@ -143,7 +138,7 @@ function sameValueOf(left: unknown, right: unknown): boolean {
  * 密钥没有明文可比，用「是否已设置 + 末 4 位掩码」判断；其余项直接比类型化值。
  * 重启后 `GET /config` 返回覆盖文件里的值，这项就自动从待生效里消失。
  */
-function isApplied(item: ConfigItemView, saved: PendingSave): boolean {
+function isApplied(item: ConfigItemView, saved: PendingConfigSave): boolean {
   if (item.secret) {
     // 密钥没有明文可比：来源必须是覆盖文件，再用末 4 位确认掩码。
     if (item.source !== 'override') {
@@ -181,6 +176,15 @@ const preview = computed(() =>
 function pendingSavedOf(path: string): boolean {
   const saved = pending.value[path]
   return saved !== undefined && drafts.value[path] === saved.draft
+}
+
+function rowStateOf(item: ConfigItemView): ConfigRowState {
+  return configRowStateOf(
+    item,
+    drafts.value[item.path] ?? '',
+    cleared.value.has(item.path),
+    pending.value[item.path],
+  )
 }
 
 const pendingCount = computed(() => Object.keys(pending.value).length)
@@ -230,9 +234,16 @@ function displayErrorOf(item: ConfigItemView): string | null {
 
 function describedByOf(item: ConfigItemView): string | undefined {
   const id = inputIdOf(item.path)
+  const state = rowStateOf(item)
   const ids: string[] = []
-  if (!item.editable && item.reason !== undefined) {
-    ids.push(`${id}-reason`)
+  if (state.constraint !== null) {
+    ids.push(`${id}-constraint`)
+  }
+  if (state.effectiveValue !== null) {
+    ids.push(`${id}-effective`)
+  }
+  if (fieldHintOf(item.path) !== null) {
+    ids.push(`${id}-hint`)
   }
   if (displayErrorOf(item) !== null) {
     ids.push(`${id}-error`)
@@ -293,7 +304,7 @@ function toggleGroup(group: ConfigGroup): void {
 
 function resetDrafts(
   next: readonly ConfigItemView[],
-  saved: Readonly<Record<string, PendingSave>> = {},
+  saved: Readonly<Record<string, PendingConfigSave>> = {},
 ): void {
   drafts.value = Object.fromEntries(
     next.map((item) => {
@@ -596,10 +607,7 @@ onMounted(() => {
                 :copy-label="`复制重启命令（${command.label}）`"
               />
             </div>
-            <p class="caption">
-              已写入 {{ saveResult.written }} 项，表单保留了你刚填的值。重启后再回到本页，
-              来源徽章会变成「来自网页保存」。
-            </p>
+            <p class="caption">已写入 {{ saveResult.written }} 项。重启后回到本页确认运行值。</p>
           </div>
         </UiCallout>
 
@@ -704,19 +712,13 @@ onMounted(() => {
           >
             <div v-for="item in visibleItems(group)" :key="item.path" class="settings-row">
               <div class="settings-row__meta">
-                <label :for="inputIdOf(item.path)" class="settings-row__label">
+                <label
+                  :for="inputIdOf(item.path)"
+                  class="settings-row__label"
+                  :title="item.path"
+                >
                   {{ fieldLabelOf(item.path) }}
                 </label>
-                <code class="settings-row__path" :title="item.path">{{ item.path }}</code>
-                <div class="settings-row__badges">
-                  <UiBadge :variant="sourceToneOf(item.source)" :title="sourceNoteOf(item.source)">
-                    {{ sourceLabelOf(item.source) }}
-                  </UiBadge>
-                  <UiBadge v-if="pendingSavedOf(item.path)" variant="teal">
-                    已保存，重启后生效
-                  </UiBadge>
-                  <UiBadge v-if="!item.editable" variant="gray">不可编辑</UiBadge>
-                </div>
               </div>
 
               <div class="settings-row__control">
@@ -726,13 +728,13 @@ onMounted(() => {
                     :model-value="cleared.has(item.path) ? '' : (drafts[item.path] ?? '')"
                     type="password"
                     autocomplete="new-password"
-                    :placeholder="item.configured ? '留空表示不修改' : '未设置'"
-                    :disabled="!item.editable || cleared.has(item.path)"
+                    :placeholder="secretPlaceholderOf(item, cleared.has(item.path))"
+                    :disabled="rowStateOf(item).disabled || cleared.has(item.path)"
                     :aria-describedby="describedByOf(item)"
                     @update:model-value="setDraft(item.path, $event)"
                   />
                   <UiButton
-                    v-if="item.editable && item.configured"
+                    v-if="!rowStateOf(item).disabled && item.configured"
                     variant="plain"
                     size="sm"
                     :aria-label="`清除${fieldLabelOf(item.path)}`"
@@ -749,7 +751,7 @@ onMounted(() => {
                   class="settings-checkbox"
                   type="checkbox"
                   :checked="(drafts[item.path] ?? '') === 'true'"
-                  :disabled="!item.editable"
+                  :disabled="rowStateOf(item).disabled"
                   :aria-describedby="describedByOf(item)"
                   @change="setBoolean(item.path, $event)"
                 >
@@ -759,7 +761,7 @@ onMounted(() => {
                   :id="inputIdOf(item.path)"
                   :model-value="drafts[item.path] ?? ''"
                   :options="fieldOptionsOf(item.path)"
-                  :disabled="!item.editable"
+                  :disabled="rowStateOf(item).disabled"
                   :described-by="describedByOf(item)"
                   @update:model-value="setDraft(item.path, $event)"
                 />
@@ -769,7 +771,7 @@ onMounted(() => {
                   :id="inputIdOf(item.path)"
                   :model-value="drafts[item.path] ?? ''"
                   :rows="2"
-                  :disabled="!item.editable"
+                  :disabled="rowStateOf(item).disabled"
                   :aria-describedby="describedByOf(item)"
                   @update:model-value="setDraft(item.path, $event)"
                 />
@@ -780,7 +782,7 @@ onMounted(() => {
                   :model-value="drafts[item.path] ?? ''"
                   type="text"
                   inputmode="decimal"
-                  :disabled="!item.editable"
+                  :disabled="rowStateOf(item).disabled"
                   :aria-describedby="describedByOf(item)"
                   @update:model-value="setDraft(item.path, $event)"
                 />
@@ -789,23 +791,37 @@ onMounted(() => {
                   v-else
                   :id="inputIdOf(item.path)"
                   :model-value="drafts[item.path] ?? ''"
-                  :disabled="!item.editable"
+                  :disabled="rowStateOf(item).disabled"
                   :aria-describedby="describedByOf(item)"
                   @update:model-value="setDraft(item.path, $event)"
                 />
 
-                <p class="settings-row__current caption">
-                  当前值：<b class="mono">{{ valueDisplayOf(item) }}</b>
-                </p>
-                <p v-if="fieldHintOf(item.path) !== null" class="settings-row__hint caption">
-                  {{ fieldHintOf(item.path) }}
+                <p
+                  v-if="rowStateOf(item).effectiveValue !== null"
+                  :id="`${inputIdOf(item.path)}-effective`"
+                  class="settings-row__current caption"
+                >
+                  当前运行值：<b class="mono">{{ rowStateOf(item).effectiveValue }}</b>
                 </p>
                 <p
-                  v-if="!item.editable && item.reason !== undefined"
-                  :id="`${inputIdOf(item.path)}-reason`"
-                  class="settings-row__note"
+                  v-if="rowStateOf(item).savedNote !== null"
+                  class="settings-row__saved"
                 >
-                  {{ item.reason }}
+                  {{ rowStateOf(item).savedNote }}
+                </p>
+                <p
+                  v-if="rowStateOf(item).constraint !== null"
+                  :id="`${inputIdOf(item.path)}-constraint`"
+                  class="settings-row__constraint"
+                >
+                  {{ rowStateOf(item).constraint }}
+                </p>
+                <p
+                  v-if="fieldHintOf(item.path) !== null"
+                  :id="`${inputIdOf(item.path)}-hint`"
+                  class="settings-row__hint caption"
+                >
+                  {{ fieldHintOf(item.path) }}
                 </p>
                 <p
                   v-if="displayErrorOf(item) !== null"
@@ -912,22 +928,6 @@ onMounted(() => {
   color: var(--label);
 }
 
-.settings-row__path {
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.4;
-  letter-spacing: -0.008em;
-  color: var(--label-3);
-  word-break: break-all;
-}
-
-.settings-row__badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
-}
-
 .settings-row__control {
   display: grid;
   gap: 8px;
@@ -947,8 +947,9 @@ onMounted(() => {
 }
 
 .settings-row__current,
+.settings-row__saved,
+.settings-row__constraint,
 .settings-row__hint,
-.settings-row__note,
 .settings-row__error {
   margin: 0;
 }
@@ -958,9 +959,17 @@ onMounted(() => {
   color: var(--label);
 }
 
-.settings-row__note {
+.settings-row__saved,
+.settings-row__constraint {
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.45;
+}
+
+.settings-row__saved {
+  color: var(--teal-ink);
+}
+
+.settings-row__constraint {
   color: var(--orange-ink);
 }
 

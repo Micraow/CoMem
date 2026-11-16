@@ -1,5 +1,5 @@
 /**
- * 设置页（`/settings`）的纯逻辑：分组、中文标签、来源徽章与请求体拼装。
+ * 设置页（`/settings`）的纯逻辑：分组、中文标签、行状态与请求体拼装。
  *
  * ## 为什么标签表在控制台里
  *
@@ -9,13 +9,15 @@
  * `configSchema` 的 84 个叶子对拍：少一条或多一条都会失败。没有这张对拍表，新增
  * 配置项会以裸路径出现在页面上，看起来像「这是个没做完的页面」。
  *
- * ## 值只有两种来源
+ * ## 普通行只显示表单
  *
  * - 密钥类（`apiKey` / `auth.sessionSecret`）：服务端只回 `configured` 与掩码
- *   （`****1234`），明文永远不在响应里。界面显示「已设置 ····1234」或「未设置」，
+ *   （`****1234`），明文永远不在响应里。输入框占位显示「已设置 ····1234」或「未设置」，
  *   **不读 `value`**——即使服务端以后错误地把明文放进来，这里也不会渲染它。
  * - 其它项：`value` 原样显示。不可暴露项的 `value` 是 `null`，显示「—」并附
  *   `reason`。
+ * - 默认来源和技术路径留在响应模型与悬停提示里，不占普通行的视觉层级。
+ * - 只有草稿与运行值不同，或保存结果正在等待重启时，才显示「当前运行值」。
  *
  * ## 保存与生效是两件事
  *
@@ -27,9 +29,7 @@
 import { isRecord } from './record'
 
 /** `GET /config` 的 `source` 取值（`src/config/index.ts` 的 `ConfigSource`）。 */
-export const CONFIG_SOURCES = ['default', 'file', 'override', 'env'] as const
-
-export type ConfigSource = (typeof CONFIG_SOURCES)[number]
+export type ConfigSource = 'default' | 'file' | 'override' | 'env'
 
 /** `GET /config` 的 `group` 取值（`src/config/metadata.ts` 的 `ConfigGroup`）。 */
 export const CONFIG_GROUPS = [
@@ -235,30 +235,6 @@ const GROUP_LABELS = {
   acl: '权限',
 } satisfies Record<ConfigGroup, string>
 
-/** 来源 → 徽章文案。四种来源是本页最有价值的一列：它回答「为什么我改了不生效」。 */
-const SOURCE_LABELS = {
-  default: '默认值',
-  file: '配置文件',
-  override: '来自网页保存',
-  env: '环境变量',
-} satisfies Record<ConfigSource, string>
-
-/** 来源 → 徽章配色。语义与文字同时表达，颜色不单独表意。 */
-const SOURCE_TONES = {
-  default: 'gray',
-  file: 'blue',
-  override: 'teal',
-  env: 'orange',
-} as const satisfies Record<ConfigSource, 'gray' | 'blue' | 'teal' | 'orange'>
-
-/** 来源造成的优先级说明：环境变量永远压过页面写入的覆盖文件。 */
-const SOURCE_NOTES = {
-  default: '没有任何配置文件与环境变量设置它。',
-  file: '来自 config.yaml。保存后写入覆盖文件，覆盖它。',
-  override: '来自本页保存的那份配置；重启后才会成为正在运行的值。',
-  env: '环境变量优先于本页设置；要改它得改环境变量再重启。',
-} satisfies Record<ConfigSource, string>
-
 /** 控件种类。值都按字符串编辑，保存时再转成配置类型。 */
 export type SettingControl = 'text' | 'number' | 'boolean' | 'select' | 'secret' | 'list'
 
@@ -268,7 +244,7 @@ export interface SettingOption {
 }
 
 export interface SettingField {
-  /** 中文名。路径另起一行小字显示，不占标签位。 */
+  /** 中文名。技术路径只作为悬停提示。 */
   readonly label: string
   readonly control: SettingControl
   /** `select` 的选项；其它控件没有。 */
@@ -439,11 +415,15 @@ export const SETTING_FIELDS = {
     control: 'list',
     hint: '每行一个类型；未列出的类型复核后直接生效。',
   },
-  'memory.profile.maxChars': { label: '画像字数上限', control: 'number' },
+  'memory.profile.maxChars': {
+    label: '画像字数上限',
+    control: 'number',
+    hint: '画像会随每个新会话注入；调大能保留更多稳定信息，也会占用更多上下文。',
+  },
   'memory.workingMemory.enabled': {
-    label: '启用工作记忆',
+    label: '生成会话工作记忆',
     control: 'boolean',
-    hint: '开它会多一次模型调用。',
+    hint: '为长会话生成结构化摘要，下一次提交时用来判断记忆是延续还是改变；会额外调用一次模型。',
   },
   'memory.ttl.defaultDays': { label: '默认过期天数', control: 'number' },
   'memory.ttl.sweepBatchSize': { label: '每轮清扫条数', control: 'number' },
@@ -451,9 +431,9 @@ export const SETTING_FIELDS = {
   'memory.consolidation.enabled': {
     label: '允许手动整理记忆',
     control: 'boolean',
-    hint: '开启后可预览重复记忆的合并建议；应用整理可能删除记忆。',
+    hint: '在记忆复核页生成重复记忆的整理建议；会额外调用模型。',
   },
-  'memory.consolidation.maxIterations': { label: '合并探索轮次上限', control: 'number' },
+  'memory.consolidation.maxIterations': { label: '整理探索轮次上限', control: 'number' },
 
   'session.autoCommit.enabled': { label: '自动提交', control: 'boolean' },
   'session.autoCommit.pendingTokenThreshold': { label: '待提交 token 阈值', control: 'number' },
@@ -601,21 +581,6 @@ export function groupLabelOf(group: ConfigGroup): string {
   return GROUP_LABELS[group]
 }
 
-/** 来源徽章文案。 */
-export function sourceLabelOf(source: ConfigSource): string {
-  return SOURCE_LABELS[source]
-}
-
-/** 来源徽章配色。 */
-export function sourceToneOf(source: ConfigSource): 'gray' | 'blue' | 'teal' | 'orange' {
-  return SOURCE_TONES[source]
-}
-
-/** 来源的一句话解释，作为徽章的 `title`。 */
-export function sourceNoteOf(source: ConfigSource): string {
-  return SOURCE_NOTES[source]
-}
-
 /** 首屏展开的分组。其余分组折叠，避免 84 个控件一次铺满。 */
 export const INITIALLY_EXPANDED_GROUPS: ReadonlySet<ConfigGroup> = new Set<ConfigGroup>([
   'llm',
@@ -716,6 +681,77 @@ export function draftOf(item: ConfigItemView): string {
     return item.value.map((value) => String(value)).join('\n')
   }
   return String(item.value)
+}
+
+/** 已写入覆盖文件、但还没有成为运行值的一项。 */
+export interface PendingConfigSave {
+  readonly draft: string
+  readonly value: unknown
+}
+
+export interface ConfigRowState {
+  /** 环境变量优先，或在服务端不可写。 */
+  readonly disabled: boolean
+  /** 只在有现实动作时才出现的约束。 */
+  readonly constraint: string | null
+  /** 仅当草稿与运行值不同，或保存结果等待重启时出现。 */
+  readonly effectiveValue: string | null
+  readonly savedNote: string | null
+}
+
+/**
+ * 一行设置的状态。
+ *
+ * `buildPatchValues` 复用同一套类型转换来判断草稿是否真的改过运行值。这样列表输入
+ * 的换行、数字格式和密钥「留空表示不改」不会在两处各解释一次。
+ */
+export function configRowStateOf(
+  item: ConfigItemView,
+  draft: string,
+  cleared: boolean,
+  saved?: PendingConfigSave,
+): ConfigRowState {
+  const candidate = buildPatchValues([item], { [item.path]: draft }, cleared ? new Set([item.path]) : new Set())
+  const draftDiffers = Object.keys(candidate.values).length > 0 || Object.keys(candidate.errors).length > 0
+  const constraint = item.source === 'env'
+    ? '由环境变量提供；修改环境变量并重启后生效。'
+    : !item.editable
+      ? item.reason ?? '此项不可编辑。'
+      : null
+
+  let savedNote: string | null = null
+  if (saved !== undefined) {
+    if (draft !== saved.draft) {
+      savedNote = '覆盖文件中的更改仍等待重启；表单还有新修改。'
+    } else if (item.secret && saved.value === '') {
+      savedNote = '已清除，等待重启。'
+    } else if (item.secret) {
+      savedNote = '新密钥已保存，等待重启。'
+    } else {
+      savedNote = '已保存，等待重启。'
+    }
+  }
+
+  return {
+    disabled: !item.editable || item.source === 'env',
+    constraint,
+    effectiveValue: draftDiffers || saved !== undefined ? valueDisplayOf(item) : null,
+    savedNote,
+  }
+}
+
+/** 密钥输入框的普通占位文案；明文永远不进入返回的界面文字。 */
+export function secretPlaceholderOf(
+  item: Pick<ConfigItemView, 'configured' | 'masked'>,
+  cleared = false,
+): string {
+  if (cleared) {
+    return '将清除已保存的密钥'
+  }
+  if (!item.configured) {
+    return '未设置'
+  }
+  return `${secretDisplayOf(item)}；留空表示不修改`
 }
 
 /** 一次保存的请求体与字段级错误。 */
