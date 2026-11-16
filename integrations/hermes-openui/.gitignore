@@ -1,0 +1,19 @@
+# Local builds and isolated Hermes/Chromium validation
+node_modules/
+desktop/plugin.js
+evidence/
+reference/
+local/
+.hermes-test/
+.tools/
+.venv/
+.uv-cache/
+.npm-cache/
+.pnpm-store/
+.drafts/
+.delegate.py
+.*.log
+.plugin-test-*/
+__pycache__/
+*.pyc
+.env*
