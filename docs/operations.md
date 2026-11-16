@@ -101,7 +101,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `memory.ttl.sweepBatchSize` | `100` | 每轮最多清扫多少条，防止一次清太多把库锁住 |
 | `memory.ttl.retentionDays` | `0` | 归档后保留多少天才物理删除文件与索引行。`0` = 永不物理删除（默认），只软归档 |
 | `memory.reviewRequired` | `["experiences","rules"]` | 走复核闸门的记忆类型（§11.6）。从列表里去掉某个类型，它的写入直接是 `active` |
-| `memory.profile.maxChars` | `800` | 用户画像正文的字符上限（§11.1）。超过后抽取提示词要求这次输出整份重写，只保留稳定身份。**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
+| `memory.profile.maxChars` | `1000` | 用户画像正文的字符上限（§11.1）。1000 是在旧默认 800 上增加 25% 的工程余量，约容纳 21 条满长 bullet；没有实测质量提升结论。它不是检索组装或开局画像注入预算。超过后抽取提示词要求这次输出整份重写，只保留稳定身份；**压缩不额外调用模型**——骑在本来就要跑的 `memory_extract` 上 |
 | `memory.workingMemory.enabled` | `false` | 开它会多一次模型调用（6 段工作记忆，§10.5）。只在长会话场景值得。**没有可用 LLM 时启动失败**：工作记忆没有规则生成器，不像摘要可以降级 |
 | `acl.groupDefaultLevel` | `write` | 组空间根的预置级别（`write` / `read`） |
 | `auth.trustLoopback` | `true` | 回环信任（§12.7）：没有凭据、来源是回环地址、且 `Host` 指向本机的请求被认证成 `server.subject`。**只允许在 `server.host` 是回环地址时打开**（否则启动期拒绝）；容器部署必须设成 `false`。它不是「关闭认证」——认证恒开，见「认证与账号」 |

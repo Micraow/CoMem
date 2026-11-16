@@ -1972,13 +1972,13 @@ export const preferencesMemoryType = {
 
 **健康度自查。** `GET /health` 的 `memory.profileFormat` 返回 `{checked, invalid, violations, truncated}`：按索引里 `memory_type = 'profile'` 的节点逐个读正文跑一次校验。`invalid` 是**至少有 1 条违规的画像份数**，`violations` 是违规条数合计。一次最多检查 200 份（`PROFILE_CHECK_LIMIT`，经验值），达到上限时 `truncated: true` 并记一条 `warn`，三个计数都只应读作下界。`ObservabilityService.profileFormatHealth()` 是 `private`，只由 `health()` 调用，`memory.profileFormat` 是它唯一的出口；没有单独的分析端点。
 
-**超阈值重写。** `memory.profile.maxChars`（默认 800）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
+**超阈值重写。** `memory.profile.maxChars`（默认 1000）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
 
-800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。
+1000 字是工程余量：它在旧默认 800 字上增加 25%，最多可容纳约 21 条「30 字正文 + 17 字日期后缀」的满长 bullet（21 × 47 = 987）。这个数值没有对应的实测质量提升结论。
 
-**产生侧与注入侧采用不同预算。** 产生侧 `memory.profile.maxChars`（默认800字符）要求抽取时收敛；开局请求 `profileBudgetTokens`（默认2000 token）还受服务端 `assembly.maxTokens` 与宿主字节上限约束。服务端优先注入正文，装不下沿既有层级降级；客户端整块缩减，先丢技能再丢背景。不能仅根据画像字符数保证总注入一定装得下，具体规则见§8.6。
+**产生侧与注入侧采用不同预算。** 产生侧 `memory.profile.maxChars`（默认 1000 字符）要求抽取时收敛；开局请求 `profileBudgetTokens`（默认 2000 token）还受服务端 `assembly.maxTokens` 与宿主字节上限约束。调整 `maxChars` 不改变检索组装或开局画像注入预算；显式写进配置文件或环境变量的 `maxChars` 仍按原优先级覆盖默认值。服务端优先注入正文，装不下沿既有层级降级；客户端整块缩减，先丢技能再丢背景。不能仅根据画像字符数保证总注入一定装得下，具体规则见 §8.6。
 
-重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 800 字正文，约 0.5–0.8K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
+重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 1000 字正文，约 0.6–0.9K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
 
 ### 11.2 合并操作
 
