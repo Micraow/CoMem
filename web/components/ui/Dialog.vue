@@ -24,7 +24,7 @@ const props = withDefaults(
 )
 
 const model = defineModel<boolean>({ default: false })
-const panel = ref<HTMLElement | null>(null)
+const panel = shallowRef<HTMLElement | null>(null)
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
