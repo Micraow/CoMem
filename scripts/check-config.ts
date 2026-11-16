@@ -147,7 +147,7 @@ function fail(message: string): never {
 function locationOf(node: ts.Node): string {
   const sourceFile = node.getSourceFile();
   const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-  return `${relative(ROOT, sourceFile.fileName)}:${String(line + 1)}`;
+  return `${toSlash(relative(ROOT, sourceFile.fileName))}:${String(line + 1)}`;
 }
 
 function propertyNameOf(node: ts.PropertyName | ts.PrivateIdentifier): string | null {
@@ -313,7 +313,7 @@ function main(): void {
 
   const schemaSource = program.getSourceFile(SCHEMA_FILE);
   if (schemaSource === undefined) {
-    fail(`找不到 ${relative(ROOT, SCHEMA_FILE)}，无法读取 ComemConfig 类型。`);
+    fail(`找不到 ${toSlash(relative(ROOT, SCHEMA_FILE))}，无法读取 ComemConfig 类型。`);
   }
   const typeAlias = schemaSource.statements.find(
     (statement): statement is ts.TypeAliasDeclaration =>

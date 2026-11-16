@@ -28,7 +28,8 @@ beforeEach(() => {
   writeFileSync(
     configPath,
     [
-      `dataDir: "${tempDir}"`,
+      // YAML 双引号里 `\U` 是非法转义，Windows 路径 `C:\Users\...` 必须转义。
+      `dataDir: ${JSON.stringify(tempDir)}`,
       'providers:',
       '  embedding:',
       '    type: openai-compatible',
@@ -297,7 +298,7 @@ describe('POST /config/test：Rerank', () => {
   it('未配置供应商时 ok:false', async () => {
     const loaded = snapshot(
       [
-        `dataDir: "${tempDir}"`,
+        `dataDir: ${JSON.stringify(tempDir)}`,
         'providers:',
         '  rerank:',
         '    type: disabled',
