@@ -1,8 +1,8 @@
 /**
  * 本地推理的状态描述（架构文档 §18.2）。
  *
- * 这里只有纯函数：判断仓库里缺什么、把缺失项翻译成可复制的安装命令、把配置里的
- * `baseUrl` 归一成健康探测的源地址。进程管理在 `manager.ts`，pid 在 `pid-file.ts`。
+ * 这里只有纯函数：判断仓库里缺什么、把缺失项翻译成可复制的安装命令、给出服务
+ * 实际监听的地址。进程管理在 `manager.ts`，pid 在 `pid-file.ts`。
  *
  * **命令写死在这里。** 安装命令与启动命令不接受任何请求参数；缺失项只是筛选
  * 已经固定的步骤，不是拼接用户输入。
@@ -11,8 +11,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** 没有配置 `providers.embedding.baseUrl` 时探测的地址。 */
-const DEFAULT_ENDPOINT = 'http://127.0.0.1:8089';
+/** 启动命令没有端口参数，服务固定监听这里；它不能跟着向量供应商配置变化。 */
+export const LOCAL_INFERENCE_ENDPOINT = 'http://127.0.0.1:8089';
 
 /** `local-inference/` 的目录名；仓库根由装配层推导。 */
 export const LOCAL_INFERENCE_DIRECTORY = 'local-inference';
@@ -39,6 +39,8 @@ export function missingLabelOf(item: LocalInferenceMissing): string {
 export interface LocalInferenceStatus {
   readonly available: boolean;
   readonly running: boolean;
+  /** 端口上的服务是否由当前 pid 记录确认。外部启动的服务为 `false`。 */
+  readonly managed: boolean;
   readonly endpoint: string;
   readonly dimension: number | null;
   readonly backend: string | null;
@@ -54,18 +56,6 @@ export interface LocalInferenceStartResult {
   readonly ready: true;
   readonly endpoint: string;
   readonly dimension: number | null;
-}
-
-/** `providers.embedding.baseUrl` → 健康探测的源地址；不是合法 URL 就用默认。 */
-export function endpointOf(baseUrl: string): string {
-  if (baseUrl.trim() === '') {
-    return DEFAULT_ENDPOINT;
-  }
-  try {
-    return new URL(baseUrl).origin;
-  } catch {
-    return DEFAULT_ENDPOINT;
-  }
 }
 
 /** 本机缺哪些依赖。`rerank-model` 不影响启动，只影响重排。 */

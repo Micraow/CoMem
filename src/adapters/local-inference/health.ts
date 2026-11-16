@@ -5,10 +5,13 @@
  * 连不上、超时、非 JSON 都按「没在运行」处理——状态页不该因为一次探测失败而报错。
  */
 
+import { connect } from 'node:net';
+
 import { isRecord } from '../../domain/guards.js';
 
 /** 单次健康探测的上限：它只读内存里的状态。 */
 const PROBE_TIMEOUT_MS = 1_500;
+const LISTENER_TIMEOUT_MS = 500;
 const POLL_INTERVAL_MS = 400;
 
 export interface HealthSnapshot {
@@ -38,7 +41,7 @@ export async function probeHealth(endpoint: string): Promise<HealthSnapshot | nu
       return null;
     }
     const body: unknown = await response.json();
-    if (!isRecord(body)) {
+    if (!isRecord(body) || body['status'] !== 'ok') {
       return null;
     }
     return {
@@ -51,6 +54,29 @@ export async function probeHealth(endpoint: string): Promise<HealthSnapshot | nu
   } catch {
     return null;
   }
+}
+
+/** 只回答端口上是否有监听者；它不把未知服务当成可管理的推理进程。 */
+export async function hasEndpointListener(endpoint: string): Promise<boolean> {
+  const url = new URL(endpoint);
+  const port = Number(url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : url.port);
+  return new Promise((resolve) => {
+    const socket = connect({ host: url.hostname, port });
+    const finish = (listening: boolean): void => {
+      socket.destroy();
+      resolve(listening);
+    };
+    socket.setTimeout(LISTENER_TIMEOUT_MS);
+    socket.once('connect', () => {
+      finish(true);
+    });
+    socket.once('timeout', () => {
+      finish(false);
+    });
+    socket.once('error', () => {
+      finish(false);
+    });
+  });
 }
 
 function delay(ms: number): Promise<void> {

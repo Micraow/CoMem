@@ -4214,9 +4214,9 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 
 | 端点 | 行为 |
 |---|---|
-| `GET /api/v1/inference/local` | 回 `available` / `running` / `endpoint` / `dimension` / `backend` / `device` / `model` / `missing` / `startCommand`。`endpoint` 取 `providers.embedding.baseUrl` 的源地址，没配用 `http://127.0.0.1:8089` |
-| `POST /api/v1/inference/local/start` | 用服务端写死的命令拉起子进程并等到就绪。成功回 `{started: true, ready: true, endpoint, dimension}`；进程退出或超时回 409 `CONFLICT`（`details` 带 `started` / `ready` / `reason`）；缺依赖回 400 `INVALID_ARGUMENT`（`details` 带 `missing` / `startCommand`） |
-| `POST /api/v1/inference/local/stop` | 只停 pid 文件里记录的那个进程组，回 `{stopped: true}` |
+| `GET /api/v1/inference/local` | 回 `available` / `running` / `managed` / `endpoint` / `dimension` / `backend` / `device` / `model` / `missing` / `startCommand`。`endpoint` 固定为 `http://127.0.0.1:8089`，与向量供应商的网关配置无关。外部启动但就绪的服务显示为可用，`managed` 为 false |
+| `POST /api/v1/inference/local/start` | 用服务端写死的命令拉起子进程并等到就绪。成功回 `{started: true, ready: true, endpoint, dimension}`；端口已有其他服务、进程退出或超时回 409 `CONFLICT`（`details` 带 `started` / `ready` / `reason`）；缺依赖回 400 `INVALID_ARGUMENT`（`details` 带 `missing` / `startCommand`） |
+| `POST /api/v1/inference/local/stop` | 只停本进程管理的推理服务，回 `{stopped: true}`；无法确认归属时回 409 |
 
 **`available` 的判据是本机文件**：`local-inference/.venv/bin/python`、
 `local-inference/server.py`、`local-inference/models/` 下至少一个 embedding `.gguf`。
@@ -4234,7 +4234,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 **只管理自己启动的进程。** spawn 用 `detached: true` + `stdio: 'ignore'`，pid 写进
 `{dataDir}/_meta/local-inference.pid`；`stop` 只对 pid 文件里的进程组发
 SIGTERM / SIGKILL，不按名字 `pkill`——用户可能在终端里手动跑着同一个 `server.py`。
-HTTP 进程重启后先校验 pid 存活与 `/proc/<pid>/cmdline`；对不上只清文件。
+记录同时包含 Linux 进程启动时刻。停止时核对 pid、启动时刻和 `/proc/<pid>/cmdline`；旧格式或对不上只清文件。
 
 **等待与失败。** `start` 最多等 25 秒（控制台请求超时是 30 秒）：模型加载实测 8 秒
 左右，留出的余量够慢机器用。`dimension` / `backend` / `device` / `model` 都来自子进程

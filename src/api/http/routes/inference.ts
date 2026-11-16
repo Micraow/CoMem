@@ -22,6 +22,7 @@ import type { HttpRouteServices } from './index.js';
 export interface LocalInferenceStatusPayload {
   readonly available: boolean;
   readonly running: boolean;
+  readonly managed: boolean;
   readonly endpoint: string;
   readonly dimension: number | null;
   readonly backend: string | null;

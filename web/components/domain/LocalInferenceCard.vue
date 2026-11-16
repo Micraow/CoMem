@@ -35,16 +35,35 @@ const statusText = computed(() => {
   if (props.status === null) {
     return props.loading ? '读取中' : '状态未知'
   }
-  return inferenceStatusText(props.status)
+  if (props.status.managed && !props.status.running) {
+    return '已启动，尚未就绪'
+  }
+  const text = inferenceStatusText({
+    ...props.status,
+    available: props.status.running || props.status.available,
+  })
+  return props.status.running && props.status.managed === false
+    ? `外部启动；${text}`
+    : text
 })
 
 const tone = computed<'gray' | 'green' | 'orange'>(() =>
-  props.status === null ? 'gray' : inferenceToneOf(props.status),
+  props.status?.running === true
+    ? 'green'
+    : props.status?.managed === true
+      ? 'orange'
+    : props.status === null ? 'gray' : inferenceToneOf(props.status),
 )
 
 const shortStatus = computed(() => {
   if (props.status === null) {
     return props.loading ? '读取中' : '状态未知'
+  }
+  if (props.status.running) {
+    return props.status.managed === false ? '外部服务' : '就绪'
+  }
+  if (props.status.managed) {
+    return '未就绪'
   }
   return inferenceShortStatusOf(props.status)
 })
@@ -68,11 +87,15 @@ const startDisabled = computed(
     props.status === null ||
     !props.status.available ||
     props.status.running ||
+    props.status.managed ||
     busy.value,
 )
 
 const stopDisabled = computed(
-  () => props.status === null || !props.status.running || busy.value,
+  () =>
+    props.status === null ||
+    props.status.managed !== true ||
+    busy.value,
 )
 </script>
 
@@ -85,8 +108,14 @@ const stopDisabled = computed(
       </div>
 
       <div class="local-inference__endpoint-row">
-        <span class="caption">地址</span>
+        <span class="caption">探测地址</span>
         <code class="local-inference__endpoint">{{ status?.endpoint ?? '—' }}</code>
+      </div>
+
+      <div v-if="status?.running" class="local-inference__details">
+        <span><span class="caption">模型</span> {{ status.model ?? '未报告' }}</span>
+        <span><span class="caption">维度</span> {{ status.dimension ?? '未报告' }}</span>
+        <span><span class="caption">设备</span> {{ status.device ?? '未报告' }}</span>
       </div>
 
       <p class="local-inference__lead">
@@ -98,6 +127,15 @@ const stopDisabled = computed(
           <Info :size="15" :stroke-width="1.4" aria-hidden="true" />
         </template>
         <p class="local-inference__note">{{ LOCAL_INFERENCE_RESTART_NOTE }}</p>
+      </UiCallout>
+
+      <UiCallout v-if="status?.running === true && status.managed === false" tone="info">
+        <template #icon>
+          <Info :size="15" :stroke-width="1.4" aria-hidden="true" />
+        </template>
+        <p class="local-inference__note">
+          该服务不是由控制台启动。控制台保留现状，也不会停止它。
+        </p>
       </UiCallout>
 
       <UiCallout v-if="partialMissing" tone="warn">
@@ -201,6 +239,15 @@ const stopDisabled = computed(
   line-height: 1.4;
   color: var(--label-2);
   word-break: break-all;
+}
+
+.local-inference__details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--label);
 }
 
 .local-inference__lead,

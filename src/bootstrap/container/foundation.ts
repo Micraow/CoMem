@@ -133,12 +133,8 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   // 调度器因开关全关而不启动时，启动清理是唯一保证，见 `background.ts`。
   const embeddings = new EmbeddingRepository({ db, logger });
   const vectors = new SqliteVectorIndex({ db, logger });
-  // 本地推理的启停（§18.2）：命令写死，pid 落在 {dataDir}/_meta。探测地址取
-  // providers.embedding.baseUrl；没配就用默认 8089，不新增配置项。
-  const localInference = new LocalInferenceManager({
-    dataDir,
-    baseUrl: config.providers.embedding.baseUrl,
-  });
+  // 本地推理的启停只访问随仓库提供的本机服务（§18.2）。
+  const localInference = new LocalInferenceManager({ dataDir });
 
   return {
     memoryStructure: new MemoryStructureIndex(db),
