@@ -27,8 +27,7 @@
  *    每条里写明。预算是典型值的 10–100 倍，余量留给服务端抖动，不留给「服务端
  *    挂了还在等」。
  *
- * 这些值**不暴露成配置项**：它们是「用户最多等多久」的取舍，不是部署差异。
- * 要改就改这张表，只有一处。
+ * 每轮召回允许用客户端 recallTimeoutMs 覆盖，其余事件沿用默认表。
  *
  * ## 为什么退出前要 `scheduleHardExit`
  *
@@ -117,8 +116,10 @@ export function processStartEpochMs() {
  * 超时差 20 倍），不再需要从原始载荷名反推。
  *
  * @param {{ event: string }} event
+ * @param {number} [recallTimeoutMs] 已校验的客户端召回预算
  */
-export function budgetForEvent(event) {
+export function budgetForEvent(event, recallTimeoutMs) {
+  if (event.event === 'user_prompt_submit' && recallTimeoutMs !== undefined) return recallTimeoutMs;
   const budget = HOOK_BUDGETS_MS[event.event];
   // 适配器会拒绝未知事件，走到这里说明事件表与新代码不同步。退回最长的那个预算
   // 不会把用户等的时间放大到无限：它仍然有上限。

@@ -56,10 +56,11 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 |---|---|---|---|
 | `baseUrl` | **是** | — | CoMem 服务端地址。缺失时插件只记一条 warn，**不注册任何监听器**（不让插件加载失败把 DSH 拖挂） |
 | `token` | 否 | 配置文件里的值 | `Authorization: Bearer`。显式写空串会覆盖配置文件 / 环境变量里的 token |
-| `timeoutMs` | 否 | `5000` | 单次 HTTP 超时；实际生效值是 `min(它, 本次注入的总预算剩余)` |
+| `timeoutMs` | 否 | `5000` | 普通请求的单次 HTTP 超时；每轮召回使用独立总预算 |
+| `recallTimeoutMs` | 否 | `2000` | 每轮召回总预算（1000–29000ms）。不填时读客户端配置文件或环境变量 |
 
 其余配置继续读 `~/.config/comem/config.yaml`（或 `COMEM_*` 环境变量），与 hook
-完全同一套：`recallLimit`、`queryFilters`、
+完全同一套：`recallTimeoutMs`（默认 2000ms，每轮自动召回总预算）、`recallLimit`、`queryFilters`、
 `profileBudgetTokens`、`skillBudgetTokens`、`commitTimeoutMs`、`tmpDir`。
 身份来自服务端认证，不需要重复填写用户 ID。服务端与插件应同步升级以支持 `/context`。
 

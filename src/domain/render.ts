@@ -33,6 +33,7 @@ export interface RenderedItem {
   readonly score: number;
   /** 实际投放的层级；只剩 URI 时是 `null` */
   readonly detail: ContextDetail | null;
+  readonly compressed?: true;
   readonly text: string;
 }
 
@@ -77,7 +78,7 @@ export function renderItem(item: RenderedItem, includeScore = true): string {
   const detail = item.detail === null ? '' : ` detail="${item.detail}"`;
   const attributes =
     `uri="${escapeAttribute(item.uri)}" type="${tag}"` +
-    `${includeScore ? ` score="${item.score.toFixed(SCORE_FRACTION_DIGITS)}"` : ''}${detail}`;
+    `${includeScore ? ` score="${item.score.toFixed(SCORE_FRACTION_DIGITS)}"` : ''}${detail}${item.compressed ? ' compressed="true"' : ''}`;
 
   // 只剩 URI 时输出单行自闭合标签：多出来的空行会占预算，也会让模型以为正文是空的。
   if (item.text === '') {

@@ -50,10 +50,10 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { DEFAULT_CONFIG, loadConfig, resolveTempDir } from '../../lib/config.mjs';
+import { DEFAULT_CONFIG, loadConfig, resolveTempDir, validateRecallTimeout } from '../../lib/config.mjs';
 import { createHttpClient } from '../../lib/http.mjs';
 import { DEFAULT_MAX_CONTEXT_BYTES } from '../../lib/injection.mjs';
-import { createDeadline, HOOK_BUDGETS_MS } from '../../lib/lifecycle.mjs';
+import { budgetForEvent, createDeadline, HOOK_BUDGETS_MS } from '../../lib/lifecycle.mjs';
 import { sanitizeCapturedMessages } from '../../lib/sanitize.mjs';
 import { handleSessionStart } from '../../servers/session-start.mjs';
 import { handleUserPromptSubmit } from '../../servers/user-prompt-submit.mjs';
@@ -200,7 +200,7 @@ function errorFields(error) {
  * 依赖里。载荷形状由架构文档与实测钉住，不是靠类型。
  *
  * @param {PluginContext} ctx
- * @param {{ baseUrl?: string, token?: string, timeoutMs?: number } | null | undefined} rawConfig
+ * @param {{ baseUrl?: string, token?: string, timeoutMs?: number, recallTimeoutMs?: number } | null | undefined} rawConfig
  */
 export function apply(ctx, rawConfig) {
   try {
@@ -214,7 +214,7 @@ export function apply(ctx, rawConfig) {
 /**
  *
  * @param {PluginContext} ctx
- * @param {{ baseUrl?: string, token?: string, timeoutMs?: number }} rawConfig
+ * @param {{ baseUrl?: string, token?: string, timeoutMs?: number, recallTimeoutMs?: number }} rawConfig
  */
 function start(ctx, rawConfig) {
   const baseUrl = typeof rawConfig.baseUrl === 'string' ? rawConfig.baseUrl.trim() : '';
@@ -225,7 +225,7 @@ function start(ctx, rawConfig) {
     return;
   }
 
-  // 只有显式给了的键才覆盖：`token` / `timeoutMs` 不写时沿用配置文件与环境变量，
+  // 只有显式给了的键才覆盖：其它键不写时沿用配置文件与环境变量，
   // 写了（包括空串）就以这里为准。`baseUrl` 必填，永远覆盖。
   const overrides = { baseUrl };
   if (typeof rawConfig.token === 'string') {
@@ -233,6 +233,9 @@ function start(ctx, rawConfig) {
   }
   if (typeof rawConfig.timeoutMs === 'number' && Number.isFinite(rawConfig.timeoutMs)) {
     overrides.timeoutMs = rawConfig.timeoutMs;
+  }
+  if (rawConfig.recallTimeoutMs !== undefined) {
+    overrides.recallTimeoutMs = validateRecallTimeout(rawConfig.recallTimeoutMs);
   }
   const fallbackConfig = { ...DEFAULT_CONFIG, ...overrides, tmpDir: resolveTempDir() };
   const settings = loadConfig()
@@ -242,7 +245,7 @@ function start(ctx, rawConfig) {
       return fallbackConfig;
     });
 
-  /** 每一轮最多等多久：沿用 hook 的总预算（召回 2s、开局 4s）。 */
+  /** 沿用宿主 Hook 的事件预算。 */
   const clientFor = (config, budgetMs) =>
     createHttpClient({ ...config, deadline: createDeadline(budgetMs, Date.now()) });
   const epochs = new Map();
@@ -304,7 +307,7 @@ function start(ctx, rawConfig) {
       const config = await settings;
       const result = await handleUserPromptSubmit(event, {
         config,
-        http: clientFor(config, HOOK_BUDGETS_MS.user_prompt_submit),
+        http: clientFor({ ...config, timeoutMs: config.recallTimeoutMs }, budgetForEvent(event, config.recallTimeoutMs)),
         maxContextBytes: MAX_CONTEXT_BYTES,
         processStartMs: NO_PROCESS_START,
       });

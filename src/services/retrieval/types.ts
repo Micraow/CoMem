@@ -44,6 +44,8 @@ export interface RetrievalSettings {
     readonly maxTokens: number;
     readonly dedupTurns: number;
     readonly quotaPreset: QuotaPreset;
+    readonly compressRecall?: boolean;
+    readonly compressRecallTimeoutMs?: number;
   };
 }
 
@@ -118,13 +120,7 @@ export interface SearchServiceDeps {
     readonly topN: number;
     readonly keepTopN: number;
   };
-  /**
-   * 意图分析（§8.4）。只有 `search` 用到。
-   *
-   * 不注入时 `search` 仍然可用：降级成单条原 query，`plan.analyzed = false` 且
-   * `plan.reason` 写明原因。降级不静默（§17.9 的同一原则）——但也不该因为「没有
-   * 模型」让整条只读路径不可用。
-   */
+  /** 意图分析（§8.4）和可选的自动召回压缩（§8.6）；缺省时 `search` 用原查询。 */
   readonly llm?: Pick<LlmService, 'generateJson'>;
   /**
    * 会话服务，两个用途：

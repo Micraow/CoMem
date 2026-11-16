@@ -1274,11 +1274,13 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 **自动上下文。** `SearchService.automaticContext(query, options)` 供 `POST /api/v1/context` 使用。身份取认证请求；默认范围统一为本人根、实际可读的组根与直接授权子树。范围查询来自物化权限，候选与正文再次求权；无权节点的 URI、索引摘要也不出现在输出。共享结论不展开私有源会话。撤权与退组在下一次请求生效，已经进入宿主历史的文字无法远程撤回。
 
-空 query 用于开局：读取本人 `memories/profile.md` 与最多 4 条偏好的正文，按既有 chat 配额最多 5 条；偏好超出的内容留待语义召回。普通 query 只固定读取 profile，优先使用当前问题与最近 10 条可读 user/assistant 对话，历史尾部最多 4000 字符。近期读取跨 live 和归档、按消息 ID 去重，并持会话 TREE 锁避免与归档交错。不默认增加每轮 LLM 改写，主动 `search` 的改写路径保留。自动候选只查 memory，不把整段原始会话送作长期事实。
+空 query 用于开局：读取本人 `memories/profile.md` 与最多 4 条偏好的正文，按既有 chat 配额最多 5 条；偏好超出的内容留待语义召回。普通 query 只固定读取 profile，优先使用当前问题与最近 10 条可读 user/assistant 对话，历史尾部最多 4000 字符。近期读取跨 live 和归档、按消息 ID 去重，并持会话 TREE 锁避免与归档交错。检索前不做每轮 LLM 查询改写，主动 `search` 的改写路径保留。自动候选只查 memory，不把整段原始会话送作长期事实。
 
 默认请求预算 1600 token、9000 字节，且不超过服务端 `assembly.maxTokens`；指令、标签与转义后的正文都计入。普通请求背景最多使用剩余 token 的一半，给相关个人及团队知识留空间；开局可使用全部预算。这是初版工程分配假设，尚无模型效果标定。历史 4000 字符和抽取预取 8000 字符同为有界输入的工程上限。背景从全文起投，放不下沿既有层级降级；最终按完整条目缩减，不切断事实或标签。空正文/只有 URI 不自动注入。结果包括 `items/rendered/tokensUsed/dropped/degradation/deliveryToken`，降级只发给诊断层。
 
 RRF 用于排序，没有通用的「无答案」判定；自动路径移除相对分数门槛。注入指令要求只使用相关且归属明确的事实，新指示优先；这能约束使用方式，不能保证下游模型总能忽略无关候选。真实自然语言效果和冷查询延迟仍需在实际使用中确认。
+
+**自动召回压缩。** `retrieval.assembly.compressRecall` 默认开启；没有配置 `providers.llm.default` 时跳过压缩，继续交付原条目。普通自动请求在检索、再次求权、去重和预算组装之后，将当前问题、用于消解指代的近期对话尾部与可交付的召回条目发给该模型；开局和固定画像不参与压缩。模型返回来源编号与精简正文，每个来源最多一条；服务端用原条目还原 URI、归属和来源层级，转义正文，输出 `items[].compressed: true` 和 `compressed="true"` 标签属性。只有估算 token 数减少且字节数不增加才采用。有效的空数组表示不投放召回，固定背景照常交付。超时、模型错误或编号无效则交付原条目，并在 `degradation` 说明。`retrieval.assembly.compressRecallTimeoutMs` 设置压缩阶段最多等待多久，默认 1000 毫秒（每轮 Hook 2 秒预算的一半），允许 1–30000 毫秒（HTTP 请求总上限 30 秒）。实际等待还受请求剩余时间与模型供应商自身超时限制。Hook 默认有 2 秒总时限，可在客户端配置 `recallTimeoutMs`（§15.9）；只调服务端压缩上限不会延长宿主等待。回执只覆盖最终实际交付的来源，按压缩前的来源内容指纹去重。来源校验不验证生成正文的事实含义。此步骤不写入画像或记忆，也不用于主动 `search`。
 
 `search` 有一个 `mode="context"` 变体：返回的不是命中列表，而是一段**可直接塞进模型上下文**的文本。这是「检索结果 → 模型输入」的独立一层。
 
@@ -3438,7 +3440,7 @@ integrations/
 
 也就是说，**用户每打一轮，都要先等 CoMem 把记忆找完**。这笔延迟直接加在「回车到模型开始生成」之间。
 
-**耗时拆解**（hook 走 `POST /api/v1/search/find`，**不调模型**）：
+**耗时拆解**（自动召回走 `POST /api/v1/context`，下表为未压缩路径的估计）：
 
 | 阶段 | 阻塞 | 典型 |
 |---|---|---|
@@ -3449,12 +3451,12 @@ integrations/
 | 写 worker 载荷（`Stop`） | 是 | 5–20ms |
 | 归档 + 抽取 + 合并 + 摘要 | **否**（后台） | 几秒到几十秒 |
 
-**每个事件一个总预算，不是「每个请求 5 秒」。** `timeoutMs`（默认 5 秒）只约束**一次 HTTP 尝试**；一个 hook 里顺序发三次请求就是三倍，`GET` 还有重试。用户在 `UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。预算按**墙上时钟**从**进程启动**算起（`performance.timeOrigin`）：读 stdin、检索、采集、上报都从同一个 deadline 里扣，子请求共享同一个 `AbortSignal`。值在 `integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`（`SessionEnd` 单列在 `SESSION_END_BUDGET_MS`），**没有配置项**——它表达的是「用户最多等多久」，不是部署差异。
+**每个事件一个总预算，不是「每个请求 5 秒」。** `timeoutMs`（默认 5 秒）只约束**一次 HTTP 尝试**；一个 hook 里顺序发三次请求就是三倍，`GET` 还有重试。用户在 `UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。预算按**墙上时钟**从**进程启动**算起（`performance.timeOrigin`）：读 stdin、检索、采集、上报都从同一个 deadline 里扣，子请求共享同一个 `AbortSignal`。值在 `integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`（`SessionEnd` 单列在 `SESSION_END_BUDGET_MS`）。每轮自动召回可用客户端 `recallTimeoutMs` 或 `COMEM_RECALL_TIMEOUT_MS` 覆盖默认 2000ms（1000–29000ms）；其 HTTP 请求直接沿用事件剩余预算，不受通用 `timeoutMs` 限制。安装器为 Claude Code 和 Codex 的该事件设置 30 秒宿主上限，29 秒配置上限为启动和退出留余量。DSH 插件使用同一配置。
 
 | 事件 | 总预算 | 依据 |
 |---|---|---|
 | `SessionStart` | 4000ms | 会话开局一次；上下文与技能目录并发请求。4 秒是已有宿主等待预算，新上下文路径未做真实模型延迟测量 |
-| `UserPromptSubmit` | 2000ms | **每轮按回车都付**。宿主默认给 30s，30s 与挂住没有区别；本节典型 60–180ms、本机实测 54ms，2s 是典型值的约 10 倍，超了退化成「本轮没有记忆」 |
+| `UserPromptSubmit` | 默认 2000ms，可调 | **每轮按回车都付**。宿主默认给 30s，30s 与挂住没有区别；本节典型 60–180ms、本机实测 54ms，2s 是典型值的约 10 倍，超了退化成「本轮没有记忆」 |
 | `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的约 30 倍 |
 | `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
 | `Stop` | 1000ms | 主进程只写载荷 + spawn；实测 44ms |
@@ -3956,6 +3958,8 @@ retrieval:
     maxTokens: 1600       # 注入模型的 token 预算
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
+    compressRecall: true  # 配置了模型时，自动尝试压缩
+    compressRecallTimeoutMs: 1000 # 毫秒，受请求剩余时间约束
   rerank:
     enabled: false        # 默认关；关掉时 find 路径不调用重排模型
     keepTopN: 0           # 重排后保留前 N 条；0 = 只重排不截断
@@ -4051,7 +4055,7 @@ task:
 
 | 端点 | 行为 |
 |---|---|
-| `GET /api/v1/config` | 84 个叶子，每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；顶层 `overridePath` / `overrideWritable`。密钥类只回 `configured` 与 `masked`（末 4 位），`value` 是 `null` |
+| `GET /api/v1/config` | 86 个叶子，每项带 `path` / `value` / `source`（`default` / `file` / `override` / `env`）/ `envName` / `group` / `editable`；顶层 `overridePath` / `overrideWritable`。密钥类只回 `configured` 与 `masked`（末 4 位），`value` 是 `null` |
 | `PATCH /api/v1/config` | 写覆盖文件。先完整校验，合法才原子写（临时文件 + `rename`，`0600`）；回 `restartRequired: true` |
 | `POST /api/v1/config/test` | 接收 `target: llm/embedding/rerank` 与可选 `values` 草稿；无草稿测运行配置，有草稿按配置优先级合并磁盘覆盖与表单，临时构造供应商，不保存、不热更新、不建索引。LLM 发短 completion，草稿 embedding 检测实际维度，rerank 发测试请求；错误返回类型与排查方向，不透传供应商原文 |
 

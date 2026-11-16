@@ -23,6 +23,7 @@ import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { ComemHookError } from './http.mjs';
+import { HOOK_BUDGETS_MS } from './lifecycle.mjs';
 
 /**
  * 默认查询过滤规则（架构文档 §8.8 的五条）。
@@ -68,12 +69,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   /** 可选的 Bearer token */
   token: '',
   timeoutMs: 5000,
+  recallTimeoutMs: HOOK_BUDGETS_MS.user_prompt_submit,
   /** `PreCompact` 等提交的超时：§17.2 的单步 LLM 上限 30000ms（`rewriteTimeoutMs`） */
   commitTimeoutMs: 30000,
   /**
    * stdio 代理等 MCP 工具响应的超时（`servers/mcp-proxy.mjs`）。
    *
-   * **不能复用 `timeoutMs`。** 那个 5 秒是 hook 的阻塞预算（§15.9），而 MCP 工具
+   * **不能复用 `timeoutMs`。** 那个 5 秒是 hook HTTP 单次请求上限（§15.9），而 MCP 工具
    * 是模型主动调用的、不占用户输入延迟：`find` 开了重排时 p95 就有 9.35 秒
    * （`config.example.yaml` 的 `retrieval.rerank.timeoutSeconds` 一节），
    * `add_resource` 还要同步跑一次摘要重算。30000 与提交超时取同一个数，因为
@@ -91,6 +93,7 @@ const ENV_OVERRIDES = Object.freeze({
   COMEM_BASE_URL: 'baseUrl',
   COMEM_TOKEN: 'token',
   COMEM_TIMEOUT_MS: 'timeoutMs',
+  COMEM_RECALL_TIMEOUT_MS: 'recallTimeoutMs',
   COMEM_COMMIT_TIMEOUT_MS: 'commitTimeoutMs',
   COMEM_MCP_TIMEOUT_MS: 'mcpTimeoutMs',
   COMEM_RECALL_LIMIT: 'recallLimit',
@@ -101,6 +104,7 @@ const ENV_OVERRIDES = Object.freeze({
 
 const NUMERIC_KEYS = new Set([
   'timeoutMs',
+  'recallTimeoutMs',
   'commitTimeoutMs',
   'mcpTimeoutMs',
   'recallLimit',
@@ -232,6 +236,14 @@ function coerce(key, value) {
   return parsed;
 }
 
+export function validateRecallTimeout(value) {
+  // 最短值为最多 800ms 的读入留余量；最长值为 30s 宿主上限留出退出时间。
+  if (!Number.isInteger(value) || value < 1000 || value > 29000) {
+    throw invalidConfig('recallTimeoutMs 必须是 1000–29000 之间的整数（毫秒）。');
+  }
+  return value;
+}
+
 /**
  * 读配置：默认值 → 配置文件 → 环境变量。
  *
@@ -240,7 +252,7 @@ function coerce(key, value) {
  *
  * @param {{ env?: NodeJS.ProcessEnv }} [options]
  * @returns {Promise<{
- *   baseUrl: string, token: string, timeoutMs: number,
+ *   baseUrl: string, token: string, timeoutMs: number, recallTimeoutMs: number,
  *   commitTimeoutMs: number, mcpTimeoutMs: number, recallLimit: number,
  *   skillBudgetTokens: number, profileBudgetTokens: number, queryFilters: readonly string[],
  *   configFile: string, tmpDir: string,
@@ -275,6 +287,7 @@ export async function loadConfig(options = {}) {
   for (const key of NUMERIC_KEYS) {
     merged[key] = coerce(key, merged[key]);
   }
+  validateRecallTimeout(merged.recallTimeoutMs);
   merged.queryFilters = Array.isArray(merged.queryFilters)
     ? merged.queryFilters.map((rule) => String(rule))
     : DEFAULT_QUERY_FILTERS;

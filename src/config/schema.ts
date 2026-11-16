@@ -191,10 +191,10 @@ const retrievalSchema = z.object({
     .object({
       /** 注入模型的 token 预算 */
       maxTokens: z.number().int().positive().default(1600),
-      /** 这么多轮内投过的 URI 不再投 */
       dedupTurns: z.number().int().nonnegative().default(3),
-      /** chat | coding */
       quotaPreset: z.enum(QUOTA_PRESETS).default('coding'),
+      compressRecall: z.boolean().default(true),
+      compressRecallTimeoutMs: z.number().int().positive().max(30000).default(1000),
     })
     .prefault({}),
   /**

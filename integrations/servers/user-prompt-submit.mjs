@@ -48,7 +48,7 @@ if (isMainModule(import.meta.url)) {
     const host = await resolveHost();
     const config = await loadConfig();
     await host.runHook(async (event, { deadline }) => handleUserPromptSubmit(event, {
-      config, http: createHttpClient({ ...config, deadline }), maxContextBytes: host.MAX_CONTEXT_BYTES,
-    }), { hardExit: true });
+      config, http: createHttpClient({ ...config, timeoutMs: config.recallTimeoutMs, deadline }), maxContextBytes: host.MAX_CONTEXT_BYTES,
+    }), { hardExit: true, recallTimeoutMs: config.recallTimeoutMs });
   });
 }

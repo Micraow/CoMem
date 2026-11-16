@@ -83,7 +83,7 @@ function expectedDefaults(dataDir: string): unknown {
       candidateMultiplier: 4,
       levelWeights: { l0: 1.15, l1: 1.05, l2: 1 },
       queryFilters: [],
-      assembly: { maxTokens: 1600, dedupTurns: 3, quotaPreset: 'coding' },
+      assembly: { maxTokens: 1600, dedupTurns: 3, quotaPreset: 'coding', compressRecall: true, compressRecallTimeoutMs: 1000 },
       rerank: { enabled: false, keepTopN: 0 },
     },
     session: {

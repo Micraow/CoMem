@@ -93,8 +93,9 @@ export interface AssembledItem {
   readonly contextType: AssemblyCandidate['contextType'];
   readonly level: Level;
   readonly score: number;
-  /** 实际投放的层级 */
+  /** 若已压缩，detail 表示提炼所用的来源层级。 */
   readonly detail: ContextDetail | null;
+  readonly compressed?: true;
   readonly text: string;
   readonly tokens: number;
 }

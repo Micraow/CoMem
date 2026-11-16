@@ -57,7 +57,7 @@ export function createRunHook({ hostLabel, normalizeEvent, formatOutput }) {
    * `read` 与 `write` 可注入，测试不启动子进程也能跑完整链路。
    *
    * @param {(event: Record<string, unknown>, context: { deadline: ReturnType<typeof createDeadline> }) => Promise<object | undefined>} handler
-   * @param {{ read?: () => Promise<unknown>, write?: (line: string) => void, hardExit?: boolean }} [options]
+   * @param {{ read?: () => Promise<unknown>, write?: (line: string) => void, hardExit?: boolean, recallTimeoutMs?: number }} [options]
    *   `hardExit` 只由真正的 hook 入口传：安排兜底退出（见 `lib/lifecycle.mjs`）
    */
   return async function runHook(handler, options = {}) {
@@ -85,7 +85,7 @@ export function createRunHook({ hostLabel, normalizeEvent, formatOutput }) {
     }
 
     // 总预算从进程启动算起：读 stdin 花掉的时间也从里面扣（`lib/lifecycle.mjs`）。
-    const deadline = createDeadline(budgetForEvent(event));
+    const deadline = createDeadline(budgetForEvent(event, options.recallTimeoutMs));
     if (hardExit) {
       // 硬上限：handler 不返回时也要退出（见 `armHardDeadline`）。
       armHardDeadline(deadline);

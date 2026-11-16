@@ -1,11 +1,13 @@
-import { QUOTA_BY_PRESET, type AssemblyCandidate, type AssemblyResult } from '../../domain/assembly.js';
+import { QUOTA_BY_PRESET, type AssembledItem, type AssemblyCandidate, type AssemblyResult } from '../../domain/assembly.js';
 import { userScopeOf } from '../../domain/acl.js';
+import { ComemError } from '../../domain/errors.js';
 import { renderAll } from '../../domain/render.js';
 import { estimateTokens } from '../../domain/session.js';
 import type { ContextOptions, FindDiagnostics, SearchServiceDeps } from './types.js';
 import type { RewriteMessage } from '../prompts/rewrite.js';
 import type { DeliveryTracker } from './delivery.js';
 import { ContextReceipts } from './receipt.js';
+import { compressRecall } from './recall-compression.js';
 
 export interface AutomaticContextOptions extends ContextOptions {
   readonly maxTokens?: number;
@@ -53,13 +55,35 @@ export class AutomaticContext {
     const excluded = await this.delivery.excluded(deliveryClock, recalled.items);
     items.push(...recalled.items.filter((item) => item.detail !== null && item.text.trim() !== '' && !excluded?.has(item.uri))
       .slice(0, QUOTA_BY_PRESET.chat.memory - items.length));
-    const render = (): string => items.length === 0 ? '' : `${CONTEXT_INSTRUCTION}\n\n${renderAll(items, false)}`;
-    while (items.length > 0 && (Buffer.byteLength(render(), 'utf8') > options.maxBytes || estimateTokens(render()) > maxTokens)) items.pop();
+    const render = (entries: readonly AssembledItem[]): string => entries.length === 0 ? '' : `${CONTEXT_INSTRUCTION}\n\n${renderAll(entries, false)}`;
+    while (items.length > 0 && (Buffer.byteLength(render(items), 'utf8') > options.maxBytes || estimateTokens(render(items)) > maxTokens)) items.pop();
+    let delivered = items;
+    let degradation = retrieval.degradation ?? (retrieval.rerankFailure === null ? null : `重排不可用（${retrieval.rerankFailure.reason}）`);
+    const { llm } = this.deps;
+    const backgroundUris = new Set(background.map((item) => item.uri));
+    const sources = items.filter((item) => !backgroundUris.has(item.uri));
+    const { compressRecall: enabled, compressRecallTimeoutMs } = this.deps.config.assembly;
+    if (enabled && compressRecallTimeoutMs !== undefined && llm !== undefined && sources.length > 0) {
+      try {
+        const digest = await compressRecall(llm, query, history.slice(-4000), sources, maxTokens, compressRecallTimeoutMs, options);
+        const candidate = [...items.filter((item) => backgroundUris.has(item.uri)), ...digest];
+        const text = render(candidate);
+        const original = render(items);
+        if (Buffer.byteLength(text) <= Buffer.byteLength(original) && estimateTokens(text) < estimateTokens(original)) delivered = candidate;
+      } catch (error) {
+        const failure = ComemError.from(error);
+        const reason = failure.details?.['timeout'] === true ? '超时' : failure.code;
+        degradation = [degradation, `召回压缩不可用（${reason}），已交付原条目`].filter(Boolean).join('；');
+      }
+    }
+    const rendered = render(delivered);
+    const deliveredUris = new Set(delivered.map((item) => item.uri));
     return {
-      deliveryToken: this.receipts.issue(options.subject, deliveryClock, items),
-      items, rendered: render(), tokensUsed: estimateTokens(render()),
-      dropped: base.dropped + recalled.dropped + base.items.length + recalled.items.length - items.length,
-      degradation: retrieval.degradation ?? (retrieval.rerankFailure === null ? null : `重排不可用（${retrieval.rerankFailure.reason}）`),
+      // 与下轮组装比较的是输入内容，避免摘要措辞变化让同一来源重复注入。
+      deliveryToken: this.receipts.issue(options.subject, deliveryClock, items.filter((item) => deliveredUris.has(item.uri))),
+      items: delivered, rendered, tokensUsed: estimateTokens(rendered),
+      dropped: base.dropped + recalled.dropped + base.items.length + recalled.items.length - delivered.length,
+      degradation,
     };
   }
 

@@ -6,7 +6,7 @@
  * `GET /api/v1/config` 只回路径（`providers.llm.default.baseUrl`）、值与来源，
  * 不回中文名——服务端的字段名是配置契约的一部分，界面文案不是。所以「路径 → 中文名
  * /控件 / 选项」这张表在 web 侧，`tests/unit/web/settings.test.ts` 直接拿
- * `configSchema` 的 84 个叶子对拍：少一条或多一条都会失败。没有这张对拍表，新增
+ * `configSchema` 的配置叶子对拍：少一条或多一条都会失败。没有这张对拍表，新增
  * 配置项会以裸路径出现在页面上，看起来像「这是个没做完的页面」。
  *
  * ## 值只有两种来源
@@ -328,7 +328,7 @@ const LOG_LEVEL_OPTIONS: readonly SettingOption[] = [
 ]
 
 /**
- * 84 个配置叶子的中文名、控件与选项。
+ * 配置叶子的中文名、控件与选项。
  *
  * 键是 `GET /config` 的 `path`，与 `src/config/schema.ts` 的默认值形状一一对应。
  * 新增配置项时这里必须补一条——`tests/unit/web/settings.test.ts` 会拿
@@ -425,6 +425,10 @@ export const SETTING_FIELDS = {
     label: '配额预设',
     control: 'select',
     options: QUOTA_PRESET_OPTIONS,
+  },
+  'retrieval.assembly.compressRecall': { label: '压缩自动召回', control: 'boolean', hint: '配置了生成模型时生效。' },
+  'retrieval.assembly.compressRecallTimeoutMs': {
+    label: '召回压缩超时（毫秒）', control: 'number', hint: '1–30000。请求剩余时间更短时，按剩余时间提前返回原文。',
   },
   'retrieval.rerank.enabled': { label: '启用重排', control: 'boolean' },
   'retrieval.rerank.keepTopN': {
@@ -615,7 +619,7 @@ export function sourceNoteOf(source: ConfigSource): string {
   return SOURCE_NOTES[source]
 }
 
-/** 首屏展开的分组。其余分组折叠，避免 84 个控件一次铺满。 */
+/** 首屏展开的分组。其余分组折叠，避免所有控件一次铺满。 */
 export const INITIALLY_EXPANDED_GROUPS: ReadonlySet<ConfigGroup> = new Set<ConfigGroup>([
   'llm',
   'embedding',
@@ -637,7 +641,7 @@ export interface SettingsGroupView {
 /**
  * 按 `group` 分组。顺序固定为 `CONFIG_GROUPS`，空分组不渲染。
  *
- * 服务端按默认值顺序返回 84 项，直接铺开会让「模型 / 向量 / 重排」三组散在
+ * 服务端按默认值顺序返回所有配置项，直接铺开会让「模型 / 向量 / 重排」三组散在
  * 中间。这里按分组重排一次，页面只负责渲染。
  */
 export function groupSettings(items: readonly ConfigItemView[]): readonly SettingsGroupView[] {
@@ -729,7 +733,7 @@ export interface PatchPreview {
  * 三条规则：
  *
  * 1. **只提交改动过的可编辑项。** 没动过的字段不写覆盖文件，否则第一次保存就会把
- *    84 个默认值全部固化进覆盖文件，以后升级默认值不再生效。
+ *    所有默认值全部固化进覆盖文件，以后升级默认值不再生效。
  * 2. **密钥留空 = 不改。** 要清除必须显式点「清除」（写 `""`）。
  * 3. **类型按字段定义转。** 数字转 `number`，开关转 `boolean`，列表按行拆成
  *    `string[]`。转换失败不提交，错误回到字段旁。

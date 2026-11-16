@@ -72,6 +72,7 @@ test('install 写七个 hook（含 SessionEnd），并备份原 settings', async
     }
     // 只有 PreToolUse 带 matcher（少起进程）。
     assert.equal(settings.hooks.PreToolUse.at(-1).matcher, 'Read|Write|Edit');
+    assert.equal(settings.hooks.UserPromptSubmit.at(-1).hooks[0].timeout, 30);
     // SessionEnd 与 PreCompact 共用 pre-compact.mjs：两个生命周期点走同一条提交
     // 链路，只是预算不同（1200ms vs 30000ms）。
     assert.equal(

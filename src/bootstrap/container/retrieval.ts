@@ -210,7 +210,7 @@ export function createRetrieval(
     logger,
     config: config.retrieval,
     ledger,
-    llm,
+    llm: llmConfigured(config) ? llm : undefined,
     sessions: session,
     embedding,
     vectors,

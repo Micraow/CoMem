@@ -162,7 +162,8 @@ export function hookGroup(event, host, options = {}) {
   const matcher = HOST_MATCHERS[host]?.[event] ?? MATCHERS[event];
   return {
     ...(matcher === undefined ? {} : { matcher }),
-    hooks: [{ type: 'command', command: hookCommand(event, host, options) }],
+    hooks: [{ type: 'command', command: hookCommand(event, host, options),
+      ...(event === 'UserPromptSubmit' ? { timeout: 30 } : {}) }],
   };
 }
 

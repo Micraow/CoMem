@@ -229,16 +229,14 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | 事件 | 总预算 | 依据 |
 |---|---|---|
 | `SessionStart` | 4000ms | 会话开局一次；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒还能接受」定；本机空载实测 57ms |
-| `UserPromptSubmit` | 2000ms | **每轮按回车都付**。宿主默认给 30s（Claude Code 官方），30s 与挂住没有区别；§15.9 典型 60–180ms、本机实测 54ms，2s 是典型值的 ~10 倍，超了退化成「本轮没有记忆」 |
+| `UserPromptSubmit` | 默认 2000ms，可调 | **每轮按回车都付**。宿主默认给 30s（Claude Code 官方），30s 与挂住没有区别；§15.9 典型 60–180ms、本机实测 54ms，2s 是典型值的 ~10 倍，超了退化成「本轮没有记忆」 |
 | `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的 ~30 倍 |
 | `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
 | `Stop` | 1000ms | 主进程只写载荷 + spawn；`tests/stop.test.mjs` 实测 44ms |
 | `PreCompact` | 30000ms | 数据可能丢，必须等提交完成；与 `commitTimeoutMs`、§17.2 的 `rewriteTimeoutMs` 同一个数（宿主默认 600s） |
 | `SessionEnd` | 1200ms | Claude Code 给 `SessionEnd` 一组 hook 只有 **1.5 秒**共享预算，留 300ms 给启动与退出。等 30s 等于被宿主先杀掉、留下半截提交 |
 
-值在 `lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`，**没有配置项**：它表达的是「用户最多
-等多久」，不是部署差异。调大时别超过宿主给该事件的 hook 超时（上表最后两行就是反
-例）：宿主会先杀掉进程并丢弃输出，预算就成了空话。
+`UserPromptSubmit` 可在运行 agent 的机器配置 `recallTimeoutMs`（1000–29000ms）；这条召回请求直接用事件的剩余预算，不被通用 `timeoutMs` 截断。其余事件仍用 `lib/lifecycle.mjs` 的固定预算。新安装的 Claude Code / Codex 召回 Hook 显式设宿主 `timeout: 30`（秒）；已有安装如果宿主上限偏低，更新该条目或重新运行安装，Codex 若提示则重新信任。
 
 **stdin 读取有 800ms 上限**（`STDIN_READ_CAP_MS`），超时按「没有事件」处理——宿主
 不写也不关 stdin 时，`for await` 永远不会返回。800ms 小于最短的事件预算，保证
@@ -547,7 +545,8 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 |---|---|---|---|
 | `baseUrl` | `COMEM_BASE_URL` | `http://127.0.0.1:1933` | 服务端地址 |
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
-| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 单次请求超时；实际生效值是 `min(它, 事件总预算的剩余)`，见「每个 hook 的总预算」 |
+| `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 普通 HTTP 单次请求超时；每轮召回直接用 `recallTimeoutMs` 的剩余时间 |
+| `recallTimeoutMs` | `COMEM_RECALL_TIMEOUT_MS` | `2000` | 每轮自动召回的总等待时间（1000–29000ms），包括检索与压缩。调大时同时检查服务端压缩超时 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |

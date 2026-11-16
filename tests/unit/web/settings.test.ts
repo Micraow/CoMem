@@ -8,7 +8,7 @@
  *    `aria-describedby` 等）。`web/pages/connect.vue` 的测试用同一套写法——把
  *    「函数对了但页面没接」变成可失败的断言，而不是靠人眼。
  *
- * 84 个叶子直接拿 `configSchema` 的默认值对拍：新增配置项时本文件会失败，不会让
+ * 配置叶子直接拿 `configSchema` 的默认值对拍：新增配置项时本文件会失败，不会让
  * 页面用裸路径顶上去。
  */
 import { readFileSync } from 'node:fs';
@@ -74,9 +74,9 @@ function itemOf(path: string, overrides: Partial<ConfigItemView> = {}): ConfigIt
 }
 
 describe('配置项清单', () => {
-  it('84 个叶子都有中文标签与控件，标签位不出现裸路径', () => {
-    expect(view.items).toHaveLength(84);
-    expect(Object.keys(SETTING_FIELDS)).toHaveLength(84);
+  it('配置叶子都有中文标签与控件，标签位不出现裸路径', () => {
+    expect(view.items).toHaveLength(86);
+    expect(Object.keys(SETTING_FIELDS)).toHaveLength(86);
 
     const controls = new Set(['text', 'number', 'boolean', 'select', 'secret', 'list']);
     for (const item of view.items) {
@@ -117,7 +117,7 @@ describe('分组', () => {
       '摘要',
       '权限',
     ]);
-    expect(groups.flatMap((group) => group.items)).toHaveLength(84);
+    expect(groups.flatMap((group) => group.items)).toHaveLength(86);
   });
 
   it('模型 / 向量 / 重排三组的中文名与路径一一对应', () => {

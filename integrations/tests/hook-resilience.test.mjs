@@ -65,18 +65,16 @@ function sleep(milliseconds) {
 /**
  * 假服务端。
  *
- * `handler` 拿到 `(request, response)`；不响应就模拟「服务端卡住」。请求体先读完，
+ * `handler` 拿到 `(request, response, body)`；不响应就模拟「服务端卡住」。请求体先读完，
  * 否则子进程可能因为 TCP 背压卡在 `fetch` 的写入上——那测的就不是读超时了。
  */
 async function startServer(handler) {
   const requests = [];
   const server = createServer(async (request, response) => {
-    for await (const chunk of request) {
-      // 消费请求体；内容不参与断言。
-      void chunk;
-    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
     requests.push({ method: request.method, url: request.url });
-    await handler(request, response);
+    await handler(request, response, Buffer.concat(chunks).toString('utf8'));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -350,6 +348,33 @@ test(
     }
   },
 );
+
+test('召回总预算可超过默认 2s，且不受通用单请求超时截断', { timeout: 10_000 }, async () => {
+  let serverBudget;
+  const server = await startServer(async (request, response, body) => {
+    if (request.url !== '/api/v1/context') {
+      response.end(JSON.stringify({ status: 'ok', result: {} }));
+      return;
+    }
+    serverBudget = JSON.parse(body).budgetMs;
+    await sleep(2150);
+    response.end(JSON.stringify({ status: 'ok', result: { rendered: '迟到的召回结果' } }));
+  });
+  try {
+    await withTempDir(async (dir) => {
+      const result = await spawnHook({
+        script: SCRIPT['user-prompt-submit'],
+        payload: { hook_event_name: 'UserPromptSubmit', session_id: 'slow-recall', cwd: dir, prompt: 'typescript strict 怎么配' },
+        env: envFor(dir, { COMEM_BASE_URL: server.baseUrl, COMEM_RECALL_TIMEOUT_MS: '4000', COMEM_TIMEOUT_MS: '1000' }),
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /迟到的召回结果/);
+      assert.ok(serverBudget > 2150 && serverBudget <= 3200, `服务端预算：${serverBudget}`);
+    });
+  } finally {
+    await server.close();
+  }
+});
 
 test(
   '慢服务端：SessionStart 的三次 GET 共享一个预算，不是 3 × 5s（含 GET 重试）',

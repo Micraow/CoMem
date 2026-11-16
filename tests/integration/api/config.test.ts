@@ -97,12 +97,12 @@ function errorOf(response: { readonly body: string }): Record<string, unknown> {
 
 function itemsOf(result: Record<string, unknown>): Map<string, Record<string, unknown>> {
   const items = result['items'] as Record<string, unknown>[];
-  expect(items).toHaveLength(84);
+  expect(items).toHaveLength(86);
   return new Map(items.map((item) => [item['path'] as string, item]));
 }
 
 describe('GET /api/v1/config', () => {
-  it('回全部 84 个叶子，密钥只有掩码', async () => {
+  it('回全部 86 个叶子，密钥只有掩码', async () => {
     const response = await inject({ method: 'GET', url: '/api/v1/config' });
     const result = resultOf(response);
     const items = itemsOf(result);
@@ -252,13 +252,14 @@ describe('PATCH /api/v1/config', () => {
         values: {
           'providers.llm.default.baseUrl': 'http://127.0.0.1:8089/v1',
           'providers.llm.default.apiKey': '',
+          'retrieval.assembly.compressRecallTimeoutMs': 1250,
         },
       },
     });
 
     expect(response.statusCode).toBe(200);
     expect(resultOf(response)).toMatchObject({
-      written: 2,
+      written: 3,
       overridePath: overridePath(),
       restartRequired: true,
     });
@@ -278,6 +279,7 @@ describe('PATCH /api/v1/config', () => {
     const reloaded = loadConfigSnapshot({ path: configPath, env: testEnv() });
     expect(reloaded.config.providers.llm.default.baseUrl).toBe('http://127.0.0.1:8089/v1');
     expect(reloaded.config.providers.llm.default.apiKey).toBe('');
+    expect(reloaded.config.retrieval.assembly.compressRecallTimeoutMs).toBe(1250);
   });
 
   it('非系统管理员返回 403', async () => {

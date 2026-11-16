@@ -21,7 +21,7 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
   const agent = { id: 'agent-other-id', session: { id: 'session-one', header: {} }, inject: () => {} };
   try {
     apply({ on: (event, listener) => listeners.set(event, listener), logger: { warn: () => {} } }, {
-      baseUrl: `http://127.0.0.1:${server.address().port}`, token: '',
+      baseUrl: `http://127.0.0.1:${server.address().port}`, token: '', timeoutMs: 1000, recallTimeoutMs: 6000,
     });
     await listeners.get('agent/created')({ agent, source: 'startup' });
     assert.equal(requests.find((entry) => entry.path === '/api/v1/context').body.sessionId, 'dsh-session-one');
@@ -33,8 +33,13 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     const child = { ...agent, session: { id: 'child', header: { origin: 'subagent' } } };
     const count = requests.length;
     const step = { kind: 'enter', messages: [] };
+    const recalled = await listeners.get('agent/pre-step')({ agent, messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '查询已有的设备配置' }] }] }, async () => step);
+    assert.equal(recalled.messages.length, 1);
+    assert.ok(requests.find((entry) => entry.body.query === '查询已有的设备配置').body.budgetMs > 4000);
+    const afterRecall = requests.length;
     assert.equal(await listeners.get('agent/pre-step')({ agent: child, messages: [{ role: 'user' }] }, async () => step), step);
-    assert.equal(requests.length, count);
+    assert.ok(afterRecall > count);
+    assert.equal(requests.length, afterRecall);
     await tool({ agent: child, name: 'bash', callId: 'ignored', arguments: {} }, { content: [] }, async () => decision);
     listeners.get('session/event')(agent.session, { type: 'turn/end', time: Date.now() });
     const body = await Promise.race([received, new Promise((_, reject) => setTimeout(() => reject(new Error('capture timed out')), 2000).unref())]);
