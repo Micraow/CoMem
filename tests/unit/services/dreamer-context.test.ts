@@ -88,10 +88,14 @@ function experience(topic: string, claim: string) {
     category: 'computer-architecture',
     topic,
     claim,
-    appliesWhen: ['分析同类数据通路。'],
-    procedure: ['逐项检查控制信号和关键路径。'],
-    limitations: [],
-    evidence: ['本轮分析得到确认。'],
+    situation: ['分析同类数据通路。'],
+    approach: ['逐项检查控制信号和关键路径。'],
+    reflection: ['本次分析确认了检查顺序。'],
+    evidence: [{
+      messageId: 'm1',
+      role: 'user',
+      quote: '继续整理 MIPS 数据通路。',
+    }],
   };
 }
 

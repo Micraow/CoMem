@@ -9,11 +9,10 @@ import {
   DEFAULT_PREFETCH_TOP_N,
   pageContent,
   retrievalQuery,
-  stripToolParts,
 } from '../commit/steps/memory-extract.js';
 import type { MemoryWriteResult } from '../memory.js';
 import { applyPlans } from './apply.js';
-import { buildExperiencePrompt } from './archive-prompt.js';
+import { buildExperiencePrompt, experiencePromptMessages } from './archive-prompt.js';
 import { unreadCaseMutations, withCaseContext } from './cases.js';
 import { userEvidence, type PreferenceEvidence } from './evidence.js';
 import {
@@ -44,7 +43,7 @@ export class DreamerService {
     const archive = this.#deps.archive;
     if (archive === undefined) throw new ComemError('INTERNAL', 'Dreamer 未接入归档端口。');
     if (!(await archive.canUse(context.scopeUri, context.archiveUri))) return [];
-    const messages = stripToolParts(context.messages);
+    const messages = experiencePromptMessages(context.messages);
     if (messages.length === 0) return [];
     const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
     const [{ catalog, existing, entities }, caseCandidates] = await Promise.all([

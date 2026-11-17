@@ -12,6 +12,7 @@ import type { MemoryRecord, MemoryWrite, MemoryWriteResult } from '../memory.js'
 import { renderMemoryUri } from '../memory.js';
 import type { MemoryLinkService } from '../memory-link.js';
 import type { ExistingExperience } from './archive-prompt.js';
+import { validateExperienceEvidence } from './experience-evidence.js';
 
 import type { StepContext } from '../commit/pipeline.js';
 import { evidenceTime } from '../memory/evidence.js';
@@ -25,18 +26,15 @@ const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SINGLE_LINE_PATTERN = /^\S(?:.*\S)?$/u;
 
 /**
- * 产品预算，不是质量阈值。
- *
- * `claimChars` 与 L0 的 256 字符预算同量级；单条明细上限和列表条数用于限制提示词
- * 体积、模型输出成本与复核负担。通过这些边界不代表经验正确，语义仍由证据、
- * 适用范围和人工复核保证。
+ * 产品预算，不是质量阈值：`claimChars` 与 L0 的 256 字符预算同量级；单条明细
+ * 上限和列表条数只限制提示词体积、输出成本与复核负担，不保证经验正确。
  */
 const EXPERIENCE_BUDGET = {
   claimChars: 240,
   detailChars: 500,
-  appliesWhen: 4,
-  procedure: 8,
-  limitations: 6,
+  situation: 4,
+  approach: 8,
+  reflection: 6,
   evidence: 6,
 } as const;
 
@@ -50,6 +48,17 @@ const detailSchema = z
   .min(1)
   .max(EXPERIENCE_BUDGET.detailChars)
   .regex(SINGLE_LINE_PATTERN);
+const messageIdSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(SINGLE_LINE_PATTERN);
+
+const experienceEvidenceSchema = z.strictObject({
+  messageId: messageIdSchema,
+  role: z.enum(['user', 'assistant']),
+  quote: detailSchema,
+});
 
 export interface ExperiencePorts {
   /** active 与 pending 记录；用于发现同 topic 冲突，防止未读正文被覆盖。 */
@@ -92,32 +101,37 @@ export interface ExperienceCatalogEntry {
 /**
  * 一条归纳结果。
  *
- * `topic` 是 identity（决定文件路径）。其余字段形成一份可机械校验的经验契约；
- * 服务端再确定性地渲染 `content`，不能由模型把偏好、单题步骤和泛泛说明混成一段。
+ * `topic` 是 identity（决定文件路径）。`claim` 是能独立检索的结论；
+ * `situation / approach / reflection` 分别承担适用边界、做法、结果与未决限制。
+ * `evidence` 只接受本次输入消息的 ID、角色和逐字片段，服务端写前核对。
+ * 服务端再确定性地渲染 `content`，不能让模型把引用伪装成实测。
  * schema 在这里而不是领域层，是因为 `generateJson` 需要把形状翻译成供应商的
  * JSON Schema；领域类型不带运行时信息（与 `memory-extract.ts` 同一份理由）。
  */
-export const experienceSchema = z.object({
+export const experienceSchema = z.strictObject({
   entityPages: z.array(z.number().int().positive()).optional(),
   category: z.string().min(1).max(80).regex(SLUG_PATTERN),
   topic: z.string().min(1).max(120).regex(SLUG_PATTERN),
   claim: claimSchema,
-  appliesWhen: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.appliesWhen),
-  procedure: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.procedure),
-  limitations: z.array(detailSchema).max(EXPERIENCE_BUDGET.limitations),
-  evidence: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.evidence),
+  situation: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.situation),
+  approach: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.approach),
+  reflection: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.reflection),
+  evidence: z.array(experienceEvidenceSchema).min(1).max(EXPERIENCE_BUDGET.evidence),
 });
 
 /** 结构化归纳结果 → 给人阅读、供检索的 Markdown 正文。 */
 export function renderExperienceContent(experience: z.infer<typeof experienceSchema>): string {
   const bullets = (items: readonly string[]) => items.map((item) => `- ${item}`).join('\n');
-  const steps = experience.procedure.map((item, index) => `${index + 1}. ${item}`).join('\n');
+  const steps = experience.approach.map((item, index) => `${index + 1}. ${item}`).join('\n');
   return [
+    // L0 摘要取正文第一行；这里必须先是完整、可独立理解的结论。
     experience.claim,
-    `## 适用条件\n\n${bullets(experience.appliesWhen)}`,
+    `## 适用情境\n\n${bullets(experience.situation)}`,
     `## 做法\n\n${steps}`,
-    ...(experience.limitations.length === 0 ? [] : [`## 限制\n\n${bullets(experience.limitations)}`]),
-    `## 证据\n\n${bullets(experience.evidence)}`,
+    `## 反思与边界\n\n${bullets(experience.reflection)}`,
+    `## 原文证据\n\n${experience.evidence
+      .map(({ messageId, role, quote }) => `- ${role} \`${messageId}\`：${quote}`)
+      .join('\n')}`,
   ].join('\n\n');
 }
 
@@ -179,6 +193,8 @@ export async function writeExperiences(
   assertWrite?: (uri: Uri) => Promise<boolean>,
 ): Promise<MemoryWriteResult[]> {
   const { memory, links, logger } = ports;
+  // 先验证整批，再开始写入，避免第二条引用错误时第一条已经落盘。
+  validateExperienceEvidence(experiences, context.messages);
   const written: MemoryWriteResult[] = [];
   const seen = new Set<string>();
   for (const experience of experiences) {

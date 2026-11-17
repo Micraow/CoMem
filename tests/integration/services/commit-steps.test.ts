@@ -1416,16 +1416,26 @@ describe('DreamerStep', () => {
         category: 'tooling',
         topic: 'monorepo-migration',
         claim: '在启用了 RAID 的笔记本上安装该仓库前，先关闭 RAID。',
-        appliesWhen: ['目标机器启用了 RAID，且安装步骤会访问同一组磁盘。'],
-        procedure: ['关闭 RAID。', '继续安装。'],
-        limitations: [],
-        evidence: ['关闭 RAID 后，本次安装完成。'],
+        situation: ['目标机器启用了 RAID，且安装步骤会访问同一组磁盘。'],
+        approach: ['关闭 RAID。', '继续安装。'],
+        reflection: ['本次安装完成。'],
+        evidence: [{
+          messageId: 'raid-1',
+          role: 'user',
+          quote: '这台机器启用了 RAID，安装需要访问同一组磁盘。',
+        }],
         entityPages: [1],
       },
     ] } }]);
-    await createDistillStep(provider, { memory: searched }).run(createContext());
+    await createDistillStep(provider, { memory: searched }).run(createContext({
+      messages: [message('raid-1', 'user', [{
+        kind: 'text',
+        text: '这台机器启用了 RAID，安装需要访问同一组磁盘。',
+      }])],
+    }));
     expect((await memory.read(Uri.parse(EXPERIENCE)))?.entityRefs).toEqual([record?.entityId]);
     expect(provider.calls[0]?.prompt.messages[0]?.content).toContain('ThinkBook');
+    expect(provider.calls[0]?.prompt.messages[0]?.content).toContain('messageId: raid-1');
   });
 
   it('归纳结果整段落盘：pending + sources 指向归档 + derived_from 链接', async () => {
@@ -1437,10 +1447,14 @@ describe('DreamerStep', () => {
               category: 'workflow',
               topic: 'monorepo-migration',
               claim: '迁移前先固定依赖版本，再修改构建脚本。',
-              appliesWhen: ['仓库依赖版本尚未锁定。'],
-              procedure: ['固定依赖版本。', '修改构建脚本。', '运行完整构建。'],
-              limitations: ['只覆盖本次验证过的构建环境。'],
-              evidence: ['固定版本后，本次迁移构建通过。'],
+              situation: ['仓库依赖版本尚未锁定。'],
+              approach: ['固定依赖版本。', '修改构建脚本。', '运行完整构建。'],
+              reflection: ['固定版本后构建通过。', '只覆盖本次验证过的构建环境。'],
+              evidence: [{
+                messageId: 'm1',
+                role: 'user',
+                quote: '这次迁移踩了依赖版本的坑。',
+              }],
             },
           ],
         },
@@ -1462,7 +1476,10 @@ describe('DreamerStep', () => {
     expect(raw).toContain('category: workflow');
     expect(raw).toContain('summary: 迁移前先固定依赖版本，再修改构建脚本。');
     expect(raw).toContain('迁移前先固定依赖版本，再修改构建脚本。');
+    expect(raw).toContain('## 适用情境');
     expect(raw).toContain('## 做法');
+    expect(raw).toContain('## 反思与边界');
+    expect(raw).toContain('user `m1`：这次迁移踩了依赖版本的坑。');
 
     const record = await memory.read(Uri.parse(EXPERIENCE));
     expect(record?.status).toBe('pending');
@@ -1484,6 +1501,8 @@ describe('DreamerStep', () => {
     const prompt = provider.calls[0]?.prompt;
     expect(prompt?.system).toContain('归纳');
     expect(prompt?.messages[0]?.content).toContain('这次迁移踩了依赖版本的坑。');
+    expect(prompt?.messages[0]?.content).toContain('messageId: m1');
+    expect(prompt?.messages[0]?.content).toContain('角色：user');
     expect(prompt?.messages[0]?.content).not.toContain('page_id');
   });
 
@@ -1506,10 +1525,14 @@ describe('DreamerStep', () => {
               category: 'workflow',
               topic: 'monorepo-migration',
               claim: '合并后的结论：先固定依赖版本，再升级。',
-              appliesWhen: ['需要迁移或升级尚未锁定版本的仓库。'],
-              procedure: ['固定依赖版本。', '升级依赖。', '运行完整构建。'],
-              limitations: [],
-              evidence: ['本次固定版本后升级成功。'],
+              situation: ['需要迁移或升级尚未锁定版本的仓库。'],
+              approach: ['固定依赖版本。', '升级依赖。', '运行完整构建。'],
+              reflection: ['本次固定版本后升级成功。'],
+              evidence: [{
+                messageId: 'source',
+                role: 'user',
+                quote: '我偏好 TypeScript。',
+              }],
             },
           ],
         },
@@ -1540,10 +1563,14 @@ describe('DreamerStep', () => {
         category: 'workflow',
         topic: 'monorepo-migration',
         claim: '迁移前先固定依赖版本。',
-        appliesWhen: ['仓库需要迁移。'],
-        procedure: ['固定依赖版本。'],
-        limitations: [],
-        evidence: ['本次迁移成功。'],
+        situation: ['仓库需要迁移。'],
+        approach: ['固定依赖版本。'],
+        reflection: ['本次迁移成功。'],
+        evidence: [{
+          messageId: 'source',
+          role: 'user',
+          quote: '我偏好 TypeScript。',
+        }],
       }] },
     };
 
@@ -1567,10 +1594,14 @@ describe('DreamerStep', () => {
         category: 'workflow',
         topic: 'monorepo-migration',
         claim: '迁移前先固定依赖版本。',
-        appliesWhen: ['仓库需要迁移。'],
-        procedure: ['固定依赖版本。'],
-        limitations: [],
-        evidence: ['本次迁移成功。'],
+        situation: ['仓库需要迁移。'],
+        approach: ['固定依赖版本。'],
+        reflection: ['本次迁移成功。'],
+        evidence: [{
+          messageId: 'source',
+          role: 'user',
+          quote: '我偏好 TypeScript。',
+        }],
       }] },
     };
 
@@ -1605,9 +1636,9 @@ describe('DreamerStep', () => {
         category: 'workflow',
         topic: 'monorepo-migration',
         claim: '迁移前先固定依赖版本。',
-        appliesWhen: ['仓库需要迁移。'],
-        procedure: ['固定依赖版本。'],
-        limitations: [],
+        situation: ['仓库需要迁移。'],
+        approach: ['固定依赖版本。'],
+        reflection: ['本次迁移成功。'],
         evidence: [],
       }] },
     };
@@ -1622,6 +1653,71 @@ describe('DreamerStep', () => {
     expect(provider.remaining).toBe(0);
   });
 
+  it('证据 ID、角色或 quote 与输入不精确匹配时拒绝整批写入', async () => {
+    const base = {
+      category: 'workflow',
+      topic: 'monorepo-migration',
+      claim: '迁移前先固定依赖版本。',
+      situation: ['仓库需要迁移。'],
+      approach: ['固定依赖版本。'],
+      reflection: ['本次迁移成功。'],
+      evidence: [{
+        messageId: 'source',
+        role: 'user',
+        quote: '我偏好 TypeScript。',
+      }],
+    };
+    const cases = [
+      {
+        reason: 'message_not_in_input',
+        evidence: { ...base.evidence[0], messageId: 'missing' },
+      },
+      {
+        reason: 'role_mismatch',
+        evidence: { ...base.evidence[0], role: 'assistant' },
+      },
+      {
+        reason: 'quote_not_exact',
+        evidence: { ...base.evidence[0], quote: '我偏好 JavaScript。' },
+      },
+    ] as const;
+
+    for (const item of cases) {
+      const provider = new FakeLlmProvider([{
+        json: { experiences: [{ ...base, evidence: [item.evidence] }] },
+      }]);
+      await expect(
+        createDistillStep(provider).run(createContext()),
+      ).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        details: { reason: item.reason },
+      });
+      expect(provider.remaining).toBe(0);
+    }
+
+    const mixedProvider = new FakeLlmProvider([{
+      json: {
+        experiences: [
+          base,
+          {
+            ...base,
+            topic: 'another-topic',
+            evidence: [{ ...base.evidence[0], messageId: 'missing' }],
+          },
+        ],
+      },
+    }]);
+    await expect(
+      createDistillStep(mixedProvider).run(createContext()),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { reason: 'message_not_in_input' },
+    });
+
+    expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual([]);
+  });
+
   it('links 写失败不让归档失败：记忆已落盘', async () => {
     const errorSpy = vi.spyOn(logger, 'error');
     const links: ExperiencePorts['links'] = {
@@ -1634,10 +1730,14 @@ describe('DreamerStep', () => {
         category: 'workflow',
         topic: 'monorepo-migration',
         claim: '照常落盘。',
-        appliesWhen: ['写入关联边失败时。'],
-        procedure: ['继续写入记忆。'],
-        limitations: [],
-        evidence: ['本次记忆已落盘。'],
+        situation: ['写入关联边失败时。'],
+        approach: ['继续写入记忆。'],
+        reflection: ['本次记忆已落盘。'],
+        evidence: [{
+          messageId: 'source',
+          role: 'user',
+          quote: '我偏好 TypeScript。',
+        }],
       }] } },
     ]);
 

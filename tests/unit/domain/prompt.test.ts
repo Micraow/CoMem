@@ -25,8 +25,12 @@ import {
   type PromptId,
 } from '../../../src/domain/prompt.js';
 import { BUILTIN_MEMORY_TYPES } from '../../../src/domain/memory-types/index.js';
+import type { SessionMessage } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
-import { buildExperiencePrompt } from '../../../src/services/dreamer/archive-prompt.js';
+import {
+  buildExperiencePrompt,
+  experiencePromptMessages,
+} from '../../../src/services/dreamer/archive-prompt.js';
 import { buildExtractPrompt } from '../../../src/services/prompts/extract.js';
 import { buildRewriteUserPrompt, REWRITE_SYSTEM_PROMPT } from '../../../src/services/prompts/rewrite.js';
 import { buildSummaryPrompt } from '../../../src/services/prompts/summarize.js';
@@ -394,7 +398,11 @@ describe('经验归纳提示词（experience-*）', () => {
           validUntil: null,
         },
       ],
-      messages: [{ role: 'user', content: '这次迁移踩了依赖版本的坑。' }],
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: '这次迁移踩了依赖版本的坑。',
+      }],
       existing: [
         {
           category: 'workflow',
@@ -425,6 +433,42 @@ describe('经验归纳提示词（experience-*）', () => {
     expect(user).toContain('只在目录里，没有预取正文。');
     expect(user).toContain('### answer-style');
     expect(user).toContain('回答先给结论。');
+    expect(user).toContain('messageId: user-1');
+    expect(user).toContain('角色：user');
     expect(user).toContain('这次迁移踩了依赖版本的坑。');
+  });
+
+  it('经验输入保留原始消息 ID 和角色，并隐藏工具部分与非对话角色', () => {
+    const messages: readonly SessionMessage[] = [
+      {
+        id: 'user-1',
+        role: 'user',
+        parts: [
+          { kind: 'text', text: '用户观察。' },
+          { kind: 'tool_result', toolUseId: 'tool-1', output: '秘密工具输出', isError: false },
+        ],
+        createdAt: '2026-11-10T00:00:00.000Z',
+        turn: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: '助手结论。' }],
+        createdAt: '2026-11-10T00:00:01.000Z',
+        turn: 2,
+      },
+      {
+        id: 'tool-1',
+        role: 'tool',
+        parts: [{ kind: 'text', text: '工具消息。' }],
+        createdAt: '2026-11-10T00:00:02.000Z',
+        turn: 3,
+      },
+    ];
+
+    expect(experiencePromptMessages(messages)).toEqual([
+      { id: 'user-1', role: 'user', content: '用户观察。' },
+      { id: 'assistant-1', role: 'assistant', content: '助手结论。' },
+    ]);
   });
 });

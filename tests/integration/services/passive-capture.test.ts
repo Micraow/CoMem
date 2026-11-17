@@ -46,6 +46,7 @@ import { rememberTool } from '../../../src/api/mcp/tools/remember.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import { runIngest } from '../../../src/commands/ingest.js';
 import type { IngestReport } from '../../../src/services/ingest.js';
+import { stableMessageId } from '../../../src/services/session/messages.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { startFakeLlmHttp, type FakeLlmHttp } from '../../helpers/fake-llm-http.js';
 import { NullLogger } from '../../helpers/null-logger.js';
@@ -93,15 +94,23 @@ const EXTRACTED_EVENT = {
   ],
 } as const;
 
-/** 本机真实网关的经验归纳结果。`experiences` 默认 `reviewRequired`，写入即 pending。 */
+/** 当前可信来源契约下的经验夹具；引用归档中最后一条助手消息。 */
 const DISTILLED_EXPERIENCE = {
   category: 'workflow',
   topic: 'payment-gateway-retry-design',
   claim: '支付重试统一放在网关层实现，业务层透传同一个幂等键。',
-  appliesWhen: ['支付模块需要统一重试策略。'],
-  procedure: ['网关设置 3 秒超时和 2 次重试。', '业务层生成并透传幂等键。'],
-  limitations: ['只覆盖本次验证的支付网关配置。'],
-  evidence: ['本次重构后的网关重试复用同一幂等键。'],
+  situation: ['支付模块需要统一重试策略。'],
+  approach: ['网关设置 3 秒超时和 2 次重试。', '业务层生成并透传幂等键。'],
+  reflection: ['本次只覆盖会话中提出的支付网关配置。'],
+  evidence: [{
+    messageId: stableMessageId(
+      'assistant',
+      CONVERSATION[3]?.text ?? '',
+      '2026-11-10T02:00:04.000Z',
+    ),
+    role: 'assistant',
+    quote: '好的，网关层超时 3 秒、重试 2 次，幂等键由业务层透传。',
+  }],
 } as const;
 
 /** 对照用例的抽取结果：显式「记住」时期望落到画像。 */

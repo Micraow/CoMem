@@ -19,9 +19,39 @@
  */
 
 import type { LlmMessage, LlmPrompt } from '../../domain/llm.js';
+import { renderMessageText, type SessionMessage } from '../../domain/session.js';
 
 import { promptRenderer } from '../prompts/registry.js';
 import type { ExperienceCatalogEntry } from './experience.js';
+
+/**
+ * 经验归纳唯一允许引用的会话消息。
+ *
+ * 角色限制在 user / assistant：工具输出不进入经验归纳，也不能被模型包装成
+ * “已实测”。ID 原样登录提示词，写入时用同一视图核对引用。
+ */
+export interface ExperiencePromptMessage extends LlmMessage {
+  readonly id: string;
+  readonly role: 'user' | 'assistant';
+}
+
+/** 归档消息 → 经验归纳输入。工具内容与非对话角色整体丢弃。 */
+export function experiencePromptMessages(
+  messages: readonly SessionMessage[],
+): readonly ExperiencePromptMessage[] {
+  return messages.flatMap((message): ExperiencePromptMessage[] => {
+    if (message.role !== 'user' && message.role !== 'assistant') return [];
+    const content = renderMessageText({
+      ...message,
+      parts: message.parts.filter(
+        (part) => part.kind !== 'tool_use' && part.kind !== 'tool_result',
+      ),
+    });
+    return content.trim() === ''
+      ? []
+      : [{ id: message.id, role: message.role, content }];
+  });
+}
 
 /**
  * 一条已经在盘上的经验。
@@ -45,8 +75,8 @@ export interface ExperiencePromptInput {
    */
   readonly catalog: readonly ExperienceCatalogEntry[];
   readonly entities?: readonly { readonly pageId: number; readonly content: string; readonly aliases: unknown }[];
-  /** 会话消息（§10.1 的 part 渲染成文本后的结果）。 */
-  readonly messages: readonly LlmMessage[];
+  /** 会话消息；ID 是 evidence 引用的唯一稳定地址。 */
+  readonly messages: readonly ExperiencePromptMessage[];
   /** 预取到的已有经验（§11.3）。 */
   readonly existing: readonly ExistingExperience[];
   /** 已生效的明确偏好；经验归纳只能引用它们，不能把同一事实再写成经验。 */
@@ -115,12 +145,17 @@ function renderPreferences(preferences: ExperiencePromptInput['preferences']): s
   return preferences.map((preference) => `### ${String(preference.topic)}\n${preference.content}`).join('\n\n');
 }
 
-/** 会话记录。角色用 Markdown 小标题标出，模型能分清谁说的。 */
-function renderMessages(messages: readonly LlmMessage[]): string {
+/** 会话记录。ID 与角色是 evidence 的服务端校验锚点。 */
+function renderMessages(messages: readonly ExperiencePromptMessage[]): string {
   if (messages.length === 0) {
     return '（这次没有会话消息。）';
   }
-  return messages.map((message) => `### ${message.role}\n${message.content}`).join('\n\n');
+  return messages.map((message) => [
+    `### messageId: ${message.id}`,
+    `角色：${message.role}`,
+    '正文：',
+    message.content,
+  ].join('\n')).join('\n\n');
 }
 
 export function buildExperiencePrompt(input: ExperiencePromptInput): LlmPrompt {

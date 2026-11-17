@@ -163,29 +163,6 @@ function skip(
   return { memoryType, reasonCode, reason };
 }
 
-/**
- * 丢掉工具输出（§10.1 的「用户记忆抽取默认隐藏工具输出」）。
- *
- * 按 part 类型丢弃：`tool_result.output` 是多行文本，按行丢弃只会留下它的一部分，
- * 而「一部分工具输出」照样泄漏，还看不出被截断过。整个 part 消失才是「隐藏」。
- */
-export function stripToolParts(messages: readonly SessionMessage[]): LlmPrompt['messages'] {
-  const result: { readonly role: 'system' | 'user' | 'assistant'; readonly content: string }[] =
-    [];
-  for (const message of messages) {
-    const parts = message.parts.filter(
-      (part) => part.kind !== 'tool_use' && part.kind !== 'tool_result',
-    );
-    const content = renderMessageText({ ...message, parts });
-    if (content.trim() === '') {
-      continue;
-    }
-    // `LlmMessage` 没有 `tool` 角色：工具消息的正文属于「用户侧输入」，按 user 渲染。
-    result.push({ role: message.role === 'tool' ? 'user' : message.role, content });
-  }
-  return result;
-}
-
 /** 用本批用户原话预取相关记忆；没有用户原话时使用受控环境观察。 */
 export function retrievalQuery(messages: readonly SessionMessage[]): string {
   const query = messages.filter((message) => message.role === 'user')
