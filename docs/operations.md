@@ -88,7 +88,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `retrieval.queryFilters` | `[]` | sed 风格正则数组，作用在 prompt 上，产物才是查询（§8.8）。Hook 侧也有默认五条 |
 | `retrieval.assembly.maxTokens` | `1600` | 注入模型的 token 预算（§8.6）。模型上下文窄时调小 |
 | `retrieval.assembly.dedupTurns` | `3` | 同一会话这么多轮内投过的 URI 不再投（召回账本，§8.7） |
-| `retrieval.assembly.quotaPreset` | `coding` | `chat`（记忆 5 / 资料 3 / 技能 2）或 `coding`（3 / 5 / 2） |
+| `retrieval.assembly.quotaPreset` | `coding` | `chat`（记忆 5 / 资料 3 / 会话 2）或 `coding`（3 / 5 / 2） |
 | `retrieval.assembly.compressRecall` | `true` | 配置了生成模型时，自动召回默认把当前问题、近期对话尾部和候选正文交给 `providers.llm.default` 提炼；没有配置模型、超时或结果无效时，注入原条目。设 `COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL=false` 可关闭 |
 | `retrieval.assembly.compressRecallTimeoutMs` | `5000` | 压缩阶段等待上限（毫秒，1–30000）；实际等待不会超出当前请求剩余预算，普通 Hook 默认 8 秒，可在客户端用 `recallTimeoutMs` 调整。可用 `COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL_TIMEOUT_MS` 或控制台「检索 → 召回压缩超时（毫秒）」设置，保存后重启（§8.6） |
 | `session.autoCommit.enabled` | `true` | 自动提交开关。关掉就只能手动 `commit` |

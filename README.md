@@ -276,7 +276,7 @@ L0 从 L1 正文提取，两层不会互相矛盾。**摘要是目录级的**，
 
 1. **硬预算**：开局 `profileBudgetTokens` 默认 2000，同时受服务端 `assembly.maxTokens`（默认 1600）约束；最终渲染文本也检查字节上限。
 2. **分层配额**：自动上下文最多五条记忆；画像正文与相关知识共享预算，长材料可退到概览或摘要，只剩 URI 时不注入。
-3. **降级顺序固定**：服务端按完整条目裁剪；Hook 合并技能目录后再次检查宿主上限，先删除技能，再删除个人背景块。极小预算下可以不注入。
+3. **降级顺序固定**：服务端按完整条目裁剪；Hook 再次检查宿主上限，超出时删除个人背景块。极小预算下可以不注入。
 
 产生侧的画像也有上限：**正文超过 1000 字就整份重写收敛**（只留当前成立的事实，不摞历史），保证注入成本是一个可控的常数，而不是随会话数线性增长。
 </details>
@@ -396,7 +396,7 @@ dsh plugin --profile web add "link:$PWD/integrations/dsh-plugin"
 dsh --profile web --dump-config | grep -A6 'id: comem'
 ```
 
-插件使用 `agent/created` 注入个人背景与技能目录、`agent/pre-step` 逐轮召回、`tools/post-execute` 采集工具调用与结果、`session/event` 的 `turn/end` 采集并提交消息、`agent/disposed` 尽力补交；`compaction/start` 重置召回上下文并提示压缩前不会额外归档。
+插件使用 `agent/created` 注入个人背景、`agent/pre-step` 逐轮召回、`tools/post-execute` 采集工具调用与结果、`session/event` 的 `turn/end` 采集并提交消息、`agent/disposed` 尽力补交；`compaction/start` 重置召回上下文并提示压缩前不会额外归档。
 
 **已知限制**：DSH 没有可在压缩前拦截的接缝，压缩前不会额外归档；没有真正的
 `SessionEnd`，进程被强杀时最后半轮会丢；子 agent 会话不注入
