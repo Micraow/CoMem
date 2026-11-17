@@ -72,10 +72,16 @@ describe('宿主清单', () => {
     expect(DOC_LINKS.dsh).toContain('#dsh');
   });
 
-  it('文档链接始终指向 master，而不是开发分支', () => {
-    for (const url of [...Object.values(DOC_LINKS), HERMES_OPENUI_DOC]) {
+  it('CoMem 文档链接指向 master', () => {
+    for (const url of Object.values(DOC_LINKS)) {
       expect(url).toMatch(/^https:\/\/github\.com\/Micraow\/CoMem\/blob\/master\//u);
     }
+  });
+
+  it('独立的 Hermes OpenUI 文档链接指向新仓库 main', () => {
+    expect(HERMES_OPENUI_DOC).toBe(
+      'https://github.com/Micraow/hermes-openui/blob/main/README.md',
+    );
   });
 });
 

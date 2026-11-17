@@ -11,6 +11,6 @@
 | 开外部记忆 | 在新会话中问相同问题。CoMem 收到 `/context` 成功请求，Hermes 回答了正确代号。Hermes 消息表没有 CoMem MCP 调用。 |
 | 同一聊天使用完整 OpenUI | 更新到 55 组件的构建，在成功召回后的同一新会话，请 Comate DeepSeek V4.1 Flash 用 `/hermes-openui:openui` 生成「约定／核对」卡片。Playwright 在第二次 `message.complete` 前已看到卡片，最终卡片包含正确代号。 |
 
-复跑可按 [Hermes 快速上手](../../hermes-quickstart.md) 在两套隔离配置中做。先在启用配置里提供一个只有测试聊天里出现的随机识别码，检查归档和任务；如有待复核经验，先通过。两套配置都开新会话，发送相同的问题，检查回复及服务端请求记录。测试原始日志与页面截图位于本地忽略目录 `local/hermes-provider-acceptance/`。
+复跑可按 [Hermes 快速上手](../../hermes-quickstart.md) 在两套隔离配置中做。先在启用配置里提供一个只有测试聊天里出现的随机识别码，检查归档和任务；如有待复核经验，先通过。两套配置都开新会话，发送相同的问题，检查回复及服务端请求记录。OpenUI 已迁移到独立仓库，安装见 [Micraow/hermes-openui](https://github.com/Micraow/hermes-openui/blob/main/docs/INSTALL.md#install-hermes-openui)。测试原始日志与页面截图位于本地忽略目录 `local/hermes-provider-acceptance/`。
 
-本次只证明一个受控问题的自动召回、使用和 OpenUI 联合输出。没有测量长期收益、召回覆盖率或真实长会话中的误抓率。远程认证、更换账号及网络失败的队列行为有 Provider 测试；上述真机链路使用回环实例。完整组件、状态和配置查询的覆盖见 [OpenUI 移植说明](../../../integrations/hermes-openui/docs/PARITY.md)。
+本次只证明一个受控问题的自动召回、使用和当时 OpenUI 版本的联合输出。没有测量长期收益、召回覆盖率或真实长会话中的误抓率。远程认证、更换账号及网络失败的队列行为有 Provider 测试；上述真机链路使用回环实例。完整组件、状态和配置查询的覆盖见 [OpenUI 移植说明](https://github.com/Micraow/hermes-openui/blob/main/docs/PARITY.md)。仓库迁移不重新验收上述结果。

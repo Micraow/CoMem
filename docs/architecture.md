@@ -80,7 +80,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 **为什么不是 npm 多包。** workspace 包需要各自的 `package.json`、`tsconfig` references、build 顺序、`exports` 映射、类型产物路径。七周的项目里这些是纯成本，换来的是「不可能有人误 import」，而一条 lint 规则能做到同样的事。包边界留给真正需要独立发布的东西——目前一个都没有。
 
-**为什么 `web/` 单独。** Nuxt 有自己的构建链和 `tsconfig`，塞不进后端。`integrations/hermes-openui/` 则用独立构建产出 Hermes 插件，不参与服务端或控制台构建。
+**为什么 `web/` 单独。** Nuxt 有自己的构建链和 `tsconfig`，塞不进后端。可选的 [Hermes OpenUI](https://github.com/Micraow/hermes-openui) 展示插件已拆到独立仓库，使用自己的构建链，不属于 CoMem 的服务端、控制台或 Hook 构建。
 
 **为什么 `domain` 和 `services` 分开。** `domain` 是规则，`services` 是流程。ACL 求值是规则（给定树和身份，算出一个布尔值，纯函数）；提交管线是流程（有 IO、有重试、有后台恢复）。混在一起，ACL 就只能在跑通整条管线之后才能测。
 
@@ -3288,7 +3288,7 @@ MCP 挂在 `/mcp`，Streamable HTTP 传输。
 
 16 个 MCP 工具里没有会话相关操作，真实会话靠 **Hook 插件**在宿主侧自动采集。这是独立于服务端的交付物，放在 `integrations/`，装进宿主。
 
-同仓维护的 [`integrations/hermes-openui/`](../integrations/hermes-openui/README.md) 是 Hermes 的可选展示插件。它在 Hermes 聊天记录中消费宿主流事件，渲染 OpenUI Lang；卡片状态保存在宿主浏览器，显式按钮回到原会话。插件不读写 CoMem 记忆，不改变 Hook、HTTP 或 MCP 契约。
+独立维护的 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 是 Hermes 的可选展示插件，不属于 CoMem 的 Hook、HTTP 或 MCP 接入。它在 Hermes 聊天记录中消费宿主流事件，渲染 OpenUI Lang；卡片状态保存在宿主浏览器，显式按钮回到原会话。插件不读写 CoMem 记忆，也不改变 CoMem 的接口契约。
 
 ### 15.1 为什么不在 MCP 工具里做
 
@@ -3413,7 +3413,7 @@ DSH 这种没有 hook 面的宿主走自己的插件包，不塞进 `hosts/`。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
 
-**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP，显示插件 `integrations/hermes-openui/` 独立启用。见[快速上手](hermes-quickstart.md)。
+**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP。可选展示插件 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 在独立仓库维护并单独安装。见[快速上手](hermes-quickstart.md)。
 
 ### 15.8 目录
 

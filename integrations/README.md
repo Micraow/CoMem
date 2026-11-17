@@ -9,7 +9,7 @@
 MCP 工具本身不经过这里：CoMem 在 `/mcp` 暴露 Streamable HTTP，能直连的宿主直接配
 URL 即可。分工与配置片段见下面的「[MCP 接入](#mcp-接入)」。
 
-Hermes 聊天里的流式界面由 [Hermes OpenUI](hermes-openui/README.md) 独立构建。它是展示插件，和下文的 CoMem 记忆 Hook 分开安装。
+Hermes 聊天里的流式界面由独立仓库中的 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 提供。它是可选展示插件，和下文的 CoMem 记忆 Hook 分开安装；自动记忆仍由 `integrations/hermes-memory/` 接入。
 
 ```
 integrations/
@@ -55,7 +55,7 @@ integrations/
 
 ## 安装
 
-**Hermes 用户：** 从 [Hermes 快速上手](../docs/hermes-quickstart.md) 开始。Hermes 通过独立 Memory Provider 自动接入；主动查找、历史导入用 MCP，OpenUI 是可选的网页显示插件。
+**Hermes 用户：** 从 [Hermes 快速上手](../docs/hermes-quickstart.md) 开始。Hermes 通过独立 Memory Provider 自动接入；主动查找、历史导入用 MCP。网页显示界面由独立仓库的可选 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 提供。
 
 ```bash
 node integrations/cli.mjs install --host claude-code

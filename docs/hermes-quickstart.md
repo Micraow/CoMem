@@ -1,6 +1,6 @@
 # 在 Hermes 使用 CoMem
 
-CoMem 主线包含 Hermes Memory Provider、MCP 接入说明和 OpenUI 展示插件。联调使用独立的工作树、数据根、端口和 Hermes 配置目录。
+CoMem 主线包含 Hermes Memory Provider 和 MCP 接入说明。可选的 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 展示插件在独立仓库维护，单独安装。联调使用独立的工作树、数据根、端口和 Hermes 配置目录。
 
 从主线创建独立工作树。`--detach` 让其他工作树仍可签出该分支：
 
@@ -50,13 +50,13 @@ hermes memory status
 
 向导生成 MCP 配置时，在页面的「服务地址」中填写后端地址 `http://127.0.0.1:1934`；生成的 MCP URL 应为 `http://127.0.0.1:1934/mcp`。不要填写控制台地址 `3082`，它只提供页面和 `/api` 开发代理。
 
-需要导入旧对话时，在向导里复制 MCP 配置，合并到**隔离的** Hermes `config.yaml` 的 `mcp_servers`。认证开启时按[认证配置](../integrations/hermes-openui/README.md#use-comem-from-the-same-chat)设置 `COMEM_TOKEN`。然后在 CoMem「会话与任务 → 导入历史会话」复制提示词，交给能够读取文件的 Agent；看完预览再确认。导入和自动捕获使用同一数据根，因此联调时只提供合成材料或明确授权的工作副本。格式与去重边界见[导入说明](ingest-prompt.md)。
+需要导入旧对话时，在向导里复制 MCP 配置，合并到**隔离的** Hermes `config.yaml` 的 `mcp_servers`。认证开启时按 [Memory Provider 认证说明](../integrations/hermes-memory/README.md#install)设置 `COMEM_TOKEN`。然后在 CoMem「会话与任务 → 导入历史会话」复制提示词，交给能够读取文件的 Agent；看完预览再确认。导入和自动捕获使用同一数据根，因此联调时只提供合成材料或明确授权的工作副本。格式与去重边界见[导入说明](ingest-prompt.md)。
 
-## 4. 在 Hermes Webapp 聊天和验证 OpenUI
+## 4. 可选：在 Hermes Webapp 使用 OpenUI
 
 聊天、工具执行和对结果继续追问都在官方 Hermes Webapp 中完成。CoMem 控制台只负责接入设置和事后查看。
 
-按 [OpenUI 安装说明](../integrations/hermes-openui/README.md) 在当前 `HERMES_HOME` 的插件目录构建、链接并启用插件，然后在官方 Hermes Webapp 的 **Capabilities → Plugins** 中启用 **hermes-openui**。在已有会话里发送：
+OpenUI 是独立维护的可选展示插件，不随 CoMem 仓库安装，也不参与自动记忆。需要交互式卡片时，按 [Hermes OpenUI 安装说明](https://github.com/Micraow/hermes-openui/blob/main/docs/INSTALL.md#install-hermes-openui) 在独立仓库完成构建和链接，然后在官方 Hermes Webapp 的 **Capabilities → Plugins** 中启用 **hermes-openui**。在已有会话里发送：
 
 ```text
 /hermes-openui:openui 把我上面的读书约定做成一个可切换「约定 / 核对」的卡片

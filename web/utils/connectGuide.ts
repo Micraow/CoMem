@@ -25,8 +25,11 @@
 
 import { formatMonthDayTime } from './format'
 
-/** 仓库的 GitHub 地址。文档锚点用它拼；仓库搬家时这里是唯一要改的地方。 */
+/** CoMem 仓库的 GitHub 地址。文档锚点用它拼；仓库搬家时这里是唯一要改的地方。 */
 const REPO_BLOB_BASE = 'https://github.com/Micraow/CoMem/blob/master'
+
+/** Hermes OpenUI 在独立仓库维护，文档链接使用该仓库的默认分支。 */
+const HERMES_OPENUI_REPO_BLOB_BASE = 'https://github.com/Micraow/hermes-openui/blob/main'
 
 /** 文档锚点。页面只链接，不复述文档正文（AGENTS.md §11）。 */
 export const DOC_LINKS = {
@@ -36,7 +39,7 @@ export const DOC_LINKS = {
   hermes: `${REPO_BLOB_BASE}/integrations/hermes-memory/README.md#install`,
 } as const
 
-export const HERMES_OPENUI_DOC = `${REPO_BLOB_BASE}/integrations/hermes-openui/README.md`
+export const HERMES_OPENUI_DOC = `${HERMES_OPENUI_REPO_BLOB_BASE}/README.md`
 
 /**
  * 服务端默认地址。
