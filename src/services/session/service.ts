@@ -28,6 +28,10 @@ import type {
   SessionServiceOptions,
 } from './ports.js';
 import {
+  bindProject,
+  type SessionProjectBinding,
+} from './project.js';
+import {
   DEFAULT_ARCHIVE_DIRECTORY_NAME,
   historyUri,
   messagesUri,
@@ -91,7 +95,7 @@ export class SessionService {
   async create(
     scopeUri: Uri,
     principals: readonly string[],
-    options: { readonly sessionId?: string } = {},
+    options: { readonly sessionId?: string; readonly projectId?: string } = {},
   ): Promise<Uri> {
     return createSession(this.#ports(), scopeUri, principals, options);
   }
@@ -101,15 +105,16 @@ export class SessionService {
     scopeUri: Uri,
     sessionId: string,
     principals: readonly string[],
+    options: { readonly projectId?: string } = {},
   ): Promise<Uri> {
-    return ensureSession(this.#ports(), scopeUri, sessionId, principals);
+    return ensureSession(this.#ports(), scopeUri, sessionId, principals, options);
   }
 
   /** 读会话（含消息）。不存在抛 `NOT_FOUND`。 */
   async load(sessionUri: Uri): Promise<Session> {
     const meta = await requireSession(this.#meta, sessionUri);
     const messages = await readMessages(this.#store, messagesUri(sessionUri));
-    return {
+    const session: Session = {
       id: meta.sessionId,
       uri: sessionUri,
       status: meta.status,
@@ -121,6 +126,9 @@ export class SessionService {
       pendingTokens: sumTokens(messages),
       lastCommitAt: meta.lastCommitAt,
     };
+    return meta.projectId === undefined
+      ? session
+      : { ...session, projectId: meta.projectId };
   }
 
   /**
@@ -182,15 +190,29 @@ export class SessionService {
   async addMessage(
     sessionUri: Uri,
     message: Omit<SessionMessage, 'turn'>,
+    options: { readonly projectId?: string } = {},
   ): Promise<SessionMessage> {
-    return appendMessage(this.#ports(), sessionUri, message);
+    return appendMessage(this.#ports(), sessionUri, message, options);
   }
 
   /** 阶段一（§10.1）。**全程持 `TREE` 锁**；六步顺序见 `archive.ts`。 */
-  async commitPhase1(sessionUri: Uri): Promise<CommitPhase1Result> {
+  async commitPhase1(
+    sessionUri: Uri,
+    options: { readonly projectId?: string } = {},
+  ): Promise<CommitPhase1Result> {
     return this.#locks.withLock(sessionUri, 'tree', () =>
-      commitPhase1(this.#archivePorts(), sessionUri),
+      commitPhase1(this.#archivePorts(), sessionUri, options.projectId),
     );
+  }
+
+  /** 首次为 legacy 会话绑定项目；只改 `.meta.json`，不读写消息正文。 */
+  async bindProject(sessionUri: Uri, projectId: string): Promise<SessionProjectBinding> {
+    return bindProject(this.#ports(), sessionUri, projectId);
+  }
+
+  /** 读取原始会话元数据，供自动召回避免加载整段消息。 */
+  async readSessionMeta(sessionUri: Uri) {
+    return this.#meta.readSession(sessionUri);
   }
 
   /** 阶段二的状态查询（`.meta.json` 的 `stepsDone`）。归档不存在返回 `null`。 */

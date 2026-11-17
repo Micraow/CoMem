@@ -94,6 +94,8 @@ export interface SkippedCommitStep {
 /** `archive_NNN/.meta.json` 的形状（§6.6）。 */
 export interface ArchiveMeta {
   readonly archiveId: string;
+  /** 阶段一冻结的项目 ID；旧归档没有绑定时缺省。 */
+  readonly projectId?: string;
   readonly phase1: ArchivePhase1;
   /** 已完成的步骤，按完成顺序 */
   readonly stepsDone: readonly CommitStepName[];
@@ -120,6 +122,8 @@ export interface ArchiveTaskPayload {
   readonly sessionUri: string;
   readonly archiveUri: string;
   readonly archiveId: string;
+  /** 与归档元数据同源，后台任务只使用这个冻结值。 */
+  readonly projectId?: string;
 }
 
 /**

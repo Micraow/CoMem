@@ -102,6 +102,8 @@ export interface SessionMessage {
 export interface Session {
   readonly id: string;
   readonly uri: Uri;
+  /** 自动识别并持久化的项目 ID；旧会话没有绑定时缺省。 */
+  readonly projectId?: string;
   readonly status: SessionStatus;
   readonly messages: readonly SessionMessage[];
   /** 未提交的消息数 */
@@ -125,6 +127,8 @@ export interface SessionMeta {
   /** 作用域根标识（`comem://user/alice` 的 `alice`），§6.6 叫 `userId` */
   readonly userId: string;
   readonly status: SessionStatus;
+  /** 项目只收窄记忆写入 scope；会话目录和原文始终留在个人根。 */
+  readonly projectId?: string;
   readonly createdAt: string;
   readonly commitCount: number;
   readonly lastCommitAt: string | null;

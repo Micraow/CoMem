@@ -58,6 +58,7 @@ import { getMemoryType } from '../../../domain/memory-types/index.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
 import type { OperationFailureReason } from '../../../domain/merge-op.js';
 import { applyOperations, suppressConflicts } from '../../../domain/merge-op.js';
+import { memoryScope } from '../../../domain/project.js';
 import { Uri } from '../../../domain/uri.js';
 
 import type { MemoryWrite, MemoryWriteResult } from '../../memory.js';
@@ -212,7 +213,10 @@ export class MemoryMergeStep extends CommitStep {
 
       let write: MemoryWriteResult;
       try {
-        write = await this.#memory.upsertMemory(context.scopeUri, schema, {
+        write = await this.#memory.upsertMemory(
+          memoryScope(schema.type, context.scopeUri, context.projectScopeUri),
+          schema,
+          {
           structure: new Map(extracted.structures ?? []).get(uriString),
           uri,
           // 溯源由服务端确定（W97）：来源是本次归档，不是模型编的出处。
@@ -251,7 +255,8 @@ export class MemoryMergeStep extends CommitStep {
             }
             return result.value;
           },
-        });
+          },
+        );
       } catch (error) {
         const failure = ComemError.from(error);
         if (failure.details?.['reason'] === 'stale_evidence' || failure.details?.['reason'] === 'forgotten_evidence') {

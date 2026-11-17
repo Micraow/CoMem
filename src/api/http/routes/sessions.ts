@@ -14,6 +14,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { ComemError, invalidArgument } from '../../../domain/errors.js';
+import { normalizeProjectId } from '../../../domain/project.js';
 import type { Session, SessionMessage, SessionStatus } from '../../../domain/session.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
@@ -25,7 +26,7 @@ import {
 } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
-import { parseMessage, scopeFrom, sessionUriOf } from './sessions-request.js';
+import { parseMessage, scopeFrom, scopeOfSubject, sessionUriOf } from './sessions-request.js';
 
 /** §12.1：read = 1、write = 3。 */
 const READ = 1;
@@ -39,6 +40,7 @@ const DEFAULT_LIST_LIMIT = 100;
 interface SerializedSession {
   readonly id: string;
   readonly uri: string;
+  readonly projectId?: string;
   readonly status: SessionStatus;
   readonly messageCount: number;
   readonly pendingTokens: number;
@@ -49,6 +51,13 @@ interface SerializedSession {
 /** `POST /sessions` 的响应体：只回新建会话的 URI。 */
 interface SessionCreateResponse {
   readonly uri: string;
+  readonly projectId?: string;
+}
+
+interface SessionProjectResponse {
+  readonly uri: string;
+  readonly projectId: string;
+  readonly projectScopeUri: string;
 }
 
 /** `POST /sessions/{id}/messages` 的响应体：追加后的消息与条数。 */
@@ -73,7 +82,7 @@ interface SessionListResponse {
 }
 
 function serializeSession(session: Session): SerializedSession {
-  return {
+  const serialized: SerializedSession = {
     id: session.id,
     uri: session.uri.toString(),
     status: session.status,
@@ -82,6 +91,76 @@ function serializeSession(session: Session): SerializedSession {
     lastCommitAt: session.lastCommitAt,
     messages: session.messages,
   };
+  return session.projectId === undefined
+    ? serialized
+    : { ...serialized, projectId: session.projectId };
+}
+
+function registerProjectBindingRoute(
+  app: FastifyInstance,
+  session: HttpRouteServices['session'],
+  authorizer: HttpRouteServices['authorizer'],
+): void {
+  app.post<{ Params: { id: string }; Body: unknown }>('/:id/project', async (request) => {
+    const body = requireRecord(request.body, 'sessions/project');
+    const context = requestContextOf(request);
+    const scope = scopeFrom(body, context.subject);
+    const sessionUri = sessionUriOf(scope, request.params.id);
+    await authorizer.assert(sessionUri, WRITE, context.principals);
+    const rawProjectId = body['projectId'];
+    if (typeof rawProjectId !== 'string') {
+      throw invalidArgument('projectId 必须是字符串。', {
+        field: 'projectId',
+        value: rawProjectId,
+      });
+    }
+    const bound = await session.bindProject(sessionUri, rawProjectId);
+    return ok<SessionProjectResponse>({
+      uri: bound.sessionUri.toString(),
+      projectId: bound.projectId,
+      projectScopeUri: bound.projectScopeUri.toString(),
+    });
+  });
+}
+
+function registerSessionMessagesRoute(
+  app: FastifyInstance,
+  session: HttpRouteServices['session'],
+  authorizer: HttpRouteServices['authorizer'],
+  observability: HttpRouteServices['observability'],
+): void {
+  app.post<{ Params: { id: string }; Body: unknown }>('/:id/messages', async (request) => {
+    const body = requireRecord(request.body, 'sessions/messages');
+    const context = requestContextOf(request);
+    const scope = scopeFrom(body, context.subject);
+    const rawProjectId = optionalString(body, 'projectId');
+    const projectId =
+      rawProjectId === undefined ? undefined : normalizeProjectId(rawProjectId);
+    const sessionUri = sessionUriOf(scope, request.params.id);
+    await authorizer.assert(sessionUri, WRITE, context.principals);
+    const rawMessages = body['messages'];
+    if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
+      throw invalidArgument('messages 必须是非空数组。', { field: 'messages' });
+    }
+    const appended = await observability.phase('capture', async () => {
+      const messages: SessionMessage[] = [];
+      for (const rawMessage of rawMessages) {
+        messages.push(
+          await session.addMessage(
+            sessionUri,
+            parseMessage(requireRecord(rawMessage, 'messages[]')),
+            { projectId },
+          ),
+        );
+      }
+      return messages;
+    });
+    return ok<SessionMessagesResponse>({
+      uri: sessionUri.toString(),
+      messages: appended,
+      count: appended.length,
+    });
+  });
 }
 
 export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup {
@@ -94,8 +173,19 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
         const body = requireRecord(request.body, 'sessions/create');
         const context = requestContextOf(request);
         const scope = scopeFrom(body, context.subject);
+        const personalScope = scopeOfSubject(context.subject);
+        if (!scope.equals(personalScope)) {
+          throw invalidArgument('新建设话只能使用当前身份的个人根。', {
+            field: 'scopeUri',
+            scopeUri: body['scopeUri'],
+            personalScopeUri: personalScope.toString(),
+          });
+        }
         await authorizer.assert(scope, WRITE, context.principals);
         const sessionId = optionalString(body, 'sessionId');
+        const rawProjectId = optionalString(body, 'projectId');
+        const projectId =
+          rawProjectId === undefined ? undefined : normalizeProjectId(rawProjectId);
         // 已存在返回 409（`ALREADY_EXISTS` → §19 的状态表）：`create` 只创建，
         // 不重置已有会话的消息。Hook 的 `PostToolUse` / `Stop` 按「409 即复用」
         // 实现——它们收到 200 就会以为刚建出一个空会话。
@@ -104,52 +194,29 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
           context.principals,
           sessionId === undefined ? {} : { sessionId },
         );
-        return ok<SessionCreateResponse>({ uri: uri.toString() });
-      });
-
-      app.post<{ Params: { id: string }; Body: unknown }>('/:id/messages', async (request) => {
-        const body = requireRecord(request.body, 'sessions/messages');
-        const context = requestContextOf(request);
-        const scope = scopeFrom(body, context.subject);
-        const sessionUri = sessionUriOf(scope, request.params.id);
-        await authorizer.assert(sessionUri, WRITE, context.principals);
-
-        // **批量形状是规范形状。** 采集侧（Hook 插件）一次可能补投多条消息，
-        // 逐条发 HTTP 会让「游标确认」变成 N 次往返，而游标一旦在中间失败就会
-        // 重投已确认的部分。数组长度为 1 是它的退化形式，不再单独支持单对象。
-        const rawMessages = body['messages'];
-        if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
-          throw invalidArgument('messages 必须是非空数组。', { field: 'messages' });
+        if (projectId !== undefined) {
+          await session.bindProject(uri, projectId);
         }
-        // §17.2 的 `capture`：`Stop` 在 hook 里只写 worker 载荷并 spawn，**真正落盘
-        // 的是这个端点**。边界包住逐条 `addMessage`，授权与参数解析不算——它们是
-        // 未归因间隙。
-        const appended = await observability.phase('capture', async () => {
-          const messages: SessionMessage[] = [];
-          for (const rawMessage of rawMessages) {
-            messages.push(
-              await session.addMessage(
-                sessionUri,
-                parseMessage(requireRecord(rawMessage, 'messages[]')),
-              ),
-            );
-          }
-          return messages;
-        });
-        return ok<SessionMessagesResponse>({
-          uri: sessionUri.toString(),
-          messages: appended,
-          count: appended.length,
-        });
+        const response: SessionCreateResponse = { uri: uri.toString() };
+        return projectId === undefined
+          ? ok<SessionCreateResponse>(response)
+          : ok<SessionCreateResponse>({ ...response, projectId });
       });
+
+      registerProjectBindingRoute(app, session, authorizer);
+
+      registerSessionMessagesRoute(app, session, authorizer, observability);
 
       app.post<{ Params: { id: string }; Body: unknown }>('/:id/commit', async (request) => {
         const body = requireRecord(request.body, 'sessions/commit');
         const context = requestContextOf(request);
         const scope = scopeFrom(body, context.subject);
+        const rawProjectId = optionalString(body, 'projectId');
+        const projectId =
+          rawProjectId === undefined ? undefined : normalizeProjectId(rawProjectId);
         const sessionUri = sessionUriOf(scope, request.params.id);
         await authorizer.assert(sessionUri, WRITE, context.principals);
-        const result = await session.commitPhase1(sessionUri);
+        const result = await session.commitPhase1(sessionUri, { projectId });
         return ok<SessionCommitResponse>({
           sessionUri: sessionUri.toString(),
           taskId: result.taskId,

@@ -45,6 +45,7 @@ import { ComemError } from '../../domain/errors.js';
 import { fsErrorCode } from '../../domain/errors.js';
 import { isRecord } from '../../domain/guards.js';
 import type { Logger } from '../../domain/log.js';
+import { normalizeProjectId } from '../../domain/project.js';
 import type { SessionMeta } from '../../domain/session.js';
 import { isSessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
@@ -232,6 +233,7 @@ function toArchiveMeta(value: unknown, uri: Uri): ArchiveMeta {
     throw corruptMetadata(uri, '不是对象');
   }
   const archiveId = value['archiveId'];
+  const projectId = readProjectId(value['projectId'], uri);
   const rawDone = value['stepsDone'];
   const stepsDone = Array.isArray(rawDone) ? rawDone.map((step: unknown) => step === 'experience_distill' ? 'dreamer' : step) : rawDone;
   const rawSkipped = value['skippedSteps'] ?? [];
@@ -250,13 +252,14 @@ function toArchiveMeta(value: unknown, uri: Uri): ArchiveMeta {
   if (taskId !== null && typeof taskId !== 'string') {
     throw corruptMetadata(uri, 'taskId 不是字符串或 null');
   }
-  return {
+  const archiveMeta: ArchiveMeta = {
     archiveId,
     phase1: toArchivePhase1(value['phase1'], uri),
     stepsDone,
     skippedSteps,
     taskId,
   };
+  return projectId === undefined ? archiveMeta : { ...archiveMeta, projectId };
 }
 
 function toSessionMeta(value: unknown, uri: Uri): SessionMeta {
@@ -266,6 +269,7 @@ function toSessionMeta(value: unknown, uri: Uri): SessionMeta {
   const sessionId = value['sessionId'];
   const userId = value['userId'];
   const status = value['status'];
+  const projectId = readProjectId(value['projectId'], uri);
   const createdAt = value['createdAt'];
   const commitCount = value['commitCount'];
   const lastCommitAt = value['lastCommitAt'];
@@ -288,7 +292,30 @@ function toSessionMeta(value: unknown, uri: Uri): SessionMeta {
   if (typeof pendingTokens !== 'number' || !Number.isFinite(pendingTokens)) {
     throw corruptMetadata(uri, 'pendingTokens 不是数字');
   }
-  return { sessionId, userId, status, createdAt, commitCount, lastCommitAt, pendingTokens };
+  const sessionMeta: SessionMeta = {
+    sessionId,
+    userId,
+    status,
+    createdAt,
+    commitCount,
+    lastCommitAt,
+    pendingTokens,
+  };
+  return projectId === undefined ? sessionMeta : { ...sessionMeta, projectId };
+}
+
+function readProjectId(value: unknown, uri: Uri): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw corruptMetadata(uri, 'projectId 不是字符串');
+  }
+  try {
+    return normalizeProjectId(value);
+  } catch {
+    throw corruptMetadata(uri, 'projectId 不是合法的单路径段');
+  }
 }
 
 export class MetadataFileStore {

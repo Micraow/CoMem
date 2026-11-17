@@ -18,7 +18,7 @@ import { Uri } from '../../../domain/uri.js';
 import { optionalString, requireRecord } from '../server.js';
 
 /** `user:alice` → `comem://user/alice`。 */
-function scopeOfSubject(subject: string): Uri {
+export function scopeOfSubject(subject: string): Uri {
   return userScopeOf(subject, '会话身份');
 }
 

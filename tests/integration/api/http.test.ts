@@ -942,6 +942,80 @@ describe('会话与任务', () => {
     expect(loaded['messageCount']).toBe(2);
     expect((loaded['messages'] as unknown[]).length).toBe(2);
   });
+
+  it('会话项目自动绑定可由列表读取，legacy 会话可幂等补绑且不可切换', async () => {
+    const created = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        payload: { sessionId: 'sess_project', projectId: 'comem' },
+      }),
+    );
+    expect(created).toMatchObject({
+      uri: `${ROOT}/sessions/sess_project`,
+      projectId: 'comem',
+    });
+
+    await inject({
+      method: 'POST',
+      url: '/api/v1/sessions/sess_project/messages',
+      payload: {
+        messages: [{ role: 'user', parts: [{ kind: 'text', text: '项目消息' }] }],
+      },
+    });
+
+    const loaded = resultOf(
+      await inject({ method: 'GET', url: '/api/v1/sessions/sess_project' }),
+    );
+    expect(loaded['projectId']).toBe('comem');
+    const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/sessions' }));
+    expect(
+      (listed['sessions'] as Record<string, unknown>[]).find(
+        (session) => session['id'] === 'sess_project',
+      )?.['projectId'],
+    ).toBe('comem');
+
+    const legacy = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        payload: { sessionId: 'sess_legacy' },
+      }),
+    );
+    expect(legacy).not.toHaveProperty('projectId');
+    const bound = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/sessions/sess_legacy/project',
+        payload: { projectId: 'comem' },
+      }),
+    );
+    expect(bound).toMatchObject({
+      uri: `${ROOT}/sessions/sess_legacy`,
+      projectId: 'comem',
+      projectScopeUri: `${ROOT}/projects/comem`,
+    });
+    const again = await inject({
+      method: 'POST',
+      url: '/api/v1/sessions/sess_legacy/project',
+      payload: { projectId: 'other' },
+    });
+    expect(again.statusCode).toBe(409);
+    expect(errorOf(again)['code']).toBe('CONFLICT');
+  });
+
+  it('新建设话拒绝非个人根，旧路径读取不受影响', async () => {
+    const response = await inject({
+      method: 'POST',
+      url: '/api/v1/sessions',
+      payload: {
+        sessionId: 'sess_wrong_scope',
+        scopeUri: `${ROOT}/projects/comem`,
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response)['code']).toBe('INVALID_ARGUMENT');
+  });
 });
 
 describe('ACL 与记忆复核', () => {

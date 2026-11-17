@@ -117,6 +117,29 @@ const EXTRACT_RESPONSE: unknown = {
   ],
 };
 
+const PROJECT_EXTRACT_RESPONSE: unknown = {
+  operations: [
+    {
+      kind: 'upsert',
+      pageId: 100,
+      type: 'experiences',
+      identity: { topic: 'project-build' },
+      operations: [
+        { kind: 'replace', field: 'content', value: '项目构建使用 pnpm。' },
+      ],
+    },
+    {
+      kind: 'upsert',
+      pageId: 101,
+      type: 'preferences',
+      identity: { topic: 'code-style' },
+      operations: [
+        { kind: 'replace', field: 'content', value: '代码必须保持严格类型。' },
+      ],
+    },
+  ],
+};
+
 /**
  * 抽取步骤的模型输出：一条新建的 `events` 记忆（`addOnly`，§11.1）。
  *
@@ -271,6 +294,7 @@ function createRunner(
     ): CommitPipeline => {
       const deps = { store, metadata, logger, dataDir, onStepsChanged };
       const archiveArtifacts = createArchiveArtifacts(archiveUri, deps);
+      const ports = createArchivePorts(archiveUri, deps);
       return new CommitPipeline({
         steps: [
           new ArchiveSummaryStep({
@@ -296,7 +320,12 @@ function createRunner(
             invalidate: (uri) => summary.invalidate(uri),
           }),
         ],
-        ports: createArchivePorts(archiveUri, deps),
+        ports: {
+          ...ports,
+          prepareProjectScope: async (projectScopeUri) => {
+            await store.mkdir(projectScopeUri, { recursive: true });
+          },
+        },
         ...(options.stepAttempts === undefined ? {} : { stepAttempts: options.stepAttempts }),
         ...(options.phase === undefined ? undefined : { phase: options.phase }),
         logger,
@@ -439,6 +468,47 @@ describe('CommitRunner 端到端（§10.1 阶段二）', () => {
     expect(provider.calls).toHaveLength(2);
 
     await runner.stop();
+  });
+
+  it('项目会话按类型分流：项目内容进 projects，个人偏好留在个人根', async () => {
+    const sessionUri = await session.create(Uri.parse(SCOPE), AUTH_PRINCIPALS, {
+      sessionId: 'sess_project',
+      projectId: 'comem',
+    });
+    await session.addMessage(sessionUri, message('m1', '项目使用 pnpm，代码保持严格类型。'));
+
+    const committed = await session.commitPhase1(sessionUri);
+    expect((await metadata.readArchive(committed.archiveUri))?.projectId).toBe('comem');
+    expect(tasks.claimable()[0]?.payload).toMatchObject({
+      archiveId: ARCHIVE_ID,
+      projectId: 'comem',
+    });
+
+    const { runner } = createRunner([
+      { json: PROJECT_EXTRACT_RESPONSE },
+      { json: { experiences: [] } },
+    ]);
+    await runner.tick();
+
+    const projectExperience = Uri.parse(
+      `${SCOPE}/projects/comem/memories/experiences/project-build.md`,
+    );
+    const personalPreference = Uri.parse(
+      `${SCOPE}/memories/preferences/code-style.md`,
+    );
+    expect(await store.exists(projectExperience)).toBe(true);
+    expect(await store.exists(personalPreference)).toBe(true);
+    expect(
+      await store.exists(Uri.parse(`${SCOPE}/memories/experiences/project-build.md`)),
+    ).toBe(false);
+    expect(
+      await store.exists(
+        Uri.parse(`${SCOPE}/projects/comem/memories/preferences/code-style.md`),
+      ),
+    ).toBe(false);
+    expect(
+      await metadata.readArchive(committed.archiveUri),
+    ).toMatchObject({ stepsDone: [...ALL_STEPS] });
   });
 
   it('旧经验检查点重放幂等：重新入队后全部跳过，不重复写', async () => {

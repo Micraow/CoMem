@@ -193,6 +193,51 @@ describe('create / load', () => {
     expect(sessionUri.toString()).toBe(`${SCOPE_ROOT}/sessions/sess_manual`);
   });
 
+  it('projectId 落盘到会话元数据，原文 URI 仍在个人 sessions 下', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_project',
+      projectId: 'comem',
+    });
+    await service.addMessage(sessionUri, message('m1'));
+
+    expect(sessionUri.toString()).toBe(`${SCOPE_ROOT}/sessions/sess_project`);
+    expect((await service.load(sessionUri)).projectId).toBe('comem');
+    expect((await service.readSessionMeta(sessionUri))?.projectId).toBe('comem');
+    expect((await service.load(sessionUri)).messages.map((item) => item.id)).toEqual(['m1']);
+  });
+
+  it('legacy 会话首次绑定项目幂等，不覆盖消息；不同项目返回冲突', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_legacy',
+    });
+    await service.addMessage(sessionUri, message('m1'));
+
+    const first = await service.bindProject(sessionUri, 'comem');
+    const second = await service.bindProject(sessionUri, 'comem');
+    expect(first.projectScopeUri.toString()).toBe(`${SCOPE_ROOT}/projects/comem`);
+    expect(second.projectId).toBe('comem');
+    await expect(service.bindProject(sessionUri, 'other')).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+
+    const loaded = await service.load(sessionUri);
+    expect(loaded.projectId).toBe('comem');
+    expect(loaded.messages.map((item) => item.id)).toEqual(['m1']);
+  });
+
+  it('后续消息请求补绑 legacy 会话，同一次写入内完成冲突检查', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_message_bind',
+    });
+
+    await service.addMessage(sessionUri, message('m1'), { projectId: 'comem' });
+    expect((await service.load(sessionUri)).projectId).toBe('comem');
+    await expect(
+      service.addMessage(sessionUri, message('m2'), { projectId: 'other' }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await service.load(sessionUri)).messages.map((item) => item.id)).toEqual(['m1']);
+  });
+
   it('已存在的 sessionId 再 create 抛 ALREADY_EXISTS，消息原样保留', async () => {
     const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
       sessionId: 'sess_existing',
@@ -516,6 +561,22 @@ describe('commitPhase1', () => {
       archiveUri: result.archiveUri.toString(),
       archiveId: 'archive_001',
     });
+  });
+
+  it('阶段一将项目冻结进归档和任务，之后不能用不同项目重试', async () => {
+    const sessionUri = await service.create(Uri.parse(SCOPE_ROOT), AUTH_PRINCIPALS, {
+      sessionId: 'sess_project_commit',
+    });
+    await service.addMessage(sessionUri, message('m1'));
+
+    const result = await service.commitPhase1(sessionUri, { projectId: 'comem' });
+    expect((await service.readArchiveMeta(result.archiveUri))?.projectId).toBe('comem');
+    expect(tasks.claimable()[0]?.payload).toMatchObject({ projectId: 'comem' });
+
+    await expect(
+      service.commitPhase1(sessionUri, { projectId: 'other' }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await service.readArchiveMeta(result.archiveUri))?.projectId).toBe('comem');
   });
 
   it('归档文件是 JSONL：一行一条消息，不是 JSON 数组', async () => {

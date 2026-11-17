@@ -116,6 +116,40 @@ function caseRecord(path: string, content: string, source: Uri): MemoryRecord {
 }
 
 describe('Dreamer 经验上下文', () => {
+  it('经验与实体预取用项目 scope，明确偏好仍用个人根', async () => {
+    const project = Uri.parse(`${SCOPE}/projects/comem`);
+    const calls: string[] = [];
+    const port: ExperiencePorts = {
+      listCurrent: async (scope, schema) => {
+        calls.push(`list:${schema.type}:${scope.toString()}`);
+        return [];
+      },
+      memory: {
+        read: async () => null,
+        prefetch: async (scope, schema) => {
+          calls.push(`prefetch:${schema.type}:${scope.toString()}`);
+          return [];
+        },
+        upsertMemory: async () => {
+          throw new Error('本测试不写记忆。');
+        },
+      },
+      links: { addLinks: async () => ({ inserted: 0, merged: 0 }) },
+      logger: logger(),
+    };
+    const step = { ...context(), projectScopeUri: project };
+
+    await experienceContext(port, step, async () => true);
+    await explicitPreferenceContext(port, step, async () => true);
+
+    expect(calls).toEqual([
+      `list:experiences:${project.toString()}`,
+      `prefetch:experiences:${project.toString()}`,
+      `prefetch:entities:${project.toString()}`,
+      `list:preferences:${SCOPE.toString()}`,
+    ]);
+  });
+
   it('完整目录包含全部可见经验，正文候选仍只来自预取，并单独提供已有偏好', async () => {
     const alpha = record(
       'memories/experiences/alpha.md',

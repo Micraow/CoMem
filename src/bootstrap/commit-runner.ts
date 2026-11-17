@@ -36,6 +36,7 @@
 import type { TaskRow } from '../adapters/sqlite/task-repository.js';
 import type { ArchiveTaskPayload, CommitStepName } from '../domain/archive.js';
 import type { Logger } from '../domain/log.js';
+import { projectScopeOf } from '../domain/project.js';
 import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 import { Uri } from '../domain/uri.js';
 import type { CommitPipeline } from '../services/commit/pipeline.js';
@@ -211,6 +212,20 @@ export class CommitRunner {
       );
       return;
     }
+    let projectScopeUri: Uri | undefined;
+    if (payload.projectId !== undefined) {
+      try {
+        projectScopeUri = projectScopeOf(scopeUri, payload.projectId);
+      } catch (error) {
+        await this.#failTask(
+          task,
+          `任务载荷里的 projectId 不合法：${payload.projectId}（${
+            error instanceof Error ? error.message : String(error)
+          }）。`,
+        );
+        return;
+      }
+    }
 
     const promise = this.#tasks
       .run(task.id, async (context) => {
@@ -222,7 +237,11 @@ export class CommitRunner {
             void context.markStepDone(step);
           }
         });
-        await runWithCommitCallContext(payload.sessionUri, scopeUri, () => pipeline.run(archiveUri, scopeUri));
+        await runWithCommitCallContext(
+          payload.sessionUri,
+          scopeUri,
+          () => pipeline.run(archiveUri, scopeUri, projectScopeUri),
+        );
       })
       .catch((error: unknown) => {
         // `TaskService.run` 自己会捕获并写失败状态；走到这里是它崩了（认领后行消失
@@ -265,6 +284,7 @@ function readArchivePayload(payload: unknown): ArchiveTaskPayload | null {
   const sessionUri = record['sessionUri'];
   const archiveUri = record['archiveUri'];
   const archiveId = record['archiveId'];
+  const projectId = record['projectId'];
   if (
     typeof sessionUri !== 'string' ||
     typeof archiveUri !== 'string' ||
@@ -272,7 +292,15 @@ function readArchivePayload(payload: unknown): ArchiveTaskPayload | null {
   ) {
     return null;
   }
-  return { sessionUri, archiveUri, archiveId };
+  if (projectId !== undefined && typeof projectId !== 'string') {
+    return null;
+  }
+  const result: ArchiveTaskPayload = {
+    sessionUri,
+    archiveUri,
+    archiveId,
+  };
+  return projectId === undefined ? result : { ...result, projectId };
 }
 
 /**

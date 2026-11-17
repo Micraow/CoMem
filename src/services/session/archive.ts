@@ -21,6 +21,7 @@ import { listArchiveUris, recordArchivedMessages } from './archive-index.js';
 import { notifyNodeWritten } from './hooks.js';
 import { readMessages, serializeMessages, sumTokens } from './messages.js';
 import type { ArchivePorts, CommitPhase1Result } from './ports.js';
+import { ensureProjectBinding, projectBindingOf } from './project.js';
 import {
   ARCHIVE_DIRECTORY_PREFIX,
   ARCHIVE_SEQUENCE_DIGITS,
@@ -30,6 +31,13 @@ import {
   requireSession,
 } from './storage.js';
 
+function projectFields(projectId: string | undefined): { projectId?: string } {
+  if (projectId === undefined) {
+    return {};
+  }
+  return { projectId };
+}
+
 /**
  * 阶段一（§10.1）。**调用方必须已持有会话的 `TREE` 锁**。
  *
@@ -38,9 +46,40 @@ import {
 export async function commitPhase1(
   ports: ArchivePorts,
   sessionUri: Uri,
+  requestedProjectId?: string,
 ): Promise<CommitPhase1Result> {
+  const initialMeta = await requireSession(ports.meta, sessionUri);
   const historyUri = historyOf(sessionUri, ports.archiveDirectoryName);
   const interrupted = await findInterruptedArchive(ports, historyUri);
+  const interruptedMeta =
+    interrupted === null ? null : await ports.meta.readArchive(interrupted);
+  const frozenProjectId = interruptedMeta?.projectId;
+  const requestedProject =
+    requestedProjectId === undefined
+      ? undefined
+      : projectBindingOf(sessionUri, requestedProjectId).projectId;
+  if (
+    frozenProjectId !== undefined &&
+    requestedProject !== undefined &&
+    frozenProjectId !== requestedProject
+  ) {
+    throw new ComemError(
+      'CONFLICT',
+      `中断归档已冻结项目 ${frozenProjectId}，不能改为 ${requestedProject}。`,
+      {
+        uri: sessionUri.toString(),
+        archiveUri: interrupted?.toString(),
+        frozenProjectId,
+        projectId: requestedProject,
+      },
+    );
+  }
+  await ensureProjectBinding(
+    ports,
+    sessionUri,
+    initialMeta,
+    frozenProjectId ?? requestedProject,
+  );
   if (interrupted !== null) {
     if (await ports.store.exists(messagesUri(interrupted))) {
       return resumeArchive(ports, sessionUri, interrupted);
@@ -83,6 +122,7 @@ export async function commitPhase1(
   // 步骤 3：`.meta.json` 先写 `preparing`。到这里为止，归档消息已经完整落盘。
   const preparing: ArchiveMeta = {
     archiveId,
+    ...projectFields(session.projectId),
     phase1: {
       status: 'preparing',
       messagesSha256,
@@ -109,6 +149,7 @@ export async function commitPhase1(
     sessionUri: sessionUri.toString(),
     archiveUri: archiveUri.toString(),
     archiveId,
+    ...projectFields(session.projectId),
   } satisfies ArchiveTaskPayload);
   await ports.meta.writeArchive(archiveUri, { ...ready, taskId: task.id });
 
@@ -135,6 +176,12 @@ async function resumeArchive(
   archiveUri: Uri,
 ): Promise<CommitPhase1Result> {
   const archiveId = archiveUri.name;
+  const existing = await ports.meta.readArchive(archiveUri);
+  const sessionMeta = await requireSession(ports.meta, sessionUri);
+  const projectId = existing?.projectId ?? sessionMeta.projectId;
+  if (projectId !== undefined) {
+    await ensureProjectBinding(ports, sessionUri, sessionMeta, projectId);
+  }
   const archived = await readMessages(ports.store, messagesUri(archiveUri));
   const messagesSha256 = await sha256OfMessages(ports.store, messagesUri(archiveUri));
   recordArchivedMessages(ports, sessionUri, archiveUri, archived);
@@ -149,9 +196,9 @@ async function resumeArchive(
   await notifyNodeWritten(ports, messagesUri(sessionUri));
 
   // 步骤 5 重放。
-  const existing = await ports.meta.readArchive(archiveUri);
   const ready: ArchiveMeta = {
     archiveId,
+    ...projectFields(projectId),
     phase1: {
       status: 'ready',
       messagesSha256,
@@ -172,6 +219,7 @@ async function resumeArchive(
       sessionUri: sessionUri.toString(),
       archiveUri: archiveUri.toString(),
       archiveId,
+      ...projectFields(projectId),
     } satisfies ArchiveTaskPayload);
     taskId = task.id;
     await ports.meta.writeArchive(archiveUri, { ...ready, taskId });

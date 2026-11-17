@@ -333,6 +333,17 @@ describe('.meta.json 读写', () => {
     await expect(store.readArchive(ARCHIVE_URI)).resolves.toEqual(meta);
   });
 
+  it('会话与归档元数据往返 projectId', async () => {
+    const sessionMeta: SessionMeta = { ...SESSION_META, projectId: 'comem' };
+    const archiveMeta: ArchiveMeta = { ...ARCHIVE_META, projectId: 'comem' };
+
+    await store.writeSession(SESSION_URI, sessionMeta);
+    await store.writeArchive(ARCHIVE_URI, archiveMeta);
+
+    await expect(store.readSession(SESSION_URI)).resolves.toEqual(sessionMeta);
+    await expect(store.readArchive(ARCHIVE_URI)).resolves.toEqual(archiveMeta);
+  });
+
   it('不存在时返回 null（不是抛错）', async () => {
     await expect(store.readSession(SESSION_URI)).resolves.toBeNull();
     await expect(store.readArchive(ARCHIVE_URI)).resolves.toBeNull();
@@ -444,6 +455,15 @@ describe('.meta.json 读写', () => {
 
   it('pendingTokens 不是数字时抛 INTERNAL', async () => {
     await writeRawMeta(SESSION_URI, JSON.stringify({ ...SESSION_META, pendingTokens: '0' }));
+
+    await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
+  });
+
+  it('projectId 不是合法的单路径段时抛 INTERNAL', async () => {
+    await writeRawMeta(
+      SESSION_URI,
+      JSON.stringify({ ...SESSION_META, projectId: 'a/b' }),
+    );
 
     await expectCorruptMeta(() => store.readSession(SESSION_URI), SESSION_URI);
   });

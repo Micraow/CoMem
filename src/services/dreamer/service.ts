@@ -3,6 +3,7 @@ import { ComemError } from '../../domain/errors.js';
 import type { LlmPrompt } from '../../domain/llm.js';
 import { memoryContentOf } from '../../domain/memory-type.js';
 import { casesMemoryType } from '../../domain/memory-types/cases.js';
+import { memoryScope } from '../../domain/project.js';
 import { Uri } from '../../domain/uri.js';
 import type { StepContext } from '../commit/pipeline.js';
 import {
@@ -46,11 +47,16 @@ export class DreamerService {
     const messages = experiencePromptMessages(context.messages);
     if (messages.length === 0) return [];
     const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
+    const caseScope = memoryScope(
+      casesMemoryType.type,
+      context.scopeUri,
+      context.projectScopeUri,
+    );
     const [{ catalog, existing, entities }, currentCases, caseCandidates] = await Promise.all([
       experienceContext(archive, context, authorize),
-      archive.listCurrent(context.scopeUri, casesMemoryType),
+      archive.listCurrent(caseScope, casesMemoryType),
       archive.memory.prefetch(
-        context.scopeUri,
+        caseScope,
         casesMemoryType,
         retrievalQuery(context.messages),
         DEFAULT_PREFETCH_TOP_N,
@@ -139,7 +145,15 @@ export class DreamerService {
       entities,
       authorize,
     );
-    const inferred = await writeInferences(this.#deps, context.scopeUri, output.inferences ?? [], evidence, authorize, false, context.archiveUri);
+    const inferred = await writeInferences(
+      this.#deps,
+      context.scopeUri,
+      output.inferences ?? [],
+      evidence,
+      authorize,
+      false,
+      context.archiveUri,
+    );
     const writes = [...written, ...inferred.writes];
     this.#deps.logger.info('Dreamer 归档整理完成', { archive: context.archiveUri.toString(), written: writes.length });
     return writes;

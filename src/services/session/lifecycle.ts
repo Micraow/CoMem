@@ -6,6 +6,7 @@
  */
 
 import { ComemError } from '../../domain/errors.js';
+import { projectScopeOf } from '../../domain/project.js';
 import type { Uri } from '../../domain/uri.js';
 
 import { listArchiveUris } from './archive-index.js';
@@ -16,6 +17,7 @@ import {
   notifyNodeWritten,
 } from './hooks.js';
 import type { SessionPorts, SessionRemoval } from './ports.js';
+import { bindProject } from './project.js';
 import {
   countMessages,
   createSessionId,
@@ -46,10 +48,14 @@ export async function createSession(
   ports: SessionPorts,
   scopeUri: Uri,
   principals: readonly string[],
-  options: { readonly sessionId?: string } = {},
+  options: { readonly sessionId?: string; readonly projectId?: string } = {},
 ): Promise<Uri> {
   const sessionId = options.sessionId ?? createSessionId();
   const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
+  const projectId =
+    options.projectId === undefined
+      ? undefined
+      : projectScopeOf(scopeUri, options.projectId).name;
   // 锁文件是会话目录的同级文件，`sessions/` 必须先存在（`acquire` 不建父目录）。
   // 目录已存在时它是幂等的，所以放在检查之前不会改变「存在」的判据。
   await ports.store.mkdir(sessionUri, { recursive: true });
@@ -66,7 +72,7 @@ export async function createSession(
     // 先写消息文件再写元数据：崩溃时留下的是「有目录、没有元数据」，`load` 按
     // NOT_FOUND 处理；反过来会留下一个声称存在、但读不出消息的会话。
     await ports.store.writeText(messagesUri(sessionUri), '');
-    await ports.meta.writeSession(sessionUri, {
+    const createdMeta = {
       sessionId,
       userId: scopeUri.rootId,
       status: 'open',
@@ -74,7 +80,11 @@ export async function createSession(
       commitCount: 0,
       lastCommitAt: null,
       pendingTokens: 0,
-    });
+    } as const;
+    await ports.meta.writeSession(
+      sessionUri,
+      projectId === undefined ? createdMeta : { ...createdMeta, projectId },
+    );
     // 空文件也是节点：不写索引行 / 不物化权限，`list` / `tree` / `glob` 就看不到
     // live 会话的 `messages.jsonl`（见 `SessionServiceOptions.observer`）。
     await notifyNodeWritten(ports, messagesUri(sessionUri));
@@ -109,10 +119,14 @@ export async function ensureSession(
   scopeUri: Uri,
   sessionId: string,
   principals: readonly string[],
+  options: { readonly projectId?: string } = {},
 ): Promise<Uri> {
   const sessionUri = scopeUri.child(SESSIONS_DIRECTORY_NAME, sessionId);
   try {
     await requireSession(ports.meta, sessionUri);
+    if (options.projectId !== undefined) {
+      await bindProject(ports, sessionUri, options.projectId);
+    }
     return sessionUri;
   } catch (error) {
     if (!(error instanceof ComemError) || error.code !== 'NOT_FOUND') {
@@ -120,12 +134,18 @@ export async function ensureSession(
     }
   }
   try {
-    return await createSession(ports, scopeUri, principals, { sessionId });
+    return await createSession(ports, scopeUri, principals, {
+      sessionId,
+      projectId: options.projectId,
+    });
   } catch (error) {
     if (error instanceof ComemError && error.code === 'ALREADY_EXISTS') {
       // 并发 `ensure` 的胜者已经建好并写下了元数据。再读一次确认它还在
       // （例如期间被 `remove` 掉的话，NOT_FOUND 会原样抛给调用方）。
       await requireSession(ports.meta, sessionUri);
+      if (options.projectId !== undefined) {
+        await bindProject(ports, sessionUri, options.projectId);
+      }
       return sessionUri;
     }
     throw error;

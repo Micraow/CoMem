@@ -18,6 +18,7 @@ import {
   sumTokens,
 } from './messages.js';
 import type { SessionPorts } from './ports.js';
+import { ensureProjectBinding } from './project.js';
 import { messagesUri, requireSession } from './storage.js';
 
 /**
@@ -58,9 +59,17 @@ export async function appendMessage(
   ports: SessionPorts,
   sessionUri: Uri,
   message: Omit<SessionMessage, 'turn'>,
+  options: { readonly projectId?: string } = {},
 ): Promise<SessionMessage> {
   return ports.locks.withLock(sessionUri, 'tree', async () => {
-    const meta = await requireSession(ports.meta, sessionUri);
+    const initialMeta = await requireSession(ports.meta, sessionUri);
+    const binding = await ensureProjectBinding(
+      ports,
+      sessionUri,
+      initialMeta,
+      options.projectId,
+    );
+    const meta = binding.meta;
     if (message.id === '') {
       throw new ComemError('INVALID_ARGUMENT', '消息 ID 不能为空。', {
         uri: sessionUri.toString(),

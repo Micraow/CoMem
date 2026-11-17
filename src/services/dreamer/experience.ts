@@ -6,6 +6,7 @@ import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 import { experiencesMemoryType } from '../../domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../domain/memory-types/preferences.js';
 import { entitiesMemoryType } from '../../domain/memory-types/entities.js';
+import { memoryScope } from '../../domain/project.js';
 import { Uri } from '../../domain/uri.js';
 
 import type { MemoryRecord, MemoryWrite, MemoryWriteResult } from '../memory.js';
@@ -154,11 +155,21 @@ function toCatalogEntry(record: MemoryRecord): ExperienceCatalogEntry {
 
 export async function experienceContext(ports: ExperiencePorts, context: StepContext, canUse: (uri: Uri) => Promise<boolean>) {
   const query = retrievalQuery(context.messages);
+  const experienceScope = memoryScope(
+    experiencesMemoryType.type,
+    context.scopeUri,
+    context.projectScopeUri,
+  );
+  const entityScope = memoryScope(
+    entitiesMemoryType.type,
+    context.scopeUri,
+    context.projectScopeUri,
+  );
   const filter = async (records: readonly MemoryRecord[]) => (await Promise.all(records.map(async (record) => await canUse(record.uri) ? [record] : []))).flat();
   const [catalog, existing, entities] = await Promise.all([
-    ports.listCurrent(context.scopeUri, experiencesMemoryType),
-    ports.memory.prefetch(context.scopeUri, experiencesMemoryType, query, DEFAULT_PREFETCH_TOP_N),
-    ports.memory.prefetch(context.scopeUri, entitiesMemoryType, query, DEFAULT_PREFETCH_TOP_N),
+    ports.listCurrent(experienceScope, experiencesMemoryType),
+    ports.memory.prefetch(experienceScope, experiencesMemoryType, query, DEFAULT_PREFETCH_TOP_N),
+    ports.memory.prefetch(entityScope, entitiesMemoryType, query, DEFAULT_PREFETCH_TOP_N),
   ]);
   return {
     catalog: (await filter(catalog)).map(toCatalogEntry),
@@ -194,7 +205,15 @@ export async function writeExperiences(
 
     let uri: Uri;
     try {
-      uri = renderMemoryUri(context.scopeUri, experiencesMemoryType, { topic });
+      uri = renderMemoryUri(
+        memoryScope(
+          experiencesMemoryType.type,
+          context.scopeUri,
+          context.projectScopeUri,
+        ),
+        experiencesMemoryType,
+        { topic },
+      );
     } catch (error) {
       // `renderPath` 拒绝含 `/`、`..`、反斜杠或控制字符的 identity：模型给出的
       // topic 拼不出合法路径时跳过这一条，不让整个归档失败。
@@ -211,7 +230,14 @@ export async function writeExperiences(
     if (assertWrite !== undefined && !(await assertWrite(uri))) continue;
     const invalidEntity = experience.entityPages?.some((page) => entities[page - 1]?.entityId === undefined) ?? false;
     if (invalidEntity) logger.warn('经验引用了未提供的实体页面，保留原有引用。', { topic, entityPages: experience.entityPages });
-    const write = await memory.upsertMemory(context.scopeUri, experiencesMemoryType, {
+    const write = await memory.upsertMemory(
+      memoryScope(
+        experiencesMemoryType.type,
+        context.scopeUri,
+        context.projectScopeUri,
+      ),
+      experiencesMemoryType,
+      {
       uri,
       ...(experience.entityPages === undefined || invalidEntity ? {} :
         { structure: { entityRefs: experience.entityPages.flatMap((page) => entities[page - 1]?.entityId ?? []) } }),
@@ -226,7 +252,8 @@ export async function writeExperiences(
           context.archiveUri.toString(),
         ),
       }),
-    }).catch((error: unknown) => {
+      },
+    ).catch((error: unknown) => {
       const failure = ComemError.from(error);
       if (failure.details?.['reason'] !== 'stale_evidence' && failure.details?.['reason'] !== 'forgotten_evidence') throw error;
       logger.warn('材料未覆盖当前经验记忆', { uri: uri.toString(), code: failure.details['reason'] }); return null;

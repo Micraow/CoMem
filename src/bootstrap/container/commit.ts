@@ -8,6 +8,7 @@
 
 import { COMMIT_STEP_NAMES } from '../../domain/archive.js';
 import type { CommitStepName, CommitStepSkipReason } from '../../domain/archive.js';
+import type { Uri } from '../../domain/uri.js';
 import { CommitPipeline } from '../../services/commit/pipeline.js';
 import type { CommitPhase, CommitStep } from '../../services/commit/pipeline.js';
 import { ArchiveSummaryStep } from '../../services/commit/steps/archive-summary.js';
@@ -58,13 +59,20 @@ export function createCommitRunner(
   return new CommitRunner({
     tasks: task,
     createPipeline: (archiveUri, onStepsChanged) => {
-      const ports = createArchivePorts(archiveUri, {
+      const archivePorts = createArchivePorts(archiveUri, {
         store,
         metadata,
         logger,
         dataDir,
         onStepsChanged,
       });
+      const ports = {
+        ...archivePorts,
+        prepareProjectScope: async (projectScopeUri: Uri) => {
+          await store.mkdir(projectScopeUri, { recursive: true });
+          await retrieval.indexObserver.onNodeWritten(projectScopeUri, 'directory');
+        },
+      };
       const archiveArtifacts = createArchiveArtifacts(archiveUri, {
         store,
         metadata,

@@ -37,6 +37,7 @@ import { memoryContentOf } from '../../../domain/memory-type.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
 import { BUILTIN_MEMORY_TYPES, getMemoryType } from '../../../domain/memory-types/index.js';
 import type { BatchOperation, MergeOperation } from '../../../domain/merge-op.js';
+import { memoryScope } from '../../../domain/project.js';
 import { renderMessageText, type SessionMessage } from '../../../domain/session.js';
 import type { Uri } from '../../../domain/uri.js';
 
@@ -206,6 +207,7 @@ function localDate(now: Date): string {
 function resolveOperations(
   output: ExtractOutput,
   scopeUri: Uri,
+  projectScopeUri: Uri | undefined,
   pages: ReadonlyMap<number, ExtractPage>,
 ): MemoryExtractResult {
   const operations: BatchOperation[] = [];
@@ -247,7 +249,11 @@ function resolveOperations(
     let uri: Uri;
     try {
       assertMemoryIdentity(schema, operation.identity);
-      uri = renderMemoryUri(scopeUri, schema, operation.identity);
+      uri = renderMemoryUri(
+        memoryScope(schema.type, scopeUri, projectScopeUri),
+        schema,
+        operation.identity,
+      );
     } catch (error) {
       skipped.push(
         skip(
@@ -341,7 +347,19 @@ function resolveOperations(
     if (operation.pageId >= NEW_PAGE_ID_START) newPages.add(operation.pageId);
   }
 
-  return { operations, skipped, memoryTypes, structures: resolveEntityAssignments([...accepted, ...output.operations.filter((op) => op.kind === 'delete')], pages, memoryTypes, skipped, scopeUri) };
+  return {
+    operations,
+    skipped,
+    memoryTypes,
+    structures: resolveEntityAssignments(
+      [...accepted, ...output.operations.filter((op) => op.kind === 'delete')],
+      pages,
+      memoryTypes,
+      skipped,
+      scopeUri,
+      projectScopeUri,
+    ),
+  };
 }
 
 /** `state` 里的抽取结果；`memory_merge` 用它做类型收窄，不用断言。 */
@@ -421,7 +439,12 @@ export class MemoryExtractStep extends CommitStep {
     });
 
     const output = messages.length === 0 ? { operations: [] } : await this.#llm.generateJson(prompt, extractOutputSchema, { purpose: 'memory_extract' });
-    const resolved = resolveOperations(output, context.scopeUri, pages);
+    const resolved = resolveOperations(
+      output,
+      context.scopeUri,
+      context.projectScopeUri,
+      pages,
+    );
     const result = { ...resolved, structures: await reuseEntityIdentities(resolved.structures ?? [], this.#memory.read?.bind(this.#memory)) };
 
     // 先落盘再进 `state`：`state` 只是本次运行的缓存，重放时靠的是归档目录里的
@@ -470,7 +493,7 @@ export class MemoryExtractStep extends CommitStep {
 
     for (const schema of Object.values(BUILTIN_MEMORY_TYPES)) {
       const records = await this.#memory.prefetch(
-        context.scopeUri,
+        memoryScope(schema.type, context.scopeUri, context.projectScopeUri),
         schema,
         query,
         this.#prefetchTopN,

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { SkippedMemoryOperation } from '../../../domain/archive.js';
 import type { MemoryStructure } from '../../../domain/memory-structure.js';
 import { getMemoryType } from '../../../domain/memory-types/index.js';
+import { memoryScope } from '../../../domain/project.js';
 import type { Uri } from '../../../domain/uri.js';
 import { renderMemoryUri } from '../../memory/document.js';
 import { NEW_PAGE_ID_START, type ExtractPage } from '../../prompts/extract.js';
@@ -35,6 +36,7 @@ interface EntityOperation {
 export function resolveEntityAssignments(
   operations: readonly EntityOperation[], pages: ReadonlyMap<number, ExtractPage>,
   accepted: ReadonlyMap<string, string>, skipped: SkippedMemoryOperation[], scope: Uri,
+  projectScope?: Uri,
 ): readonly (readonly [string, MemoryStructure])[] {
   const targets = new Map<number, { uri: string; type: string; id?: string }>();
   const structures = new Map<string, MemoryStructure>();
@@ -47,7 +49,13 @@ export function resolveEntityAssignments(
     const schema = getMemoryType(op.type);
     if (schema === undefined) continue;
     let uri: string;
-    try { uri = renderMemoryUri(scope, schema, op.identity).toString(); } catch { continue; }
+    try {
+      uri = renderMemoryUri(
+        memoryScope(schema.type, scope, projectScope),
+        schema,
+        op.identity,
+      ).toString();
+    } catch { continue; }
     if (accepted.get(uri) !== op.type || deleted.has(op.pageId)) continue;
     const existing = targets.get(op.pageId);
     if (op.pageId < NEW_PAGE_ID_START && existing?.uri !== uri) continue;

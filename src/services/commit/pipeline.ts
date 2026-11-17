@@ -63,12 +63,15 @@ export interface StepContextPorts {
   readonly latestArchiveOverview: () => Promise<string | null>;
   /** 写 `archive_NNN/.done`。只有 `run` 在全部步骤成功后调用。 */
   readonly writeDone: () => Promise<void>;
+  /** 首次项目写入前建立目录并物化权限；无项目时不会调用。 */
+  readonly prepareProjectScope?: (scopeUri: Uri) => Promise<void>;
   readonly logger: Logger;
 }
 
 export interface StepContext {
   readonly archiveUri: Uri;
   readonly scopeUri: Uri;
+  readonly projectScopeUri?: Uri;
   readonly messages: readonly SessionMessage[];
   readonly meta: ArchiveMeta;
   readonly latestArchiveOverview: string | null;
@@ -183,12 +186,28 @@ export class CommitPipeline {
     this.#phase = options.phase ?? IDENTITY_PHASE;
   }
 
-  async run(archiveUri: Uri, scopeUri: Uri): Promise<void> {
+  async run(archiveUri: Uri, scopeUri: Uri, projectScopeUri?: Uri): Promise<void> {
     const [messages, initialMeta, latestArchiveOverview] = await Promise.all([
       this.#ports.readMessages(),
       this.#ports.readArchiveMeta(),
       this.#ports.latestArchiveOverview(),
     ]);
+    const archivedProjectId = initialMeta.projectId ?? null;
+    const taskProjectId = projectScopeUri?.name ?? null;
+    if (archivedProjectId !== taskProjectId) {
+      throw new ComemError(
+        'INVALID_ARGUMENT',
+        '归档元数据与任务载荷的 projectId 不一致。',
+        {
+          archive: archiveUri.toString(),
+          archiveProjectId: archivedProjectId,
+          taskProjectId,
+        },
+      );
+    }
+    if (projectScopeUri !== undefined) {
+      await this.#ports.prepareProjectScope?.(projectScopeUri);
+    }
 
     let meta = initialMeta;
     const state = new Map<string, unknown>();
@@ -226,6 +245,7 @@ export class CommitPipeline {
       const context: StepContext = {
         archiveUri,
         scopeUri,
+        projectScopeUri,
         messages,
         meta,
         latestArchiveOverview,
