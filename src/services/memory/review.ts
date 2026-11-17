@@ -15,9 +15,15 @@ import { ComemError, invalidArgument } from '../../domain/errors.js';
 import type { Logger } from '../../domain/log.js';
 import { getMemoryType } from '../../domain/memory-types/index.js';
 import type { Uri } from '../../domain/uri.js';
-import { serializeMemoryDocument } from './document.js';
+import { CONTENT_FIELD, serializeMemoryDocument } from './document.js';
 import { readMemoryDocument, type MemoryFileStore } from './ports.js';
 import { restoreSuperseded } from './versioning.js';
+
+/** 待复核正文编辑；`expectedUpdatedAt` 是打开复核项时服务端给出的版本标记。 */
+export interface MemoryApprovalEdit {
+  readonly content: string;
+  readonly expectedUpdatedAt: string;
+}
 
 /**
  * 一次复核拒绝的终态（§11.11「`reject` 先回退，回退不了才删」）。
@@ -36,11 +42,17 @@ export type MemoryRejectResult =
   | { readonly outcome: 'restored'; readonly restoredFrom: Uri }
   | { readonly outcome: 'removed' };
 
-/** 复核通过：`pending` → `active`（§11.6）。已经是 `active` 时是空操作。 */
+/**
+ * 复核通过：`pending` → `active`（§11.6）。空审批对 `active` 是幂等空操作。
+ *
+ * 编辑审批只接受仍为 `pending` 且 `updatedAt` 等于调用方所见版本的文件。判定、正文
+ * 映射和状态写入都在这一个函数里，调用方的 `exact(uri)` 锁覆盖整个过程。
+ */
 export async function approveMemory(
   filesystem: MemoryFileStore,
   logger: Logger,
   uri: Uri,
+  edit?: MemoryApprovalEdit,
 ): Promise<void> {
   const document = await readMemoryDocument(filesystem, logger, uri);
   if (document === null) {
@@ -55,7 +67,45 @@ export async function approveMemory(
     });
   }
   if (document.status === 'active') {
-    return;
+    if (edit === undefined) {
+      return;
+    }
+    throw new ComemError('CONFLICT', `记忆已经通过复核，不能再用编辑内容覆盖：${uri.toString()}`, {
+      uri: uri.toString(),
+      reason: 'not_pending',
+      status: document.status,
+    });
+  }
+
+  let fields = document.fields;
+  if (edit !== undefined) {
+    if (document.status !== 'pending') {
+      throw new ComemError('CONFLICT', `只有待复核记忆可以编辑后通过：${uri.toString()}`, {
+        uri: uri.toString(),
+        reason: 'not_pending',
+        status: document.status,
+      });
+    }
+    if (edit.expectedUpdatedAt !== document.updatedAt) {
+      throw new ComemError('CONFLICT', `待复核记忆已经变化，请重新打开后再编辑：${uri.toString()}`, {
+        uri: uri.toString(),
+        reason: 'stale_pending',
+        expectedUpdatedAt: edit.expectedUpdatedAt,
+        currentUpdatedAt: document.updatedAt,
+      });
+    }
+    if (edit.content.trim() === '') {
+      throw invalidArgument('内容不能为空。', { field: CONTENT_FIELD });
+    }
+    const contentField = schema.fields.find((field) => field.name === CONTENT_FIELD);
+    if (contentField === undefined || contentField.type !== 'string') {
+      throw invalidArgument(`记忆类型 ${schema.type} 没有可编辑的正文。`, {
+        uri: uri.toString(),
+        memoryType: schema.type,
+        field: CONTENT_FIELD,
+      });
+    }
+    fields = { ...document.fields, [CONTENT_FIELD]: edit.content };
   }
 
   const now = new Date().toISOString();
@@ -67,11 +117,13 @@ export async function approveMemory(
       status: 'active',
       updatedAt: now,
       schema,
+      fields,
     }),
   );
   logger.info('记忆复核通过', {
     uri: uri.toString(),
     memoryType: document.memoryType,
+    edited: edit !== undefined,
   });
 }
 

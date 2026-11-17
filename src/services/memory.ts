@@ -25,7 +25,7 @@ export type {
   MemoryUpdateInput,
   MemoryWrite,
 } from './memory/service.js';
-export type { MemoryRejectResult } from './memory/review.js';
+export type { MemoryApprovalEdit, MemoryRejectResult } from './memory/review.js';
 export type { MemoryServicePorts } from './memory/ports.js';
 export { appendSources, renderMemoryUri, assertMemoryIdentity } from './memory/document.js';
 export { MemoryService } from './memory/service.js';

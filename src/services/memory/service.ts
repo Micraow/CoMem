@@ -51,7 +51,7 @@ import {
   readMemoryRecord,
   type MemoryRecord,
 } from './query.js';
-import { approveMemory, rejectMemory, type MemoryRejectResult } from './review.js';
+import { approveMemory, rejectMemory, type MemoryApprovalEdit, type MemoryRejectResult } from './review.js';
 import { writeVersionSnapshot } from './versioning.js';
 import { assertCurrentEvidence, assertRememberable, evidenceTimestamp } from './evidence.js';
 import type { MemoryStructure } from '../../domain/memory-structure.js';
@@ -322,9 +322,9 @@ export class MemoryService {
    *
    * 判定与写回在 `review.ts`，锁在这里取（§18）。
    */
-  async approve(uri: Uri): Promise<void> {
+  async approve(uri: Uri, edit?: MemoryApprovalEdit): Promise<void> {
     await this.#locks.withLock(uri, 'exact', async () => {
-      await approveMemory(this.#filesystem, this.#logger, uri);
+      await approveMemory(this.#filesystem, this.#logger, uri, edit);
     });
   }
 

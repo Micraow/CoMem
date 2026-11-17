@@ -22,12 +22,18 @@
 import { AlertTriangle, X } from 'lucide-vue-next'
 
 import {
+  ApiClientError,
   forbiddenMessageOf,
   useApi,
   type ContentReadPayload,
 } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import { memoryBodyText } from '~/utils/memoryBody'
+import {
+  reviewMutationBodyOf,
+  type ApproveReviewEdit,
+  type ReviewAction,
+} from '~/utils/reviewEdit'
 import { memoryReviewTitleOf } from '~/components/domain/memoryReview'
 import type {
   PendingListPayload,
@@ -104,6 +110,9 @@ function memoryPath(uri: string, action: 'approve' | 'reject'): string {
  * 同一形状，不在这里再写一遍。
  */
 function actionErrorOf(caught: unknown): string {
+  if (caught instanceof ApiClientError && caught.statusCode === 409) {
+    return '这条记忆已经变化，请重新拉取待复核队列。'
+  }
   return forbiddenMessageOf(caught, '你没有权限复核这条记忆')
 }
 
@@ -248,18 +257,25 @@ function dropFromQueue(uri: string): void {
   }
 }
 
-type ReviewAction = 'approve' | 'reject'
-
-async function reviewOne(uri: string, action: ReviewAction, reason: string): Promise<string | null> {
+async function reviewOne(
+  uri: string,
+  action: ReviewAction,
+  reason: string,
+  edit?: ApproveReviewEdit,
+): Promise<string | null> {
   try {
-    await api.post<unknown>(memoryPath(uri, action), action === 'reject' ? { reason } : undefined)
+    await api.post<unknown>(memoryPath(uri, action), reviewMutationBodyOf(action, reason, edit))
     return null
   } catch (caught) {
     return actionErrorOf(caught)
   }
 }
 
-async function reviewSelected(action: ReviewAction, reason = ''): Promise<void> {
+async function reviewSelected(
+  action: ReviewAction,
+  reason = '',
+  edit?: ApproveReviewEdit,
+): Promise<void> {
   const memory = selectedMemory.value
   if (memory === null || busy.value || loading.value) {
     return
@@ -268,7 +284,7 @@ async function reviewSelected(action: ReviewAction, reason = ''): Promise<void> 
   const token = ++operationToken
   busy.value = true
   actionBusy.value = action
-  const failure = await reviewOne(memory.uri, action, reason)
+  const failure = await reviewOne(memory.uri, action, reason, edit)
   if (token !== operationToken) {
     return
   }
@@ -281,6 +297,10 @@ async function reviewSelected(action: ReviewAction, reason = ''): Promise<void> 
   }
   dropFromQueue(memory.uri)
   toast.show('success', `${action === 'approve' ? '已通过' : '已拒绝'}：${memoryReviewTitleOf(memory)}`)
+}
+
+function approveSelected(edit?: ApproveReviewEdit): void {
+  void reviewSelected('approve', '', edit)
 }
 
 async function runBatch(action: ReviewAction, reason: string): Promise<void> {
@@ -411,7 +431,7 @@ watch(scopeRoot, () => {
         :baseline-error="baselineError"
         :busy="busy || loading"
         :action-busy="actionBusy"
-        @approve="reviewSelected('approve')"
+        @approve="approveSelected"
         @reject="reviewSelected('reject', $event)"
       />
     </div>

@@ -2053,7 +2053,8 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 - 这两类写入时是 `pending`，不进检索结果。`rules` 来自抽取与补丁合并，`experiences`
   来自阶段二第 5 步的经验归纳（§10.1）
 - 控制台「记忆复核」直接展示新增正文；更新按 `supersedes` 读取上一版本，再展示行级差异。
-- 人工通过 → `active`；拒绝 → 回退到被顶替的版本，没有版本可回时删除并记录原因
+- 人工通过 → `active`；通过时可以把正文改成复核后的版本，若编辑则同时提交用户看到的
+  `updatedAt` 作为版本标记；拒绝 → 回退到被顶替的版本，没有版本可回时删除并记录原因
   （§11.11）
 - 其余类型直接 `active`
 
@@ -2073,6 +2074,20 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 **两侧的结论刻意不同。** 检索路径按「磁盘上有什么」工作，所以 `find` 仍能命中它（文件
 存在、索引行是 `active`）；内容层按「是不是一条可解析的记忆」工作，所以读不到。`find`
 的契约是「这里有东西」，`read` 的契约是「这是一条记忆」。
+
+**编辑后通过与普通通过共用 `POST /memories/{uri}/approve`。** 空 body 保持旧行为：
+`pending` / `archived → active`，已经 `active` 时 200 幂等空操作。编辑请求体是
+`{content, expectedUpdatedAt}`；`content` 必须 trim 后非空，目标 schema 必须有 string
+型 `content` 字段，`expectedUpdatedAt` 必须是待复核响应里原样带出的 `updatedAt`。服务端
+在同一个 `exact(uri)` 锁内重新读取文档，只有它仍是 `pending` 且 `updatedAt` 等于版本
+标记时才把 `content` 映射进 `fields.content`、更新 `updatedAt` 并置 `active`。写回保留
+`createdAt`、`sources`、`validFrom` / `validUntil`、`supersedes`、记忆类型、实体 / 链接
+及其它 schema 字段，URI 与 ACL 不变。
+
+**过期编辑不能覆盖新版本或已生效正文。** 记录已经 `active` / 非 `pending` 时，编辑审批
+返回 409 `CONFLICT`（`details.reason = "not_pending"`）；`expectedUpdatedAt` 不匹配时
+返回 409（`stale_pending`）。两个并发编辑只有一个在锁内通过，后到者按 active 冲突返回，
+不会把另一个正文覆盖后又声称通过。缺少版本标记或空白正文返回 400 `INVALID_ARGUMENT`。
 
 ### 11.7 记忆 TTL 与过期清扫
 
@@ -3264,7 +3279,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
-| 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
+| 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`（空 body 兼容审批；编辑审批传 `{content, expectedUpdatedAt}`，§11.6）、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源/技能 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` |
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |

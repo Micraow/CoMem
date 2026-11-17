@@ -6,11 +6,15 @@
  * 真实的单栏行级差异；`baseline` 为空、正在读取或读取失败时都不会伪造上一版本。
  * 来源来自服务端给出的归档 URI，没有来源或引用数据时整块不渲染。
  */
-import { Check, Link2, Loader2, X } from 'lucide-vue-next'
+import { Check, Link2, Loader2, Pencil, X } from 'lucide-vue-next'
 
 import { fileRouteOf } from '~/utils/fileRoute'
 import { formatMonthDayTime, formatRelativeTime } from '~/utils/format'
 import { memoryTypeLabelOf, memoryTypeVariantOf } from '~/utils/memoryTypeLabels'
+import {
+  hasReviewContent,
+  type ApproveReviewEdit,
+} from '~/utils/reviewEdit'
 
 import type { PendingMemoryPayload } from './ReviewList.vue'
 import {
@@ -31,11 +35,12 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  approve: []
+  approve: [edit?: ApproveReviewEdit]
   reject: [reason: string]
 }>()
 
 type DiffKind = 'context' | 'add' | 'remove'
+type ReviewView = 'proposal' | 'baseline'
 
 interface DiffRow {
   readonly kind: DiffKind
@@ -46,6 +51,11 @@ interface DiffRow {
 
 const rejectOpen = ref(false)
 const rejectReason = ref('')
+const editing = ref(false)
+const draft = ref('')
+const draftVersion = ref<string | null>(null)
+const draftError = ref<string | null>(null)
+const view = ref<ReviewView>('proposal')
 
 function splitLines(text: string | null): readonly string[] {
   if (text === null || text === '') {
@@ -117,6 +127,9 @@ const narrative = computed(() =>
 )
 
 const pendingText = computed(() => narrative.value.body)
+const storedText = computed(() =>
+  props.memory === null ? '' : memoryReviewContentOf(props.memory),
+)
 
 // 更新比较完整的存储正文；不能把展示时拆出的证据误标成删除行。
 const rows = computed<readonly DiffRow[]>(() =>
@@ -167,8 +180,87 @@ const showDiff = computed(
     props.baselineError === null,
 )
 
+const showViewSwitch = computed(
+  () =>
+    replacesPrevious.value &&
+    props.baseline !== null &&
+    !props.baselineLoading &&
+    props.baselineError === null,
+)
+
+const saveDisabled = computed(
+  () => props.busy || (editing.value && !hasReviewContent(draft.value)),
+)
+
 const memoryTitle = computed(() =>
   props.memory === null ? '' : memoryReviewTitleOf(props.memory),
+)
+
+function resetDraft(): void {
+  editing.value = false
+  draft.value = storedText.value
+  draftVersion.value = null
+  draftError.value = null
+  view.value = 'proposal'
+}
+
+function startEditing(): void {
+  if (props.memory === null || props.busy) {
+    return
+  }
+  draft.value = storedText.value
+  draftVersion.value = props.memory.updatedAt
+  draftError.value = null
+  editing.value = true
+  view.value = 'proposal'
+}
+
+function cancelEditing(): void {
+  if (props.busy) {
+    return
+  }
+  draft.value = storedText.value
+  draftVersion.value = null
+  draftError.value = null
+  editing.value = false
+  view.value = 'proposal'
+}
+
+function approve(): void {
+  if (props.busy) {
+    return
+  }
+  if (!editing.value) {
+    emit('approve')
+    return
+  }
+  if (!hasReviewContent(draft.value)) {
+    draftError.value = '正文不能为空。'
+    return
+  }
+  if (draftVersion.value === null) {
+    return
+  }
+  draftError.value = null
+  emit('approve', {
+    content: draft.value,
+    expectedUpdatedAt: draftVersion.value,
+  })
+}
+
+watch(
+  () => props.memory?.uri ?? null,
+  () => resetDraft(),
+  { immediate: true },
+)
+
+watch(
+  () => props.memory?.updatedAt ?? null,
+  () => {
+    if (!editing.value) {
+      resetDraft()
+    }
+  },
 )
 
 function openReject(): void {
@@ -243,14 +335,65 @@ function confirmReject(): void {
           <section class="proposal" :aria-label="replacesPrevious ? '待生效改动' : '待生效记忆'">
             <div class="proposal__head">
               <span class="proposal__label">
-                {{ showDiff && hasDifference ? '版本差异' : replacesPrevious ? '新版本' : '记忆内容' }}
+                {{
+                  editing
+                    ? view === 'baseline'
+                      ? '上一版本'
+                      : '编辑正文'
+                    : view === 'baseline'
+                      ? '上一版本'
+                      : showDiff && hasDifference
+                        ? '版本差异'
+                        : replacesPrevious
+                          ? '新版本'
+                          : '记忆内容'
+                }}
               </span>
               <span class="spacer" />
-              <span v-if="showDiff" class="proposal__counts">
+              <div v-if="showViewSwitch" class="view-switch" role="group" aria-label="查看正文">
+                <UiButton
+                  variant="plain"
+                  size="sm"
+                  :aria-pressed="view === 'proposal'"
+                  :disabled="props.busy"
+                  @click="view = 'proposal'"
+                >
+                  {{ editing ? '草稿' : '新版本' }}
+                </UiButton>
+                <UiButton
+                  variant="plain"
+                  size="sm"
+                  :aria-pressed="view === 'baseline'"
+                  :disabled="props.busy"
+                  @click="view = 'baseline'"
+                >
+                  上一版本
+                </UiButton>
+              </div>
+              <span v-if="!editing && view === 'proposal' && showDiff" class="proposal__counts">
                 <span class="proposal__add">+{{ addedCount }}</span>
                 <span class="proposal__sep">/</span>
                 <span class="proposal__del">−{{ removedCount }}</span>
               </span>
+              <UiButton
+                v-if="!editing"
+                variant="plain"
+                size="sm"
+                :disabled="props.busy"
+                @click="startEditing"
+              >
+                <Pencil :size="14" :stroke-width="1.6" />
+                编辑
+              </UiButton>
+              <UiButton
+                v-else
+                variant="plain"
+                size="sm"
+                :disabled="props.busy"
+                @click="cancelEditing"
+              >
+                取消编辑
+              </UiButton>
             </div>
 
             <div
@@ -262,6 +405,30 @@ function confirmReject(): void {
               <UiSkeleton width="92%" height="14px" />
               <UiSkeleton width="86%" height="14px" />
               <UiSkeleton width="64%" height="14px" />
+            </div>
+
+            <div v-else-if="view === 'baseline'" role="region" aria-label="上一版本正文">
+              <pre
+                v-if="props.baseline !== null && props.baseline.trim() !== ''"
+                class="proposal__text"
+              >{{ props.baseline }}</pre>
+              <p v-else class="proposal__empty">正文为空</p>
+            </div>
+
+            <div v-else-if="editing" class="proposal__editor">
+              <UiTextarea
+                v-model="draft"
+                aria-label="记忆正文"
+                :rows="12"
+                :disabled="props.busy"
+                @update:model-value="draftError = null"
+              />
+              <p v-if="draftError !== null" class="proposal__error" role="alert">
+                {{ draftError }}
+              </p>
+              <p v-else-if="!hasReviewContent(draft)" class="proposal__error" role="alert">
+                正文不能为空。
+              </p>
             </div>
 
             <div
@@ -331,7 +498,7 @@ function confirmReject(): void {
           />
           {{ props.actionBusy === 'reject' ? '正在拒绝…' : '拒绝' }}
         </UiButton>
-        <UiButton variant="primary" :disabled="props.busy" @click="emit('approve')">
+        <UiButton variant="primary" :disabled="saveDisabled" @click="approve">
           <Loader2
             v-if="props.actionBusy === 'approve'"
             :size="14"
@@ -341,10 +508,14 @@ function confirmReject(): void {
           />
           {{
             props.actionBusy === 'approve'
-              ? '正在通过…'
-              : replacesPrevious
-                ? '通过新版本'
-                : '通过并生效'
+              ? editing
+                ? '正在保存…'
+                : '正在通过…'
+              : editing
+                ? '保存并通过'
+                : replacesPrevious
+                  ? '通过新版本'
+                  : '通过并生效'
           }}
         </UiButton>
       </div>
@@ -498,8 +669,9 @@ function confirmReject(): void {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
   min-height: 45px;
-  padding: 0 20px;
+  padding: 8px 20px;
   border-bottom: 0.5px solid var(--separator);
 }
 
@@ -529,6 +701,21 @@ function confirmReject(): void {
   color: var(--red-ink);
 }
 
+.view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-control);
+  background: var(--fill-2);
+}
+
+.view-switch .btn[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--label);
+  box-shadow: var(--inset-hair), var(--shadow-card);
+}
+
 .proposal__text {
   max-width: 76ch;
   margin: 0;
@@ -547,6 +734,25 @@ function confirmReject(): void {
   padding: 28px;
   font-size: 14px;
   color: var(--label-3);
+}
+
+.proposal__editor {
+  display: grid;
+  gap: 10px;
+  padding: 22px 28px 28px;
+}
+
+.proposal__editor :deep(textarea) {
+  min-height: 280px;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.proposal__error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--red-ink);
 }
 
 .proposal__loading {

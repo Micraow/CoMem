@@ -32,6 +32,7 @@ import {
 } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
+import { parseApprovalEdit } from './memories-approve.js';
 import {
   optionalBoolean, parseLinkDirection, parseMemoryUri, readableLinks, requireRecordReason, scopeOfSubject,
 } from './memories-request.js';
@@ -179,11 +180,11 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
       // `/consolidate` 是破坏性操作的旧名称，继续作为同一契约的兼容别名。
       app.post<{ Body: unknown }>('/dreamer', (request) => runDreamer(services, request));
       app.post<{ Body: unknown }>('/consolidate', (request) => runDreamer(services, request));
-      app.post<{ Params: { uri: string } }>('/:uri/approve', async (request) => {
+      app.post<{ Params: { uri: string }; Body: unknown }>('/:uri/approve', async (request) => {
         const context = requestContextOf(request);
         const uri = parseMemoryUri(request.params.uri);
         await authorizer.assert(uri, WRITE, context.principals);
-        await memory.approve(uri);
+        await memory.approve(uri, parseApprovalEdit(request.body));
         return ok<MemoryApproveResponse>({
           uri: uri.toString(),
           status: 'active',
