@@ -363,11 +363,7 @@ comem://group/eng/projects/comem/
 
 **项目的语义**：一个稳定的上下文作用域。同一个仓库的不同 clone、worktree、子目录都归到同一个项目。
 
-**项目 ID 从 git origin 派生**：`git@github.com:micraow/CoMem.git` → `github.com-micraow-comem`（非字母数字换成 `-`）。不在仓库里时用目录名。可以用 `.comem/config.json` 显式指定：
-
-```json
-{ "version": 1, "project": { "id": "comem" } }
-```
+**当前实现边界。** 项目 URI 可以显式传给写入与检索接口，但宿主接入尚未实现从 git origin 或 `.comem/config.json` 自动绑定当前项目。自动采集默认使用个人根，默认召回范围包含可读根的子树；因此当前不能把目录位置当成“只召回当前项目”的保证。项目自动识别与兄弟项目排除仍待接线。
 
 **个人项目 vs 组项目**：
 
@@ -1977,6 +1973,20 @@ export const preferencesMemoryType = {
 **`memories/` 下不是记忆的文件会记一条 warn。** `read` / `listPending` 读 `.abstract.md` 这类文件时解析不出记忆 frontmatter（没有 `memory_type`），按「不存在」处理并记 `warn`——这是既有行为，不是新问题；看到日志里出现它，先确认读的 URI 是不是记忆文件。
 
 内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`cases`、`identity`、`soul`、`experiences`、`rules`。
+
+**目录按信息职责划分，按需创建。** 长期内容统一放在 `memories/`，原始对话放在 `sessions/`，导入资料放在 `resources/`；不把全部记忆摊在根目录，也不把学习所得放进宿主技能目录。
+
+| 路径 | 内容 |
+|---|---|
+| `memories/profile.md`、`identity.md`、`soul.md` | 画像、身份与长期原则 |
+| `memories/preferences/{topic}.md` | 跨会话稳定的表达、工作与选择偏好 |
+| `memories/entities/{entity}.md` | 项目、设备、人物等实体事实 |
+| `memories/events/{date}-{event}.md` | 决定、里程碑与状态变化 |
+| `memories/cases/{case}.md` | 一次具体任务的尝试、参数、结果与证据 |
+| `memories/experiences/{topic}.md` | 可复用的方法、适用情境、反思与边界 |
+| `memories/rules/{scenario}/{rule}.md` | 明确需要遵守的约束 |
+
+`cases` 经过同一条抽取、合并和检索链路；Dreamer 预取相关案例作为经验提炼的上下文。手动整理更新或删除已有案例前，必须先读取正文，否则整批操作被拒绝。没有独立保留价值的一次计算可以只留在会话中，不强行生成案例或经验。
 
 **浏览器新建记忆的路径也由服务端算。** 控制台的「新建记忆」只收类型、标题/主题与正文，提交到 `POST /memories`；`domain/memory-types/creation.ts` 的 `deriveCreationIdentity` 把标题映射成该类型的 identity 值（单段类型整份标题作值；`rules` 的 `{scenario}/{rule}.md` 按 `/` 分成两段；`events` 缺日期前缀时补今天的本地日期），再交给 `renderMemoryUri` / `renderPath` 用 schema 的 `filename` 模板渲染。响应带最终 URI，控制台只做跳转——路径规则仍然只有 `memories/` 下这一份，前端没有模板解析器。同类型同标题再次提交走 `upsertMemory` 的字段级合并，响应里的 `created` 区分「新建」与「更新」；`events` 是 `addOnly`，撞名返回 `ALREADY_EXISTS`。
 
