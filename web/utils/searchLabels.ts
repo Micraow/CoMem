@@ -51,10 +51,10 @@ export function typedQueryIntentLabel(intent: TypedQueryIntent): string {
  * `contextType` 的取值清单，来自 `src/domain/node.ts` 的 `CONTEXT_TYPES`。
  *
  * `serializeHit()` 原样输出 `hit.contextType`，其静态类型是 `ContextType`，所以
- * 命中的上下文类型只可能是这四个之一。`/search/find` 与 `/search/search` 共用同一
+ * 命中的上下文类型只可能是这三个之一。`/search/find` 与 `/search/search` 共用同一
  * 份序列化，两者没有分叉。
  */
-export const CONTEXT_TYPES = ['memory', 'resource', 'skill', 'session'] as const
+export const CONTEXT_TYPES = ['memory', 'resource', 'session'] as const
 
 export type ContextType = (typeof CONTEXT_TYPES)[number]
 
@@ -62,7 +62,6 @@ export type ContextType = (typeof CONTEXT_TYPES)[number]
 export const CONTEXT_LABEL = {
   memory: '记忆',
   resource: '资源',
-  skill: '技能',
   session: '会话',
 } satisfies Record<ContextType, string>
 

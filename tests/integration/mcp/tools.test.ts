@@ -54,7 +54,6 @@ import {
 } from '../../../src/services/resource.js';
 import { SearchService, type RetrievalSettings } from '../../../src/services/search.js';
 import { SessionService, stableMessageId } from '../../../src/services/session.js';
-import { SkillService } from '../../../src/services/skill.js';
 import { RuleSummarizer, SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
@@ -285,17 +284,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     logger,
     authorizer,
   });
-  const skill = new SkillService({
-    store,
-    locks,
-    index,
-    summary,
-    reconcile: { append: async () => undefined },
-    permissions,
-    logger,
-    authorizer,
-  });
-
   const observability = {
     health: async (): Promise<MemoryHealth> => ({
       pendingReview: 0,
@@ -316,7 +304,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     memory,
     observability,
     resource,
-    skill,
     tasks,
     index,
     logger,
@@ -1033,18 +1020,6 @@ describe('~ 别名（§6.1）', () => {
         files: [{ path: 'docs/a.md', content: 'a' }],
       }),
     ).toContain('Added 1 file(s)');
-    expect(
-      await callText('add_skill', {
-        parentUri: '~/skills',
-        name: 'demo-skill',
-        files: [
-          {
-            path: 'SKILL.md',
-            content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
-          },
-        ],
-      }),
-    ).toContain('Installed skill "demo-skill"');
   });
 
   it('group 主体展开成 group 根', async () => {
@@ -1348,7 +1323,7 @@ describe('remember / download', () => {
   });
 });
 
-describe('add_resource / add_skill', () => {
+describe('add_resource', () => {
   it('add_resource 批量写入文件', async () => {
     const parent = `${SCOPE}/resources`;
     const text = await callText('add_resource', {
@@ -1360,22 +1335,6 @@ describe('add_resource / add_skill', () => {
     expect(await harness.store.exists(Uri.parse(`${parent}/docs/api.md`))).toBe(true);
   });
 
-  it('add_skill 安装技能', async () => {
-    const parent = `${SCOPE}/skills`;
-    const text = await callText('add_skill', {
-      parentUri: parent,
-      name: 'demo-skill',
-      files: [
-        {
-          path: 'SKILL.md',
-          content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
-        },
-      ],
-    });
-
-    expect(text).toContain('Installed skill "demo-skill"');
-    expect(await harness.store.exists(Uri.parse(`${parent}/demo-skill/SKILL.md`))).toBe(true);
-  });
 });
 
 describe('工具描述与实际行为', () => {
@@ -1386,10 +1345,6 @@ describe('工具描述与实际行为', () => {
     expect(tool('read').description).toContain('... (truncated)');
   });
 
-  it('add_skill 的描述写明覆盖范围（旧文件不会被移除）', () => {
-    expect(tool('add_skill').description).toContain('同路径文件被覆盖');
-    expect(tool('add_skill').description).toContain('上一版存在但本次未提供的文件不会被移除');
-  });
 });
 
 describe('写后物化权限', () => {
@@ -1428,63 +1383,6 @@ describe('写后物化权限', () => {
     });
   });
 
-  it('add_skill 之后 list(parent) 能看到技能目录', async () => {
-    const parent = `${SCOPE}/skills`;
-    await withRealAcl(async (context, filesystem) => {
-      await tool('add_skill').execute(
-        {
-          parentUri: parent,
-          name: 'demo-skill',
-          files: [
-            {
-              path: 'SKILL.md',
-              content: '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n',
-            },
-            { path: 'scripts/check.sh', content: '#!/bin/sh\nexit 0\n' },
-          ],
-        },
-        context,
-      );
-
-      const listed = await filesystem.list(Uri.parse(parent), PRINCIPALS);
-      expect(listed.map((entry) => entry.uri.toString())).toEqual([`${parent}/demo-skill`]);
-
-      const nested = await filesystem.list(Uri.parse(`${parent}/demo-skill`), PRINCIPALS);
-      expect(nested.map((entry) => entry.uri.name).sort()).toEqual(['SKILL.md', 'scripts']);
-    });
-  });
-
-  it('add_skill 重装同名技能不删除上一版有、本次没提交的文件', async () => {
-    const parent = `${SCOPE}/skills`;
-    await withRealAcl(async (context, filesystem) => {
-      const entry = '---\nname: demo-skill\ndescription: 演示技能\n---\n# Demo\n';
-      await tool('add_skill').execute(
-        {
-          parentUri: parent,
-          name: 'demo-skill',
-          files: [
-            { path: 'SKILL.md', content: entry },
-            { path: 'scripts/old.sh', content: '#!/bin/sh\nexit 0\n' },
-          ],
-        },
-        context,
-      );
-      await tool('add_skill').execute(
-        {
-          parentUri: parent,
-          name: 'demo-skill',
-          files: [{ path: 'SKILL.md', content: entry }],
-        },
-        context,
-      );
-
-      const oldFile = `${parent}/demo-skill/scripts/old.sh`;
-      // 同路径覆盖，但没提交的旧文件既不在磁盘上被删，也不从索引里清掉。
-      expect((await filesystem.stat(Uri.parse(oldFile), PRINCIPALS))?.kind).toBe('file');
-      expect(await callText('find', { query: 'exit' }, context)).toContain(oldFile);
-    });
-  });
-
   it('remember 之后会话目录可见（GET /sessions 依赖它）', async () => {
     await withRealAcl(async (context, filesystem) => {
       await tool('remember').execute(
@@ -1501,7 +1399,7 @@ describe('写后物化权限', () => {
 });
 
 describe('权限', () => {
-  it('全部 16 个工具在无权限时抛 PERMISSION_DENIED', async () => {
+  it('全部 15 个工具在无权限时抛 PERMISSION_DENIED', async () => {
     const denied = await createHarness({ authorizer: new DenyAllAuthorizer() });
     const file = `${MEM}/denied.md`;
     const dir = `${MEM}`;
@@ -1522,11 +1420,6 @@ describe('权限', () => {
       remember: { messages: [{ role: 'user', content: 'hi' }] },
       forget: { uri: file },
       add_resource: { parentUri: dir, files: [{ path: 'a.md', content: 'x' }] },
-      add_skill: {
-        parentUri: dir,
-        name: 'demo',
-        files: [{ path: 'SKILL.md', content: '# x' }],
-      },
     };
 
     try {

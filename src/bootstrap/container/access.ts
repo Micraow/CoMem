@@ -134,9 +134,6 @@ export async function createAccess(
    * 根行就一条都返回不了。写路径上 `InheritingAuthorizer` 会顺手补，但只读路径
    * 不会——一个刚装好、还没写过东西的实例，控制台是空的。
    *
-   * `skills/` 是可选的外部能力包目录，只在第一次 `add_skill` 时创建；预先建一个空目录
-   * 会让用户误以为 CoMem 在这个账号里管理技能。
-   *
    * `POST /admin/users` 也要调它（通过 `IdentityService.ensureUserNamespace`）：
    * 新建的账号第一次登录时，会话页必须是空列表而不是 403。
    */

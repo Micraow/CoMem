@@ -9,7 +9,7 @@ import {
 import { MCP_TOOLS } from '../../../src/api/mcp/tools/index.js';
 import { ComemError } from '../../../src/domain/errors.js';
 
-/** §13.2 的 16 个工具，硬编码——不从实现里推导，否则测试跟着实现一起漂移。 */
+/** 当前 MCP 工具，硬编码——不从实现里推导，否则测试跟着实现一起漂移。 */
 const EXPECTED_NAMES = [
   'find',
   'search',
@@ -26,7 +26,6 @@ const EXPECTED_NAMES = [
   'remember',
   'forget',
   'add_resource',
-  'add_skill',
 ];
 
 function expectInternal(action: () => void): void {
@@ -50,7 +49,7 @@ function firstTool(): McpToolDefinition {
 }
 
 describe('MCP 工具注册表', () => {
-  it('16 个工具的名字与 §13.2 完全一致', () => {
+  it('15 个工具的名字与协议面完全一致', () => {
     expect(MCP_TOOLS.map((tool) => tool.name)).toEqual(EXPECTED_NAMES);
     expect([...MCP_TOOL_NAMES]).toEqual(EXPECTED_NAMES);
   });
@@ -58,7 +57,7 @@ describe('MCP 工具注册表', () => {
   it('createToolRegistry 自检通过', () => {
     const registry = new ToolRegistry(MCP_TOOLS);
     expect(() => registry.validate()).not.toThrow();
-    expect(registry.list()).toHaveLength(16);
+    expect(registry.list()).toHaveLength(15);
   });
 
   it('少一个时 validate 抛 INTERNAL', () => {
@@ -67,7 +66,7 @@ describe('MCP 工具注册表', () => {
   });
 
   it('重名时 validate 抛 INTERNAL', () => {
-    const registry = new ToolRegistry([...MCP_TOOLS.slice(0, 15), firstTool()]);
+    const registry = new ToolRegistry([...MCP_TOOLS.slice(0, 14), firstTool()]);
     expectInternal(() => registry.validate());
   });
 
@@ -76,7 +75,7 @@ describe('MCP 工具注册表', () => {
       ...firstTool(),
       name: 'get_acl' as unknown as McpToolName,
     };
-    const registry = new ToolRegistry([...MCP_TOOLS.slice(0, 15), rogue]);
+    const registry = new ToolRegistry([...MCP_TOOLS.slice(0, 14), rogue]);
     expectInternal(() => registry.validate());
   });
 
@@ -111,7 +110,7 @@ describe('MCP 工具注册表', () => {
    *
    * 绝对 URI 要 `comem://user/{uid}/…`，而 uid 只能从 `health` 的 `subject` 拿。
    * 参数描述里不提 `~`，agent 就会去猜 uid——猜错的根会把写入落进别人的空间。
-   * 这条断言把「16 个工具里有的教、有的不教」变成测试失败。
+   * 这条断言把「有的工具教、有的不教」变成测试失败。
    */
   it('URI 参数的描述都说明 ~ 别名', () => {
     const uriFields = ['uri', 'uris', 'parentUri', 'targetUri'];

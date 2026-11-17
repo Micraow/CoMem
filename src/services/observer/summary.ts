@@ -14,7 +14,7 @@
  * `onNodeWritten` / `onNodeRemoved` 是在 `FileSystemService` 的**路径锁里面**被调用的
  * （`write` 持文件的 `EXACT`、`mkdir` / `remove` 持 `TREE`）。摘要生成自己也要拿目录的
  * `EXACT` 锁，而 `TREE` 与同路径 / 祖先路径的 `EXACT` 互斥（§10.6）——同步调用会自己
- * 等自己 5 秒然后 `CONFLICT`。W6 的批量路径也踩过：`ResourceService` / `SkillService`
+ * 等自己 5 秒然后 `CONFLICT`。W6 的批量路径也踩过：`ResourceService`
  * 都是「锁释放后再投递摘要失效」。
  *
  * 所以这里用 `setImmediate` 推到当前宏任务的微任务队列之后（那时 `withLock` 的

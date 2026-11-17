@@ -60,7 +60,6 @@ const CONTEXT_OPTIONS = [
   { value: '', label: '全部类型' },
   { value: 'memory', label: '记忆' },
   { value: 'resource', label: '资源' },
-  { value: 'skill', label: '技能' },
   { value: 'session', label: '会话' },
 ] as const
 

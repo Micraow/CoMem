@@ -91,7 +91,7 @@ export interface SearchQuery {
    * `(valid_until IS NULL OR valid_until > asOf)`。NULL 在两侧都放行，所以旧数据
    * （全 NULL）与非记忆节点（无有效期）不受影响。
    *
-   * **不对外暴露。** MCP 的 16 个工具与 HTTP 查询参数都没有这一项：所有入口都用
+   * **不对外暴露。** MCP 的 15 个工具与 HTTP 查询参数都没有这一项：所有入口都用
    * 「请求到达的时刻」，由 `SearchService` 自己填。允许调用方指定 `asOf` 等于把
    * 「回溯某个时刻的记忆状态」变成一个没人测过的入口。
    *

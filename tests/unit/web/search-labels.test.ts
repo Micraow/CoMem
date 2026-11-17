@@ -64,8 +64,8 @@ describe('检索意图文案', () => {
 })
 
 describe('上下文类型文案', () => {
-  it('类型清单是文档里的四个，且与 src/domain/node.ts 的 CONTEXT_TYPES 双向一致', () => {
-    expect([...CONTEXT_TYPES]).toEqual(['memory', 'resource', 'skill', 'session'])
+  it('类型清单是当前三个，且与 src/domain/node.ts 的 CONTEXT_TYPES 双向一致', () => {
+    expect([...CONTEXT_TYPES]).toEqual(['memory', 'resource', 'session'])
 
     const domainTypes = new Set<string>(DOMAIN_CONTEXT_TYPES)
     // web 清单 ⊆ 领域清单
@@ -82,25 +82,22 @@ describe('上下文类型文案', () => {
     const webToDomain: Record<ContextType, DomainContextType> = {
       memory: 'memory',
       resource: 'resource',
-      skill: 'skill',
       session: 'session',
     }
     const domainToWeb: Record<DomainContextType, ContextType> = {
       memory: 'memory',
       resource: 'resource',
-      skill: 'skill',
       session: 'session',
     }
 
-    expect(Object.keys(webToDomain)).toEqual(['memory', 'resource', 'skill', 'session'])
-    expect(Object.keys(domainToWeb)).toEqual(['memory', 'resource', 'skill', 'session'])
+    expect(Object.keys(webToDomain)).toEqual(['memory', 'resource', 'session'])
+    expect(Object.keys(domainToWeb)).toEqual(['memory', 'resource', 'session'])
   })
 
   it('每个上下文类型都有中文文案，且不等于原值', () => {
     expect(CONTEXT_TYPES.map((contextType) => CONTEXT_LABEL[contextType])).toEqual([
       '记忆',
       '资源',
-      '技能',
       '会话',
     ])
   })

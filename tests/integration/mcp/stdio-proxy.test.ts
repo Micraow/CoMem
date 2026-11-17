@@ -38,7 +38,6 @@ import type { MemoryService } from '../../../src/services/memory.js';
 import type { ResourceService } from '../../../src/services/resource.js';
 import type { SearchService } from '../../../src/services/search.js';
 import type { SessionService } from '../../../src/services/session.js';
-import type { SkillService } from '../../../src/services/skill.js';
 import type { SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
@@ -61,7 +60,6 @@ const EXPECTED_NAMES = [
   'remember',
   'forget',
   'add_resource',
-  'add_skill',
 ];
 
 function createLogger(): Logger {
@@ -102,7 +100,6 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
       }),
     },
     resource: {} as unknown as ResourceService,
-    skill: {} as unknown as SkillService,
     tasks,
     index,
     logger,
@@ -199,7 +196,7 @@ async function createTestServer(): Promise<TestServer> {
 }
 
 describe('stdio 代理', () => {
-  it('StdioClientTransport 能连上，tools/list 返回 16 个工具', async () => {
+  it('StdioClientTransport 能连上，tools/list 返回 15 个工具', async () => {
     const server = await createTestServer();
     const transport = new StdioClientTransport({
       command: process.execPath,

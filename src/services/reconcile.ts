@@ -49,7 +49,6 @@ import { Uri } from '../domain/uri.js';
 import type { AclService } from './acl.js';
 import { parseFrontmatterFields } from './index-observer.js';
 import { frontmatterFieldsOf } from './memory/frontmatter.js';
-import { skillIndexRecord } from './skill.js';
 
 /** 资源文件的索引层级（与 `ResourceService` 一致，§9.1）。 */
 const RESOURCE_LEVEL = 'L2';
@@ -289,11 +288,6 @@ export class ReconcileService {
   /**
    * 从磁盘重建一条文件的索引记录。
    *
-   * **技能走共享实现**：`context_type === 'skill'` 时由 `skillIndexRecord` 构造，
-   * 与 `SkillService.addSkill` 调用的是同一个函数（§10.6）。不做这一层分流，重放器
-   * 会按通用资源口径读 frontmatter 的 `summary`，而技能写路径写的是 `description`
-   * ——「重放成功」之后技能的索引行与原状态不同，重放就不再是「恢复原样」。
-   *
    * 其余文件与写路径的 `toIndexRecord` 对齐：正文是去掉 frontmatter 的文本，
    * `abstract` 是 frontmatter 的 `summary`，层级固定 L2。`context_type` /
    * `memory_type` / `status` 优先取索引里的旧行——重放是「补写丢掉的派生数据」，
@@ -320,19 +314,6 @@ export class ReconcileService {
     const existing = this.#nodes.get(uri.toString());
     const contextType = existing?.contextType ?? contextTypeOf(uri);
     const bytes = await this.#store.readBytes(uri);
-
-    if (contextType === 'skill') {
-      await this.#index.upsert([
-        skillIndexRecord({
-          uri,
-          bytes,
-          updatedAt: stat.updatedAt,
-          memoryType: existing?.memoryType ?? null,
-          status: existing?.status ?? 'active',
-        }),
-      ]);
-      return { kind: 'indexed' };
-    }
 
     const base = {
       uri: uri.toString(),

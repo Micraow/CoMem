@@ -187,7 +187,7 @@ function sortedUris(hits: readonly { readonly uri: string }[]): string[] {
 function expectFindHitShape(hit: RankedScoredHit, engine: RetrievalEngine): void {
   expect(typeof hit.uri).toBe('string');
   expect(['L0', 'L1', 'L2']).toContain(hit.level);
-  expect(['memory', 'resource', 'skill', 'session']).toContain(hit.contextType);
+  expect(['memory', 'resource', 'session']).toContain(hit.contextType);
   expect(hit.memoryType === null || typeof hit.memoryType === 'string').toBe(true);
   expect(hit.abstract === null || typeof hit.abstract === 'string').toBe(true);
   expect(Number.isFinite(hit.score)).toBe(true);

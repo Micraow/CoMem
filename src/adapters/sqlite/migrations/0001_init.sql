@@ -120,7 +120,7 @@ CREATE TABLE node (
   parent_uri     TEXT NOT NULL,
   scope          TEXT NOT NULL,      -- user | group
   kind           TEXT NOT NULL,      -- directory | document
-  context_type   TEXT NOT NULL,      -- memory | resource | skill | session
+  context_type   TEXT NOT NULL,      -- memory | resource | session
   memory_type    TEXT,               -- profile | preferences | entities | ...（非记忆文件为 NULL）
   -- 存领域字面量 'L0' | 'L1' | 'L2'：IndexRecord / SearchHit 都按它收发。
   level          TEXT NOT NULL,      -- L0 | L1 | L2

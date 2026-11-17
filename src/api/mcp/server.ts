@@ -6,7 +6,7 @@
  * `sessionIdGenerator: undefined` 打开无状态模式：没有会话状态、没有重连恢复。
  * 每个 HTTP 请求新建一个 `Server` + `StreamableHTTPServerTransport`，请求结束销毁。
  * 这是 SDK 对无状态模式的硬性要求（同一个 transport 处理第二个请求会撞消息 ID），
- * 也符合 CoMem 的现状——16 个工具都是无状态调用，没有需要跨请求保持的会话。
+ * 也符合 CoMem 的现状——15 个工具都是无状态调用，没有需要跨请求保持的会话。
  *
  * ## 身份与 requestId
  *

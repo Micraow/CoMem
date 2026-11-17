@@ -119,15 +119,13 @@ const EVENT_MEMORY_TYPE = 'events';
 /**
  * 层级天花板（`local/notes/comparison.md` 第 3 条）。
  *
- * 天花板在**升级**时生效，降级不设限：一个技能包即使从 abstract 起投，也永远升不到
- * full——`SKILL.md` 动辄几万字，塞进 1600 token 的预算里会把别的条目全挤掉。
- * 会话（§8.7 的账本粒度）只给摘要：同一段对话的原文对下一轮的检索没有增量信息，
+ * 天花板在**升级**时生效，降级不设限。会话（§8.7 的账本粒度）只给摘要：
+ * 同一段对话的原文对下一轮的检索没有增量信息，
  * 反而重复占预算。资源与记忆没有理由设限，全文有用就升。
  */
 const DEPTH_CEILING: Readonly<Record<ContextType, ContextDetail>> = Object.freeze({
   memory: 'full',
   resource: 'full',
-  skill: 'overview',
   session: 'abstract',
 });
 
@@ -144,8 +142,8 @@ const DEPTH_CEILING: Readonly<Record<ContextType, ContextDetail>> = Object.freez
 export const QUOTA_BY_PRESET: Readonly<
   Record<QuotaPreset, Readonly<Record<ContextType, number>>>
 > = Object.freeze({
-  chat: Object.freeze({ memory: 5, resource: 3, skill: 2, session: 2 }),
-  coding: Object.freeze({ memory: 3, resource: 5, skill: 2, session: 2 }),
+  chat: Object.freeze({ memory: 5, resource: 3, session: 2 }),
+  coding: Object.freeze({ memory: 3, resource: 5, session: 2 }),
 });
 
 /**
@@ -472,7 +470,7 @@ export async function assembleContext(
 
   // 第 4 步：配额。去重之后、渲染之前。
   const quota = QUOTA_BY_PRESET[options.quotaPreset];
-  const used: Record<ContextType, number> = { memory: 0, resource: 0, skill: 0, session: 0 };
+  const used: Record<ContextType, number> = { memory: 0, resource: 0, session: 0 };
   const kept: Slot[] = [];
   for (const slot of deduped) {
     const contextType = slot.candidate.contextType;

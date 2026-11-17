@@ -257,7 +257,7 @@ export class NodeRepository {
    * 可逆），仍按最后使用时刻过期。
    *
    * **只对 `context_type = 'memory'` 生效**：`memory.ttl` 描述记忆的存活时间，
-   * `resources` / `skills` 不该被套上它。
+   * 资源目录不该被套上它。
    *
    * 为什么第一段仍是软过期：TTL 配错（把 30 天写成 1 天）时，`archived` 还能改回来；
    * 物理删除没有回滚。两段式让「配错」在 `retentionDays` 的宽度里可观测、可撤销。

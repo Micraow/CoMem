@@ -290,24 +290,6 @@ describe('assembleContext 升级', () => {
     expect(result.dropped).toBe(0);
   });
 
-  it('技能不会升到 full：不会读原文', async () => {
-    const skill = candidate({
-      uri: `${ALICE}/skills/typescript/SKILL`,
-      contextType: 'skill',
-      abstract: '技能摘要',
-    });
-    const fixture = createPorts({
-      overviews: { [skill.uri]: '技能概览' },
-      bodies: { [skill.uri]: '几万字的技能正文' },
-    });
-
-    const result = await assembleContext([skill], options(), fixture.ports);
-
-    expect(result.items[0]?.detail).toBe('overview');
-    expect(result.items[0]?.text).toBe('技能概览');
-    expect(fixture.bodyCalls).toEqual([]);
-  });
-
   it('会话停在天花板 abstract，不读概览也不读原文', async () => {
     const session = candidate({
       uri: `${ALICE}/sessions/s1`,
@@ -355,7 +337,7 @@ describe('assembleContext 去重', () => {
 });
 
 describe('assembleContext 配额', () => {
-  const categories: readonly ContextType[] = ['memory', 'resource', 'skill', 'session'];
+  const categories: readonly ContextType[] = ['memory', 'resource', 'session'];
 
   function quotaFixture(): AssemblyCandidate[] {
     const candidates: AssemblyCandidate[] = [];
@@ -377,14 +359,14 @@ describe('assembleContext 配额', () => {
   function countByType(
     items: readonly { readonly contextType: ContextType }[],
   ): Record<ContextType, number> {
-    const counts: Record<ContextType, number> = { memory: 0, resource: 0, skill: 0, session: 0 };
+    const counts: Record<ContextType, number> = { memory: 0, resource: 0, session: 0 };
     for (const item of items) {
       counts[item.contextType] += 1;
     }
     return counts;
   }
 
-  it('chat 预设：记忆 5 / 资源 3 / 技能 2 / 会话 2', async () => {
+  it('chat 预设：记忆 5 / 资源 3 / 会话 2', async () => {
     const fixture = createPorts();
     const result = await assembleContext(
       quotaFixture(),
@@ -392,11 +374,11 @@ describe('assembleContext 配额', () => {
       fixture.ports,
     );
 
-    expect(countByType(result.items)).toEqual({ memory: 5, resource: 3, skill: 2, session: 2 });
-    expect(result.dropped).toBe(5);
+    expect(countByType(result.items)).toEqual({ memory: 5, resource: 3, session: 2 });
+    expect(result.dropped).toBe(4);
   });
 
-  it('coding 预设：记忆 3 / 资源 5 / 技能 2 / 会话 2', async () => {
+  it('coding 预设：记忆 3 / 资源 5 / 会话 2', async () => {
     const fixture = createPorts();
     const result = await assembleContext(
       quotaFixture(),
@@ -404,13 +386,13 @@ describe('assembleContext 配额', () => {
       fixture.ports,
     );
 
-    expect(countByType(result.items)).toEqual({ memory: 3, resource: 5, skill: 2, session: 2 });
-    expect(result.dropped).toBe(5);
+    expect(countByType(result.items)).toEqual({ memory: 3, resource: 5, session: 2 });
+    expect(result.dropped).toBe(4);
   });
 
   it('配额表就是 §8.6 的表格', () => {
-    expect(QUOTA_BY_PRESET.chat).toEqual({ memory: 5, resource: 3, skill: 2, session: 2 });
-    expect(QUOTA_BY_PRESET.coding).toEqual({ memory: 3, resource: 5, skill: 2, session: 2 });
+    expect(QUOTA_BY_PRESET.chat).toEqual({ memory: 5, resource: 3, session: 2 });
+    expect(QUOTA_BY_PRESET.coding).toEqual({ memory: 3, resource: 5, session: 2 });
   });
 });
 

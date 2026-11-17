@@ -49,7 +49,6 @@ describe('renderItem', () => {
 
   it('标签名由 contextType 决定', () => {
     expect(renderItem(item({ contextType: 'resource' }))).toMatch(/^<resource /);
-    expect(renderItem(item({ contextType: 'skill' }))).toMatch(/^<skill /);
     expect(renderItem(item({ contextType: 'session' }))).toMatch(/^<session /);
     expect(renderItem(item({ contextType: 'resource' }))).toContain('type="resource"');
   });

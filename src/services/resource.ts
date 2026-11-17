@@ -420,7 +420,7 @@ export class ResourceService {
             count: records.length,
             error: reason,
           });
-          // 与 `SkillService` / `IndexObserver` 共用同一份记录实现（§10.6）：
+          // 与 `IndexObserver` 共用同一份记录实现（§10.6）：
           // 一行一个 URI，写日志失败只记 error，不改写操作的结果。
           await recordIndexFailures(
             { append: (entry) => this.#storage.appendReconcile(entry) },

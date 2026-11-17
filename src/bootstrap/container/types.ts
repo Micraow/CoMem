@@ -34,7 +34,6 @@ import type { ReconcileService } from '../../services/reconcile.js';
 import type { ResourceService } from '../../services/resource.js';
 import type { SearchService } from '../../services/search.js';
 import type { SessionService } from '../../services/session.js';
-import type { SkillService } from '../../services/skill.js';
 import type { SummaryService } from '../../services/summary.js';
 import type { TaskService } from '../../services/task.js';
 import type { CommitRunner } from '../commit-runner.js';
@@ -107,7 +106,6 @@ export interface ContainerServices {
   readonly task: TaskService;
   readonly memory: MemoryService;
   readonly resource: ResourceService;
-  readonly skill: SkillService;
   /**
    * 对账日志重放（§10.6「索引双写补偿」）。
    *

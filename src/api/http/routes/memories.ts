@@ -6,7 +6,7 @@
  *
  * `POST /dreamer` 是记忆合并（§11.8）：**破坏性操作**（会 `delete`），所以
  * 需要 `manage`、`dryRun` 默认 `true`、并且配置里没开启时明确拒绝。它**不进 MCP**
- * （§3：16 个工具，不多不少）。
+ * 工具协议面。
  *
  * 路径里的 URI 是 **percent-encoded** 的（`comem%3A%2F%2Fuser%2Falice%2F...`）：
  * URI 含 `/`，不编码会被 Fastify 当成多段路径。Fastify 的路径参数默认已经

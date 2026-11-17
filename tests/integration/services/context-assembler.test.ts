@@ -92,9 +92,9 @@ class DenyAllAuthorizer implements Authorizer {
  * 正文——这才是调用方看到的结果。
  */
 
-/** 概览层的候选：`events` 从概览起投，`skill` 的天花板也是概览，升级轮次因此跳过。 */
+/** 概览层的候选：`events` 从概览起投，用于验证概览正文的后续处理。 */
 function overviewOnly(uri: string): AssemblyCandidate {
-  return candidate(uri, { contextType: 'skill', memoryType: 'events' });
+  return candidate(uri, { contextType: 'resource', memoryType: 'events' });
 }
 
 /** 只投一个候选，返回它落到的条目（预算足够时就是该层级本身）。 */

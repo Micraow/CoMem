@@ -14,7 +14,7 @@
  *
  * 后面还有派生数据要维护：`materializeNode` 不跟着做，节点在 `node_permission` 里
  * 没有行，权限过滤是纯 SQL 查询——重放补上索引行之后 `find` 仍然搜不到（默认
- * deny）。`ResourceService` / `SkillService` 的批量路径是同一个取舍。
+ * deny）。`ResourceService` 的批量路径是同一个取舍。
  */
 
 import type { IndexRecord } from '../../domain/retrieval.js';

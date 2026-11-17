@@ -28,7 +28,6 @@ import type { RecallLedger } from '../../../services/recall-ledger.js';
 import type { ResourceService } from '../../../services/resource.js';
 import type { SearchService } from '../../../services/search.js';
 import type { SessionService } from '../../../services/session.js';
-import type { SkillService } from '../../../services/skill.js';
 import type { SummaryService } from '../../../services/summary.js';
 import type { TaskService } from '../../../services/task.js';
 import type { HttpRouteGroup } from '../server.js';
@@ -54,7 +53,6 @@ import { createPromptRoutes } from './prompts.js';
 import { createResourceRoutes } from './resources.js';
 import { createSearchRoutes } from './search.js';
 import { createSessionRoutes } from './sessions.js';
-import { createSkillRoutes } from './skills.js';
 import type { TaskQueryStore } from './tasks.js';
 import { createTaskRoutes } from './tasks.js';
 import { createTelemetryRoutes } from './telemetry.js';
@@ -103,7 +101,6 @@ export interface HttpRouteServices {
   /** 记忆合并（§11.8）。破坏性操作，只在 `POST /memories/dreamer` 上暴露。 */
   readonly dreamer: DreamerService;
   readonly resource: ResourceService;
-  readonly skill: SkillService;
   readonly search: SearchService;
   /** 召回账本（§8.7）：删账号 / 组时清掉对应的作用域账本。 */
   readonly ledger: RecallLedger;
@@ -147,7 +144,7 @@ export interface HttpRouteServices {
   /**
    * MCP 工具注册表（§13.2）。
    *
-   * 只给 `GET /mcp/tools` 读：控制台展示 16 个工具的名字与说明，文本来源必须是
+   * 只给 `GET /mcp/tools` 读：控制台展示 15 个工具的名字与说明，文本来源必须是
    * 模型看到的那一份，硬编码一份等于给「界面说的」与「模型读到的」制造漂移。
    */
   readonly registry: ToolRegistry;
@@ -176,7 +173,6 @@ export function createHttpRouteGroups(
     createMemoryRoutes(services),
     createMemoryMetaRoutes(services),
     createResourceRoutes(services),
-    createSkillRoutes(services),
     createAdminRoutes(services),
     createAuthRoutes(services),
     createBootstrapRoutes(services),

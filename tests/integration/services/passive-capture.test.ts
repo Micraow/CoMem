@@ -423,7 +423,6 @@ describe('对照：显式 remember → 画像', () => {
       memory: container.services.memory,
       observability: container.observability,
       resource: container.services.resource,
-      skill: container.services.skill,
       tasks: container.services.task,
       index: container.services.index,
       logger: new NullLogger(),

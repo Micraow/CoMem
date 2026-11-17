@@ -86,7 +86,6 @@ function mcpContext(): McpToolContext {
     session: container.services.session,
     memory: container.services.memory,
     resource: container.services.resource,
-    skill: container.services.skill,
     tasks: container.services.task,
     index: container.services.index,
     logger: container.logger,

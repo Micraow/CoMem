@@ -67,7 +67,7 @@ function levelOf(value: string): SearchLevel | '' {
 }
 
 function contextTypeOf(value: string): SearchContextType | '' {
-  return value === 'memory' || value === 'resource' || value === 'skill' || value === 'session'
+  return value === 'memory' || value === 'resource' || value === 'session'
     ? value
     : ''
 }

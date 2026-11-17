@@ -1,15 +1,14 @@
 /**
- * 16 个 MCP 工具的装配点（架构文档 §13.2）。
+ * MCP 工具的装配点。
  *
  * 数组顺序与 `MCP_TOOL_NAMES` 一致，方便 `tools/list` 的输出与文档逐行对照。
  * `createToolRegistry` 在构造后立刻自检：数量、重名、白名单，任一不满足启动就崩
- * （AGENTS.md「16 个，不多不少」）。
+ * 必须有唯一实现。
  */
 
 import { MCP_TOOL_NAMES, ToolRegistry, type McpToolDefinition, type McpToolName } from '../registry.js';
 
 import { addResourceTool } from './add-resource.js';
-import { addSkillTool } from './add-skill.js';
 import { downloadTool } from './download.js';
 import { editTool } from './edit.js';
 import { findTool } from './find.js';
@@ -48,10 +47,9 @@ const TOOL_BY_NAME: Readonly<Record<McpToolName, McpToolDefinition>> = {
   remember: rememberTool,
   forget: forgetTool,
   add_resource: addResourceTool,
-  add_skill: addSkillTool,
 };
 
-/** §13.2 的 16 个工具，顺序取自 `MCP_TOOL_NAMES`（表格顺序）。 */
+/** 当前工具，顺序取自 `MCP_TOOL_NAMES`。 */
 export const MCP_TOOLS: readonly McpToolDefinition[] = Object.freeze(
   MCP_TOOL_NAMES.map((name) => TOOL_BY_NAME[name]),
 );

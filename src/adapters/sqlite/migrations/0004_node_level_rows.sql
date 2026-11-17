@@ -33,7 +33,7 @@ CREATE TABLE node_level_rows (
   parent_uri     TEXT NOT NULL,
   scope          TEXT NOT NULL,      -- user | group
   kind           TEXT NOT NULL,      -- directory | document
-  context_type   TEXT NOT NULL,      -- memory | resource | skill | session
+  context_type   TEXT NOT NULL,      -- memory | resource | session
   memory_type    TEXT,               -- profile | preferences | entities | ...（非记忆文件为 NULL）
   -- 这一行自己的层级：文件 L2；目录两行分别是 L0（摘要）与 L1（概览）
   level          TEXT NOT NULL,      -- L0 | L1 | L2

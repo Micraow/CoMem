@@ -1,10 +1,8 @@
 /**
  * 写完之后顺手要做的两件事（架构文档 §10.6、§12.4）。
  *
- * `ResourceService` 与 `SkillService` 都绕开 `FileSystemService` 直接写
- * `ContentStore`，所以两条链路各自补三步：批量写 → 一次 `index.upsert` → 摘要失效
- * + 权限物化。前两步的输入不同（一个要处理附件与文本规范化，一个只写字节），后两步
- * 的规则完全相同，共用这一份实现。
+ * `ResourceService` 绕开 `FileSystemService` 直接写 `ContentStore`，所以补三步：
+ * 批量写 → 一次 `index.upsert` → 摘要失效 + 权限物化。
  *
  * ## 摘要失效为什么只能 `markStale`
  *
@@ -17,7 +15,7 @@
  * ## 物化权限为什么不能只算写出来的 URI
  *
  * 写 `docs/api/spec.md`（或 `scripts/check.sh`）会顺手建出中间目录。这些目录没有
- * `node_permission` 行时，`list` / `tree` / `listSkills` 的纯 SQL 过滤会让它们整个
+ * `node_permission` 行时，`list` / `tree` 的纯 SQL 过滤会让它们整个
  * 消失——写成功了，树里却什么都没有。`assert` 走 `InheritingAuthorizer` 的写路径，
  * 先在物化表缺行时 `materializeNode` 再求权；逐级物化是幂等的，去重之后只多出
  * 「目录数」条 UPSERT。
@@ -77,10 +75,10 @@ export async function invalidateParentSummaries(
 export interface AncestorPermissionDeps {
   readonly authorizer: Authorizer;
   readonly logger: Logger;
-  /** 错误日志的主语：「资源节点」/「技能节点」。 */
+  /** 错误日志的主语。 */
   readonly nodeLabel: string;
   /**
-   * 物化失败之后的额外处理。`ResourceService` 与 `SkillService` 都用它往
+   * 物化失败之后的额外处理。`ResourceService` 用它往
    * `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6「索引双写补偿」）；
    * 省略时只记日志。
    */

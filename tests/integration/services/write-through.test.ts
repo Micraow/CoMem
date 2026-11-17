@@ -275,16 +275,16 @@ describe('materializeAncestorPermissions', () => {
     });
 
     await materializeAncestorPermissions(
-      { authorizer, logger, nodeLabel: '技能节点' },
-      [uri(`${SCOPE}/skills/code-review`)],
+      { authorizer, logger, nodeLabel: '批量写入节点' },
+      [uri(`${SCOPE}/resources/code-review`)],
       ['user:alice'],
     );
 
-    // 自身 → skills → scope 根，三个节点全部失败。
+    // 自身 → resources → scope 根，三个节点全部失败。
     expect(logger.errors.map((entry) => entry.message)).toEqual([
-      '技能节点权限物化失败，已忽略。',
-      '技能节点权限物化失败，已忽略。',
-      '技能节点权限物化失败，已忽略。',
+      '批量写入节点权限物化失败，已忽略。',
+      '批量写入节点权限物化失败，已忽略。',
+      '批量写入节点权限物化失败，已忽略。',
     ]);
   });
 });

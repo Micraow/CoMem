@@ -1,7 +1,7 @@
 /**
  * MCP 工具上下文（架构文档 §13）。
  *
- * 16 个工具共享同一组依赖。这里只声明形状，实例由 `bootstrap/` 按请求构造：
+ * MCP 工具共享同一组依赖。这里只声明形状，实例由 `bootstrap/` 按请求构造：
  * 身份、已展开的权限主体与 `requestId` 都在请求边界注入，工具层不做认证。
  *
  * ## 为什么 `acl` 是 `Authorizer` 而不是 `AclService`
@@ -23,7 +23,6 @@ import type { ObservabilityService } from '../../services/observability.js';
 import type { ResourceService } from '../../services/resource.js';
 import type { SearchService } from '../../services/search.js';
 import type { SessionService } from '../../services/session.js';
-import type { SkillService } from '../../services/skill.js';
 import type { SummaryService } from '../../services/summary.js';
 import type { TaskService } from '../../services/task.js';
 
@@ -42,7 +41,6 @@ export interface McpToolContext {
    */
   readonly observability: Pick<ObservabilityService, 'health'>;
   readonly resource: ResourceService;
-  readonly skill: SkillService;
   readonly tasks: TaskService;
   readonly index: RetrievalIndex;
   readonly logger: Logger;

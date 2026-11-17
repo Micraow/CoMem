@@ -1,5 +1,5 @@
 /**
- * 装配阶段 5：记忆与提交流水线的前半段（记忆服务 → 合并 → 资源 → 对账 → 技能）。
+ * 装配阶段 5：记忆与提交流水线的前半段（记忆服务 → 合并 → 资源 → 对账）。
  *
  * ## 记忆文件的端口语义是「原样文档」（含 frontmatter）
  *
@@ -23,7 +23,6 @@ import {
   DEFAULT_MAX_FILES,
   ResourceService,
 } from '../../services/resource.js';
-import { SkillService } from '../../services/skill.js';
 import { USER_WILDCARD } from '../../domain/acl.js';
 import { Uri } from '../../domain/uri.js';
 import type { Access } from './access.js';
@@ -40,7 +39,6 @@ export interface MemoryStack {
   readonly dreamer: DreamerService;
   readonly resource: ResourceService;
   readonly reconcile: ReconcileService;
-  readonly skill: SkillService;
   readonly principals: readonly string[];
 }
 
@@ -50,7 +48,7 @@ export function createMemory(
   access: Access,
   retrieval: Retrieval,
 ): MemoryStack {
-  const { config, logger, store, locks, index, nodes, permissions, dataDir } = core;
+  const { config, logger, store, locks, index, nodes, dataDir } = core;
   const { llm } = models;
   const { acl, subject, groups, boundPrincipal } = access;
   const { summary, search, reconcileLog, authorizer, indexObserver } = retrieval;
@@ -133,7 +131,7 @@ export function createMemory(
     summary,
     storage: new FileResourceStorage(dataDir, reconcileLog),
     logger,
-    // 写后物化权限：资源与技能服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
+    // 写后物化权限：资源服务直接写 `ContentStore`，观察者收不到通知（§12.4）。
     authorizer,
     maxFileBytes: DEFAULT_MAX_FILE_BYTES,
     maxFiles: DEFAULT_MAX_FILES,
@@ -149,17 +147,5 @@ export function createMemory(
     logger,
   });
 
-  // 技能与资源共用同一个 `ReconcileLog`：索引失败的对账记录由同一个重放器消费。
-  const skill = new SkillService({
-    store,
-    locks,
-    index,
-    summary,
-    reconcile: reconcileLog,
-    permissions,
-    logger,
-    authorizer,
-  });
-
-  return { memory, dreamer, resource, reconcile, skill, principals };
+  return { memory, dreamer, resource, reconcile, principals };
 }

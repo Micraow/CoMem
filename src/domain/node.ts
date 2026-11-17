@@ -17,7 +17,7 @@ export type NodeKind = 'directory' | 'document';
  * 数组是唯一来源，类型从它派生：MCP 的 `inputSchema.enum`、HTTP 的 `contextTypes`
  * 参数、按类别分的预算表都要跟着它走。加一个类别时这些消费点必须逐个显示决定。
  */
-export const CONTEXT_TYPES = ['memory', 'resource', 'skill', 'session'] as const;
+export const CONTEXT_TYPES = ['memory', 'resource', 'session'] as const;
 
 /** 索引里的 `context_type`（架构文档 §8.1）。 */
 export type ContextType = (typeof CONTEXT_TYPES)[number];
@@ -88,11 +88,10 @@ export function parseStatusField(raw: unknown): StatusField {
   return { kind: 'invalid' };
 }
 
-/** §6.5 的四个上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
+/** §6.5 的上下文目录名（复数）→ §8.1 的 `context_type`（单数）。 */
 const CONTEXT_TYPE_BY_DIRECTORY: Readonly<Record<string, ContextType>> = {
   memories: 'memory',
   resources: 'resource',
-  skills: 'skill',
   sessions: 'session',
 };
 
@@ -108,7 +107,7 @@ const DEFAULT_CONTEXT_TYPE: ContextType = 'resource';
 /**
  * URI → 索引里的 `context_type`（架构文档 §6.3、§6.5、§8.1）。
  *
- * 只看路径的第一段：§6.5 把上下文固定在根下的 `memories/` `resources/` `skills/`
+ * 只看路径的第一段：§6.5 把上下文固定在根下的 `memories/` `resources/`
  * `sessions/`，项目作用域在最前面多一段 `projects/{pid}/`，所以先剥掉这一段再看
  * 下一段。更深的段名不参与判断（`memories/archive/resources/x` 仍是记忆）。
  *

@@ -31,7 +31,6 @@ import type { MemoryService } from '../../../src/services/memory.js';
 import type { ResourceService } from '../../../src/services/resource.js';
 import type { SearchService } from '../../../src/services/search.js';
 import type { SessionService } from '../../../src/services/session.js';
-import type { SkillService } from '../../../src/services/skill.js';
 import type { SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 import { AllowAllAuthorizer } from '../../helpers/allow-all-authorizer.js';
@@ -52,7 +51,6 @@ const EXPECTED_NAMES = [
   'remember',
   'forget',
   'add_resource',
-  'add_skill',
 ];
 
 function createLogger(): Logger {
@@ -137,7 +135,6 @@ function createContext(db: DatabaseSync, logger: Logger): Omit<
       }),
     },
     resource: {} as unknown as ResourceService,
-    skill: {} as unknown as SkillService,
     tasks,
     index,
     logger,
@@ -231,7 +228,7 @@ async function createTestServer(
 }
 
 describe('McpHttpServer', () => {
-  it('MCP 客户端能连上，tools/list 返回 16 个，tools/call 调 health 成功', async () => {
+  it('MCP 客户端能连上，tools/list 返回 15 个，tools/call 调 health 成功', async () => {
     const server = await createTestServer(async () => ({
       subject: 'user:alice',
       principals: ['user:alice', 'user:*'],

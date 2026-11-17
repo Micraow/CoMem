@@ -1,14 +1,13 @@
 /**
  * 「文件已经落盘、派生数据没写成」时留一条对账记录（架构文档 §10.6「索引双写补偿」）。
  *
- * 全仓有五处会走到这个形态：
+ * 全仓有四类写入会走到这个形态：
  *
  * 1. `ResourceService` 的批量 `index.upsert` 与逐文件落盘；
- * 2. `SkillService` 的批量 `index.upsert`；
- * 3. `IndexObserver` 的单节点 `index.upsert`——记忆文件的字节写、会话消息落盘、
+ * 2. `IndexObserver` 的单节点 `index.upsert`——记忆文件的字节写、会话消息落盘、
  *    以及 `FileSystemService` 的 `write` / `mkdir` 都从这里进；
- * 4. `IndexObserver` 移动后的批量 `index.upsert`（记的是**目标** URI）；
- * 5. 三条写路径的权限物化失败（`op: 'permission'`）。
+ * 3. `IndexObserver` 移动后的批量 `index.upsert`（记的是**目标** URI）；
+ * 4. 写路径的权限物化失败（`op: 'permission'`）。
  *
  * 记录形状只有一种：`{op, uri, error, at}`，一行一个 URI。重放器按 `op` + URI 重做，
  * 形状漂移就是重放做错事，所以留记录只走这一份实现。
@@ -29,11 +28,7 @@
  * 待人工处理）。类型收窄在这里没有收益：写侧不判断能否重放，读侧用
  * `replayableOpOf` 判。
  *
- * ## 为什么不放在 `services/reconcile.ts`
- *
- * 那个模块 `import { skillIndexRecord } from './skill.js'`（重放技能行要用写路径的
- * 同一份构造），而 `SkillService` 需要这里的函数。放进 `reconcile.ts` 会形成
- * `reconcile ⇄ skill` 的循环依赖；拆成独立模块后依赖方向仍然只有「→ domain」。
+ * 独立成模块后依赖方向仍然只有「→ domain」。
  */
 
 import { errorMessage } from '../domain/errors.js';

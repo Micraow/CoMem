@@ -60,7 +60,6 @@ import {
   type RerankFailure,
 } from '../../../src/services/search.js';
 import type { SessionService } from '../../../src/services/session.js';
-import type { SkillService } from '../../../src/services/skill.js';
 import type { SummaryService } from '../../../src/services/summary.js';
 import { TaskService } from '../../../src/services/task.js';
 
@@ -295,7 +294,6 @@ async function createSearchHarness(options: SearchHarnessOptions): Promise<Searc
       }),
     },
     resource: {} as unknown as ResourceService,
-    skill: {} as unknown as SkillService,
     tasks,
     index,
     logger,
@@ -493,7 +491,6 @@ function minimalContext(search: SearchService): Omit<
       }),
     },
     resource: {} as unknown as ResourceService,
-    skill: {} as unknown as SkillService,
     tasks: {} as unknown as TaskService,
     index: {} as unknown as SqliteFtsIndex,
     logger: createLogger(),

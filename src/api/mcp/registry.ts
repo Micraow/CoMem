@@ -1,7 +1,7 @@
 /**
  * MCP 工具注册表（架构文档 §13.2）。
  *
- * 16 个工具是**硬约束**：多一个少一个都不行（AGENTS.md）。`validate()` 是这条
+ * 15 个工具是当前协议面。`validate()` 是这条
  * 约束的唯一执行点，启动时调用——等到演示时才发现多注册了一个工具，代价比启动
  * 时崩掉大得多。
  *
@@ -33,12 +33,12 @@ import {
 import type { McpToolContext } from './context.js';
 
 /**
- * §13.2 的 16 个工具名，**按表格顺序**。
+ * 当前 MCP 工具名，**按文档顺序**。
  *
  * 数组是唯一来源，类型从它派生：`tools/list` 的顺序、启动自检的白名单、各工具
- * 定义的 `name` 都从它来。往数组加第 17 个名字时，`src/api/mcp/tools/index.ts` 的
+ * 定义的 `name` 都从它来。往数组加第 16 个名字时，`src/api/mcp/tools/index.ts` 的
  * `Record<McpToolName, McpToolDefinition>` 会编译失败，逼你补实现（`AGENTS.md` §3
- * 「16 个，不多不少」）。测试用 `toEqual` 对比文档里硬编码的清单。
+ * 的清单）。测试用 `toEqual` 对比文档里硬编码的清单。
  */
 export const MCP_TOOL_NAMES = [
   'find',
@@ -56,15 +56,14 @@ export const MCP_TOOL_NAMES = [
   'remember',
   'forget',
   'add_resource',
-  'add_skill',
 ] as const;
 
 export type McpToolName = (typeof MCP_TOOL_NAMES)[number];
 
 /**
- * 16 个，不多不少（`AGENTS.md` §3）。
+ * 15 个，不多不少。
  *
- * 从数组长度取：再手写一个 `16` 就成了第三份清单。数量本身仍被
+ * 从数组长度取：再手写一个 `15` 就成了第三份清单。数量本身仍被
  * `tests/integration/mcp/registry.test.ts` 对照文档硬编码的清单锁住——这里的自检
  * 只负责「装配时少注册/多注册一个就崩」。
  */
@@ -76,7 +75,7 @@ export type McpToolResult =
   /**
    * 工具级失败（到上限仍未返回）。
    *
-   * 不是 `McpToolResult` 的常规产物：16 个工具的业务错误都抛 `ComemError`，由
+   * 不是 `McpToolResult` 的常规产物：15 个工具的业务错误都抛 `ComemError`，由
    * `server.ts` 统一收敛。这个形态只给 `ToolRegistry` 的截止时间闸门用——它拿到
    * 的是「超时」而不是一个异常，因为异常在工具内部可能已经被吞掉（降级路径），
    * 这里要返回的是**明确的失败**，不能伪装成空结果。
@@ -203,7 +202,7 @@ function deadlineMessage(tool: McpToolDefinition, deadline: CallDeadline): strin
 /**
  * 给每个工具套上截止时间。
  *
- * 包装在 `execute` 上而不是逐工具的 `try/finally`：16 个工具漏一个就是一条没有
+ * 包装在 `execute` 上而不是逐工具的 `try/finally`：15 个工具漏一个就是一条没有
  * 上限的路径，而「哪个工具忘了」在 review 里看不出来。放在了 `~` 展开之后，
  * 别名展开本身也被同一个预算覆盖。
  */
@@ -242,7 +241,7 @@ export class ToolRegistry {
 
   constructor(tools: readonly McpToolDefinition[], options: ToolRegistryOptions = {}) {
     // `~` 展开需要请求身份，而身份只在 `execute` 的 `context` 里（§6.1、§13.2）。
-    // 在这里统一包装，16 个工具不必各写一遍——漏一个就是「有的工具能用别名、
+    // 在这里统一包装，15 个工具不必各写一遍——漏一个就是「有的工具能用别名、
     // 有的不能」。
     //
     // 截止时间同样是统一包装：它是「MCP 工具调用不能挂住宿主 agent」的唯一执行点

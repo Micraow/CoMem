@@ -29,14 +29,15 @@ const CASES: readonly ContextTypeCase[] = [
   { uri: 'comem://user/alice/memories/preferences/code-style.md', expected: 'memory' },
   { uri: 'comem://user/alice/resources', expected: 'resource' },
   { uri: 'comem://user/alice/resources/paper.pdf', expected: 'resource' },
-  { uri: 'comem://user/alice/skills', expected: 'skill' },
-  { uri: 'comem://user/alice/skills/license-review/must-locate-license.md', expected: 'skill' },
+  // 旧版 skills 目录现在是普通资源；已有文件不会被迁移或删除。
+  { uri: 'comem://user/alice/skills', expected: 'resource' },
+  { uri: 'comem://user/alice/skills/license-review/must-locate-license.md', expected: 'resource' },
   { uri: 'comem://user/alice/sessions', expected: 'session' },
   { uri: 'comem://user/alice/sessions/2026-11-09/summary.md', expected: 'session' },
 
   // 组空间与个人空间共用一套布局
   { uri: 'comem://group/eng/memories/decision.md', expected: 'memory' },
-  { uri: 'comem://group/eng/projects/app/skills/review.md', expected: 'skill' },
+  { uri: 'comem://group/eng/projects/app/skills/review.md', expected: 'resource' },
 
   // 项目作用域：`projects/{pid}/` 先剥一层，再看下一段
   { uri: 'comem://user/alice/projects', expected: 'resource' },
@@ -44,7 +45,7 @@ const CASES: readonly ContextTypeCase[] = [
   { uri: 'comem://user/alice/projects/comem/memories', expected: 'memory' },
   { uri: 'comem://user/alice/projects/comem/memories/note.md', expected: 'memory' },
   { uri: 'comem://user/alice/projects/comem/resources/spec.pdf', expected: 'resource' },
-  { uri: 'comem://user/alice/projects/comem/skills/style.md', expected: 'skill' },
+  { uri: 'comem://user/alice/projects/comem/skills/style.md', expected: 'resource' },
   { uri: 'comem://user/alice/projects/comem/sessions/s1.md', expected: 'session' },
 
   // 不在任何已知目录下：兜底 resource
@@ -64,8 +65,8 @@ describe('contextTypeOf', () => {
     expect(contextTypeOf(Uri.parse(uri))).toBe(expected);
   });
 
-  it('矩阵覆盖全部四个 context_type', () => {
+  it('矩阵覆盖全部三个 context_type', () => {
     const produced = new Set(CASES.map((entry) => entry.expected));
-    expect([...produced].sort()).toEqual(['memory', 'resource', 'session', 'skill']);
+    expect([...produced].sort()).toEqual(['memory', 'resource', 'session']);
   });
 });

@@ -1070,73 +1070,6 @@ describe('资源与技能', () => {
     ]);
   });
 
-  it('add_skill 写入技能包并列出', async () => {
-    const parentUri = `${ROOT}/skills`;
-    const skill = [
-      '---',
-      'name: code-review',
-      'description: 代码审查',
-      '---',
-      '',
-      '# code-review',
-    ].join('\n');
-    const response = await inject({
-      method: 'POST',
-      url: '/api/v1/skills',
-      payload: {
-        parentUri,
-        name: 'code-review',
-        files: [{ path: 'SKILL.md', content: Buffer.from(skill).toString('base64') }],
-      },
-    });
-    expect(response.statusCode).toBe(200);
-    expect(resultOf(response)['fileCount']).toBe(1);
-
-    const listed = resultOf(
-      await inject({ method: 'GET', url: `/api/v1/skills?scopeUri=${encode(ROOT)}` }),
-    );
-    expect(listed['skills']).toEqual([
-      { uri: `${parentUri}/code-review`, name: 'code-review' },
-    ]);
-
-    // 写后物化：技能目录没有自己的 `node_permission` 行时，上面的 `listSkills`
-    // 会把它整个过滤掉。
-    const directories = await container.services.filesystem.list(Uri.parse(parentUri), AUTH_PRINCIPALS);
-    expect(directories.map((entry) => entry.uri.name)).toEqual(['code-review']);
-  });
-
-  it('skills 的 files[].executable 已不是参数（不做类型校验、不参与透传）', async () => {
-    // 该字段曾从 HTTP 透传到 `SkillFileInput`，最后被静默丢弃。它已从两个类型里
-    // 删除；这里故意传一个非法类型：旧实现会因“executable 必须是布尔值”返回
-    // 400，删掉后它只是未知键。若有人把字段或校验加回来，这条会失败。
-    const parentUri = `${ROOT}/skills-no-exec`;
-    const skill = [
-      '---',
-      'name: no-exec',
-      'description: 没有执行位字段',
-      '---',
-      '',
-      '# no-exec',
-    ].join('\n');
-    const response = await inject({
-      method: 'POST',
-      url: '/api/v1/skills',
-      payload: {
-        parentUri,
-        name: 'no-exec',
-        files: [
-          {
-            path: 'SKILL.md',
-            content: Buffer.from(skill).toString('base64'),
-            executable: 'yes',
-          },
-        ],
-      },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(resultOf(response)['fileCount']).toBe(1);
-  });
 });
 
 describe('MCP 挂载', () => {
@@ -1277,12 +1210,12 @@ describe('指标开关', () => {
 });
 
 describe('GET /mcp/tools', () => {
-  it('列出 16 个工具，名字与顺序都来自注册表', async () => {
+  it('列出 15 个工具，名字与顺序都来自注册表', async () => {
     const result = resultOf(await inject({ method: 'GET', url: '/api/v1/mcp/tools' }));
     const tools = result['tools'] as readonly Record<string, unknown>[];
 
-    // 16 是硬约束（AGENTS.md）。这里是同一份注册表的只读视图，不是第 17 个工具。
-    expect(tools).toHaveLength(16);
+    // 这里是同一份注册表的只读视图，不另存一份工具清单。
+    expect(tools).toHaveLength(15);
     expect(tools.map((tool) => tool['name'])).toEqual([...MCP_TOOL_NAMES]);
 
     for (const tool of tools) {

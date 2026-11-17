@@ -13,7 +13,7 @@
  *      → IdentityService → AclService → 命名空间 （access）
  *      → Summary → ContextAssembler → IndexObserver → FileSystemService
  *      → SearchService → TaskService → SessionService   （retrieval）
- *      → MemoryService → Consolidation → Resource → Reconcile → Skill （memory）
+ *      → MemoryService → Consolidation → Resource → Reconcile （memory）
  *      → CommitRunner → TtlService → Scheduler → Observability    （background）
  *      → MCP → HTTP 路由                          （api）
  * ```

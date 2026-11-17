@@ -12,7 +12,7 @@
  * </memory>
  * ```
  *
- * 标签名由 `contextType` 决定（`memory` / `resource` / `skill` / `session`），不是
+ * 标签名由 `contextType` 决定（`memory` / `resource` / `session`），不是
  * 统一的 `<context type="...">`：模型对 `<memory>` 这种语义标签的理解比
  * `<context type="memory">` 更直接，而这个格式的目的就是让模型一次读对。
  */
