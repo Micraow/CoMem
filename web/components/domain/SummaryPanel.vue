@@ -4,9 +4,9 @@
  *
  * 五段：记忆、摘要来源、新鲜度、有效权限、存储。
  *
- * **不编造拿不到的状态。** 服务端只暴露「摘要是否存在」「是否降级」与全站的
- * 待刷新目录数，没有单节点的生成时间、模型、版本。设计稿里的仪表需要单节点
- * 的待刷新比例，这里改成「未知 / 已生成」加全站计数——百分比没有分母就是假数据。
+ * **不编造拿不到的状态。** 服务端只暴露「摘要是否存在」「是否降级」、摘要来源与
+ * 全站的待刷新目录数，没有单节点的生成时间、模型、版本。这里不根据降级字段猜
+ * 生成方式；百分比没有分母，也不做单节点比例。
  *
  * **「记忆」一段只在 `memories/` 下的文件出现。** 内容来自 `GET /memories/{uri}`：
  * 检索只返回 `active` 节点，`pending` / `archived` 在 `find` / `search` / `glob`
@@ -23,12 +23,17 @@ import { formatBytes, formatDateTime } from '~/utils/format'
 import { fsEntryKindLabel, fsEntryLevelsLabel } from '~/utils/fsLabels'
 import { memoryTypeLabelOf } from '~/utils/memoryTypeLabels'
 import { NODE_RETRIEVAL_LABEL, NODE_STATUS_LABEL } from '~/utils/nodeStatus'
+import {
+  summarySourceLabelOf,
+  type SummarySource,
+} from '~/utils/summarySource'
 
 const props = withDefaults(
   defineProps<{
     stat: FsStatPayload['stat']
     abstract: string | null
-    degraded: boolean
+    abstractSource: SummarySource | null
+    abstractFailed: boolean
     freshness: HealthPayload['summary'] | null
     acl: AclPayload | null
     aclError: string | null
@@ -44,7 +49,8 @@ const props = withDefaults(
   {
     stat: null,
     abstract: null,
-    degraded: false,
+    abstractSource: null,
+    abstractFailed: false,
     freshness: null,
     acl: null,
     aclError: null,
@@ -68,11 +74,18 @@ const effectiveRows = computed<readonly { principal: string; level: AclLevel }[]
 })
 
 const summaryState = computed(() => {
-  if (props.abstract === null) {
-    return '未知'
+  if (props.abstractFailed) {
+    return '没有取到'
   }
-  return props.degraded ? '规则生成（降级）' : '已生成'
+  if (props.abstract === null) {
+    return '没有'
+  }
+  return '已生成'
 })
+
+const summarySourceLabel = computed(() =>
+  props.abstract === null ? null : summarySourceLabelOf(props.abstractSource),
+)
 
 const sizeLabel = computed(() => {
   if (props.stat === null) {
@@ -185,6 +198,10 @@ const memoryValidityLabel = computed<string | null>(() => {
         <div class="meta-list__row">
           <span class="meta-list__k">摘要状态</span>
           <span class="meta-list__v">{{ summaryState }}</span>
+        </div>
+        <div class="meta-list__row">
+          <span class="meta-list__k">来源</span>
+          <span class="meta-list__v">{{ summarySourceLabel ?? '—' }}</span>
         </div>
         <div class="meta-list__row">
           <span class="meta-list__k">层级</span>

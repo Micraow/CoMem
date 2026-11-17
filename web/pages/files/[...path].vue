@@ -57,6 +57,11 @@ import {
   type LevelTab,
 } from '~/utils/levelLabels'
 import { isMemoryUri, linkRowsOf, type LinkRow } from '~/utils/memoryLinks'
+import {
+  archiveMessagesDirectoryOf,
+  summarySourceLabelOf,
+  type SummarySource,
+} from '~/utils/summarySource'
 
 useHead({ title: '文件树 · CoMem 控制台' })
 
@@ -101,8 +106,11 @@ const entryKindLabel = computed(() => {
   return kind === null ? null : fsEntryKindLabel(kind)
 })
 const abstractText = ref<string | null>(null)
+const abstractSource = ref<SummarySource | null>(null)
 /** 摘要请求失败：与「这个节点还没有摘要」分开，前者不是数据状态。 */
 const abstractFailed = ref(false)
+/** 已同时经路径、目录 stat 和目录摘要确认的会话归档目录。 */
+const archiveSummaryUri = ref<string | null>(null)
 const overviewText = ref<string | null>(null)
 const contentText = ref<string | null>(null)
 const children = ref<readonly TreeEntryPayload[] | null>(null)
@@ -157,6 +165,7 @@ const isDirectory = computed(() => entryKind.value === 'directory')
 const visibleLayerTabs = computed(() =>
   isDirectory.value ? layerTabs : layerTabs.filter((tab) => tab.value !== 'l1'),
 )
+const abstractSourceLabel = computed(() => summarySourceLabelOf(abstractSource.value))
 
 /**
  * 只有 `memories/` 下的节点有关联边（判据见 `~/utils/memoryLinks`）：普通文件
@@ -265,7 +274,9 @@ async function loadNode(uri: string): Promise<void> {
   layerError.value = null
   stat.value = null
   abstractText.value = null
+  abstractSource.value = null
   abstractFailed.value = false
+  archiveSummaryUri.value = null
   overviewText.value = null
   contentText.value = null
   children.value = null
@@ -320,10 +331,46 @@ async function loadNode(uri: string): Promise<void> {
 async function loadAbstract(uri: string): Promise<void> {
   try {
     const payload = await api.get<SummaryLayerPayload>('/content/abstract', { uri })
+    if (selectedUri.value !== uri) {
+      return
+    }
     abstractText.value = payload.abstract ?? null
+    abstractSource.value = payload.source ?? null
     degraded.value = payload.degraded
+    if (abstractText.value === null && payload.source === 'index') {
+      await loadArchiveSummary(uri)
+    }
   } catch {
-    abstractFailed.value = true
+    if (selectedUri.value === uri) {
+      abstractFailed.value = true
+    }
+  }
+}
+
+/** 只用目录自身的真实状态确认归档入口，路径形状不能单独作为证据。 */
+async function loadArchiveSummary(uri: string): Promise<void> {
+  const directory = archiveMessagesDirectoryOf(uri)
+  if (directory === null) {
+    return
+  }
+
+  try {
+    const [statPayload, summaryPayload] = await Promise.all([
+      api.get<FsStatPayload>('/fs/stat', { uri: directory }),
+      api.get<SummaryLayerPayload>('/content/abstract', { uri: directory }),
+    ])
+    if (
+      selectedUri.value === uri &&
+      statPayload.stat?.kind === 'directory' &&
+      summaryPayload.source === 'summary' &&
+      summaryPayload.abstract !== null &&
+      summaryPayload.abstract !== undefined &&
+      summaryPayload.abstract.trim() !== ''
+    ) {
+      archiveSummaryUri.value = directory
+    }
+  } catch {
+    // 这是可选的下一步入口；无法确认时保持普通空态，不把猜测写成事实。
   }
 }
 
@@ -475,8 +522,10 @@ onBeforeUnmount(() => {
                         <b>L0</b>
                       </span>
                       <span>摘要</span>
-                      <span class="faint">·</span>
-                      <span>{{ degraded ? '规则生成' : '模型生成' }}</span>
+                      <template v-if="abstractSourceLabel !== null">
+                        <span class="faint">·</span>
+                        <span>{{ abstractSourceLabel }}</span>
+                      </template>
                     </div>
                     <p class="abstract__quote">{{ abstractText }}</p>
                     <div class="abstract__foot">
@@ -484,7 +533,27 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   <UiEmpty v-else-if="abstractFailed" title="摘要没有取到" />
-                  <UiEmpty v-else title="还没有摘要" />
+                  <UiEmpty v-else title="还没有摘要">
+                    <template #extra>
+                      <div class="summary-empty-actions">
+                        <NuxtLink
+                          v-if="archiveSummaryUri !== null"
+                          :to="fileRouteOf(archiveSummaryUri)"
+                          class="btn btn--secondary btn--sm"
+                        >
+                          查看归档摘要
+                        </NuxtLink>
+                        <UiButton
+                          v-if="!isDirectory"
+                          variant="secondary"
+                          size="sm"
+                          @click="layer = 'l2'"
+                        >
+                          打开原文
+                        </UiButton>
+                      </div>
+                    </template>
+                  </UiEmpty>
                 </template>
 
                 <template v-else-if="layer === 'l1'">
@@ -581,7 +650,8 @@ onBeforeUnmount(() => {
               <DomainSummaryPanel
                 :stat="stat"
                 :abstract="abstractText"
-                :degraded="degraded"
+                :abstract-source="abstractSource"
+                :abstract-failed="abstractFailed"
                 :freshness="health?.summary ?? null"
                 :acl="acl"
                 :acl-error="aclError"
@@ -615,6 +685,17 @@ onBeforeUnmount(() => {
   letter-spacing: 0.01em;
   color: var(--label-3);
   text-transform: uppercase;
+}
+
+.summary-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.summary-empty-actions a {
+  text-decoration: none;
 }
 
 .links__group {

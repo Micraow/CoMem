@@ -450,12 +450,18 @@ export interface LlmCallListPayload {
   readonly nextCursor: string | null
 }
 
-/** `GET /content/abstract` 与 `/content/overview` 的公共形状。 */
+/**
+ * `GET /content/abstract` 与 `/content/overview` 的公共形状。
+ *
+ * `source` 是服务端给出的读取来源：文件摘要在 `index`，目录摘要文件是 `summary`，
+ * 文件概览没有对应数据时是 `none`。界面不能从 `degraded` 反推生成方式。
+ */
 export interface SummaryLayerPayload {
   readonly uri: string
   readonly abstract?: string | null
   readonly overview?: string | null
   readonly degraded: boolean
+  readonly source: 'index' | 'summary' | 'none'
 }
 
 /** `GET /content/read`。 */
