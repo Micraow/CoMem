@@ -22,11 +22,14 @@ import {
   CURSOR_INSPECT_COMMAND,
   DEFAULT_SERVER_BASE_URL,
   DOC_LINKS,
+  HERMES_KEY_NAME,
+  HERMES_TOKEN_ENV,
   HERMES_OPENUI_DOC,
   HOST_CONFIG_LOCATION,
   HOST_DOC_LINK,
   MCP_ENDPOINT_PATH,
   MCP_SERVER_NAME,
+  apiKeysPathForSubject,
   deriveVerification,
   firstMemoryCall,
   firstMemoryCurl,
@@ -34,6 +37,7 @@ import {
   isFreshInstall,
   mcpSnippetFor,
   trustStepFor,
+  userIdFromSubject,
 } from '../../../web/utils/connectGuide.js';
 
 const CONFIG_SOURCE = readFileSync(
@@ -43,6 +47,10 @@ const CONFIG_SOURCE = readFileSync(
 const README = readFileSync(new URL('../../../integrations/README.md', import.meta.url), 'utf8');
 const INDEX_PAGE = readFileSync(
   new URL('../../../web/pages/index.vue', import.meta.url),
+  'utf8',
+);
+const CONNECT_PAGE = readFileSync(
+  new URL('../../../web/pages/connect.vue', import.meta.url),
   'utf8',
 );
 
@@ -142,16 +150,64 @@ describe('MCP 配置片段', () => {
   });
 
   it('Hermes 的 Docker 配置只引用当前 profile 的 API Key 环境变量', () => {
-    const snippet = parseYaml(mcpSnippetFor('hermes', 'http://127.0.0.1:18080', true).text);
+    const snippet = parseYaml(mcpSnippetFor('hermes', 'http://127.0.0.1:18080').text);
     expect(snippet).toEqual({
       mcp_servers: {
         comem: {
           url: 'http://127.0.0.1:18080/mcp',
+          auth: 'header',
           headers: { Authorization: 'Bearer ${COMEM_TOKEN}' },
           tools: { include: ['health', 'find', 'read', 'remember'] },
         },
       },
     });
+  });
+
+  it('Hermes 接入 Key 名称与 COMEM_TOKEN 共用一份常量', () => {
+    expect(HERMES_KEY_NAME).toBe('Hermes');
+    expect(HERMES_TOKEN_ENV).toBe('COMEM_TOKEN');
+    expect(mcpSnippetFor('hermes').text).toContain(`\${${HERMES_TOKEN_ENV}}`);
+    expect(mcpSnippetFor('hermes').text).toContain('auth: header');
+  });
+});
+
+describe('当前账号 API Key', () => {
+  it('用户主体生成既有自助 API Key 端点', () => {
+    expect(userIdFromSubject('user:pengbo')).toBe('pengbo');
+    expect(apiKeysPathForSubject('user:pengbo')).toBe('/admin/users/pengbo/api-keys');
+    expect(userIdFromSubject('group:eng')).toBeNull();
+    expect(apiKeysPathForSubject('group:eng')).toBeNull();
+  });
+
+  it('页面仅由显式按钮生成 Hermes Key，不使用可选复选框', () => {
+    expect(CONNECT_PAGE).toContain('consoleIdentityState');
+    expect(CONNECT_PAGE).toContain('generateHermesKey');
+    expect(CONNECT_PAGE).toContain('生成 Hermes 接入 Key');
+    expect(CONNECT_PAGE).toContain('完整 Key 只显示这一次');
+    expect(CONNECT_PAGE).not.toContain('hermesUseApiKey');
+    expect(CONNECT_PAGE).not.toMatch(/onMounted\([^)]*generateHermesKey/u);
+  });
+
+  it('页面明确区分控制台来源与 Agent 后端地址', () => {
+    expect(CONNECT_PAGE).toContain('consoleOrigin');
+    expect(CONNECT_PAGE).toContain('本网页');
+    expect(CONNECT_PAGE).toContain('Agent');
+  });
+
+  it('页面把当前登录、Key 所有者和免凭据回环身份分开说明', () => {
+    expect(CONNECT_PAGE).toContain('当前登录');
+    expect(CONNECT_PAGE).toContain('接入 Key 所有者');
+    expect(CONNECT_PAGE).toContain('免凭据连接会写入');
+    expect(CONNECT_PAGE).toContain('只有 Hermes 没有读取');
+    expect(CONNECT_PAGE).toContain('to="/account"');
+    expect(CONNECT_PAGE).not.toContain('服务绑定');
+    expect(CONNECT_PAGE).not.toContain('is-mismatch');
+  });
+
+  it('宿主切换时使仍在途的 Key 请求失效', () => {
+    expect(CONNECT_PAGE).toContain('keyRequestVersion');
+    expect(CONNECT_PAGE).toMatch(/requestVersion !== keyRequestVersion/u);
+    expect(CONNECT_PAGE).toMatch(/watch\(isHermes,[\s\S]*keyRequestVersion \+= 1/u);
   });
 });
 
@@ -265,16 +321,26 @@ describe('验证三态', () => {
 
   it('Hermes 只认可 Hermes 会话，已有导入不能冒充自动采集', () => {
     const input = {
-      host: 'hermes', health: HEALTH, healthError: null, sessionsError: null,
+      host: 'hermes',
+      health: HEALTH,
+      healthError: null,
+      sessionsError: null,
+      currentSubject: 'user:pengbo',
       sessions: [{ ...COMMITTED_SESSION, id: 'import-already-present' }],
     } as const;
     const missing = deriveVerification(input);
     expect(missing.checks.map((check) => check.key)).toEqual(['server', 'sessions']);
+    expect(missing.checks[1]?.label).toBe('当前账号归档');
+    expect(missing.checks[1]?.detail).toContain('user:pengbo');
+    expect(missing.checks[1]?.detail).toContain('还没有已归档');
     expect(missing.checks[1]?.tone).toBe('warn');
     expect(missing.allGreen).toBe(false);
-    expect(deriveVerification({
+    const observed = deriveVerification({
       ...input, sessions: [...input.sessions, { ...COMMITTED_SESSION, id: 'hermes-auto' }],
-    }).allGreen).toBe(true);
+    });
+    expect(observed.allGreen).toBe(true);
+    expect(observed.checks[1]?.detail).toContain('user:pengbo');
+    expect(observed.checks[1]?.detail).toContain('已归档的 Hermes 会话');
   });
 });
 

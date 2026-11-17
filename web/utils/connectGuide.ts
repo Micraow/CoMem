@@ -110,6 +110,25 @@ export interface McpSnippet {
   readonly text: string
 }
 
+export const HERMES_KEY_NAME = 'Hermes'
+
+export const HERMES_TOKEN_ENV = 'COMEM_TOKEN'
+
+/** 当前网页登录主体 → API Key 端点使用的用户 ID。 */
+export function userIdFromSubject(subject: string): string | null {
+  return subject.startsWith('user:') && subject.length > 'user:'.length
+    ? subject.slice('user:'.length)
+    : null
+}
+
+/** 当前用户自助管理 API Key 的既有端点。 */
+export function apiKeysPathForSubject(subject: string): string | null {
+  const userId = userIdFromSubject(subject)
+  return userId === null
+    ? null
+    : `/admin/users/${encodeURIComponent(userId)}/api-keys`
+}
+
 function mcpEndpointOf(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/u, '')}${MCP_ENDPOINT_PATH}`
 }
@@ -125,7 +144,6 @@ function mcpEndpointOf(baseUrl: string): string {
 export function mcpSnippetFor(
   host: ConnectHost,
   baseUrl: string = DEFAULT_SERVER_BASE_URL,
-  hermesUseApiKey = false,
 ): McpSnippet {
   const url = mcpEndpointOf(baseUrl)
 
@@ -155,10 +173,11 @@ export function mcpSnippetFor(
   }
 
   if (host === 'hermes') {
-    const headers = hermesUseApiKey ? '    headers:\n      Authorization: "Bearer ${COMEM_TOKEN}"\n' : ''
     return {
       format: 'YAML',
-      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n${headers}    tools:\n      include: [health, find, read, remember]\n`,
+      // Hermes 0.23.2 的运行时直接用 headers 建立 HTTP transport；auth 只在值为 oauth 时
+      // 触发 OAuth。header 是本机 Hermes 配置界面保存 Bearer 配置时使用的显式模式标记。
+      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n    auth: header\n    headers:\n      Authorization: "Bearer \${${HERMES_TOKEN_ENV}}"\n    tools:\n      include: [health, find, read, remember]\n`,
     }
   }
 
@@ -247,7 +266,7 @@ export function trustStepFor(host: ConnectHost): TrustStep {
   if (host === 'hermes') {
     return {
       title: '检查并开启新会话',
-      detail: '运行 hermes memory status 确认当前记忆服务为 CoMem。重启 Hermes 网关，打开新会话。',
+      detail: `运行 hermes memory status 确认当前记忆服务为 CoMem。重启 Hermes 网关，确认自动记忆与 MCP 都读取同一个 ${HERMES_TOKEN_ENV}。`,
     }
   }
 
@@ -319,6 +338,8 @@ export interface VerificationInput {
   readonly healthError: string | null
   readonly sessions: readonly VerificationSession[] | null
   readonly sessionsError: string | null
+  /** 当前网页登录主体；Hermes 验证只陈述这个账号自己的归档。 */
+  readonly currentSubject?: string | null
 }
 
 export interface VerificationCheck {
@@ -363,6 +384,8 @@ function latestActivityOf(sessions: readonly VerificationSession[]): string | nu
  */
 export function deriveVerification(input: VerificationInput): VerificationResult {
   const hermes = input.host === 'hermes'
+  const sessionLabel = hermes ? '当前账号归档' : '最近会话'
+  const currentAccount = input.currentSubject?.trim() || '当前账号'
   const observedSessions = hermes
     ? input.sessions?.filter((session) =>
       session.id?.startsWith('hermes-') && session.lastCommitAt !== null) ?? null
@@ -392,31 +415,37 @@ export function deriveVerification(input: VerificationInput): VerificationResult
   if (input.sessionsError !== null) {
     sessions = {
       key: 'sessions',
-      label: '最近会话',
+      label: sessionLabel,
       tone: 'fail',
       detail: input.sessionsError,
       hint: null,
     }
   } else if (observedSessions === null) {
-    sessions = { key: 'sessions', label: '最近会话', tone: 'idle', detail: '还没有检查', hint: null }
+    sessions = { key: 'sessions', label: sessionLabel, tone: 'idle', detail: '还没有检查', hint: null }
   } else if (observedSessions.length === 0) {
     sessions = {
       key: 'sessions',
-      label: '最近会话',
+      label: sessionLabel,
       tone: 'warn',
-      detail: hermes ? '还没有收到 Hermes 会话。请在 Hermes 发送一条消息。' : '还没有采集到会话',
+      detail: hermes
+        ? `${currentAccount} 还没有已归档的 Hermes 会话。请在 Hermes 发送一条消息。`
+        : '还没有采集到会话',
       hint: null,
     }
   } else {
     const latest = latestActivityOf(observedSessions)
     sessions = {
       key: 'sessions',
-      label: '最近会话',
+      label: sessionLabel,
       tone: 'ok',
       detail:
         latest === null
-          ? `已收到 ${String(observedSessions.length)} 个会话`
-          : `已收到 ${String(observedSessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
+          ? hermes
+            ? `${currentAccount} 有 ${String(observedSessions.length)} 个已归档的 Hermes 会话`
+            : `已收到 ${String(observedSessions.length)} 个会话`
+          : hermes
+            ? `${currentAccount} 有 ${String(observedSessions.length)} 个已归档的 Hermes 会话 · 最近 ${formatMonthDayTime(latest)}`
+            : `已收到 ${String(observedSessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
       hint: null,
     }
   }

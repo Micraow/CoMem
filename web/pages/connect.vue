@@ -13,11 +13,16 @@
  * **游标读不到本机文件。** 控制台跑在浏览器里，拿不到 `{tmpdir}/comem-cursors.json`，
  * 所以第三项检查只根据会话提交记录间接判断，并在提示里给出本机命令。
  */
-import { AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, Copy, KeyRound, RefreshCw } from 'lucide-vue-next'
 
 import type { SessionListPayload } from '~/components/domain/SessionList.vue'
 import { errorMessageOf, useApi, type HealthPayload } from '~/composables/useApi'
+import { consoleIdentityState } from '~/composables/consoleIdentity'
+import { useToast } from '~/composables/useToast'
+import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 import {
+  HERMES_KEY_NAME,
+  HERMES_TOKEN_ENV,
   CONNECT_HOSTS,
   CONNECT_HOST_LABELS,
   DEFAULT_SERVER_BASE_URL,
@@ -29,6 +34,7 @@ import {
   firstMemoryCurl,
   hookInstallFor,
   mcpSnippetFor,
+  apiKeysPathForSubject,
   serverBaseUrlFromApiBase,
   trustStepFor,
   type ConnectHost,
@@ -67,9 +73,15 @@ const HOST_TABS = CONNECT_HOSTS.map((host) => ({
 }))
 
 const api = useApi()
+const toast = useToast()
 const scopeRoot = useScopeRoot()
 const runtimeConfig = useRuntimeConfig()
 const route = useRoute()
+const identityState = consoleIdentityState()
+const identity = identityState.status === 'ready' ? identityState.identity : null
+const currentSubject = computed(() => identity?.subject ?? '')
+const apiKeysPath = computed(() => apiKeysPathForSubject(currentSubject.value))
+const consoleOrigin = typeof window === 'undefined' ? '' : window.location.origin
 
 /**
  * Agent 要连的服务地址。
@@ -95,19 +107,22 @@ const serverBaseUrl = useState<string>('comem-mcp-server-base-url', initialServe
 
 const host = ref<ConnectHost>(route.query.host === 'hermes' ? 'hermes' : 'claude-code')
 const isHermes = computed(() => host.value === 'hermes')
-const hermesUseApiKey = ref(false)
 const health = ref<HealthPayload | null>(null)
 const healthError = ref<string | null>(null)
 const sessions = ref<SessionListPayload['sessions'] | null>(null)
 const sessionsError = ref<string | null>(null)
 const loading = ref(false)
+const generatingKey = ref(false)
+const keyError = ref<string | null>(null)
+const generatedKey = ref<{ readonly key: string } | null>(null)
+let keyRequestVersion = 0
 
 /** 空输入时退回文档里的默认地址，片段里不出现 `/mcp` 这种没有主机的地址。 */
 const effectiveServerBaseUrl = computed(
   () => serverBaseUrl.value.trim() || DEFAULT_SERVER_BASE_URL,
 )
 
-const snippet = computed(() => mcpSnippetFor(host.value, effectiveServerBaseUrl.value, hermesUseApiKey.value))
+const snippet = computed(() => mcpSnippetFor(host.value, effectiveServerBaseUrl.value))
 const hook = computed(() => hookInstallFor(host.value))
 const trust = computed(() => trustStepFor(host.value))
 const configLocation = computed(() => HOST_CONFIG_LOCATION[host.value])
@@ -124,8 +139,55 @@ const verification = computed(() =>
     healthError: healthError.value,
     sessions: sessions.value,
     sessionsError: sessionsError.value,
+    currentSubject: currentSubject.value,
   }),
 )
+
+async function generateHermesKey(): Promise<void> {
+  if (apiKeysPath.value === null || generatingKey.value || generatedKey.value !== null) {
+    return
+  }
+  const requestVersion = ++keyRequestVersion
+  const requestSubject = currentSubject.value
+  const requestPath = apiKeysPath.value
+  generatingKey.value = true
+  keyError.value = null
+  try {
+    const result = await api.post<{ readonly key: string }>(requestPath, {
+      name: HERMES_KEY_NAME,
+    })
+    // 切换宿主不会取消已经发出的请求；只让当前 Hermes 页面处理它的结果。
+    if (
+      requestVersion !== keyRequestVersion ||
+      !isHermes.value ||
+      currentSubject.value !== requestSubject
+    ) {
+      return
+    }
+    generatedKey.value = result
+    toast.show('success', `已为 ${currentSubject.value} 生成 Hermes 接入 Key`)
+  } catch (caught) {
+    if (requestVersion === keyRequestVersion && isHermes.value) {
+      keyError.value = errorMessageOf(caught)
+    }
+  } finally {
+    if (requestVersion === keyRequestVersion) {
+      generatingKey.value = false
+    }
+  }
+}
+
+async function copyHermesToken(): Promise<void> {
+  const key = generatedKey.value?.key
+  if (key === undefined) {
+    return
+  }
+  if (!(await copyToClipboard(key))) {
+    toast.show('error', CLIPBOARD_DENIED_MESSAGE)
+    return
+  }
+  toast.show('success', `已复制 ${HERMES_TOKEN_ENV}`)
+}
 
 async function loadHealth(): Promise<void> {
   healthError.value = null
@@ -139,9 +201,14 @@ async function loadHealth(): Promise<void> {
 
 async function loadSessions(): Promise<void> {
   sessionsError.value = null
+  const targetScope = isHermes.value ? (identity?.scopes[0] ?? scopeRoot.value) : scopeRoot.value
+  if (targetScope === '') {
+    sessions.value = []
+    return
+  }
   try {
     const payload = await api.get<SessionListPayload>('/sessions', {
-      scopeUri: scopeRoot.value,
+      scopeUri: targetScope,
     })
     sessions.value = payload.sessions
   } catch (caught) {
@@ -170,6 +237,23 @@ onMounted(() => {
 watch(scopeRoot, () => {
   void check()
 })
+
+watch(host, () => {
+  void check()
+})
+
+watch(isHermes, (active) => {
+  if (!active) {
+    keyRequestVersion += 1
+    generatingKey.value = false
+    generatedKey.value = null
+    keyError.value = null
+  }
+})
+
+onBeforeUnmount(() => {
+  keyRequestVersion += 1
+})
 </script>
 
 <template>
@@ -188,6 +272,31 @@ watch(scopeRoot, () => {
         <UiCard title="① 选择宿主" panel>
           <UiTabs v-model="host" :items="HOST_TABS" aria-label="选择宿主" />
 
+          <div class="account-facts">
+            <span class="account-fact account-fact--primary">
+              <span class="account-fact__label">当前登录</span>
+              <code>{{ currentSubject || '未识别' }}</code>
+            </span>
+            <span class="account-fact account-fact--primary">
+              <span class="account-fact__label">接入 Key 所有者</span>
+              <code>{{ currentSubject || '未识别' }}</code>
+            </span>
+            <span v-if="health !== null" class="account-fact">
+              <span class="account-fact__label">免凭据连接会写入</span>
+              <code>{{ health.subject }}</code>
+            </span>
+          </div>
+          <p v-if="health !== null" class="loopback-consequence body-sm">
+            <template v-if="health.subject !== currentSubject">
+              <code>{{ health.subject }}</code> 是回环信任的兜底身份。只有 Hermes 没有读取
+              <code>{{ HERMES_TOKEN_ENV }}</code> 时，回环请求才会写入这个账号；使用本页生成的 Key
+              时，MCP 与自动记忆使用 <code>{{ currentSubject }}</code>。
+            </template>
+            <template v-else>
+              即使 Hermes 没有读取 <code>{{ HERMES_TOKEN_ENV }}</code>，回环请求也使用当前登录账号。
+            </template>
+          </p>
+
           <div class="connect-host">
             <section v-if="isHermes" class="connect-block">
               <h3 class="headline">自动记忆</h3>
@@ -201,13 +310,44 @@ watch(scopeRoot, () => {
                 <a :href="docLink" target="_blank" rel="noreferrer">安装和配置记忆插件</a>
               </p>
             </section>
+
+            <section v-if="isHermes" class="connect-block">
+              <div class="connect-block__head">
+                <h3 class="headline">接入凭据</h3>
+                <span class="caption">{{ HERMES_TOKEN_ENV }} · {{ currentSubject || '当前账号未识别' }}</span>
+              </div>
+              <UiButton
+                variant="secondary"
+                :disabled="apiKeysPath === null || generatingKey || generatedKey !== null"
+                @click="generateHermesKey"
+              >
+                <KeyRound :size="14" :stroke-width="1.5" />
+                {{ generatingKey ? '生成中…' : generatedKey === null ? '生成 Hermes 接入 Key' : '本页已生成' }}
+              </UiButton>
+              <UiErrorCallout v-if="keyError !== null" :message="keyError" />
+              <div v-if="generatedKey !== null" class="generated-key" role="status">
+                <p>完整 Key 只显示这一次，刷新或离开页面后不再显示。</p>
+                <code>{{ generatedKey.key }}</code>
+                <UiButton variant="secondary" size="sm" @click="copyHermesToken">
+                  <Copy :size="14" :stroke-width="1.5" />
+                  复制 {{ HERMES_TOKEN_ENV }}
+                </UiButton>
+              </div>
+              <p class="body-sm">
+                自动记忆插件与 MCP 配置共用这个 {{ HERMES_TOKEN_ENV }}。
+              </p>
+              <p class="body-sm credential-manage">
+                <NuxtLink to="/account">在“我的账户”中管理或撤销 API Key</NuxtLink>
+              </p>
+            </section>
+
             <section class="connect-block">
               <div class="connect-block__head">
                 <h3 class="headline">{{ isHermes ? '主动查找与导入（MCP）' : 'MCP 配置' }}</h3>
                 <span class="caption">写入 {{ configLocation }}</span>
               </div>
               <label class="connect-address" for="mcp-server-address">
-                <span class="connect-address__label">服务地址</span>
+                <span class="connect-address__label">Agent 访问地址</span>
                 <UiInput
                   id="mcp-server-address"
                   v-model="serverBaseUrl"
@@ -215,17 +355,10 @@ watch(scopeRoot, () => {
                   placeholder="http://127.0.0.1:1933"
                 />
               </label>
-              <p class="caption">
-                填写 Agent 能访问的 CoMem 地址。本地开发时填写后端端口。Docker 部署请为 Agent 配置 API Key，见
-                <a :href="docLink" target="_blank" rel="noreferrer">接入文档</a>。
-              </p>
-              <label v-if="isHermes" class="api-key-choice body-sm">
-                <input v-model="hermesUseApiKey" type="checkbox" />
-                CoMem 要求 API Key（例如 Docker 部署）
-              </label>
-              <p v-if="isHermes && hermesUseApiKey" class="body-sm">
-                在 Hermes 配置目录的 <code>.env</code> 中设置 <code>COMEM_TOKEN</code>，使用与自动记忆相同的账号。
-              </p>
+              <div class="address-pair">
+                <span>本网页 <code>{{ consoleOrigin }}</code></span>
+                <span>Agent <code>{{ effectiveServerBaseUrl }}</code></span>
+              </div>
               <DomainCodeBlock
                 :code="snippet.text"
                 :label="`MCP 配置（${snippet.format}）`"
@@ -272,7 +405,10 @@ watch(scopeRoot, () => {
         </UiCard>
 
         <UiCard title="② 验证接入" panel>
-          <p class="body-sm">要验证召回，请在新会话中问一个已经存过的约定。</p>
+          <p v-if="isHermes" class="body-sm">
+            当前账号：<code>{{ currentSubject || '未识别' }}</code>
+          </p>
+          <p v-else class="body-sm">要验证召回，请在新会话中问一个已经存过的约定。</p>
 
           <ul class="connect-checks">
             <li v-for="item in verification.checks" :key="item.key" class="connect-check">
@@ -297,6 +433,9 @@ watch(scopeRoot, () => {
             <div v-if="memoryExtractSkipped">
               当前未配置模型，会话会被归档但不会产生新的记忆；
               见下方说明。
+            </div>
+            <div v-else-if="isHermes">
+              当前账号已收到归档。归档只证明写入成功，不证明召回内容被模型使用。
             </div>
             <div v-else>CoMem 已收到会话。请到「会话与任务」检查刚才那一轮。</div>
           </UiCallout>
@@ -346,6 +485,48 @@ watch(scopeRoot, () => {
   margin-top: 16px;
 }
 
+.account-facts,
+.address-pair {
+  display: flex;
+  align-items: baseline;
+  gap: 8px 18px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding: 11px 14px;
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  font-size: 13px;
+  color: var(--label-3);
+}
+
+.account-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.account-fact__label {
+  color: var(--label-3);
+}
+
+.account-fact--primary {
+  color: var(--label);
+}
+
+.account-fact--primary .account-fact__label {
+  color: var(--label-2);
+  font-weight: 560;
+}
+
+.loopback-consequence {
+  margin: 0;
+  color: var(--label-2);
+}
+
+.address-pair {
+  margin-top: 0;
+}
+
 .connect-block {
   display: grid;
   gap: 10px;
@@ -374,10 +555,29 @@ watch(scopeRoot, () => {
   color: var(--label-2);
 }
 
-.api-key-choice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.generated-key {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: var(--r-card);
+  background: var(--orange-tint);
+}
+
+.generated-key p {
+  font-size: 13px;
+  color: var(--label-2);
+}
+
+.generated-key code {
+  overflow-wrap: anywhere;
+  user-select: all;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--label);
+}
+
+.credential-manage {
+  margin: 0;
 }
 
 .connect-checks {
