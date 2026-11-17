@@ -30,6 +30,7 @@ integrations/
 │   ├── context-epoch.mjs # 每个宿主会话的上下文重置标识
 │   ├── sanitize.mjs      # 捕获侧剥离（去掉自己注入的块）
 │   ├── injection.mjs     # 注入转义 / token 估算 / 最终字节上限
+│   ├── project.mjs       # 从宿主 cwd 解析稳定 projectId
 │   ├── filter.mjs        # sed 风格查询过滤
 │   └── telemetry.mjs     # 四阶段开销上报
 ├── servers/              # 七个可执行入口
@@ -173,6 +174,47 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 会话（`header.origin === 'subagent'`）不注入、不采集。
 共享配置文件存在但无效时，DSH 插件停用注入与采集并记录 warn，不会退回默认地址写入
 回环身份。
+
+### 项目自动识别
+
+**用户不需要给每个仓库填写项目名。** Claude Code、Codex、DSH 和 Hermes 都在宿主侧
+从当前工作目录解析一个稳定的 `projectId`，再随 `/context` 与 `POST /sessions`
+发送；服务端不需要访问宿主文件系统，也不会根据消息里的绝对路径反推项目。
+
+解析顺序固定：
+
+1. 从当前目录向上找最近的 `.comem/config.json`。文件必须是
+   `{"version":1,"project":{"id":"..."}}`，其中 `id` 是一个合法 URI 路径段。
+2. 没有配置时运行 `git rev-parse --show-toplevel`，再读取该仓库的
+   `remote get-url origin`。
+3. git remote 的 SCP、HTTPS、SSH 形式归一到同一个 host/path；凭据、query、
+   fragment 与尾部 `.git` 不进入 ID。
+4. 有 git 但没有 origin 时，对真实 git root 路径算哈希。
+5. 既没有配置也没有 git 时没有项目，继续使用普通个人空间。HOME 不会仅因它是
+   当前目录而被当成项目。
+
+显式配置优先于 git；附近的显式配置存在但不可读、结构错误或 `id` 非法时，resolver
+抛 `PROJECT_CONFIG_INVALID`，不会悄悄回退到 git 或个人空间。Hook 按 fail-open
+规则退出或跳过本轮采集并写诊断；Hermes 的 provider initialize 失败由宿主处理。
+项目 ID 始终是单路径段且不超过 255 个 UTF-8 字节：
+
+```text
+remote-<host-owner-repo>-<16 hex>   # 有 origin，可读前缀 + 规范 remote 哈希
+root-<16 hex>                       # 无 origin，真实 git root 哈希
+```
+
+同一个仓库的 clone、worktree 和子目录从同一 origin 得到同一 ID；两个同名目录的
+无 origin 仓库因 realpath 不同而得到不同 ID。绝对路径和 remote 原文不会出现在
+`projectId`、Hook 日志或 Hermes outbox 中。
+
+`POST /sessions` 与 `/context` 只在解析成功时携带 `projectId`。会话原文仍保存在
+个人根的 `sessions/`；项目 ID 只收窄该项目提取出的记忆和自动召回范围。显式配置
+是覆盖自动识别的唯一入口。
+
+**409 有两种语义。** 同一会话、同一项目绑定的 `ALREADY_EXISTS` 表示复用；
+legacy 未绑定会话收到一个项目时由服务端先持久化绑定再按复用处理；不同项目绑定
+返回 `CONFLICT`。客户端只忽略前者，项目冲突会进入 `comem-capture.log` 或宿主
+warn，不会把后续消息静默写入另一项目。
 
 ### Codex
 
@@ -727,8 +769,8 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 
 | 用途 | 请求 | 期望响应 |
 |---|---|---|
-| 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}` | `result: {rendered, items, tokensUsed, dropped, degradation, deliveryToken}`；空 query 取开局背景 |
-| 建会话 | `POST /api/v1/sessions`，`{sessionId}` | 身份取请求认证；409 已存在时复用 |
+| 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, projectId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}` | `result: {rendered, items, tokensUsed, dropped, degradation, deliveryToken}`；空 query 取开局背景 |
+| 建会话 | `POST /api/v1/sessions`，`{sessionId, projectId?}` | 身份取请求认证；409 `ALREADY_EXISTS` 时复用，409 `CONFLICT` 是项目绑定冲突 |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
 | 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关 |
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |

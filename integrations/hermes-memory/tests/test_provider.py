@@ -27,6 +27,7 @@ class FakeCoMem:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
         self.session_status = 200
+        self.session_error_code = "ALREADY_EXISTS"
         self.fail_capture = False
         self.fail_context = False
         self.fail_identity = False
@@ -138,7 +139,10 @@ class FakeCoMem:
                             409,
                             {
                                 "status": "error",
-                                "error": {"code": "ALREADY_EXISTS", "message": "exists"},
+                                "error": {
+                                    "code": test.session_error_code,
+                                    "message": "exists or conflicts",
+                                },
                             },
                         )
                     return self._send(
@@ -389,6 +393,149 @@ class ProviderTests(unittest.TestCase):
             any(r["path"] == f"/api/v1/sessions/{canonical}/messages" for r in self.api.requests)
         )
 
+    def test_project_id_is_used_by_context_and_persisted_for_outbox_replay(self) -> None:
+        project_dir = tempfile.TemporaryDirectory()
+        try:
+            comem_dir = Path(project_dir.name) / ".comem"
+            comem_dir.mkdir()
+            (comem_dir / "config.json").write_text(
+                json.dumps(
+                    {"version": 1, "project": {"id": "hermes-project"}}
+                ),
+                encoding="utf-8",
+            )
+            provider = self.module.CoMemMemoryProvider(
+                {"base_url": self.api.base_url, "token": "test-token"}
+            )
+            provider.initialize(
+                "native-session",
+                hermes_home=self.home.name,
+                agent_identity="desktop",
+                cwd=project_dir.name,
+                agent_context="primary",
+            )
+            provider.prefetch("project question")
+            context = next(
+                r for r in self.api.requests if r["path"] == "/api/v1/context"
+            )
+            self.assertEqual(context["body"]["projectId"], "hermes-project")
+
+            self.api.fail_capture = True
+            provider.sync_turn(
+                "project question",
+                "project answer",
+                messages=[
+                    {"role": "user", "content": "project question"},
+                    {"role": "assistant", "content": "project answer"},
+                ],
+            )
+            record_path = next(provider._outbox_dir.glob("*.json"))
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["project_id"], "hermes-project")
+
+            self.api.fail_capture = False
+            restarted = self.module.CoMemMemoryProvider(
+                {"base_url": self.api.base_url, "token": "test-token"}
+            )
+            restarted.initialize(
+                "native-session",
+                hermes_home=self.home.name,
+                cwd="/work/with/different/cwd",
+            )
+            restarted._flush_outbox()
+            create = [
+                r
+                for r in self.api.requests
+                if r["method"] == "POST"
+                and r["path"] == "/api/v1/sessions"
+                and r["body"].get("projectId") == "hermes-project"
+            ][-1]
+            self.assertEqual(create["body"]["sessionId"], provider._session_id_of("native-session"))
+            self.assertEqual(list(provider._outbox_dir.glob("*.json")), [])
+        finally:
+            project_dir.cleanup()
+
+    def test_invalid_explicit_project_config_stops_initialization(self) -> None:
+        project_dir = tempfile.TemporaryDirectory()
+        invalid_home = tempfile.TemporaryDirectory()
+        try:
+            comem_dir = Path(project_dir.name) / ".comem"
+            comem_dir.mkdir()
+            (comem_dir / "config.json").write_text(
+                json.dumps({"version": 1, "project": {"id": "owner/repo"}}),
+                encoding="utf-8",
+            )
+            provider = self.module.CoMemMemoryProvider(
+                {"base_url": self.api.base_url, "token": "test-token"}
+            )
+            with self.assertRaises(self.module.ProjectConfigError) as raised:
+                provider.initialize(
+                    "native-session",
+                    hermes_home=invalid_home.name,
+                    cwd=project_dir.name,
+                )
+            self.assertEqual(raised.exception.code, "PROJECT_CONFIG_INVALID")
+            self.assertNotIn("owner/repo", str(raised.exception))
+            self.assertFalse(
+                (Path(invalid_home.name) / "comem-provider" / "outbox").exists()
+            )
+            before = len(self.api.requests)
+            self.assertEqual(provider.prefetch("must not use personal space"), "")
+            provider.sync_turn(
+                "must not use personal space",
+                "not stored",
+                session_id="native-session",
+                messages=[
+                    {"role": "user", "content": "must not use personal space"},
+                    {"role": "assistant", "content": "not stored"},
+                ],
+            )
+            self.assertEqual(len(self.api.requests), before)
+        finally:
+            project_dir.cleanup()
+            invalid_home.cleanup()
+
+    def test_session_switch_without_cwd_uses_initial_project_not_previous_switch(self) -> None:
+        base = tempfile.TemporaryDirectory()
+        other = tempfile.TemporaryDirectory()
+        try:
+            for directory, project_id in (
+                (base.name, "base-project"),
+                (other.name, "other-project"),
+            ):
+                comem_dir = Path(directory) / ".comem"
+                comem_dir.mkdir()
+                (comem_dir / "config.json").write_text(
+                    json.dumps({"version": 1, "project": {"id": project_id}}),
+                    encoding="utf-8",
+                )
+            provider = self.module.CoMemMemoryProvider(
+                {"base_url": self.api.base_url, "token": "test-token"}
+            )
+            provider.initialize(
+                "base-session",
+                hermes_home=self.home.name,
+                cwd=base.name,
+            )
+            provider.on_session_switch("other-session", cwd=other.name)
+            provider.prefetch("other query", session_id="other-session")
+            other_context = next(
+                r for r in self.api.requests
+                if r["path"] == "/api/v1/context" and r["body"].get("query") == "other query"
+            )
+            self.assertEqual(other_context["body"]["projectId"], "other-project")
+
+            provider.on_session_switch("third-session")
+            provider.prefetch("third query", session_id="third-session")
+            third_context = next(
+                r for r in self.api.requests
+                if r["path"] == "/api/v1/context" and r["body"].get("query") == "third query"
+            )
+            self.assertEqual(third_context["body"]["projectId"], "base-project")
+        finally:
+            base.cleanup()
+            other.cleanup()
+
     def test_sync_turn_writes_create_append_and_commit(self) -> None:
         self.provider.sync_turn(
             "project alpha",
@@ -423,6 +570,14 @@ class ProviderTests(unittest.TestCase):
         )
         self.assertTrue(any(r["path"].endswith("/commit") for r in self.api.requests))
         self.assertEqual(list(self.provider._outbox_dir.glob("*.json")), [])
+
+    def test_project_binding_conflict_is_not_treated_as_existing_session(self) -> None:
+        self.api.session_status = 409
+        self.api.session_error_code = "CONFLICT"
+        with self.assertRaises(self.module._HttpFailure) as raised:
+            self.provider._client.ensure_session("hermes-session", "project-a")
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.code, "CONFLICT")
 
     def test_failed_capture_spools_and_retries(self) -> None:
         self.api.fail_capture = True
@@ -763,7 +918,7 @@ class ProviderTests(unittest.TestCase):
             home.cleanup()
 
     def test_message_route_quotes_session_id(self) -> None:
-        self.provider._client.ensure_session("../unsafe")
+        self.provider._client.ensure_session("../unsafe", "")
         create = next(r for r in self.api.requests if r["path"] == "/api/v1/sessions")
         self.assertEqual(create["body"]["sessionId"], "../unsafe")
 

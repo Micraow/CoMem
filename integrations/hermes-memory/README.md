@@ -39,13 +39,38 @@ memory:
 ## What Hermes gets
 
 - Before a model call, the provider calls `POST /context` with the current prompt, Hermes session ID and current context epoch. Hermes only supplies the completed prompt to background prefetch, so this provider does not cache speculative recall. Recall stays within a 7.5-second server/request budget and the host's fixed 8-second provider timeout.
-- After a completed, uninterrupted turn, the user and assistant messages are spooled to the profile's `comem-provider/outbox/`, appended with stable IDs through `POST /sessions/{id}/messages`, and committed through `/commit`. CoMem then runs extraction, merge and review normally.
+- At `initialize`, the provider resolves a project ID from Hermes's `cwd`, then sends the same `projectId` with `/context` and `POST /sessions`. With no explicit `.comem/config.json` and no git repository, the provider keeps using personal space.
+- After a completed, uninterrupted turn, the user and assistant messages are spooled to the profile's `comem-provider/outbox/`, appended with stable IDs through `POST /sessions/{id}/messages`, and committed through `/commit`. CoMem then runs extraction, merge and review normally. Each outbox record includes the resolved `projectId`, so replay does not depend on the cwd of the process performing the retry.
 - A failed write remains in the profile-local outbox and is retried after the next completed turn, up to 10 queued turns per completed exchange. CoMem outage therefore does not block Hermes responses.
 - Each queued turn records the CoMem endpoint, credential fingerprint and authenticated `subject` through `GET /auth/me`. A queued turn is replayed only when all three still match. Changing server, API key or account leaves the old queue untouched and reports the skipped binding in status.
 - Primary sessions write; cron and subagent contexts do not. Hermes remains responsible for redacting secrets and for skipping interrupted turns.
-- The provider returns one recall indicator and no extra tools. CoMem's 16 MCP tools remain the explicit read/write interface.
+- The provider returns one recall indicator and no extra tools. CoMem's 15 MCP tools remain the explicit read/write interface.
 
 The provider strips Hermes's `<memory-context>` fence and CoMem recall fences before capture, so recalled memory is not archived as a new user statement.
+
+## Project binding
+
+No project name needs to be configured. The provider uses the same resolution order as
+the Node hooks: nearest ancestor `.comem/config.json`, then the git `origin`, then a
+hash of the real git root when `origin` is absent. Explicit configuration has this
+shape:
+
+```json
+{"version":1,"project":{"id":"team-alpha"}}
+```
+
+The ID must be one legal URI path segment. An unreadable or invalid explicit config
+raises CoMem's `ProjectConfigError` during `initialize`; Hermes logs that provider
+initialization failure, and the CoMem instance remains inactive rather than falling
+back to git or writing project turns into personal space. Remote-derived IDs are
+human-readable and bounded, such as
+`remote-github.com-owner-repo-<16 hex>`; no-origin repositories use `root-<16 hex>`.
+Credentials, query strings and absolute paths are not included in the error, ID or
+outbox.
+
+`POST /sessions` treats `ALREADY_EXISTS` as normal reuse. A different project binding
+returns `CONFLICT`; the queue remains on disk and status reports the replay failure,
+so a retry cannot silently move an old turn into another project.
 
 ## Status and limits
 

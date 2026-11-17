@@ -13,7 +13,9 @@ import logging
 import math
 import os
 import re
+import subprocess
 import threading
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -120,6 +122,171 @@ def _valid_http_url(url: str) -> bool:
         and bool(parsed.hostname)
         and parsed.username is None
         and parsed.password is None
+    )
+
+
+_PROJECT_SEGMENT_MAX_BYTES = 255
+_PROJECT_REMOTE_HASH_LENGTH = 16
+_PROJECT_PATH_HASH_LENGTH = 16
+_PROJECT_RESERVED_NAMES = {
+    ".abstract.md",
+    ".overview.md",
+    ".acl.json",
+    ".meta.json",
+    ".done",
+    "memory_diff.json",
+    "memory_operations.json",
+}
+
+
+class ProjectConfigError(RuntimeError):
+    code = "PROJECT_CONFIG_INVALID"
+
+
+def normalize_explicit_project_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFC", value)
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or "/" in normalized
+        or "\\" in normalized
+        or any(ord(character) < 0x20 for character in normalized)
+        or normalized in _PROJECT_RESERVED_NAMES
+        or len(normalized.encode("utf-8")) > _PROJECT_SEGMENT_MAX_BYTES
+    ):
+        return None
+    return normalized
+
+
+def _clean_remote_path(value: str) -> str:
+    path = value.strip("/")
+    path = re.sub(r"\.git$", "", path, flags=re.IGNORECASE)
+    return "/".join(part for part in path.split("/") if part).lower()
+
+
+def normalize_remote_identity(remote: Any) -> str | None:
+    if not isinstance(remote, str) or not remote.strip():
+        return None
+    raw = remote.strip()
+    scp = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", raw)
+    if "://" not in raw and scp is not None:
+        host = scp.group(1).lower()
+        path = _clean_remote_path(re.sub(r"[?#].*$", "", scp.group(2)))
+        return f"{host}/{path}" if host and path else None
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https", "ssh", "git"}:
+        return None
+    host = (parsed.hostname or "").lower()
+    path = _clean_remote_path(parsed.path)
+    if not host or not path:
+        return None
+    defaults = {"http": 80, "https": 443, "ssh": 22, "git": 9418}
+    suffix = f":{port}" if port is not None and port != defaults[parsed.scheme] else ""
+    return f"{host}{suffix}/{path}"
+
+
+def _readable_project_slug(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", normalized)
+    slug = re.sub(r"-+", "-", slug)
+    return re.sub(r"^[-.]+|[-.]+$", "", slug)
+
+
+def project_id_from_remote_identity(identity: Any) -> str | None:
+    if not isinstance(identity, str) or not identity:
+        return None
+    suffix = f"-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:_PROJECT_REMOTE_HASH_LENGTH]}"
+    prefix = "remote-"
+    budget = _PROJECT_SEGMENT_MAX_BYTES - len((prefix + suffix).encode("utf-8"))
+    label = _readable_project_slug(identity)
+    while len(label.encode("utf-8")) > budget:
+        label = label[:-1]
+    return f"{prefix}{label}{suffix}"
+
+
+def project_id_from_git_root(real_git_root: str) -> str:
+    digest = hashlib.sha256(real_git_root.encode("utf-8")).hexdigest()[:_PROJECT_PATH_HASH_LENGTH]
+    return f"root-{digest}"
+
+
+def _explicit_project_at_or_above(cwd: str) -> tuple[bool, str | None]:
+    current = cwd
+    while True:
+        config_path = Path(current) / ".comem" / "config.json"
+        try:
+            config_path.stat()
+        except FileNotFoundError:
+            found = False
+        except OSError as error:
+            raise ProjectConfigError("显式项目配置无法读取。") from error
+        else:
+            found = True
+        if found:
+            try:
+                value = json.loads(config_path.read_text(encoding="utf-8"))
+            except OSError as error:
+                raise ProjectConfigError("显式项目配置无法读取。") from error
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ProjectConfigError("显式项目配置不是合法 JSON。") from error
+            if (
+                not isinstance(value, dict)
+                or type(value.get("version")) is not int
+                or value.get("version") != 1
+            ):
+                raise ProjectConfigError("显式项目配置必须包含 version: 1 与 project.id。")
+            project = value.get("project")
+            if not isinstance(project, dict):
+                raise ProjectConfigError("显式项目配置必须包含 version: 1 与 project.id。")
+            project_id = normalize_explicit_project_id(project.get("id"))
+            if project_id is None:
+                raise ProjectConfigError("显式项目配置的 project.id 不是合法路径段。")
+            return True, project_id
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False, None
+        current = parent
+
+
+def _git_output(cwd: str, *args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", cwd, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def resolve_project_id(cwd: Any) -> str | None:
+    """Resolve a host-local cwd to the same single-segment ID as the Node hooks."""
+    if not isinstance(cwd, str) or not cwd or not os.path.isdir(cwd):
+        return None
+    real_cwd = os.path.realpath(cwd)
+    found, explicit = _explicit_project_at_or_above(real_cwd)
+    if found:
+        return explicit
+    root = _git_output(real_cwd, "rev-parse", "--show-toplevel")
+    if not root:
+        return None
+    real_root = os.path.realpath(root)
+    origin = _git_output(real_root, "remote", "get-url", "origin")
+    identity = normalize_remote_identity(origin)
+    return (
+        project_id_from_remote_identity(identity)
+        if identity is not None
+        else project_id_from_git_root(real_root)
     )
 
 
@@ -237,7 +404,12 @@ class _Client:
         return result
 
     def context(
-        self, query: str, session_id: str, epoch: str, previous_token: str
+        self,
+        query: str,
+        session_id: str,
+        epoch: str,
+        previous_token: str,
+        project_id: str,
     ) -> tuple[dict[str, Any], int, float]:
         """Return the response plus the exact transport limits used for this call.
 
@@ -255,16 +427,21 @@ class _Client:
         }
         if previous_token:
             body["previousDeliveryToken"] = previous_token
+        if project_id:
+            body["projectId"] = project_id
         result = self.request("POST", "/context", body, timeout=_PREFETCH_TIMEOUT_S)
         return result, _PREFETCH_BUDGET_MS, _PREFETCH_TIMEOUT_S
 
     def identity(self) -> dict[str, Any]:
         return self.request("GET", "/auth/me", timeout=_CAPTURE_TIMEOUT_S)
 
-    def ensure_session(self, session_id: str) -> None:
+    def ensure_session(self, session_id: str, project_id: str) -> None:
+        body = {"sessionId": session_id}
+        if project_id:
+            body["projectId"] = project_id
         try:
             self.request(
-                "POST", "/sessions", {"sessionId": session_id}, timeout=_CAPTURE_TIMEOUT_S
+                "POST", "/sessions", body, timeout=_CAPTURE_TIMEOUT_S
             )
         except _HttpFailure as error:
             if error.status != 409 or error.code != "ALREADY_EXISTS":
@@ -306,6 +483,9 @@ class CoMemMemoryProvider(MemoryProvider):
         self._epoch = "default"
         self._agent_context = "primary"
         self._cwd = ""
+        self._base_project_id = ""
+        self._project_id = ""
+        self._project_by_session: dict[str, str] = {}
         self._machine_id = "hermes"
         self._state_dir: Path | None = None
         self._outbox_dir: Path | None = None
@@ -315,6 +495,7 @@ class CoMemMemoryProvider(MemoryProvider):
         self._delivered: dict[str, str] = {}
         self._recall = 0
         self._last_error = ""
+        self._initialized = False
 
     @property
     def name(self) -> str:
@@ -350,6 +531,9 @@ class CoMemMemoryProvider(MemoryProvider):
         return subject if isinstance(subject, str) else ""
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._initialized = False
+        cwd = str(kwargs.get("cwd") or "")
+        base_project_id = resolve_project_id(cwd) or ""
         home = Path(kwargs.get("hermes_home") or Path.home() / ".hermes")
         self._state_dir = home / "comem-provider"
         self._outbox_dir = self._state_dir / "outbox"
@@ -362,10 +546,15 @@ class CoMemMemoryProvider(MemoryProvider):
         self._known_subject = self._bound_subject(self._state_dir)
         self._session_id = session_id
         self._agent_context = str(kwargs.get("agent_context") or "primary")
-        self._cwd = str(kwargs.get("cwd") or "")
+        self._cwd = cwd
+        self._base_project_id = base_project_id
+        self._project_id = base_project_id
+        if self._project_id:
+            self._project_by_session[self._session_id_of(session_id)] = self._project_id
         identity = str(kwargs.get("agent_identity") or "hermes")
         self._machine_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         self._epoch = f"hermes-{kwargs.get('resumed', False)}-{kwargs.get('message_count', 0)}"
+        self._initialized = True
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         return [
@@ -468,14 +657,17 @@ class CoMemMemoryProvider(MemoryProvider):
         """Recall must use the upcoming prompt; Hermes only supplies the completed prompt here."""
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        if not self._initialized:
+            return ""
         sid = session_id or self._session_id
         canonical_session = self._session_id_of(sid)
         with self._lock:
             epoch = self._epoch
             previous = self._delivered.get(sid, "")
+            project_id = self._project_id_of(canonical_session)
         try:
             result, budget_ms, timeout_s = self._client.context(
-                query, canonical_session, epoch, previous
+                query, canonical_session, epoch, previous, project_id
             )
             items = result.get("items")
             rendered = str(result.get("rendered") or "")
@@ -528,6 +720,8 @@ class CoMemMemoryProvider(MemoryProvider):
         messages: list[dict[str, Any]] | None = None,
         turn_author: dict[str, Any] | None = None,
     ) -> None:
+        if not self._initialized:
+            return
         sid = session_id or self._session_id
         with self._lock:
             delivered = self._pending_delivery.pop(sid, "")
@@ -570,10 +764,25 @@ class CoMemMemoryProvider(MemoryProvider):
         rewound: bool = False,
         **kwargs,
     ) -> None:
+        if not self._initialized:
+            return
+        cwd = kwargs.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            project_id = resolve_project_id(cwd) or ""
+        else:
+            # Hermes 0.23.x 的 on_session_switch 调用方不传 cwd；保留 initialize 时
+            # 绑定的主会话目录，不沿用前一个 session id 的项目映射。
+            project_id = self._base_project_id
+        canonical = self._session_id_of(new_session_id)
         with self._lock:
             self._session_id = new_session_id
             self._pending_delivery.clear()
             self._delivered.clear()
+            self._project_id = project_id
+            if project_id:
+                self._project_by_session[canonical] = project_id
+            else:
+                self._project_by_session.pop(canonical, None)
             if reset or rewound:
                 boundary = "rewound" if rewound else "reset"
                 self._epoch = f"{boundary}-{datetime.now(UTC).isoformat()}"
@@ -626,12 +835,21 @@ class CoMemMemoryProvider(MemoryProvider):
         turn_digest = hashlib.sha256(
             json.dumps(captured, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        return {"id": turn_digest, "session_id": session_id, "messages": captured}
+        project_id = self._project_id_of(session_id)
+        return {
+            "id": turn_digest,
+            "session_id": session_id,
+            "project_id": project_id or None,
+            "messages": captured,
+        }
 
     @staticmethod
     def _session_id_of(native_session: str) -> str:
         digest = hashlib.sha256(native_session.encode("utf-8")).hexdigest()[:32]
         return f"hermes-{digest}"
+
+    def _project_id_of(self, canonical_session: str) -> str:
+        return self._project_by_session.get(canonical_session, self._base_project_id)
 
     def _spool(self, record: dict[str, Any]) -> None:
         if self._outbox_dir is None:
@@ -680,6 +898,9 @@ class CoMemMemoryProvider(MemoryProvider):
                 break
             record = json.loads(path.read_text(encoding="utf-8"))
             session_id = str(record["session_id"])
+            project_id = record.get("project_id")
+            if project_id is not None and not isinstance(project_id, str):
+                raise ValueError(f"invalid CoMem outbox project_id: {path.name}")
             messages = record["messages"]
             if not isinstance(messages, list):
                 raise ValueError(f"invalid CoMem outbox record: {path.name}")
@@ -703,7 +924,7 @@ class CoMemMemoryProvider(MemoryProvider):
                     ),
                 )
                 continue
-            self._client.ensure_session(session_id)
+            self._client.ensure_session(session_id, project_id or "")
             self._client.append(session_id, messages)
             self._client.commit(session_id)
             path.unlink(missing_ok=True)
