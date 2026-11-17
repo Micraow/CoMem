@@ -238,7 +238,13 @@ class _Client:
 
     def context(
         self, query: str, session_id: str, epoch: str, previous_token: str
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], int, float]:
+        """Return the response plus the exact transport limits used for this call.
+
+        The running Hermes process keeps this module in memory. Recording these
+        values next to the response makes it possible to distinguish the source
+        currently on disk from the constants actually loaded by that process.
+        """
         body: dict[str, Any] = {
             "query": query,
             "sessionId": session_id,
@@ -249,7 +255,8 @@ class _Client:
         }
         if previous_token:
             body["previousDeliveryToken"] = previous_token
-        return self.request("POST", "/context", body, timeout=_PREFETCH_TIMEOUT_S)
+        result = self.request("POST", "/context", body, timeout=_PREFETCH_TIMEOUT_S)
+        return result, _PREFETCH_BUDGET_MS, _PREFETCH_TIMEOUT_S
 
     def identity(self) -> dict[str, Any]:
         return self.request("GET", "/auth/me", timeout=_CAPTURE_TIMEOUT_S)
@@ -421,14 +428,15 @@ class CoMemMemoryProvider(MemoryProvider):
                 outbox = None
         if outbox is not None and outbox.exists():
             pending = len(list(outbox.glob("*.json")))
-        last_error = self._last_error
-        if not last_error and state_dir is not None:
+        stored: dict[str, Any] = {}
+        if state_dir is not None:
             try:
-                stored = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
-                if isinstance(stored, dict):
-                    last_error = str(stored.get("lastError") or "")
+                payload = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    stored = payload
             except (OSError, json.JSONDecodeError):
                 pass
+        last_error = self._last_error or str(stored.get("lastError") or "")
         if self._settings.token:
             authentication = "API key"
         elif _is_loopback(self._settings.base_url):
@@ -446,6 +454,9 @@ class CoMemMemoryProvider(MemoryProvider):
             result["subject"] = subject
         if last_error:
             result["last_error"] = last_error
+        last_recall = self._valid_recall_status(stored.get("lastRecall"))
+        if last_recall is not None:
+            result["last_recall"] = last_recall
         return result
 
     def recall_status(self) -> RecallStatus | None:
@@ -458,23 +469,49 @@ class CoMemMemoryProvider(MemoryProvider):
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         sid = session_id or self._session_id
+        canonical_session = self._session_id_of(sid)
         with self._lock:
             epoch = self._epoch
             previous = self._delivered.get(sid, "")
         try:
-            result = self._client.context(
-                query, self._session_id_of(sid), epoch, previous
+            result, budget_ms, timeout_s = self._client.context(
+                query, canonical_session, epoch, previous
             )
             items = result.get("items")
             rendered = str(result.get("rendered") or "")
             count = len(items) if isinstance(items, list) else 0
             token = str(result.get("deliveryToken") or "")
+            raw_degradation = result.get("degradation")
+            degradation = (
+                raw_degradation
+                if isinstance(raw_degradation, str) and raw_degradation.strip()
+                else None
+            )
         except Exception as error:
             self._record_failure("recall", error)
+            self._record_recall(
+                canonical_session,
+                outcome="failed",
+                count=0,
+                bytes_utf8=0,
+                degradation=None,
+                budget_ms=_PREFETCH_BUDGET_MS,
+                timeout_s=_PREFETCH_TIMEOUT_S,
+            )
             with self._lock:
                 self._recall = 0
             return ""
         self._recall = count
+        rendered_bytes = len(rendered.encode("utf-8"))
+        self._record_recall(
+            canonical_session,
+            outcome="received" if rendered_bytes > 0 else "empty",
+            count=count,
+            bytes_utf8=rendered_bytes,
+            degradation=degradation,
+            budget_ms=budget_ms,
+            timeout_s=timeout_s,
+        )
         with self._lock:
             if token:
                 self._pending_delivery[sid] = token
@@ -690,19 +727,93 @@ class CoMemMemoryProvider(MemoryProvider):
 
     def _record_failure(self, operation: str, error: Exception) -> None:
         self._last_error = f"{operation}: {error}"
-        if self._state_dir is not None:
+        self._update_status(
+            {
+                "lastError": self._last_error,
+                "at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            }
+        )
+        logger.warning("CoMem memory %s failed (Hermes continues): %s", operation, error)
+
+    def _record_recall(
+        self,
+        session_id: str,
+        *,
+        outcome: str,
+        count: int,
+        bytes_utf8: int,
+        degradation: str | None,
+        budget_ms: int,
+        timeout_s: float,
+    ) -> None:
+        """Persist recall metadata only; memory text and credentials stay in memory."""
+        self._update_status(
+            {
+                "lastRecall": {
+                    "at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "session_id": session_id,
+                    "count": count,
+                    "bytes": bytes_utf8,
+                    "degradation": degradation,
+                    "outcome": outcome,
+                    "budget_ms": budget_ms,
+                    "timeout_s": timeout_s,
+                }
+            }
+        )
+
+    def _update_status(self, values: dict[str, Any]) -> None:
+        """Merge known diagnostics into status.json without overwriting concurrent fields."""
+        if self._state_dir is None:
+            return
+        with self._lock:
+            try:
+                stored = json.loads(
+                    (self._state_dir / "status.json").read_text(encoding="utf-8")
+                )
+                status = dict(stored) if isinstance(stored, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                status = {}
+            status.update(values)
             try:
                 self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self._atomic_json_write(
-                    self._state_dir / "status.json",
-                    {
-                        "lastError": self._last_error,
-                        "at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                    },
-                )
+                self._atomic_json_write(self._state_dir / "status.json", status)
             except OSError:
                 pass
-        logger.warning("CoMem memory %s failed (Hermes continues): %s", operation, error)
+
+    @staticmethod
+    def _valid_recall_status(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        outcome = value.get("outcome")
+        at = value.get("at")
+        session_id = value.get("session_id")
+        count = value.get("count")
+        bytes_utf8 = value.get("bytes")
+        budget_ms = value.get("budget_ms")
+        timeout_s = value.get("timeout_s")
+        degradation = value.get("degradation")
+        if (
+            outcome not in {"received", "empty", "failed"}
+            or not isinstance(at, str)
+            or not isinstance(session_id, str)
+            or not isinstance(count, int)
+            or not isinstance(bytes_utf8, int)
+            or not isinstance(budget_ms, int)
+            or not isinstance(timeout_s, (int, float))
+            or (degradation is not None and not isinstance(degradation, str))
+        ):
+            return None
+        return {
+            "at": at,
+            "session_id": session_id,
+            "count": count,
+            "bytes": bytes_utf8,
+            "degradation": degradation,
+            "outcome": outcome,
+            "budget_ms": budget_ms,
+            "timeout_s": float(timeout_s),
+        }
 
 
 def register(ctx) -> None:

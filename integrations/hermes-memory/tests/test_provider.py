@@ -28,9 +28,15 @@ class FakeCoMem:
         self.requests: list[dict[str, Any]] = []
         self.session_status = 200
         self.fail_capture = False
+        self.fail_context = False
         self.fail_identity = False
         self.redirect_next = False
         self.subject = "user:demo"
+        self.context_rendered = "Known: project mint"
+        self.context_items: list[dict[str, Any]] = [
+            {"uri": "comem://user/demo/memory.md"}
+        ]
+        self.context_degradation: str | None = None
         self.lock = threading.Lock()
         test = self
 
@@ -109,14 +115,20 @@ class FakeCoMem:
                         {"status": "error", "error": {"code": "UNAVAILABLE", "message": "offline"}},
                     )
                 if self.path == "/api/v1/context":
+                    if test.fail_context:
+                        return self._send(
+                            503,
+                            {"status": "error", "error": {"code": "UNAVAILABLE", "message": "offline"}},
+                        )
                     return self._send(
                         200,
                         {
                             "status": "ok",
                             "result": {
-                                "rendered": "Known: project mint",
-                                "items": [{"uri": "comem://user/demo/memory.md"}],
+                                "rendered": test.context_rendered,
+                                "items": test.context_items,
                                 "deliveryToken": "receipt-one",
+                                "degradation": test.context_degradation,
                             },
                         },
                     )
@@ -199,7 +211,66 @@ class ProviderTests(unittest.TestCase):
             self.provider._session_id_of("native-session"),
         )
         self.assertEqual(context["auth"], "Bearer test-token")
-        self.assertEqual(context["body"]["budgetMs"], 7500)
+        self.assertEqual(
+            context["body"]["budgetMs"],
+            self.module._PREFETCH_BUDGET_MS,
+        )
+
+    def test_prefetch_status_records_non_secret_transport_metadata(self) -> None:
+        self.api.context_degradation = "rerank_unavailable"
+        rendered = self.provider.prefetch("How should I name the project?")
+        status = self.provider.get_status_config({})
+        recall = status["last_recall"]
+        context = next(r for r in self.api.requests if r["path"] == "/api/v1/context")
+
+        self.assertEqual(recall["outcome"], "received")
+        self.assertEqual(
+            recall["session_id"],
+            self.provider._session_id_of("native-session"),
+        )
+        self.assertEqual(recall["count"], 1)
+        self.assertEqual(recall["bytes"], len(rendered.encode("utf-8")))
+        self.assertEqual(recall["degradation"], "rerank_unavailable")
+        self.assertEqual(recall["budget_ms"], context["body"]["budgetMs"])
+        self.assertEqual(recall["timeout_s"], self.module._PREFETCH_TIMEOUT_S)
+        self.assertTrue(recall["at"].endswith("Z"))
+
+        raw_status = (
+            self.provider._state_dir / "status.json"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("How should I name the project?", raw_status)
+        self.assertNotIn(rendered, raw_status)
+        self.assertNotIn("test-token", raw_status)
+
+        restarted = self.module.CoMemMemoryProvider(
+            {"base_url": self.api.base_url, "token": "test-token"}
+        )
+        restarted.initialize("native-session", hermes_home=self.home.name)
+        self.assertEqual(restarted.get_status_config({})["last_recall"], recall)
+
+    def test_prefetch_status_distinguishes_empty_recall(self) -> None:
+        self.api.context_rendered = ""
+        self.api.context_items = []
+        self.assertEqual(self.provider.prefetch("no matches"), "")
+
+        recall = self.provider.get_status_config({})["last_recall"]
+        self.assertEqual(recall["outcome"], "empty")
+        self.assertEqual(recall["count"], 0)
+        self.assertEqual(recall["bytes"], 0)
+        self.assertIsNone(recall["degradation"])
+
+    def test_prefetch_status_distinguishes_failure(self) -> None:
+        self.api.fail_context = True
+        self.assertEqual(self.provider.prefetch("offline"), "")
+
+        status = self.provider.get_status_config({})
+        recall = status["last_recall"]
+        self.assertEqual(recall["outcome"], "failed")
+        self.assertEqual(recall["count"], 0)
+        self.assertEqual(recall["bytes"], 0)
+        self.assertEqual(recall["budget_ms"], self.module._PREFETCH_BUDGET_MS)
+        self.assertEqual(recall["timeout_s"], self.module._PREFETCH_TIMEOUT_S)
+        self.assertTrue(status["last_error"].startswith("recall:"))
 
     def test_queue_prefetch_does_not_issue_a_speculative_request(self) -> None:
         self.provider.queue_prefetch("completed turn", session_id="native-session")

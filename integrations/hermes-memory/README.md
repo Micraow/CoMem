@@ -49,7 +49,24 @@ The provider strips Hermes's `<memory-context>` fence and CoMem recall fences be
 
 ## Status and limits
 
-`hermes memory status` shows the endpoint, authentication mode, the last authenticated subject, pending local writes, and the last transport error. Provider failures are logged and fail open.
+`hermes memory status` shows the endpoint, authentication mode, the last authenticated subject, pending local writes, the last transport error, and `last_recall`. `last_recall` contains:
+
+| Field | Meaning |
+|---|---|
+| `outcome` | `received`, `empty`, or `failed` |
+| `at` | When the prefetch attempt finished, in UTC |
+| `session_id` | CoMem session ID used by the request |
+| `count` | Number of returned context items |
+| `bytes` | UTF-8 byte length of the rendered context returned to Hermes |
+| `degradation` | CoMem degradation reason, or `null` |
+| `budget_ms` | Exact `budgetMs` sent in that `/context` request |
+| `timeout_s` | HTTP timeout used by that request |
+
+`received` means CoMem returned non-empty context to Hermes; it does not prove the model used that context. `empty` means the request succeeded without rendered context, and `failed` means the request did not complete successfully. The status file stores metadata only, never memory text, prompts, or credentials.
+
+The provider is loaded into the Hermes process. Editing this source file does not change constants in an already-running process. Compare `budget_ms` and `timeout_s` in `last_recall` with the current source when diagnosing which values are actually loaded; do not infer them from the file on disk.
+
+Provider failures are logged and fail open.
 
 The provider needs Hermes v0.23.1 or a compatible v0.23.x `MemoryProvider` ABI; v0.23.2 is verified. It targets CoMem's HTTP envelope and identity semantics; changing either API requires updating this adapter. `hermes memory status` checks configuration, not network reachability. After setup, compare the reported `subject` with the current space in the CoMem console, send a new prompt, and verify the archived messages in **Sessions**.
 
