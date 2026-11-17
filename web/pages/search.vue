@@ -20,6 +20,10 @@
  * **没检索过与没命中是两件事。** 前者是空状态「还没有检索」；后者按「库空」与
  * 「有数据但没匹配」分两种文案（`index.totalNodes === 0` 时提示先写入一条记忆），
  * 由 `searched` 区分。
+ *
+ * **范围有三挡。** 「当前空间」显式发送侧栏选中的根；「所有可访问」不发送
+ * `scopes`，由服务端按当前身份展开个人根、可读组和直接授权，并继续做 ACL 过滤；
+ * 「已知 URI」用于用户手中已有 `comem://` 地址时收窄到该范围。
  */
 import type {
   SearchContextType,
@@ -36,6 +40,7 @@ import { retrievalEngineLabel, typedQueryIntentLabel } from '~/utils/searchLabel
 useHead({ title: '检索 · CoMem 控制台' })
 
 const DEFAULT_LIMIT = '20'
+type ScopeMode = 'current' | 'all' | 'uri'
 
 const api = useApi()
 const route = useRoute()
@@ -69,7 +74,11 @@ function contextTypeOf(value: string): SearchContextType | '' {
 
 const query = ref(firstValue(route.query['q']))
 const mode = ref<SearchMode>(modeOf(firstValue(route.query['mode'])))
-const scope = ref(firstValue(route.query['scope']) || scopeRoot.value)
+const initialScope = firstValue(route.query['scope'])
+const scopeMode = ref<ScopeMode>(
+  initialScope === '' ? 'all' : initialScope === scopeRoot.value ? 'current' : 'uri',
+)
+const scope = ref(initialScope)
 const limit = ref(firstValue(route.query['limit']) || DEFAULT_LIMIT)
 const level = ref<SearchLevel | ''>(levelOf(firstValue(route.query['level'])))
 const contextType = ref<SearchContextType | ''>(contextTypeOf(firstValue(route.query['type'])))
@@ -103,9 +112,10 @@ async function loadHealth(): Promise<void> {
 function buildBody(): Record<string, unknown> {
   const body: Record<string, unknown> = { query: query.value.trim() }
 
-  const scopeUri = scope.value.trim()
-  if (scopeUri !== '') {
-    body['scopes'] = [scopeUri]
+  if (scopeMode.value === 'current' && scopeRoot.value !== '') {
+    body['scopes'] = [scopeRoot.value]
+  } else if (scopeMode.value === 'uri') {
+    body['scopes'] = [scope.value.trim()]
   }
 
   const parsed = Number.parseInt(limit.value, 10)
@@ -127,7 +137,9 @@ function buildBody(): Record<string, unknown> {
 /** 查询串只保留非默认值：默认条件不写进 URL，链接才短。 */
 function syncUrl(): void {
   const next: Record<string, string> = { q: query.value.trim(), mode: mode.value }
-  if (scope.value.trim() !== '') {
+  if (scopeMode.value === 'current' && scopeRoot.value !== '') {
+    next['scope'] = scopeRoot.value
+  } else if (scopeMode.value === 'uri') {
     next['scope'] = scope.value.trim()
   }
   if (limit.value !== DEFAULT_LIMIT) {
@@ -146,6 +158,13 @@ function syncUrl(): void {
 async function runSearch(): Promise<void> {
   const text = query.value.trim()
   if (text === '' || loading.value) {
+    return
+  }
+  if (scopeMode.value === 'uri' && scope.value.trim() === '') {
+    error.value = '请填写要检索的 comem:// 地址。'
+    hits.value = null
+    plan.value = null
+    searched.value = true
     return
   }
 
@@ -185,10 +204,9 @@ onMounted(() => {
   }
 })
 
-// 全局作用域切换后，检索条件里的范围跟着换；已经有结果就按新范围重跑。
-watch(scopeRoot, (root) => {
-  scope.value = root
-  if (searched.value) {
+// 只有「当前空间」跟随侧栏切换。
+watch(scopeRoot, () => {
+  if (scopeMode.value === 'current' && searched.value) {
     void runSearch()
   }
 })
@@ -206,6 +224,7 @@ watch(scopeRoot, (root) => {
       </DomainPageHeader>
 
       <DomainSearchPanel
+        v-model:scope-mode="scopeMode"
         v-model:query="query"
         v-model:mode="mode"
         v-model:scope="scope"
@@ -383,4 +402,5 @@ watch(scopeRoot, (root) => {
   margin: 6px 0 0;
   overflow-wrap: anywhere;
 }
+
 </style>

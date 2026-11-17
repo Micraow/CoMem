@@ -242,6 +242,9 @@ function onCreated(uri: string): void {
                 <NuxtLink to="/connect" class="btn btn--secondary btn--sm connect-cta">
                   接入 Agent
                 </NuxtLink>
+                <NuxtLink to="/connect#import-history" class="btn btn--secondary btn--sm connect-cta">
+                  导入历史会话
+                </NuxtLink>
               </div>
             </template>
           </UiEmpty>

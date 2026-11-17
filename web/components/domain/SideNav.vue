@@ -7,6 +7,7 @@
  */
 import {
   Activity,
+  CircleUserRound,
   ClipboardCheck,
   FileText,
   FolderTree,
@@ -22,8 +23,8 @@ import {
 import type { Component } from 'vue'
 
 import { consoleIdentityState, consoleScopeLabel } from '~/composables/consoleIdentity'
-import { useScopeRoot } from '~/composables/useApi'
-import { NAV_GROUPS, isActivePath, type NavIconName } from '~/utils/nav'
+import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
+import { isActivePath, navGroupsFor, type NavIconName } from '~/utils/nav'
 
 const NAV_ICONS: Record<NavIconName, Component> = {
   plug: Plug,
@@ -38,15 +39,33 @@ const NAV_ICONS: Record<NavIconName, Component> = {
   sessions: History,
   monitor: Activity,
   settings: Settings,
+  account: CircleUserRound,
 }
 
 const state = consoleIdentityState()
 const identity = state.status === 'ready' ? state.identity : null
 const scopeRoot = useScopeRoot()
-const scopeLabel = computed(() =>
-  identity === null ? '—' : consoleScopeLabel(scopeRoot.value, identity.subject),
+const scopeOptions = computed(() =>
+  (identity?.scopes ?? []).map((scope) => ({
+    value: scope,
+    label: consoleScopeLabel(scope, identity?.subject ?? ''),
+  })),
 )
+const hasScopeChoice = computed(() => scopeOptions.value.length > 1)
+const currentScopeLabel = computed(() => {
+  if (identity === null || scopeRoot.value === '') {
+    return '暂无可访问空间'
+  }
+  return consoleScopeLabel(scopeRoot.value, identity.subject)
+})
+const scopeModel = computed({
+  get: () => scopeRoot.value,
+  set: (value: string) => {
+    selectScopeRoot(value)
+  },
+})
 const route = useRoute()
+const navGroups = computed(() => navGroupsFor(identity?.isAdmin === true))
 </script>
 
 <template>
@@ -62,7 +81,7 @@ const route = useRoute()
     </div>
 
     <nav class="sidenav" aria-label="主导航">
-      <template v-for="group in NAV_GROUPS" :key="group.label">
+      <template v-for="group in navGroups" :key="group.label">
         <div class="sidenav__label">{{ group.label }}</div>
         <NuxtLink
           v-for="item in group.items"
@@ -79,10 +98,48 @@ const route = useRoute()
     </nav>
 
     <div class="sidebar__foot">
-      <div class="footstat">
-        <span>命名空间</span>
-        <b>{{ scopeLabel }}</b>
+      <div class="space">
+        <label v-if="hasScopeChoice" class="space__label" for="console-space">
+          当前空间
+        </label>
+        <UiSelect
+          v-if="hasScopeChoice"
+          id="console-space"
+          v-model="scopeModel"
+          :options="scopeOptions"
+          aria-label="当前空间"
+        />
+        <template v-else>
+          <span class="space__label">当前空间</span>
+          <b class="space__current">{{ currentScopeLabel }}</b>
+        </template>
       </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.space {
+  display: grid;
+  gap: 6px;
+}
+
+.space__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-3);
+}
+
+.space__current {
+  overflow: hidden;
+  color: var(--label);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.space :deep(.select) {
+  width: 100%;
+}
+</style>

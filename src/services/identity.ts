@@ -45,24 +45,9 @@
  * `AclService.resolvePrincipals` 在求权时追加（§12.1：它命中所有 user 主体），
  * 不属于「这个用户加入了什么」。
  *
- * ## 两套凭据（§12.7）
- *
- * `resolve(credential)` 是认证入口：用户名 + 密码（登录换 session token）与
- * API Key。两者都只回答「这个请求是哪个用户」，不携带权限范围——范围靠路径级
- * ACL 表达。**组关系每请求查库**（`listGroupIdsOfUser`）：SQLite 单机微秒级，
- * 缓存只会让「退组立即生效」变成「重启后生效」。
- *
- * API Key 的 secret 用与密码相同的 scrypt 编码（`services/password.ts`）。一把
- * key 就是一个 `(user_id)` 的完整凭证：`api_key` 表没有 scope 列，权限范围始终由
- * 路径级 ACL 表达（§12.5）。
- *
- * ## session token 还要比身份版本
- *
- * `session` 凭据除了用户 ID 还带 `epoch`（`app_user.session_epoch`）。
- * 只确认「用户存在且 active」不够：删账号再重建同 ID 时两件事都成立，旧 token 在
- * 整个 `exp` 窗口内继续有效——撤销访问的动作本身失效。身份版本在重建账号与改密码
- * 时轮换，比对它让这两条路径上的旧 token 立刻 401。比对放在服务层而不是
- * `AuthService`：绕过 `resolveBearer` 直接调 `resolve` 的代码也要被挡住。
+ * `resolve` 把 password、API Key 或 session token 换成用户身份；组关系每请求
+ * 查库。API Key 没有 scope，权限只由路径 ACL 决定。session token 还要与
+ * `session_epoch` 比对，使改密码与删号重建立即使旧 token 失效。
  */
 
 import type { ApiKeyRecord, ApiKeyRepository } from '../adapters/sqlite/api-key-repository.js';
@@ -74,16 +59,9 @@ import type { Group, GroupMember, Identity, User } from '../domain/identity.js';
 import { assertValidGroupId, assertValidUserId, buildIdentity } from '../domain/identity.js';
 import type { Logger } from '../domain/log.js';
 import { generateApiKey, parseApiKey } from './api-key.js';
-import { hashSecret, verifySecret } from './password.js';
+import { assertPasswordPolicy, hashSecret, verifySecret } from './password.js';
 
-/**
- * 用户命名空间的预置端口。
- *
- * 建用户时要建 `comem://user/{uid}/` 与四个上下文目录，并物化它们的权限行——否则
- * 新用户 `find` 一条都搜不到（目录不存在，物化不出行）。这段逻辑要写磁盘、要
- * 调 `AclService`，都不属于身份用例；由装配层注入，`IdentityService` 只负责
- * 「创建用户之后立刻预置」这个顺序。
- */
+/** 建用户后预置根与上下文目录；由装配层注入，避免身份用例直接写文件。 */
 export interface UserNamespace {
   ensure(userId: string): Promise<void>;
 }
@@ -96,13 +74,7 @@ export interface IdentityServiceDeps {
   readonly logger: Logger;
 }
 
-/**
- * 认证凭据。
- *
- * 三种形态对应两个入口：`password` 是登录，`api-key` 是请求头里的
- * `Authorization: Bearer comem_...`，`session` 是 `AuthService` 校验过签名的
- * token 载荷（用户 ID + 身份版本，这里做存在性与版本比对）。
- */
+/** 登录 password、API Key 与已验签 session token。 */
 export type Credential =
   | { readonly kind: 'password'; readonly username: string; readonly password: string }
   | { readonly kind: 'api-key'; readonly apiKey: string }
@@ -130,6 +102,11 @@ function unauthenticated(message: string): ComemError {
 function userNotFound(id: string): ComemError {
   return new ComemError('NOT_FOUND', `用户不存在：${id}`, { userId: id });
 }
+
+const invalidCurrentPassword = (): ComemError =>
+  new ComemError('INVALID_ARGUMENT', '当前密码不正确或已更改，请重新输入。', {
+    field: 'currentPassword',
+  });
 
 function groupNotFound(id: string): ComemError {
   return new ComemError('NOT_FOUND', `组不存在：${id}`, { groupId: id });
@@ -505,6 +482,25 @@ export class IdentityService {
     const hash = await hashSecret(password);
     this.#users.setPasswordHash(userId, hash, now);
     this.#logger.info('用户密码已设置', { userId });
+  }
+
+  /** 校验当前 password，并以旧哈希做比较交换，避免并发覆盖。 */
+  async changeOwnPassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    const currentHash = this.#users.getPasswordHash(userId);
+    if (currentHash === null || !(await verifySecret(currentPassword, currentHash))) {
+      throw invalidCurrentPassword();
+    }
+    assertPasswordPolicy(newPassword);
+    const nextHash = await hashSecret(newPassword);
+    if (!this.#users.setPasswordHash(userId, nextHash, now, currentHash)) {
+      throw invalidCurrentPassword();
+    }
+    this.#logger.info('用户自助修改密码', { userId });
   }
 
   /** `app_user.password_hash` 非空。管理面只回布尔，哈希不出服务层。 */

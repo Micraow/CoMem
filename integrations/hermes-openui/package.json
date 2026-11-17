@@ -1,0 +1,30 @@
+{
+  "name": "hermes-openui-stream",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./tests/register-tsx.mjs --test tests/*.test.ts && npm run test:backend",
+    "test:browser": "node --import ./tests/register-tsx.mjs --test tests/surface.test.tsx",
+    "test:backend": "python3 -m unittest discover -s dashboard/tests -p 'test_*.py'",
+    "test:webapp": "node --import ./tests/register-tsx.mjs tests/webapp.mjs"
+  },
+  "dependencies": {
+    "@openuidev/react-lang": "1.1.0",
+    "katex": "0.16.47",
+    "lucide-react": "0.562.0",
+    "maplibre-gl": "6.13.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "0.28.1",
+    "playwright-core": "1.65.1",
+    "typescript": "6.0.3"
+  }
+}

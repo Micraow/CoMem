@@ -117,6 +117,7 @@ async function readPayload(response: Response): Promise<unknown> {
 interface RequestOptions {
   readonly query?: Record<string, unknown>
   readonly body?: unknown
+  readonly timeoutMs?: number
 }
 
 /**
@@ -148,11 +149,12 @@ async function request<T>(
   const config = useRuntimeConfig()
   const base = String(config.public.apiBase).replace(/\/+$/, '')
   const controller = new AbortController()
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, REQUEST_TIMEOUT_MS)
+  }, timeoutMs)
 
   try {
     const response = await fetch(`${base}${path}${buildQuery(options.query)}`, {
@@ -205,7 +207,7 @@ async function request<T>(
     }
     if (timedOut) {
       throw new ApiClientError(
-        '请求超时：服务端在 30 秒内没有响应。',
+        `请求超时：服务端在 ${timeoutMs / 1_000} 秒内没有响应。`,
         'TIMEOUT',
         0,
       )
@@ -222,7 +224,7 @@ async function request<T>(
 
 export interface ApiClient {
   get<T>(path: string, query?: Record<string, unknown>): Promise<T>
-  post<T>(path: string, body?: unknown): Promise<T>
+  post<T>(path: string, body?: unknown, options?: { readonly timeoutMs: number }): Promise<T>
   put<T>(path: string, body?: unknown): Promise<T>
   patch<T>(path: string, body?: unknown): Promise<T>
   del<T>(path: string, query?: Record<string, unknown>): Promise<T>
@@ -231,7 +233,7 @@ export interface ApiClient {
 export function useApi(): ApiClient {
   return {
     get: (path, query) => request('GET', path, { query }),
-    post: (path, body) => request('POST', path, { body }),
+    post: (path, body, options) => request('POST', path, { body, ...options }),
     put: (path, body) => request('PUT', path, { body }),
     patch: (path, body) => request('PATCH', path, { body }),
     del: (path, query) => request('DELETE', path, { query }),

@@ -112,6 +112,21 @@ afterEach(async () => {
 });
 
 describe('POST /memories/{uri}/reject：报告发生了什么', () => {
+  it('可以复核编码后超过 Fastify 默认长度的记忆 URI', async () => {
+    const topic = '家庭照片整理清单的长期归档约定';
+    const memory = await requireContainer().services.memory.upsertMemory(
+      Uri.parse(ROOT), experiencesMemoryType, {
+        uri: Uri.parse(`${MEMORY_DIR}/${topic}.md`),
+        update: (current) => ({ ...current, topic, content: '每周整理一次。' }),
+      },
+    );
+    const uri = memory.uri.toString();
+    expect(encodeURIComponent(uri).length).toBeGreaterThan(100);
+    const response = await inject({ method: 'POST', url: `/api/v1/memories/${encodeURIComponent(uri)}/approve` });
+    expect(response.statusCode).toBe(200);
+    expect(resultOf(response)['status']).toBe('active');
+  });
+
   it('有版本可回退时报告恢复，并给出恢复自哪个版本 URI', async () => {
     const started = requireContainer();
     // 先通过一次，让磁盘上是一份 active 的旧值；再覆盖才会产生版本快照并写 `supersedes`。

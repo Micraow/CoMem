@@ -26,21 +26,18 @@
 import { ComemError } from './errors.js';
 
 /**
- * 八条提示词的稳定标识。
+ * 十条提示词的稳定标识。
  *
  * 标识同时是 `prompts/{id}.md` 的文件名与数据库覆盖行的主键，**不要改**：改了等于
  * 让已有的覆盖静默失效（界面会显示成「没有覆盖」，用户以为自己的修改丢了）。
  * 展示用的中文说明在 `PROMPT_DEFINITIONS` 里。
  */
 export const PROMPT_IDS = [
-  'extract-system',
-  'extract-user',
-  'experience-system',
-  'experience-user',
-  'summarize-system',
-  'summarize-user',
-  'rewrite-system',
-  'rewrite-user',
+  'extract-system', 'extract-user',
+  'experience-system', 'experience-user',
+  'consolidation-system', 'consolidation-user',
+  'summarize-system', 'summarize-user',
+  'rewrite-system', 'rewrite-user',
 ] as const;
 
 export type PromptId = (typeof PROMPT_IDS)[number];
@@ -76,17 +73,17 @@ export interface PromptDefinition {
 }
 
 /**
- * 八条提示词的目录。
+ * 十条提示词的目录。
  *
- * 顺序就是控制台的展示顺序：按「抽取 → 经验归纳 → 摘要 → 重写」的业务链路排，
+ * 顺序就是控制台的展示顺序：按「抽取 → 经验归纳 → 记忆整理 → 摘要 → 重写」的业务链路排，
  * 不按字母。
  */
 /**
- * 八条提示词的定义，**按标识索引**。
+ * 十条提示词的定义，**按标识索引**。
  *
  * 写成 `Record<PromptId, ...>` 而不是数组：`PROMPT_IDS` 加一条提示词时这里编译
  * 失败，逼你补定义。数组写法只会让 `tools/list` 与 `/prompts` 少一条——`PROMPT_IDS`
- * 有八个成员而定义表只有七个时，`promptDefinition` 只能在运行期抛 `INTERNAL`。
+ * 有十个成员而定义表只有九个时，`promptDefinition` 只能在运行期抛 `INTERNAL`。
  *
  * 展示顺序不在这里：它由 `PROMPT_IDS` 决定（见下面的 `PROMPT_DEFINITIONS`）。
  */
@@ -122,6 +119,16 @@ const PROMPT_BODIES: Readonly<Record<PromptId, Omit<PromptDefinition, 'id'>>> = 
       { name: 'messages', description: '这次要归纳的会话消息' },
     ],
   },
+  'consolidation-system': { description: 'Dreamer · 记忆整理 · 系统提示词', variables: [{ name: 'maxIterations', description: '一次整理最多允许的读取轮次' }] },
+  'consolidation-user': {
+    description: 'Dreamer · 记忆整理 · 用户消息',
+    variables: [
+      { name: 'scope', description: '本次整理的记忆目录' }, { name: 'inventoryCount', description: '清单中的记忆条数' },
+      { name: 'inventory', description: '生效中记忆的地址、类型、摘要与更新时间' }, { name: 'readCount', description: '已经读取正文的条数' },
+      { name: 'reads', description: '已经读取的记忆正文' }, { name: 'iteration', description: '当前轮次' },
+      { name: 'maxIterations', description: '最多允许的读取轮次' },
+    ],
+  },
   'summarize-system': {
     description: '目录摘要 · 系统提示词',
     variables: [
@@ -131,10 +138,7 @@ const PROMPT_BODIES: Readonly<Record<PromptId, Omit<PromptDefinition, 'id'>>> = 
   },
   'summarize-user': {
     description: '目录摘要 · 用户消息',
-    variables: [
-      { name: 'uri', description: '要生成摘要的目录' },
-      { name: 'children', description: '直接子节点（名字、类别与摘要）' },
-    ],
+    variables: [{ name: 'uri', description: '要生成摘要的目录' }, { name: 'children', description: '直接子节点（名字、类别与摘要）' }],
   },
   'rewrite-system': {
     description: '查询重写 · 系统提示词',
@@ -142,15 +146,11 @@ const PROMPT_BODIES: Readonly<Record<PromptId, Omit<PromptDefinition, 'id'>>> = 
   },
   'rewrite-user': {
     description: '查询重写 · 用户消息',
-    variables: [
-      { name: 'query', description: '用户当前这句话' },
-      { name: 'recentMessages', description: '最近几轮对话，越靠后越新' },
-      { name: 'knownScopes', description: '调用方可见的路径范围' },
-    ],
+    variables: [{ name: 'query', description: '用户当前这句话' }, { name: 'recentMessages', description: '最近几轮对话，越靠后越新' }, { name: 'knownScopes', description: '调用方可见的路径范围' }],
   },
 };
 
-/** 八条提示词的目录，顺序取自 `PROMPT_IDS`（「抽取 → 经验归纳 → 摘要 → 重写」）。 */
+/** 十条提示词的目录，顺序取自 `PROMPT_IDS`（「抽取 → 经验归纳 → 记忆整理 → 摘要 → 重写」）。 */
 export const PROMPT_DEFINITIONS: readonly PromptDefinition[] = PROMPT_IDS.map((id) => ({
   id,
   ...PROMPT_BODIES[id],

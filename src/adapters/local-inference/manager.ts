@@ -11,26 +11,23 @@
  * （同样的理由见 `config/prompt-defaults.ts`）。
  */
 
-import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ComemError } from '../../domain/errors.js';
 
-import { probeHealth, waitForReady, type HealthSnapshot } from './health.js';
 import {
-  clearPid,
-  isAlive,
-  isManagedProcess,
-  pidPathOf,
-  readPid,
-  signalProcessGroup,
-  writePid,
-} from './pid-file.js';
+  hasEndpointListener,
+  probeHealth,
+  waitForReady,
+  type HealthSnapshot,
+} from './health.js';
+import { clearPid, isAlive, isManagedProcess, pidPathOf, readPid } from './pid-file.js';
+import { launchInferenceProcess, stopManagedProcess } from './process.js';
 import {
-  endpointOf,
   installCommandOf,
   LOCAL_INFERENCE_DIRECTORY,
+  LOCAL_INFERENCE_ENDPOINT,
   missingLabelOf,
   missingOf,
   type LocalInferenceMissing,
@@ -45,27 +42,15 @@ import {
  * 服务端等到 30 秒再回 409 时浏览器已经先断开，前端只能看到「请求超时」。
  */
 const START_TIMEOUT_MS = 25_000;
-const STOP_TIMEOUT_MS = 5_000;
-
-interface ExitState {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-}
 
 export interface LocalInferenceManagerOptions {
   readonly dataDir: string;
-  /** `providers.embedding.baseUrl`；空串用默认 8089。 */
-  readonly baseUrl: string;
   /** 测试用：覆盖仓库根，避免测试启动仓库里真实的 Python 进程。 */
   readonly repoRoot?: string;
+  /** 测试用：覆盖固定本地地址，避免占用真实 8089。 */
+  readonly endpoint?: string;
   /** 测试用：缩短等待时间。 */
   readonly startTimeoutMs?: number;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 export class LocalInferenceManager {
@@ -79,18 +64,21 @@ export class LocalInferenceManager {
     const repoRoot = options.repoRoot ?? fileURLToPath(new URL('../../..', import.meta.url));
     this.#dir = join(repoRoot, LOCAL_INFERENCE_DIRECTORY);
     this.#pidPath = pidPathOf(options.dataDir);
-    this.#endpoint = endpointOf(options.baseUrl);
+    this.#endpoint = options.endpoint ?? LOCAL_INFERENCE_ENDPOINT;
     this.#startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
   }
 
   async status(): Promise<LocalInferenceStatus> {
     const missing = missingOf(this.#dir);
     const available = missing.every((item) => item === 'rerank-model');
-    const health = available ? await probeHealth(this.#endpoint) : null;
+    const health = await probeHealth(this.#endpoint);
     const running = health?.ready === true;
+    const pid = readPid(this.#pidPath);
+    const managed = pid !== null && isManagedProcess(pid);
     return {
       available,
       running,
+      managed,
       endpoint: this.#endpoint,
       dimension: running ? health.dimension : null,
       backend: running ? health.backend : null,
@@ -119,24 +107,31 @@ export class LocalInferenceManager {
   }
 
   async stop(): Promise<void> {
-    const pid = readPid(this.#pidPath);
-    if (pid === null) {
-      return;
+    if (!(await stopManagedProcess(this.#pidPath))) {
+      throw this.#notManaged();
     }
-    // pid 可能是别的进程复用出来的：只清文件，不杀。
-    if (!isManagedProcess(pid)) {
-      clearPid(this.#pidPath);
-      return;
-    }
-    signalProcessGroup(pid, 'SIGTERM');
-    if (!(await this.#waitExit(pid, STOP_TIMEOUT_MS))) {
-      signalProcessGroup(pid, 'SIGKILL');
-      await this.#waitExit(pid, 1_000);
-    }
-    clearPid(this.#pidPath);
   }
 
   async #startOnce(): Promise<LocalInferenceStartResult> {
+    const current = await probeHealth(this.#endpoint);
+    const record = readPid(this.#pidPath);
+    if (current?.ready === true) {
+      if (record !== null && isManagedProcess(record)) {
+        return this.#readyResult(current);
+      }
+      throw this.#listenerConflict(true);
+    }
+
+    if (record !== null && isManagedProcess(record)) {
+      // 上一条 start 已经拉起进程、还在加载：等它，不再 spawn 第二个去抢端口。
+      const health = await waitForReady(this.#endpoint, this.#startTimeoutMs, record.pid, isAlive);
+      if (health !== null) {
+        return this.#readyResult(health);
+      }
+      throw this.#notReady(record.pid, `已有进程（pid ${String(record.pid)}）没有进入就绪状态。`);
+    }
+    clearPid(this.#pidPath);
+
     const missing = missingOf(this.#dir);
     if (missing.some((item) => item !== 'rerank-model')) {
       throw new ComemError(
@@ -146,56 +141,21 @@ export class LocalInferenceManager {
       );
     }
 
-    const current = await probeHealth(this.#endpoint);
-    if (current?.ready === true) {
-      return this.#readyResult(current);
+    if (await hasEndpointListener(this.#endpoint)) {
+      throw this.#listenerConflict(false);
     }
 
-    const existing = readPid(this.#pidPath);
-    if (existing !== null && isManagedProcess(existing)) {
-      // 上一条 start 已经拉起进程、还在加载：等它，不再 spawn 第二个去抢端口。
-      const health = await waitForReady(this.#endpoint, this.#startTimeoutMs, existing, isAlive);
-      if (health !== null) {
-        return this.#readyResult(health);
-      }
-      throw this.#notReady(existing, `已有进程（pid ${String(existing)}）没有进入就绪状态。`);
-    }
-    clearPid(this.#pidPath);
-
-    const exit: ExitState = { code: null, signal: null };
-    const child = spawn('nice', this.#spawnArgs(missing), {
-      cwd: this.#dir,
-      detached: true,
-      stdio: 'ignore',
+    const launched = await launchInferenceProcess({
+      directory: this.#dir,
+      pidPath: this.#pidPath,
+      endpoint: this.#endpoint,
+      timeoutMs: this.#startTimeoutMs,
+      spawnArgs: this.#spawnArgs(missing),
     });
-    const spawnError: { message: string | null } = { message: null };
-    child.once('error', (error) => {
-      spawnError.message = error.message;
-    });
-    if (child.pid === undefined) {
-      await delay(50);
-      throw new ComemError('INTERNAL', '无法启动本地推理服务：启动命令没有跑起来。', {
-        error: spawnError.message ?? 'spawn 没有返回进程号',
-      });
+    if (launched.health !== null) {
+      return this.#readyResult(launched.health);
     }
-    const pid = child.pid;
-    writePid(this.#pidPath, pid);
-    child.once('exit', (code, signal) => {
-      exit.code = code;
-      exit.signal = signal;
-    });
-    child.unref();
-
-    const health = await waitForReady(this.#endpoint, this.#startTimeoutMs, pid, isAlive);
-    if (health !== null) {
-      return this.#readyResult(health);
-    }
-    const reason =
-      exit.code !== null || exit.signal !== null
-        ? `进程已退出（${exit.signal === null ? `退出码 ${String(exit.code)}` : `信号 ${exit.signal}`}）。`
-        : `等待 ${String(Math.round(this.#startTimeoutMs / 1_000))} 秒后仍未就绪。`;
-    clearPid(this.#pidPath);
-    throw this.#notReady(pid, reason);
+    throw this.#notReady(launched.pid, launched.reason ?? '进程没有进入就绪状态。');
   }
 
   #spawnArgs(missing: readonly LocalInferenceMissing[]): readonly string[] {
@@ -234,14 +194,19 @@ export class LocalInferenceManager {
     });
   }
 
-  async #waitExit(pid: number, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (!isAlive(pid)) {
-        return true;
-      }
-      await delay(100);
-    }
-    return !isAlive(pid);
+  #listenerConflict(ready: boolean): ComemError {
+    return new ComemError(
+      'CONFLICT',
+      `本地地址 ${this.#endpoint} 已有${ready ? '可用' : ''}服务，但不是由此控制台启动；未启动或停止该服务。`,
+      { started: false, ready, reason: 'endpoint_in_use' },
+    );
+  }
+
+  #notManaged(): ComemError {
+    return new ComemError(
+      'CONFLICT',
+      '没有找到由此控制台启动的本地推理服务；未停止其他进程。',
+      { stopped: false, reason: 'not_managed' },
+    );
   }
 }

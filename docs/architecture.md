@@ -80,7 +80,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 **为什么不是 npm 多包。** workspace 包需要各自的 `package.json`、`tsconfig` references、build 顺序、`exports` 映射、类型产物路径。七周的项目里这些是纯成本，换来的是「不可能有人误 import」，而一条 lint 规则能做到同样的事。包边界留给真正需要独立发布的东西——目前一个都没有。
 
-**为什么 `web/` 单独。** Nuxt 有自己的构建链和 `tsconfig`，塞不进后端。它是唯一需要独立的构建单元。
+**为什么 `web/` 单独。** Nuxt 有自己的构建链和 `tsconfig`，塞不进后端。`integrations/hermes-openui/` 则用独立构建产出 Hermes 插件，不参与服务端或控制台构建。
 
 **为什么 `domain` 和 `services` 分开。** `domain` 是规则，`services` 是流程。ACL 求值是规则（给定树和身份，算出一个布尔值，纯函数）；提交管线是流程（有 IO、有重试、有后台恢复）。混在一起，ACL 就只能在跑通整条管线之后才能测。
 
@@ -1966,13 +1966,13 @@ export const preferencesMemoryType = {
 
 **健康度自查。** `GET /health` 的 `memory.profileFormat` 返回 `{checked, invalid, violations, truncated}`：按索引里 `memory_type = 'profile'` 的节点逐个读正文跑一次校验。`invalid` 是**至少有 1 条违规的画像份数**，`violations` 是违规条数合计。一次最多检查 200 份（`PROFILE_CHECK_LIMIT`，经验值），达到上限时 `truncated: true` 并记一条 `warn`，三个计数都只应读作下界。`ObservabilityService.profileFormatHealth()` 是 `private`，只由 `health()` 调用，`memory.profileFormat` 是它唯一的出口；没有单独的分析端点。
 
-**超阈值重写。** `memory.profile.maxChars`（默认 800）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
+**超阈值重写。** `memory.profile.maxChars`（默认 1000）是画像正文的字符上限。抽取时把**当前字数与上限一起**渲染进提示词（`renderProfileDirective`）：超过时要求这次输出一条 `replace content` 的整份重写，只保留稳定身份；未超过时用 `patch` 增量维护，但正文不符合格式契约（缺日期后缀、单条超长、留着历史值）同样整份重写。压缩**不额外调用模型**——它骑在本来就要跑的 `memory_extract` 上。
 
-800 字的依据：稳定身份约 10–12 条 bullet，每条「≤30 字正文 + 17 字日期后缀」≈ 47 字，合计 ≈ 570 字；800 给真正长期的事实留约 40% 余量，同时把每次会话的注入成本限制在 ≈ 800 字（中英混排约 0.5–0.6K token）。
+1000 字是工程余量：它在旧默认 800 字上增加 25%，最多可容纳约 21 条「30 字正文 + 17 字日期后缀」的满长 bullet（21 × 47 = 987）。这个数值没有对应的实测质量提升结论。
 
-**产生侧与注入侧采用不同预算。** 产生侧 `memory.profile.maxChars`（默认800字符）要求抽取时收敛；开局请求 `profileBudgetTokens`（默认2000 token）还受服务端 `assembly.maxTokens` 与宿主字节上限约束。服务端优先注入正文，装不下沿既有层级降级；客户端整块缩减，先丢技能再丢背景。不能仅根据画像字符数保证总注入一定装得下，具体规则见§8.6。
+**产生侧与注入侧采用不同预算。** 产生侧 `memory.profile.maxChars`（默认 1000 字符）要求抽取时收敛；开局请求 `profileBudgetTokens`（默认 2000 token）还受服务端 `assembly.maxTokens` 与宿主字节上限约束。调整 `maxChars` 不改变检索组装或开局画像注入预算；显式写进配置文件或环境变量的 `maxChars` 仍按原优先级覆盖默认值。服务端优先注入正文，装不下沿既有层级降级；客户端整块缩减，先丢技能再丢背景。不能仅根据画像字符数保证总注入一定装得下，具体规则见 §8.6。
 
-重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 800 字正文，约 0.5–0.8K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
+重写动作本身不会撞 `providers.llm.default.maxTokens`（默认 32,768）：一次重写最多写 1000 字正文，约 0.6–0.9K token，加上同一次输出里的其它记忆操作也远低于上限。真正会撞上限的是「一次归档抽出来的操作特别多」，那是 `maxTokens` 的既有风险，与画像重写无关。
 
 ### 11.2 合并操作
 
@@ -2041,7 +2041,7 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 - 这两类写入时是 `pending`，不进检索结果。`rules` 来自抽取与补丁合并，`experiences`
   来自阶段二第 5 步的经验归纳（§10.1）
-- 控制台「记忆复核」页展示 diff（before/after）
+- 控制台「记忆复核」直接展示新增正文；更新按 `supersedes` 读取上一版本，再展示行级差异。
 - 人工通过 → `active`；拒绝 → 回退到被顶替的版本，没有版本可回时删除并记录原因
   （§11.11）
 - 其余类型直接 `active`
@@ -2254,6 +2254,131 @@ Dreamer 统一归档整理和手动整理，两种入口使用同一个服务、
 
 手动端点返回 `adds` / `updates` / `deletes` 和逐轮 `trace`。旧地址 `POST /api/v1/memories/consolidate` 保留为同一处理器的兼容别名，权限、默认预览与写入语义相同。合并计划应用前验证目标合法、已有记忆状态与路径、ACL 及字段；先写保留项，再删被取代项。I/O 或锁冲突造成部分成功时，错误详情会列出已执行的操作。MCP 工具集合不变。旧配置文件里的 `memory.consolidation.enabled` / `maxIterations` 及对应环境变量兼容读取，新键优先。
 
+相似度只能回答「这两条像不像」，回答不了「这两条里是不是有一条已经被取代」。两条
+互相矛盾的约定同样相似，按阈值合并的两种结果都不对：都留下（矛盾仍在），或者不分
+青红地删一条（可能删掉仍然有效的那条）。判断需要读正文、需要说明理由，所以决策交给
+模型。
+
+#### 循环
+
+`LlmProvider` 只有 `complete` / `completeJson`，没有 tool calling（§4.4）。合并用
+**多轮 `completeJson`**，每一轮输出一个 JSON 对象：
+
+```json
+{ "action": "read", "uris": ["comem://user/alice/memories/preferences/code-style.md"] }
+{ "action": "finish", "operations": [
+  { "kind": "update", "uri": "comem://.../code-style.md", "content": "...", "reason": "..." },
+  { "kind": "delete", "uri": "comem://.../code-style-legacy.md", "content": null, "reason": "..." }
+] }
+```
+
+| 轮次动作 | 服务端行为 |
+|---|---|
+| `read` | 读取已通过 ACL 过滤、列入本次候选清单的生效记忆正文，塞进下一轮上下文 |
+| `finish` | 用 `operations` 结束循环；缺省是空列表（模型认为不需要改） |
+
+每轮提示词包含 scope 下**全部**生效中记忆的清单（URI、类型、摘要与更新时间，
+**不带正文**）、已经读过的正文、当前轮次。
+
+默认提示词在 `prompts/consolidation-system.md` 与
+`prompts/consolidation-user.md`。它们和抽取、经验归纳、摘要、查询重写使用同一套
+仓库默认值 + 控制台覆盖机制（§18.1）；修改 `memory.dreamer.maxIterations`
+后，系统提示词中的轮次上限会在下一轮渲染时同步更新。提示词是数据，但仍必须通过
+占位符与变量校验，不能绕过 §11.8 的服务端操作验证、ACL 和整批失败规则。
+
+| 配置 | 默认 | 语义 |
+|---|---|---|
+| `memory.dreamer.manualConsolidation` | `false` | 关着时 `POST /memories/dreamer` 与兼容别名 `/memories/consolidate` 明确拒绝（403），不返回空结果 |
+| `memory.dreamer.maxIterations` | `10` | 轮次上限。**来源是设计约定**：每轮至少一次模型调用，10 轮足够读完一个 scope 的主要记忆；收敛通常发生在前几轮 |
+
+到上限还没 `finish` 抛 `RESOURCE_EXHAUSTED`，**不做部分应用**：只合并了一半的记忆库
+比没合并更难解释。
+
+#### 校验：整批失败
+
+`validateOperations`（`domain/consolidation.ts`）逐条检查，**任意一条不满足就整批
+失败**，不逐条丢弃：
+
+| 拒绝条件 | 为什么 |
+|---|---|
+| `delete` / `update` 的 URI 不在清单里 | 模型幻觉出不存在的路径 |
+| `add` 的 URI 已存在 | 应该用 `update` |
+| URI 不在允许的 scope 内 | 隔离：只能操作显式给出的 scope |
+| `content` 为空而 `kind !== 'delete'` | 空正文等于删除，但走了 update 的路径 |
+| `reason` 为空 | 没有理由的删除不可接受 |
+| 同一个 URI 出现两次 | 同一批里 update 又 delete 是自相矛盾的；写盘阶段也会对同一条记忆重复加锁 |
+
+**为什么整批失败而不是逐条丢弃**：模型产出的一半操作被执行、一半被丢弃，得到的是一份
+自相矛盾的记忆库——比如「这条被那条取代了」的删除被丢掉，两条就都留下了。要么全做，
+要么全不做。
+
+#### 写回
+
+- 操作只带 URI，`MemoryService.upsertMemory` 要的是「记忆类型 + identity 值」。
+  中间这一步由 `resolveMemoryTarget`（`domain/consolidation.ts`）还原：**不切字符串**，
+  目录与文件名模板都来自记忆类型定义（`renderPath` 的逆运算）。`profile` 这类固定
+  文件名的类型 identity 不能由路径推出，所以只能 `update`，`add` 会被拒绝。
+- 写盘前完成全部校验，然后**按 URI 升序逐条写入**。加锁不在这一层：`MemoryService`
+  的 `upsertMemory` / `remove` 各自在自己的单文件 `exact` 锁内完成；这一层再持锁会
+  等自己（`PathLockManager` 不可重入）。因此这**不是原子批次**——中途 `CONFLICT` 或
+  I/O 失败时，前面已应用的操作不会回滚，错误 `details` 带上已应用的清单（下一节）。
+  URI 升序只让报告与日志的顺序确定。
+- `delete` 必进日志，带模型给的 `reason`。
+
+#### 溯源
+
+被合并掉的记忆删除之后只剩磁盘历史，所以**本批被删除记忆的 `sources` 会并进本批写出的
+每一条**：保留者自己的在前（顺序不变），被删的按操作顺序追加，去重与 20 条上限沿用
+§11.1 的同一套规则。`entity_refs` 与 `memory_links` 属于各自文件，自动 consolidation 不转移它们；如需保留已删除记忆的关联，应在删除前显式纠正目标文件。
+
+**已知限制：`add` 一条「参考了现有多条、但把原条目留着」的新记忆，不会继承它们的
+来源。** 模型输出里没有「我参考了哪几条」这个信号，按正文猜就是编。这类记忆的溯源从
+它自己被归档的那一次开始。
+
+**被删记录的 `sources` 里出现不合法的 URI 时整批失败**（`INVALID_ARGUMENT`），一条
+记忆都不删：打错的 frontmatter 必须在写盘之前拦住，否则删除已经应用、没有回滚
+（下一节「回滚语义」）。
+
+**这条校验是不对称的。** 只有**被删除**的记录会被逐个 `Uri.tryParse`——它们的来源要
+并进保留者，坏值会在写盘中途炸掉整批。**保留者自己**从磁盘读出的坏 `sources` 不参与
+校验，会原样留在文件里、不报错；写入侧只做字符串去重与 20 条截断，不校验已有条目的
+URI。这是当前行为：保留者路径没有崩溃风险，来源字符串原样展示即可，所以没有把它升级
+成整批失败。
+
+#### 回滚语义
+
+`MemoryService` 没有事务（一条记忆一个文件），`filesystem` 端口也拿不回逐字节前像
+（`created_at`、`status` 会在重写时被重新计算）。所以**不做假回滚**：全部校验前置，
+把「中途失败」压到只剩 I/O 与加锁失败；真的中途失败时错误 `details` 里带上已经应用
+过的 `adds` / `updates` / `deletes`，由运维按这份清单收尾。
+
+#### 隔离
+
+- 只允许操作 `scope` 下的记忆（`validateOperations` 的 `allowedScopes`）。
+- **不展开组**：`comem://group/eng/` 的记忆不会因为调用者有 `group:eng` 就被合并。
+  合并是**写**操作，scope 必须显式指定。
+- 清单与正文用**调用方自己的 principals** 读取：`restricted` 切断的节点不能因为
+  「scope 根是调用方」就被读出来，然后删掉一条调用方本来无权看到的记忆。
+- **`pending` / `archived` 不是候选**：`pending` 还在复核（§11.6），删掉它等于绕过
+  复核闸门；`archived` 已被 TTL 归档（§11.7），清理要按 TTL 的策略走。清单过滤之外，
+  写回前还会再读一次状态：`add` 的 `existing` 用的是**全部**记忆文件，`update` /
+  `delete` 的目标必须是 `active`——模型可以凭空写出一条真实存在的路径（不算幻觉），
+  只靠清单过滤会让它通过「存在」校验然后被删掉。
+- 清单来自检索索引（文件是真相，索引是派生，§7）。文件写了但索引还没同步时不会出现
+  在清单里，也就不会被合并——漏合并比「合并了一份陈旧的正文」安全。
+
+#### 入口
+
+`POST /api/v1/memories/dreamer`，body `{ "scope": "...", "dryRun": true }`，
+需要 `manage`。**`dryRun` 默认 `true`**：合并会 `delete`，不传就等于预览，误点的代价
+不可逆。`POST /api/v1/memories/consolidate` 是同一处理器的兼容别名。**不进 MCP**
+（§3：16 个工具，不多不少）。
+
+模型结果协议同时服务归档整理、偏好推断与手动整理：`action`、`experiences`、
+`inferences` 和 `operations` 都是可选字段。手动整理把缺少 `action` / `operations`
+解释为没有需要改的内容；归档阶段接受 `experiences` 与 `inferences`，拒绝普通
+add/update/delete 操作。推断偏好仍然只通过 `inferences` 写入待复核文件。
+
 ### 11.9 本机 Agent 对话导入
 
 用户的机器上散落着历史对话（Claude Code / Codex / DeepSeek / Qwen）。这些对话里的
@@ -2288,9 +2413,9 @@ Dreamer 统一归档整理和手动整理，两种入口使用同一个服务、
 | | 服务端适配器（`pnpm ingest`） | Agent 侧提示词（`docs/ingest-prompt.md`） |
 |---|---|---|
 | 谁跑 | CoMem 进程内的 `LogSource` | 用户本机的 Agent |
-| 能读到什么 | 服务进程有权限的路径 | Agent 所在机器的完整磁盘（`~/Downloads`、`~/.claude`） |
-| 输入 | 四个内置宿主格式 | 任意宿主：Agent 自己解析成 `{role, text, createdAt}` |
-| 产出 | `sessions/<id>/messages.jsonl` | 同一个文件，经 `remember` |
+| 能读到什么 | 服务进程有权限的路径 | 用户明确指定、Agent 能访问的文件或粘贴的文本 |
+| 输入 | 四个内置宿主格式 | Agent 将能解析的内容转成 `{role, content, createdAt}`，先给预览，确认后才写入 |
+| 产出 | 会话归档和提交任务 | 同样的归档和任务，经 `remember`；响应包含实际 `archiveUri`、消息数、`taskId` |
 | 之后 | 阶段一 → 阶段二 → 记忆 | 完全一致 |
 
 **为什么不是二选一。** 服务端适配器只能覆盖「服务进程能读到、且格式已内置」的宿主；
@@ -2320,11 +2445,13 @@ Dreamer 统一归档整理和手动整理，两种入口使用同一个服务、
 - **传了**：会话已存在就追加、不存在就创建（`SessionService.ensure` 不覆写消息）。
 - **幂等**：消息的稳定 ID 由 `services/session.ts` 的 `stableMessageId(role, text, createdAt)` 算（与 ingest 同一个实现）。追加前收集会话已有的
   消息 ID（live + `history/archive_NNN/` 的 `archivedMessageIds`），命中就跳过。所以
-  **调用方必须把源日志的 `createdAt` 原样传进来**；不传时用当前时刻，重跑无法去重。
+  **调用方必须给同一消息传入同一个 `createdAt`**；不传时用当前时刻，重跑无法去重。
+  导入提示词要求保留源时间（统一为 ISO 8601 UTC）；缺失时用 Unix 纪元加消息序号毫秒作为占位。
 - **没有新消息**：不提交，返回 `taskId: none`。live 里还有上一次崩溃留下的未提交消息时
   仍然提交——否则它们永远停在 live 里。
 - **并发**：去重是「读现有 → 追加」两步，没有跨请求的锁。批量导入是单协程顺序调用，
   不受影响；并发同 `sessionId` 的两个调用各追加一份是已知窗口。
+- **跨入口**：提示词给来源会话分配 `import-` 前缀的哈希 ID，与内置适配器和 Hook 的会话 ID 不同；跨入口不保证去重。没有原生 ID 时按解析结果哈希，修改内容或改变解析结果会改变会话 ID。
 
 #### 数据流
 
@@ -2783,7 +2910,8 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 | `rm` / `mv` | manage |
 | `getAcl` / `setAcl` | manage |
 | 改组 owner（`POST /admin/groups/{id}/owner`） | 当前 owner、系统管理员，或组根 manage |
-| 用户管理（改密码、改资料、启用禁用、删除） | 对 `comem://user/{id}` 求 manage |
+| 用户管理（委派改密码、改资料、启用禁用、删除） | 对目标 `comem://user/{id}` 求 manage；改密码不能以自己的 ID 为目标 |
+| 自助改密码（`POST /auth/password`） | 只更新当前 `subject`，并校验 `currentPassword` |
 | API Key（签发、列出、吊销） | 对**持有者**的 `comem://user/{id}` 求 manage |
 | 组管理（改资料、删除、加退成员） | 对 `comem://group/{gid}` 求 manage |
 | 提示词（`GET`） | 任何已认证身份 |
@@ -2811,13 +2939,13 @@ UTC 形态，不在序列化层换格式）；`supersedes` 非空即「这条记
 
 **管理端点判定的是目标资源，不是调用方自己的根。** 对「自己的根」求 `manage` 对每个登录用户都成立（user 根 owner 恒为本人），用它当门禁等于任何登录用户都是管理员。所以改密码、改资料、启用禁用、删除用户，签发 / 列出 / 吊销 API Key，改组资料、删除组、加退组成员，一律对目标用户根或组根求 `manage`。吊销 API Key 的请求里只有 key ID，先反查持有者，再对持有者的根求权——否则任何登录用户都能吊销别人的凭据。组 owner 变更不能只看组根 manage 的历史原因见下。
 
-**跨主体端点只认系统管理员。** 列全部用户 / 组、建用户、建组，以及 `/tasks` 的三个端点（`GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`）在数据模型里没有可求权的目标：`task` 表没有 scope 或 uri 列，`payload` 是 `unknown`，从它里面猜路径等于把授权建在不可校验的 JSON 上。它们按 `auth.adminUserIds` 判定——名单存 `app_user.id`，默认 `[]`（空表示没有管理员）。没有「第一个用户自动成为管理员」「绑定主体即管理员」这类隐式规则：默认值站在安全的一侧。
+**跨主体端点只认系统管理员。** 列全部用户 / 组、建用户、建组，以及 `/tasks` 的三个端点（`GET /tasks`、`GET /tasks/{id}`、`POST /tasks/{id}/retry`）在数据模型里没有可求权的目标：`task` 表没有 scope 或 uri 列，`payload` 是 `unknown`，从它里面猜路径等于把授权建在不可校验的 JSON 上。系统管理员包括通过 `POST /bootstrap/admin` 初始化的管理员和 `auth.adminUserIds` 中列出的用户 ID。名单默认为空；这不影响初始化管理员。普通建用户流程和回环绑定本身不会授予系统管理员角色。
 
 **提示词分读写。** 提示词是全局的（不分作用域），读它不会暴露任何节点内容，所以 `GET /prompts` 与 `GET /prompts/{id}` 任何已认证身份可读；`PUT` / `DELETE` / `POST /prompts/{id}/preview` 改的是所有身份的注入行为，要系统管理员。没有「目标资源」可以表达这件事——它不是某个节点上的权限。
 
 **`GroupMember.role` 是派生字段。** 唯一真相是 `app_group.owner_user_id`：只有 `userId === ownerUserId` 才是 `owner`。`group_member.role` 列已废弃、写入只落常量 `member`，读取时不采用；`POST /admin/groups/{id}/members` 显式传 `role` 返回 `INVALID_ARGUMENT`，改 owner 的入口只有 `POST /admin/groups/{id}/owner`。
 
-**升级说明：这是一次破坏性变更。** 存量部署必须显式配 `auth.adminUserIds: [<uid>, ...]`，否则用户与组管理端点、`/tasks` 全部 403。回环信任（`auth.trustLoopback`）给出的 `server.subject` 同样要写进名单——跨主体端点不认「请求来自本机」这个事实。
+**存量部署。** 没有初始化管理员的部署可用 `auth.adminUserIds: [<uid>, ...]` 指定管理员。回环信任（`auth.trustLoopback`）只确定调用身份；若 `server.subject` 对应的用户未通过初始化获得管理员角色，同样需要列入名单。
 
 管理面的组 owner 变更不能只看「自己根的 manage」：那对任何登录用户都成立（owner 恒 manage），等于任何成员都能接管别人的组。判定改用组根的主体集合。
 
@@ -2934,15 +3062,30 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 | 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `boundSubject` / `adminConfigured`。控制台在拿到身份之前调它；`needsSetup` 就是「`app_user` 里没有任何密码哈希」。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
+| 当前身份 | `GET /api/v1/auth/me` | `{subject, principals, isAdmin}`；`isAdmin` 使用系统管理员策略 |
+| 自助改密码 | `POST /api/v1/auth/password` | 已认证请求，`{currentPassword, newPassword}`；只改当前 `subject`，成功后轮换 `session_epoch`，已有 session token 下次请求 401 |
 | 建用户 | `POST /api/v1/admin/users` | `{id, displayName, email?, password?}`，系统管理员（§12.4）。`password` 省略时建出无密码账号（先当 ACL 主体用），传了则**先过口令策略再建账号**、一次完成建账号 + 设密码；响应带 `hasPassword` |
 | 列用户 | `GET /api/v1/admin/users` | 每一项带 `hasPassword`：只由 `app_user.password_hash` 非空派生，不回哈希或其任何派生值 |
-| 设密码 | `POST /api/v1/admin/users/{id}/password` | 对目标用户根 `manage`，或系统管理员（§12.4）；口令策略与建用户同一份 |
+| 委派设密码 | `POST /api/v1/admin/users/{id}/password` | 对**其他**目标用户根 `manage`，或系统管理员；请求目标必须是当前 `subject` 以外的用户，否则 400 并指向自助入口；口令策略与建用户同一份 |
 | 签发 key | `POST /api/v1/admin/users/{id}/api-keys` | 对目标用户根 `manage`，或系统管理员；明文只在创建响应里出现一次 |
 | 列出 key | `GET /api/v1/admin/users/{id}/api-keys` | 同上；只回 `prefix`，永不回哈希 |
 | 撤销 key | `DELETE /api/v1/admin/api-keys/{keyId}` | 先反查持有者，再对持有者的根求 `manage`，或系统管理员；幂等 |
 
 **改密码 / 撤销凭据是唯一的「让 token 立刻失效」入口。** 认证恒开之后没有
 「关掉认证」这个开关，撤销只能针对具体凭据（§12.7 的 session token 段）。
+
+**自助改密码与委派重置是两条不同的信任路径。** 自助入口从认证中间件取得当前
+`subject`，请求体没有目标用户 ID，因此不能改另一个账号；它先校验
+`currentPassword`，再用旧哈希作为比较交换条件写新哈希。当前密码错误或并发请求
+已先换掉哈希时返回 400 `INVALID_ARGUMENT`，`details.field` 为
+`currentPassword`，前端保留登录态让用户重试。校验通过后沿用 `setPasswordHash`
+轮换 `session_epoch`：session token 立即失效，API Key 不随密码轮换而撤销。
+
+**管理端点的自助绕过已关闭。** 目标用户根对本人恒有 `manage`，所以管理端点若接受
+`id === 当前用户`，任何登录用户都能跳过当前密码重置自己的密码。该组合现在返回
+400，并只接受 `POST /auth/password`。委派重置其他用户仍走目标根 `manage` 或系统
+管理员，这是管理员协助恢复账号的既有契约；忘记密码且没有可用登录态时仍用
+`pnpm password` 恢复。
 
 ### 12.8 ACL 写入的锁契约
 
@@ -3093,9 +3236,9 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 ## 14. HTTP API
 
-自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals}`，含组成员身份。
+自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals, isAdmin}`，含组成员身份与系统管理员判定。
 
-统一前缀 `/api/v1`。响应封套：
+统一前缀 `/api/v1`。记忆复核等端点把完整的 percent-encoded `comem://` URI 放在一个路径参数里；路由器允许该参数最多 4 KiB，避免合法的长主题和多层路径在进入 URI 校验前被 Fastify 默认的 100 字符限制拒绝。响应封套：
 
 ```json
 { "status": "ok", "result": { } }
@@ -3116,7 +3259,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
 | 本地推理 | `GET /inference/local`、`POST /inference/local/start`、`POST /inference/local/stop`。三个都只认系统管理员；启动命令与 pid 管理见 §18.2 |
 | 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验） |
-| 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`POST /auth/login`、`POST /auth/logout`（§12.7） |
+| 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`GET /auth/me`、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（§12.7） |
 | MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
@@ -3138,6 +3281,8 @@ MCP 挂在 `/mcp`，Streamable HTTP 传输。
 ## 15. Agent 集成
 
 16 个 MCP 工具里没有会话相关操作，真实会话靠 **Hook 插件**在宿主侧自动采集。这是独立于服务端的交付物，放在 `integrations/`，装进宿主。
+
+同仓维护的 [`integrations/hermes-openui/`](../integrations/hermes-openui/README.md) 是 Hermes 的可选展示插件。它在 Hermes 聊天记录中消费宿主流事件，渲染 OpenUI Lang；卡片状态保存在宿主浏览器，显式按钮回到原会话。插件不读写 CoMem 记忆，不改变 Hook、HTTP 或 MCP 契约。
 
 ### 15.1 为什么不在 MCP 工具里做
 
@@ -3221,7 +3366,7 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 ### 15.7 支持哪些宿主
 
-v1 做三个：**Claude Code**（hooks + MCP，最常用）、**Codex**（hooks + MCP）和 **DSH**（原生插件 + MCP）。
+支持 **Claude Code**（Hook + MCP）、**Codex**（Hook + MCP）、**DSH**（原生插件 + MCP）和 **Hermes**（Memory Provider + 可选 MCP）。
 
 **两个 hook 宿主**的事件名与载荷覆盖 §15.2 的七个事件：
 
@@ -3261,6 +3406,8 @@ Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` /
 DSH 这种没有 hook 面的宿主走自己的插件包，不塞进 `hosts/`。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
+
+**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP，显示插件 `integrations/hermes-openui/` 独立启用。见[快速上手](hermes-quickstart.md)。
 
 ### 15.8 目录
 
@@ -3427,33 +3574,40 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 ## 16. Web 控制台
 
-Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用户部署下出现的登录页：
+Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 | 页面 | 内容 |
 |---|---|
 | 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
+| 我的账户 | 右上角进入；显示本人系统角色，管理自己的 API Key，验证当前密码后可换新密码并重新登录 |
 | 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
 | 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块，文件还有「记忆」区块（类型、状态、能否被检索、有效期） |
 | 检索 | 输入 query，选「直接查找 / 先理解再检索」，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4）；结果标题用摘要或文件名、URI 降为第二行；右上角如实显示实际引擎（关键词匹配 / 向量检索 / 混合检索，读 `GET /health` 的 `retrieval.engine`）；0 命中区分「库空」与「无匹配」，并说明关键词引擎的边界 |
-| 记忆复核 | `pending` 列表 + diff 视图（before/after）；详情头显示有效期与「替换上一版本」提示；批量失败的原因逐条列在页面上；通过 / 拒绝 |
+| 记忆复核 | 待确认列表优先显示更新与推断偏好；详情展示正文、真实的版本差异及来源；逐条更新通过 / 拒绝的结果 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
-| 用户与组 | 用户列表、组列表、组成员维护；用户详情里的 API Key 与密码 |
-| 会话与任务 | 会话列表、归档列表、任务状态；没有重试入口，也没有回收记录列表（理由见下） |
+| 用户与组 | 系统管理员入口；用户列表显示服务器判定的角色，组成员列表区分所有者和成员。管理员可以为其他用户设置或重置密码；查看或管理节点读写权限使用「权限管理」 |
+| 会话与任务 | 会话列表、归档列表、任务状态；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
+| 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
 | 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
+| 设置 | 表单显示可编辑值；草稿与运行值不同时显示运行值，保存后标记待重启；由环境变量控制的字段只读 |
 
 **一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
 
-- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（`assertSystemAdmin`，名单是 `auth.adminUserIds`，默认 `[]`），因为 `task` 表没有可求权的目标（§12.4）；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
-- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。页面看到 403 就显示「需要管理员权限」的空态，同时收起页头的「新建用户 / 新建组」按钮——页面已经说明不能用，就不留一个注定失败的入口。其它失败仍显示服务端的消息（那是排查用的诊断信息）。侧栏入口不按角色隐藏：前端不知道谁是管理员，要隐藏得先让服务端暴露一个权限标志（`web/pages/admin.vue`）。
+- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（§12.4），因为 `task` 表没有可求权的目标；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
+- **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。「我的账户」并排显示登录账号与系统角色。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
 - **文件详情页的「记忆」区块回答「为什么搜不到」。** `memories/` 下的**文件**另请求一次 `GET /memories/{uri}`，显示记忆类型、状态、能否被检索与有效期。状态与类型取自**检索索引**而不是记忆文件的 frontmatter：TTL 归档只把索引行改成 `archived`，文件里仍是 `active`（§11.7），读文件会在归档后给出相反的答案。能否被检索由状态推导：检索只返回 `active`（索引的 `n.status = 'active'`），所以 `pending` 写「待复核，检索不到」并给「去复核」入口，`archived` 写「已归档，检索不到」并说明按 URI 仍可读取。没有恢复端点，因此不给恢复按钮——按了也做不成事。有效期来自记忆文件（索引的 `NodeStat` 没有这两列）。没有索引行、目录、`.history` 版本文件与 `.abstract.md` 显示「未知」，与请求失败分开。请求失败只影响这一块，正文、摘要、关联与权限照常渲染（`web/pages/files/[...path].vue`、`web/components/domain/SummaryPanel.vue`）。
 
 **浏览器里能创建第一条记忆。** 概览页的「还没有数据」空态与文件树工具栏各有一个「新建记忆」入口，共用同一个对话框：选记忆类型（中文名来自 `web/utils/memoryTypeLabels.ts`），填标题/主题与正文，提交走 `POST /memories`。路径不在控制台拼——服务端把标题映射成 identity 值并用各类型自己的 `filename` 模板渲染，响应带最终 URI（见 §11.1）。成功后关闭对话框、刷新目录树、跳到那条文件；`experiences` / `rules` 落在复核队列里，提示语写「等待复核」而不是只说「已保存」。失败时按 `details.field` 把 400 的原文挂在标题或内容字段旁，其余失败（403、网络）挂在对话框内——表单不吞掉服务端的诊断信息（`web/components/domain/MemoryCreateDialog.vue`）。
 
-**复核页把有效期、替换关系与失败原因都摆在页面上。** 详情头在有 `validUntil` 时写「有效期截止 …」，`validFrom` 与 `updatedAt` 不同时写「自 … 起生效」；`supersedes` 非空时在差异区上方给一条提示：通过会替换掉上一版本，拒绝则恢复到覆盖前的值（`web/components/domain/MemoryDiff.vue`）——用户在按按钮之前，需要知道按钮会做什么。服务端没有批量端点，批量操作逐条独立执行，**失败原因逐条列在队列上方**（可逐条看、可关闭，下一轮开始时清空），toast 只说「成功 N 条，失败 M 条」：3 秒后消失的 toast 装不下「哪几条、各自为什么」（`web/pages/review.vue`）。
+**导入整段对话从「会话与任务」或概览空态进入。** 接入页提供可复制的[导入提示词](../web/assets/prompts/import-history.md)，浏览器不读取本机文件，也不提交对话。Agent 展示来源和预览后，等用户确认才走 MCP `remember`（§11.9）。目标由 MCP 登录身份决定，Agent 可用 `health` 核对账号和提炼能力。会话在「会话与任务」，原文可按返回的归档地址在「文件树」查看，待复核记忆在「记忆复核」。
+
+**复核队列先展示覆盖写，其次是推断偏好，同一类保留接口顺序。** 新记忆从 `GET /memories/pending` 返回的正文直接展示，无需等待第二次请求；更新只读取 `supersedes` 所指向的快照，快照不可用时保留新正文。来源链接用已存档的地址，有明确的推断原话时单独呈现。详情保留有效期和错误。通过或拒绝立即在对应按钮显示处理中；只有服务端确认后才移走该条目并选中相邻一条。勾选后显示批量操作，执行时逐条更新进度，失败项留在队列并显示原因（`web/pages/review.vue`、`web/components/domain/MemoryDiff.vue`）。
+
+**复核页可以生成整理建议。** 「整理建议」调用 `POST /memories/consolidate`，固定传 `dryRun: true`，按新增、更新和删除展示建议及理由。模型只能读取进入本次候选清单的生效记忆。控制台只展示预览、原记忆和提示词入口；它不发 `dryRun: false`，因为旧 API 的执行会重新向模型取方案，不能保证等于用户看到的预览（§11.8）。手动整理默认关闭，需要先在「设置」开启。
 
 **403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 
@@ -3467,7 +3621,7 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
   走它。
 - **有账号但没有会话**（或会话已过期）：整页进 `/login?redirect=...`，登录成功用
   `POST /auth/login` 换 session token，之后每个请求带
-  `Authorization: Bearer <token>`。登录响应带 `subject` 与 `principals`，控制台按
+  `Authorization: Bearer <token>`。刷新时用 `GET /auth/me` 获取当前主体、组关系和系统角色，控制台按
   `user:{uid}` / `group:{gid}` 推出候选根，再逐个用 `GET /fs/tree` 验证可读；读不到的根
   （组根未预置）不列出来。凭据存 `sessionStorage`（刷新保留、关标签页即清），不存
   `localStorage`；收到 401 时清掉本地会话并回登录页。
@@ -3479,9 +3633,9 @@ Nuxt 3 + shadcn-vue + Tailwind。十个业务页面，外加一个只在多用�
 插件是 `await` 的，所以页面渲染时身份已经确定——先渲染再补身份，页面在身份到达前发出的
 请求会没有凭据。拉取失败时整页显示错误，**不猜一个默认身份**：即使回环信任会让服务端
 接受不带凭据的本机请求，控制台也不在没有身份的情况下渲染页面——那会让「服务端不可达」
-看起来像正常状态。`scopes` 为空时显示「当前主体没有可访问的命名空间」，与「加载中」
-区分开。**作用域选择器**只在可读根多于一个时出现，选择存 `sessionStorage`；切换后
-文件树、检索、权限管理各自重新加载，文件详情不在新根下时回 `/files`。
+看起来像正常状态。侧栏底部显示**当前空间**。有多个可读根时在这里切换「个人空间」和团队；只有一个时显示名称，无可读根时显示「暂无可访问空间」。选择存 `sessionStorage`；切换后文件树、权限管理等按新空间加载，文件详情不在新根下时回 `/files`。
+
+**跨空间查找使用「所有可访问」。** 检索默认不传 `scopes`，由服务端按当前身份展开个人空间、可读团队与直接授权的范围，结果仍逐项检查 ACL。选「当前空间」仅查侧栏选中的空间；拿到具体地址时可选择「指定地址」。团队共享内容可从团队文件树浏览；他人个人空间中单独获授权的子树不会出现在侧栏，可用「所有可访问」查找该子树内可检索的内容。
 
 **为什么不该给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把登录身份换成第二处配置：
 运维改 `server.subject` 时还要记得改控制台，而控制台的真实身份来自登录响应。
@@ -4037,6 +4191,10 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 提示词的静态骨架在仓库的 `prompts/*.md`，动态部分由 `services/prompts/*.ts` 渲染成
 字符串后用 `{{name}}` 注入。存储是两层：
 
+内置提示词共十条，按业务链路分为五对：抽取、经验归纳、记忆整理、摘要与查询重写的
+系统 / 用户消息。控制台按这个顺序展示；`memory.dreamer.maxIterations` 等运行
+参数通过变量进入模板，默认模板与覆盖都不需要复制代码里的配置值。
+
 | 层 | 位置 | 谁改 | 优先级 |
 |---|---|---|---|
 | 默认 | `prompts/{id}.md` | 改代码（进 review、可 diff） | 低 |
@@ -4057,8 +4215,9 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 引用了定义外的变量（拼写错误）、模板需要的变量没有传。第三条是「代码少传了」的失败——
 渲染成 `{{pages}}` 字面量时模型会把它当正文，而错误只会在模型的输出里出现。
 
-**渲染器是进程级绑定。** 提示词的调用点有四个（`services/retrieval/intent.ts`、`services/summary.ts`、
-`services/commit/steps/memory-extract.ts`、`services/dreamer/archive-prompt.ts`，
+**渲染器是进程级绑定。** 提示词链路的调用点有五个（`services/retrieval/intent.ts`、
+`services/summary.ts`、`services/commit/steps/memory-extract.ts`、
+`services/dreamer/archive-prompt.ts`、`services/dreamer/prompt.ts`，
 每处渲染一对系统 / 用户提示词），这些文件不在本 wave 的文件所有权内，而
 `REWRITE_SYSTEM_PROMPT` 在 `retrieval/intent.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
 没法通过参数注入。数据库覆盖只能通过 `services/prompts/registry.ts` 的模块级绑定进入
@@ -4076,9 +4235,9 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 
 | 端点 | 行为 |
 |---|---|
-| `GET /api/v1/inference/local` | 回 `available` / `running` / `endpoint` / `dimension` / `backend` / `device` / `model` / `missing` / `startCommand`。`endpoint` 取 `providers.embedding.baseUrl` 的源地址，没配用 `http://127.0.0.1:8089` |
-| `POST /api/v1/inference/local/start` | 用服务端写死的命令拉起子进程并等到就绪。成功回 `{started: true, ready: true, endpoint, dimension}`；进程退出或超时回 409 `CONFLICT`（`details` 带 `started` / `ready` / `reason`）；缺依赖回 400 `INVALID_ARGUMENT`（`details` 带 `missing` / `startCommand`） |
-| `POST /api/v1/inference/local/stop` | 只停 pid 文件里记录的那个进程组，回 `{stopped: true}` |
+| `GET /api/v1/inference/local` | 回 `available` / `running` / `managed` / `endpoint` / `dimension` / `backend` / `device` / `model` / `missing` / `startCommand`。`endpoint` 固定为 `http://127.0.0.1:8089`，与向量供应商的网关配置无关。外部启动但就绪的服务显示为可用，`managed` 为 false |
+| `POST /api/v1/inference/local/start` | 用服务端写死的命令拉起子进程并等到就绪。成功回 `{started: true, ready: true, endpoint, dimension}`；端口已有其他服务、进程退出或超时回 409 `CONFLICT`（`details` 带 `started` / `ready` / `reason`）；缺依赖回 400 `INVALID_ARGUMENT`（`details` 带 `missing` / `startCommand`） |
+| `POST /api/v1/inference/local/stop` | 只停本进程管理的推理服务，回 `{stopped: true}`；无法确认归属时回 409 |
 
 **`available` 的判据是本机文件**：`local-inference/.venv/bin/python`、
 `local-inference/server.py`、`local-inference/models/` 下至少一个 embedding `.gguf`。
@@ -4096,7 +4255,7 @@ URI 由调用方给出，不是服务渲染的：`update` 的输入依赖磁盘�
 **只管理自己启动的进程。** spawn 用 `detached: true` + `stdio: 'ignore'`，pid 写进
 `{dataDir}/_meta/local-inference.pid`；`stop` 只对 pid 文件里的进程组发
 SIGTERM / SIGKILL，不按名字 `pkill`——用户可能在终端里手动跑着同一个 `server.py`。
-HTTP 进程重启后先校验 pid 存活与 `/proc/<pid>/cmdline`；对不上只清文件。
+记录同时包含 Linux 进程启动时刻。停止时核对 pid、启动时刻和 `/proc/<pid>/cmdline`；旧格式或对不上只清文件。
 
 **等待与失败。** `start` 最多等 25 秒（控制台请求超时是 30 秒）：模型加载实测 8 秒
 左右，留出的余量够慢机器用。`dimension` / `backend` / `device` / `model` 都来自子进程

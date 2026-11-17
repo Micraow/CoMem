@@ -1,0 +1,6 @@
+name: comem
+version: 0.1.0
+description: "CoMem — automatic cross-session recall through POST /context and completed-turn capture through the session pipeline."
+config_keys:
+  - memory.comem
+requires_env: []

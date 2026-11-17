@@ -135,13 +135,22 @@ describe('改密码只能改自己的（或系统管理员）', () => {
       });
       expect(withInjected.statusCode).toBe(401);
 
-      // 正向对照 1：本人改自己的密码（目标就是自己的根）→ 成功。
+      // 本人不能再借管理端点跳过当前密码；自助端点才成立。
       const bobToken = await login(harness, 'bob');
-      const own = await inject(harness, {
+      const bypass = await inject(harness, {
         method: 'POST',
         url: '/api/v1/admin/users/bob/password',
         headers: bearer(bobToken),
         payload: { password: 'bob-new-password' },
+      });
+      expect(bypass.statusCode).toBe(400);
+      expect(errorOf(bypass)['code']).toBe('INVALID_ARGUMENT');
+
+      const own = await inject(harness, {
+        method: 'POST',
+        url: '/api/v1/auth/password',
+        headers: bearer(bobToken),
+        payload: { currentPassword: PASSWORD, newPassword: 'bob-new-password' },
       });
       expect(own.statusCode).toBe(200);
     } finally {
@@ -302,6 +311,15 @@ describe('系统管理员默认空名单', () => {
         headers: bearer(aliceToken),
       });
       expect(listed.statusCode).toBe(200);
+      const listedUsers = (json(listed)['result'] as Record<string, unknown>)['users'] as readonly Record<
+        string,
+        unknown
+      >[];
+      expect(
+        listedUsers.find(
+          (user) => user['id'] === 'alice',
+        ),
+      ).toMatchObject({ isAdmin: true });
 
       const created = await inject(harness, {
         method: 'POST',
@@ -310,6 +328,13 @@ describe('系统管理员默认空名单', () => {
         payload: { id: 'mallory', displayName: 'Mallory' },
       });
       expect(created.statusCode).toBe(200);
+      const createdUser = (json(created)['result'] as Record<string, unknown>)['user'] as Record<
+        string,
+        unknown
+      >;
+      expect(
+        createdUser['isAdmin'],
+      ).toBeUndefined();
       expect(harness.container.services.identity.getUser('mallory')?.displayName).toBe(
         'Mallory',
       );

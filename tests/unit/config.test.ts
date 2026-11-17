@@ -99,7 +99,7 @@ function expectedDefaults(dataDir: string): unknown {
     },
     memory: {
       reviewRequired: ['experiences', 'rules'],
-      profile: { maxChars: 800 },
+      profile: { maxChars: 1000 },
       workingMemory: { enabled: false },
       ttl: { defaultDays: 0, sweepBatchSize: 100, retentionDays: 0 },
       dreamer: { manualConsolidation: false, maxIterations: 10 },
@@ -326,6 +326,7 @@ describe('loadConfig', () => {
           COMEM_LOGGING_FILE: '/var/log/comem/error.log',
           COMEM_RETRIEVAL_QUERY_FILTERS: '["^recall"]',
           COMEM_MEMORY_REVIEW_REQUIRED: '["rules"]',
+          COMEM_MEMORY_PROFILE_MAX_CHARS: '1200',
           COMEM_MEMORY_CONSOLIDATION_MAX_ITERATIONS: '5',
           COMEM_INGEST_ENABLED: 'true',
           COMEM_INGEST_BATCH_SIZE: '25',
@@ -345,7 +346,17 @@ describe('loadConfig', () => {
       expect(config.logging.file).toBe('/var/log/comem/error.log');
       expect(config.retrieval.queryFilters).toEqual(['^recall']);
       expect(config.memory.reviewRequired).toEqual(['rules']);
+      expect(config.memory.profile.maxChars).toBe(1200);
       expect(config.memory.dreamer.maxIterations).toBe(5);
+    });
+
+    it('memory.profile.maxChars 显式配置优先于新默认值', () => {
+      const config = loadConfig({
+        path: writeConfig('memory:\n  profile:\n    maxChars: 900\n'),
+        env: testEnv(),
+      });
+
+      expect(config.memory.profile.maxChars).toBe(900);
     });
 
     it('环境变量优先于配置文件', () => {
@@ -543,7 +554,7 @@ describe('loadConfig', () => {
       expect(config.memory.dreamer.manualConsolidation).toBe(true);
     });
 
-    it('summary.generator 是 llm 时记忆合并可用，maxIterations 真的生效', () => {
+    it('旧 memory.consolidation 配置映射到 Dreamer，maxIterations 真的生效', () => {
       const config = loadConfig({
         path: writeConfig(
           [

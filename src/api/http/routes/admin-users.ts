@@ -13,7 +13,12 @@ import { Uri } from '../../../domain/uri.js';
 import { assertPasswordPolicy } from '../../../services/password.js';
 import { scopeKeyOf } from '../../../services/recall-ledger.js';
 import { ok } from '../envelope.js';
-import { assertSystemAdmin, requestContextOf, type SystemAdminPolicy } from '../middleware.js';
+import {
+  assertSystemAdmin,
+  callerUserIdOf,
+  requestContextOf,
+  type SystemAdminPolicy,
+} from '../middleware.js';
 import {
   optionalQueryInteger,
   optionalString,
@@ -66,6 +71,8 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
             ...user,
             permissionCount: counts.get(userPrincipal(user.id)) ?? 0,
             hasPassword: identity.hasPassword(user.id),
+            isAdmin:
+              systemAdmin.adminUserIds.includes(user.id) || systemAdmin.isBootstrapAdmin(user.id),
           })),
           total: adminAccess.userCount(),
           limit,
@@ -130,6 +137,13 @@ export function createAdminUserRoutes(services: AdminRouteServices): HttpRouteGr
           const id = assertValidUserId(request.params.id);
           const body = requireRecord(request.body, 'admin/users/:id/password');
           const password = requireString(body, 'password');
+          if (callerUserIdOf(request) === id) {
+            throw new ComemError(
+              'INVALID_ARGUMENT',
+              '修改自己的密码请使用 POST /auth/password。',
+              { field: 'id' },
+            );
+          }
           await assertManageOf(request, authorizer, systemAdmin, userRootOf(id));
 
           // 与 `POST /admin/users` 同一个策略函数：两处各写一条长度规则必然漂移，

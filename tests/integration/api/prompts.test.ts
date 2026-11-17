@@ -89,18 +89,20 @@ function errorBody(payload: unknown): ErrorBody['error'] {
 }
 
 describe('GET /prompts', () => {
-  it('列出八条提示词，初始都没有覆盖', async () => {
+  it('列出十条提示词，初始都没有覆盖', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/prompts' });
     expect(response.statusCode).toBe(200);
 
     const result = okBody<{ prompts: readonly Record<string, unknown>[] }>(response.json());
 
-    expect(result.prompts).toHaveLength(8);
+    expect(result.prompts).toHaveLength(10);
     expect(result.prompts.map((prompt) => prompt['id'])).toEqual([
       'extract-system',
       'extract-user',
       'experience-system',
       'experience-user',
+      'consolidation-system',
+      'consolidation-user',
       'summarize-system',
       'summarize-user',
       'rewrite-system',
@@ -108,7 +110,7 @@ describe('GET /prompts', () => {
     ]);
     expect(result.prompts.every((prompt) => prompt['overridden'] === false)).toBe(true);
     expect(result.prompts.every((prompt) => prompt['stale'] === false)).toBe(true);
-    // 列表不带正文：八条模板加起来十几 KB，列表用不到。
+    // 列表不带正文：十条模板加起来十几 KB，列表用不到。
     expect(result.prompts.every((prompt) => !('body' in prompt))).toBe(true);
   });
 });
@@ -182,6 +184,42 @@ describe('PUT /prompts/:id', () => {
 
     const detail = await app.inject({ method: 'GET', url: '/api/v1/prompts/experience-user' });
     expect(okBody<Record<string, unknown>>(detail.json())['body']).toContain('只输出 JSON。');
+  });
+
+  it('记忆整理的两个标识可读、可覆写', async () => {
+    for (const id of ['consolidation-system', 'consolidation-user']) {
+      const detail = await app.inject({ method: 'GET', url: `/api/v1/prompts/${id}` });
+      expect(detail.statusCode).toBe(200);
+      expect(okBody<Record<string, unknown>>(detail.json())['overridden']).toBe(false);
+    }
+
+    const system = await app.inject({
+      method: 'GET',
+      url: '/api/v1/prompts/consolidation-system',
+    });
+    expect(String(okBody<Record<string, unknown>>(system.json())['body'])).toContain(
+      '{{maxIterations}}',
+    );
+
+    const saved = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/prompts/consolidation-user',
+      payload: {
+        body:
+          '## 范围\n\n{{scope}}\n\n## 清单\n\n{{inventory}}\n\n' +
+          '## 已读\n\n{{reads}}\n\n第 {{iteration}}/{{maxIterations}} 轮；共 {{inventoryCount}} 条，已读 {{readCount}} 条。',
+      },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(okBody<Record<string, unknown>>(saved.json())['overridden']).toBe(true);
+
+    const detail = await app.inject({
+      method: 'GET',
+      url: '/api/v1/prompts/consolidation-user',
+    });
+    expect(okBody<Record<string, unknown>>(detail.json())['body']).toContain(
+      '第 {{iteration}}/{{maxIterations}} 轮',
+    );
   });
 
   it('未知变量被拒绝，错误里带变量名与行号', async () => {

@@ -3,9 +3,9 @@
  *
  * ## 为什么是模块级绑定，而不是构造参数
  *
- * 四条提示词的调用点不在本 wave 的文件所有权里（`services/search.ts`、
+ * 五条提示词链路的调用点不在本 wave 的文件所有权里（`services/retrieval/intent.ts`、
  * `services/summary.ts`、`services/commit/steps/memory-extract.ts`、
- * `services/dreamer/experience.ts`），而
+ * `services/dreamer/archive-prompt.ts`、`services/dreamer/prompt.ts`），而
  * `REWRITE_SYSTEM_PROMPT` 在 `search.ts` 里是一个**值**（`system: REWRITE_SYSTEM_PROMPT`），
  * 不是函数调用——它没法通过参数注入。
  *

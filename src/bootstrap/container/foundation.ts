@@ -124,8 +124,8 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   // 提示词覆盖（§18）。构造期就把全部覆盖读进内存并校验——一条引用了不存在
   // 变量的覆盖会让每一次模型调用失败，而失败只出现在后台任务里。
   const prompts = new PromptService({ overrides: new PromptRepository({ db }) });
-  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：四条提示词的调用点
-  // （`search` / `summary` / `memory-extract` / `experience-distill`）不属于本 wave
+  // 进程级渲染器换成「覆盖优先」的实现。必须在这里做：五条提示词链路的调用点
+  // （检索重写 / 摘要 / 记忆抽取 / Dreamer 归档 / Dreamer 整理）不属于本 wave
   // 的所有权，推导见 `services/prompts/registry.ts`。
   bindPromptRenderer(prompts);
   // `request_log` 的裁剪跟着调度器走（§17.6）：表在进程活着的时候长，只在启动时
@@ -133,12 +133,8 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   // 调度器因开关全关而不启动时，启动清理是唯一保证，见 `background.ts`。
   const embeddings = new EmbeddingRepository({ db, logger });
   const vectors = new SqliteVectorIndex({ db, logger });
-  // 本地推理的启停（§18.2）：命令写死，pid 落在 {dataDir}/_meta。探测地址取
-  // providers.embedding.baseUrl；没配就用默认 8089，不新增配置项。
-  const localInference = new LocalInferenceManager({
-    dataDir,
-    baseUrl: config.providers.embedding.baseUrl,
-  });
+  // 本地推理的启停只访问随仓库提供的本机服务（§18.2）。
+  const localInference = new LocalInferenceManager({ dataDir });
 
   return {
     memoryStructure: new MemoryStructureIndex(db),

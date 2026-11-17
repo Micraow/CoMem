@@ -25,11 +25,14 @@ export type NavIconName =
   | 'sessions'
   | 'monitor'
   | 'settings'
+  | 'account'
 
 export interface NavItem {
   readonly to: string
   readonly label: string
   readonly icon: NavIconName
+  /** 只有服务端确认的系统管理员才看到的入口。 */
+  readonly requiresAdmin?: boolean
 }
 
 export interface NavGroup {
@@ -53,7 +56,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     label: '治理',
     items: [
       { to: '/acl', label: '权限管理', icon: 'shield' },
-      { to: '/admin', label: '用户与组', icon: 'users' },
+      { to: '/admin', label: '用户与组', icon: 'users', requiresAdmin: true },
       { to: '/prompts', label: '提示词', icon: 'prompt' },
     ],
   },
@@ -71,6 +74,21 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   },
 ]
 
+/** 当前主体的个人入口。它放在标题栏，不占用主导航。 */
+export const ACCOUNT_NAV_ITEM: NavItem = {
+  to: '/account',
+  label: '我的账户',
+  icon: 'account',
+}
+
+/** 按服务端真实系统管理员标志生成导航。普通用户看不到用户与组目录入口。 */
+export function navGroupsFor(isAdmin: boolean): readonly NavGroup[] {
+  return NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => item.requiresAdmin !== true || isAdmin),
+  })).filter((group) => group.items.length > 0)
+}
+
 /** 路径是否命中入口。根路径只做精确匹配，否则任何页面都会点亮「概览」。 */
 export function isActivePath(to: string, path: string): boolean {
   if (to === '/') {
@@ -81,6 +99,9 @@ export function isActivePath(to: string, path: string): boolean {
 
 /** 当前路径对应的入口标签，用于标题栏面包屑。 */
 export function navLabelOf(path: string): string {
+  if (isActivePath(ACCOUNT_NAV_ITEM.to, path)) {
+    return ACCOUNT_NAV_ITEM.label
+  }
   for (const group of NAV_GROUPS) {
     for (const item of group.items) {
       if (isActivePath(item.to, path)) {

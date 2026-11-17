@@ -12,6 +12,8 @@ import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-vue-next'
 
 import { useToast, type ToastTone } from '~/composables/useToast'
 
+defineOptions({ inheritAttrs: false })
+
 const { toasts, dismiss } = useToast()
 
 const ICONS = {
@@ -31,7 +33,7 @@ const TONE_LABEL: Readonly<Record<ToastTone, string>> = {
 
 <template>
   <Teleport to="body">
-    <div class="toast-stack" role="status" aria-live="polite">
+    <div v-bind="$attrs" class="toast-stack" role="status" aria-live="polite">
       <TransitionGroup name="toast">
         <div v-for="item in toasts" :key="item.id" class="toast" :data-tone="item.tone">
           <component :is="ICONS[item.tone]" :size="15" :stroke-width="1.6" aria-hidden="true" />

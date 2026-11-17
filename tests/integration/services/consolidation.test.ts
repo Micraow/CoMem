@@ -205,7 +205,31 @@ function inventoryUris(prompt: string): readonly string[] {
     .map((line) => line.slice('- '.length));
 }
 
-describe('DreamerService.consolidate', () => {
+describe('DreamerService.run', () => {
+  it('使用控制台保存的记忆整理提示词覆盖', async () => {
+    await writePreference('editor', '默认编辑器是 vim。');
+    container.services.prompts.save(
+      'consolidation-system',
+      '自定义记忆整理要求。最多 {{maxIterations}} 轮。',
+    );
+    container.services.prompts.save(
+      'consolidation-user',
+      '范围={{scope}}；清单={{inventory}}；已读={{reads}}；第 {{iteration}}/{{maxIterations}} 轮。',
+    );
+    const llm = new ScriptedLlm([{ action: 'finish', operations: [] }]);
+
+    await createService(llm).run(Uri.parse(SCOPE), {
+      subject: SUBJECT,
+      principals: PRINCIPALS,
+    });
+
+    expect(llm.prompts[0]?.system).toBe('自定义记忆整理要求。最多 10 轮。');
+    expect(llm.prompts[0]?.messages[0]?.content).toContain(`范围=${SCOPE}/memories/`);
+    expect(llm.prompts[0]?.messages[0]?.content).toContain(`清单=- ${EDITOR}`);
+    expect(llm.prompts[0]?.messages[0]?.content).toContain('已读=（还没有读过正文。）');
+    expect(llm.prompts[0]?.messages[0]?.content).toContain('第 1/10 轮');
+  });
+
   it('真实容器：3 条相似记忆合并成 2 条，正文是模型给的合并结果', async () => {
     await seedThree();
     const llm = new ScriptedLlm([
@@ -715,6 +739,20 @@ describe('DreamerService.consolidate', () => {
         principals: PRINCIPALS,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('模型不能通过猜地址读到同一空间里未进入候选清单的待复核内容', async () => {
+    await seedThree();
+    const pending = await container.services.memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'not-yet-reviewed',
+      content: '仅用于验证待复核正文不会进入手动整理。',
+    });
+    const llm = new ScriptedLlm([{ action: 'read', uris: [pending.uri.toString()] }]);
+    const read = vi.spyOn(container.services.memory, 'read');
+    await expect(createService(llm).run(Uri.parse(SCOPE), {
+      dryRun: true, subject: SUBJECT, principals: PRINCIPALS,
+    })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(read).not.toHaveBeenCalledWith(pending.uri);
   });
 
   it('pending 记忆不是合并候选（§11.6 的复核闸门）', async () => {

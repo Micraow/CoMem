@@ -33,7 +33,10 @@ export const DOC_LINKS = {
   claudeCode: `${REPO_BLOB_BASE}/integrations/README.md#claude-code`,
   codex: `${REPO_BLOB_BASE}/integrations/README.md#codex`,
   dsh: `${REPO_BLOB_BASE}/integrations/README.md#dsh`,
+  hermes: `${REPO_BLOB_BASE}/integrations/hermes-memory/README.md#install`,
 } as const
+
+export const HERMES_OPENUI_DOC = `${REPO_BLOB_BASE}/integrations/hermes-openui/README.md`
 
 /**
  * 服务端默认地址。
@@ -69,7 +72,7 @@ export function serverBaseUrlFromApiBase(apiBase: string): string | null {
 /** MCP 服务器名；决定宿主里的工具前缀（`mcp__comem__*`）。 */
 export const MCP_SERVER_NAME = 'comem'
 
-export const CONNECT_HOSTS = ['claude-code', 'codex', 'dsh'] as const
+export const CONNECT_HOSTS = ['claude-code', 'codex', 'dsh', 'hermes'] as const
 
 export type ConnectHost = (typeof CONNECT_HOSTS)[number]
 
@@ -78,6 +81,7 @@ export const CONNECT_HOST_LABELS = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
   dsh: 'DSH',
+  hermes: 'Hermes',
 } satisfies Record<ConnectHost, string>
 
 /** 各宿主的 MCP 配置写在哪。 */
@@ -85,6 +89,7 @@ export const HOST_CONFIG_LOCATION = {
   'claude-code': '个人配置 ~/.claude.json，或项目根目录的 .mcp.json',
   codex: '~/.codex/config.toml',
   dsh: '$DSH_HOME/profiles/<name>/cordis.patch.yml',
+  hermes: '当前 Hermes 配置目录的 config.yaml',
 } satisfies Record<ConnectHost, string>
 
 /** 每个宿主自己的文档小节。 */
@@ -92,6 +97,7 @@ export const HOST_DOC_LINK = {
   'claude-code': DOC_LINKS.claudeCode,
   codex: DOC_LINKS.codex,
   dsh: DOC_LINKS.dsh,
+  hermes: DOC_LINKS.hermes,
 } satisfies Record<ConnectHost, string>
 
 export type McpSnippetFormat = 'JSON' | 'TOML' | 'YAML'
@@ -116,6 +122,7 @@ function mcpEndpointOf(baseUrl: string): string {
 export function mcpSnippetFor(
   host: ConnectHost,
   baseUrl: string = DEFAULT_SERVER_BASE_URL,
+  hermesUseApiKey = false,
 ): McpSnippet {
   const url = mcpEndpointOf(baseUrl)
 
@@ -141,6 +148,14 @@ export function mcpSnippetFor(
     return {
       format: 'TOML',
       text: `[mcp_servers.${MCP_SERVER_NAME}]\nurl = "${url}"\n`,
+    }
+  }
+
+  if (host === 'hermes') {
+    const headers = hermesUseApiKey ? '    headers:\n      Authorization: "Bearer ${COMEM_TOKEN}"\n' : ''
+    return {
+      format: 'YAML',
+      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n${headers}    tools:\n      include: [health, find, read, remember]\n`,
     }
   }
 
@@ -175,6 +190,13 @@ export interface HookInstall {
  * 命令，改为说明需要先装桥插件。
  */
 export function hookInstallFor(host: ConnectHost): HookInstall {
+  if (host === 'hermes') {
+    return {
+      available: false,
+      command: null,
+      note: '安装 CoMem Memory Provider，再运行 hermes memory setup。',
+    }
+  }
   if (host === 'dsh') {
     return {
       available: false,
@@ -216,6 +238,13 @@ export function trustStepFor(host: ConnectHost): TrustStep {
       title: '在 /hooks 里信任 Hook',
       detail:
         '打开 /hooks 逐条信任 integrations/servers/*.mjs。不信任时 MCP 工具仍可用，但自动召回与采集不生效。',
+    }
+  }
+
+  if (host === 'hermes') {
+    return {
+      title: '检查并开启新会话',
+      detail: '运行 hermes memory status 确认当前记忆服务为 CoMem。重启 Hermes 网关，打开新会话。',
     }
   }
 
@@ -275,12 +304,14 @@ export interface VerificationHealth {
 }
 
 export interface VerificationSession {
+  readonly id?: string
   readonly lastCommitAt: string | null
   readonly messageCount: number
   readonly messages: readonly { readonly createdAt: string }[]
 }
 
 export interface VerificationInput {
+  readonly host?: ConnectHost
   readonly health: VerificationHealth | null
   readonly healthError: string | null
   readonly sessions: readonly VerificationSession[] | null
@@ -328,6 +359,11 @@ function latestActivityOf(sessions: readonly VerificationSession[]): string | nu
  * 并把本机命令放在 `hint` 里，不声称「已推进」。
  */
 export function deriveVerification(input: VerificationInput): VerificationResult {
+  const hermes = input.host === 'hermes'
+  const observedSessions = hermes
+    ? input.sessions?.filter((session) =>
+      session.id?.startsWith('hermes-') && session.lastCommitAt !== null) ?? null
+    : input.sessions
   // `/health` 返回 200 就说明服务端可达；健康状态放在 detail 里单独说，不再把
   // 「可达」与「降级」挤进同一个徽章（规则摘要 / 未配置模型都会让 status 是
   // degraded，那是合法配置，不是连不上）。
@@ -358,27 +394,34 @@ export function deriveVerification(input: VerificationInput): VerificationResult
       detail: input.sessionsError,
       hint: null,
     }
-  } else if (input.sessions === null) {
+  } else if (observedSessions === null) {
     sessions = { key: 'sessions', label: '最近会话', tone: 'idle', detail: '还没有检查', hint: null }
-  } else if (input.sessions.length === 0) {
+  } else if (observedSessions.length === 0) {
     sessions = {
       key: 'sessions',
       label: '最近会话',
       tone: 'warn',
-      detail: '还没有采集到会话',
+      detail: hermes ? '还没有收到 Hermes 会话。请在 Hermes 发送一条消息。' : '还没有采集到会话',
       hint: null,
     }
   } else {
-    const latest = latestActivityOf(input.sessions)
+    const latest = latestActivityOf(observedSessions)
     sessions = {
       key: 'sessions',
       label: '最近会话',
       tone: 'ok',
       detail:
         latest === null
-          ? `已采集 ${String(input.sessions.length)} 个会话`
-          : `已采集 ${String(input.sessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
+          ? `已收到 ${String(observedSessions.length)} 个会话`
+          : `已收到 ${String(observedSessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
       hint: null,
+    }
+  }
+
+  if (hermes) {
+    return {
+      checks: [server, sessions],
+      allGreen: server.tone === 'ok' && sessions.tone === 'ok',
     }
   }
 

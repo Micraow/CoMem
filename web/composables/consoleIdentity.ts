@@ -18,8 +18,8 @@
  *
  * ## 为什么要探测作用域
  *
- * 登录响应带 `subject` 与 `principals`，控制台按 `user:{uid}` / `group:{gid}` 推出
- * 候选根，再逐个用 `GET /fs/tree` 验证「这个根真的可读」——组的根预置缺失时
+ * 刷新时 `GET /auth/me` 返回当前 `subject`、`principals` 与管理员标志。控制台按
+ * 当前主体推出候选根，再逐个用 `GET /fs/tree` 验证「这个根真的可读」——组的根预置缺失时
  * `principals` 里仍有组，但那个组根没有可读内容。直接列出来会让用户切过去看到 403。
  *
  * 本模块不依赖 Nuxt 运行时（`useRuntimeConfig` / `useState` 都不在这里）：身份解析
@@ -38,12 +38,14 @@ import {
 } from './consoleAuth'
 import { fetchConsoleBootstrap, type ConsoleBootstrap } from './consoleBootstrap'
 
-/** 当前登录用户的身份。字段与登录响应同形（§12.7）。 */
+/** 当前登录用户的身份；主体与组关系来自刷新时的 `/auth/me`（§12.7）。 */
 export interface ConsoleIdentity {
   /** 登录用户的主体，形如 `user:alice`。 */
   readonly subject: string
   /** 该主体可寻址且可读的根；个人根在前。为空表示没有任何可访问的命名空间。 */
   readonly scopes: readonly string[]
+  /** 服务端按 `auth.adminUserIds` 与引导管理员策略判定的系统管理员身份。 */
+  readonly isAdmin: boolean
 }
 
 /** 身份引导的状态。`pending` 只在插件跑完之前存在，控制台挂载时不会再看到它。 */
@@ -167,7 +169,7 @@ export function identityHeaders(): Readonly<Record<string, string>> {
 /**
  * 作用域的显示名。
  *
- * URI 是内部标识，不直接摆给用户。个人根显示「个人空间」，组根显示组 ID。
+ * URI 是内部标识，不直接摆给用户。个人根显示「个人空间」，组根显示团队名。
  */
 export function consoleScopeLabel(scope: string, subject: string): string {
   const path = scope.replace(/^comem:\/\//u, '').replace(/\/+$/u, '')
@@ -182,7 +184,7 @@ export function consoleScopeLabel(scope: string, subject: string): string {
     return id === userId ? '个人空间' : `用户 ${id}`
   }
   if (kind === 'group') {
-    return `组 ${id}`
+    return `团队 · ${id}`
   }
   return scope
 }
@@ -205,14 +207,17 @@ function principalToScope(principal: string): string | null {
   return `comem://${kind}/${id}`
 }
 
-/** 候选根：个人根在前，组根按登录响应里的顺序。 */
-function scopeCandidatesOf(session: ConsoleSession): readonly string[] {
+/** 候选根：个人根在前，组根按 `/auth/me` 返回的当前关系顺序。 */
+function scopeCandidatesOf(
+  subject: string,
+  principals: readonly string[],
+): readonly string[] {
   const candidates: string[] = []
-  const personal = principalToScope(session.subject)
+  const personal = principalToScope(subject)
   if (personal !== null) {
     candidates.push(personal)
   }
-  for (const principal of session.principals) {
+  for (const principal of principals) {
     if (!principal.startsWith('group:')) {
       continue
     }
@@ -228,6 +233,15 @@ type ScopeProbeResult =
   | { readonly status: 'ok'; readonly scopes: readonly string[] }
   | { readonly status: 'unauthenticated' }
 
+type CurrentIdentityPolicy =
+  | {
+      readonly status: 'ok';
+      readonly subject: string;
+      readonly principals: readonly string[];
+      readonly isAdmin: boolean;
+    }
+  | { readonly status: 'unauthenticated' }
+
 /**
  * 逐个验证候选根可读。
  *
@@ -238,17 +252,19 @@ type ScopeProbeResult =
 async function fetchReadableScopes(
   baseUrl: string,
   request: ConsoleRequest,
-  session: ConsoleSession,
+  token: string,
+  subject: string,
+  principals: readonly string[],
 ): Promise<ScopeProbeResult> {
   const base = trimBase(baseUrl)
   const scopes: string[] = []
 
-  for (const scope of scopeCandidatesOf(session)) {
+  for (const scope of scopeCandidatesOf(subject, principals)) {
     const query = new URLSearchParams({ uri: scope, depth: '1', limit: '1' })
     const response = await request(`${base}/fs/tree?${query.toString()}`, {
       headers: {
         accept: 'application/json',
-        authorization: `Bearer ${session.token}`,
+        authorization: `Bearer ${token}`,
       },
     })
 
@@ -269,6 +285,67 @@ async function fetchReadableScopes(
   }
 
   return { status: 'ok', scopes }
+}
+
+/**
+ * 读取服务端确认的当前主体、组关系与系统管理员标志。
+ *
+ * 登录响应只负责建立会话，权限标志必须从 `/auth/me` 取。字段缺失或形状不对时
+ * 整次身份引导失败：猜成普通用户会把真实管理员锁在管理页外，猜成管理员又会
+ * 显示一个后端必然拒绝的入口。刷新时也使用这里的 principals 探测可读范围，
+ * 避免退组 / 入组后仍按登录当时的旧关系生成作用域。
+ */
+async function fetchCurrentIdentityPolicy(
+  baseUrl: string,
+  request: ConsoleRequest,
+  session: ConsoleSession,
+): Promise<CurrentIdentityPolicy> {
+  const response = await request(`${trimBase(baseUrl)}/auth/me`, {
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${session.token}`,
+    },
+  })
+  if (response.status === 401) {
+    return { status: 'unauthenticated' }
+  }
+  if (!response.ok) {
+    throw new ConsoleIdentityError(
+      'IDENTITY_POLICY_FAILED',
+      `服务端在读取当前账号权限时返回 HTTP ${String(response.status)}，控制台无法确定当前角色。`,
+    )
+  }
+
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    payload = undefined
+  }
+  const result =
+    isRecord(payload) && payload['status'] === 'ok' && isRecord(payload['result'])
+      ? payload['result']
+      : null
+  if (
+    result === null ||
+    result['subject'] !== session.subject ||
+    !Array.isArray(result['principals']) ||
+    !result['principals'].every((principal) => typeof principal === 'string') ||
+    typeof result['isAdmin'] !== 'boolean'
+  ) {
+    throw new ConsoleIdentityError(
+      'INVALID_IDENTITY_RESPONSE',
+      '服务端没有返回当前账号的组关系或系统管理员标志，控制台无法确定当前身份。',
+    )
+  }
+  return {
+    status: 'ok',
+    subject: result['subject'],
+    principals: result['principals'].filter(
+      (principal): principal is string => typeof principal === 'string',
+    ),
+    isAdmin: result['isAdmin'],
+  }
 }
 
 /**
@@ -293,7 +370,19 @@ export async function bootstrapConsoleIdentity(
     return { status: 'unauthenticated' }
   }
 
-  const result = await fetchReadableScopes(baseUrl, request, session)
+  const policy = await fetchCurrentIdentityPolicy(baseUrl, request, session)
+  if (policy.status === 'unauthenticated') {
+    clearConsoleSession()
+    return { status: 'unauthenticated' }
+  }
+
+  const result = await fetchReadableScopes(
+    baseUrl,
+    request,
+    session.token,
+    policy.subject,
+    policy.principals,
+  )
   if (result.status === 'unauthenticated') {
     clearConsoleSession()
     return { status: 'unauthenticated' }
@@ -301,7 +390,11 @@ export async function bootstrapConsoleIdentity(
 
   return {
     status: 'ready',
-    identity: { subject: session.subject, scopes: result.scopes },
+    identity: {
+      subject: policy.subject,
+      scopes: result.scopes,
+      isAdmin: policy.isAdmin,
+    },
   }
 }
 

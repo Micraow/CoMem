@@ -14,6 +14,8 @@ const tailwindConfig: TailwindConfig = {
   },
 }
 
+const backendPort = process.env['COMEM_SERVER_PORT'] ?? '1933'
+
 export default defineNuxtConfig({
   // 内部管理工具，不需要 SEO；关掉 SSR 让 API 读取只跑在浏览器，
   // 开发时由 nitro 的 devProxy 把 /api 转到后端，免去 CORS 配置。
@@ -28,6 +30,7 @@ export default defineNuxtConfig({
   runtimeConfig: {
     public: {
       apiBase: '/api/v1',
+      devBackendPort: backendPort,
     },
   },
 
@@ -36,7 +39,7 @@ export default defineNuxtConfig({
       // 端口必须跟后端一致，否则控制台把请求转给别的服务，而界面看起来「有数据」。
       // 后端用 `COMEM_SERVER_PORT` 改端口时这里跟着变（`scripts/dev.sh` 会传）。
       '/api': {
-        target: `http://127.0.0.1:${process.env['COMEM_SERVER_PORT'] ?? '1933'}/api`,
+        target: `http://127.0.0.1:${backendPort}/api`,
         changeOrigin: true,
       },
     },

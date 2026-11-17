@@ -6,7 +6,13 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { NAV_GROUPS, isActivePath, navLabelOf } from '../../../web/utils/nav.js';
+import {
+  ACCOUNT_NAV_ITEM,
+  NAV_GROUPS,
+  isActivePath,
+  navGroupsFor,
+  navLabelOf,
+} from '../../../web/utils/nav.js';
 
 describe('主导航', () => {
   it('「接入 Agent」在控制台分组的第一位，「概览」紧随其后', () => {
@@ -31,8 +37,19 @@ describe('主导航', () => {
   it('面包屑取当前路径的入口标签', () => {
     expect(navLabelOf('/connect')).toBe('接入 Agent');
     expect(navLabelOf('/')).toBe('概览');
+    expect(navLabelOf('/account')).toBe('我的账户');
     expect(navLabelOf('/settings')).toBe('设置');
     expect(navLabelOf('/unknown')).toBe('控制台');
+  });
+
+  it('只有服务端确认的系统管理员看到用户与组入口', () => {
+    const adminItems = navGroupsFor(true).flatMap((group) => group.items);
+    const ordinaryItems = navGroupsFor(false).flatMap((group) => group.items);
+    expect(adminItems).toContainEqual(
+      expect.objectContaining({ to: '/admin', requiresAdmin: true }),
+    );
+    expect(ordinaryItems.find((item) => item.to === '/admin')).toBeUndefined();
+    expect(ACCOUNT_NAV_ITEM).toEqual({ to: '/account', label: '我的账户', icon: 'account' });
   });
 
   it('「设置」是最后一组，入口只有一个且指向 /settings', () => {

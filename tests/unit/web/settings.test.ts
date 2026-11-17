@@ -3,7 +3,7 @@
  *
  * 仓库没有组件测试运行器（vitest 的 environment 是 `node`），所以这里分两层验证：
  *
- * 1. **纯函数**：分组、中文标签、来源徽章、密钥显示、`PATCH` 请求体、连接测试摘要。
+ * 1. **纯函数**：分组、中文标签、行状态、密钥显示、`PATCH` 请求体、连接测试摘要。
  * 2. **接线**：页面源码里必须出现对应的调用点（`valueDisplayOf` / `disabled` /
  *    `aria-describedby` 等）。`web/pages/connect.vue` 的测试用同一套写法——把
  *    「函数对了但页面没接」变成可失败的断言，而不是靠人眼。
@@ -20,13 +20,13 @@ import { configSchema } from '../../../src/config/schema.js';
 import type { ConfigSnapshot } from '../../../src/config/index.js';
 import {
   CONFIG_GROUPS,
-  CONFIG_SOURCES,
   CONFIG_TEST_TARGETS,
   INITIALLY_EXPANDED_GROUPS,
   RESTART_COMMANDS,
   SETTING_FIELDS,
   TEST_SCOPE_NOTE,
   buildPatchValues,
+  configRowStateOf,
   draftOf,
   errorHintOf,
   fieldControlOf,
@@ -37,13 +37,12 @@ import {
   groupSettings,
   isExpandedByDefault,
   restartNoticeOf,
-  sourceLabelOf,
-  sourceNoteOf,
-  sourceToneOf,
+  secretPlaceholderOf,
   testSummaryOf,
   valueDisplayOf,
   type ConfigItemView,
   type ConfigTestPayload,
+  type PendingConfigSave,
 } from '../../../web/utils/settings.js';
 
 const SETTINGS_PAGE = readFileSync(
@@ -88,9 +87,10 @@ describe('配置项清单', () => {
     }
   });
 
-  it('路径只作为小字显示，控件用 label 的 for 关联', () => {
+  it('技术路径只作为悬停提示，控件用 label 的 for 关联', () => {
     expect(SETTINGS_PAGE).toContain('fieldLabelOf(item.path)');
-    expect(SETTINGS_PAGE).toContain('{{ item.path }}');
+    expect(SETTINGS_PAGE).not.toContain('{{ item.path }}');
+    expect(SETTINGS_PAGE).toContain(':title="item.path"');
     expect(SETTINGS_PAGE).toContain(':for="inputIdOf(item.path)"');
     expect(SETTINGS_PAGE).toContain(':id="inputIdOf(item.path)"');
   });
@@ -188,24 +188,66 @@ describe('分组', () => {
       .toEqual([...CONFIG_TEST_TARGETS]);
     expect(groups.find((group) => group.group === 'memory')?.testTarget).toBeNull();
   });
+
+  it('工作记忆与手动整理说明实际发生的动作', () => {
+    expect(fieldLabelOf('memory.workingMemory.enabled')).toBe('生成会话工作记忆');
+    expect(fieldHintOf('memory.workingMemory.enabled')).toContain('下一次提交');
+    expect(fieldHintOf('memory.workingMemory.enabled')).toContain('额外调用一次模型');
+    expect(fieldLabelOf('memory.dreamer.manualConsolidation')).toBe('允许 Dreamer 手动整理');
+    expect(fieldHintOf('memory.dreamer.manualConsolidation')).toContain('删除被取代的记忆');
+  });
 });
 
-describe('来源徽章', () => {
-  it('四种来源各有一条文案，配色互不相同', () => {
-    expect(CONFIG_SOURCES.map(sourceLabelOf)).toEqual([
-      '默认值',
-      '配置文件',
-      '来自网页保存',
-      '环境变量',
-    ]);
-    expect(new Set(CONFIG_SOURCES.map(sourceToneOf)).size).toBe(4);
-    expect(sourceNoteOf('env')).toContain('环境变量优先');
+describe('普通行状态', () => {
+  it('默认行只显示表单，不重复当前值', () => {
+    const item = itemOf('providers.llm.default.baseUrl');
+    const state = configRowStateOf(item, draftOf(item), false);
+
+    expect(state).toEqual({
+      disabled: false,
+      constraint: null,
+      effectiveValue: null,
+      savedNote: null,
+    });
+    expect(SETTINGS_PAGE).not.toContain('sourceLabelOf');
+    expect(SETTINGS_PAGE).not.toContain('默认值</UiBadge>');
+    expect(SETTINGS_PAGE).toContain('当前运行值');
+    expect(SETTINGS_PAGE).not.toContain('当前值：');
   });
 
-  it('页面按 item.source 渲染徽章', () => {
-    expect(SETTINGS_PAGE).toContain('sourceLabelOf(item.source)');
-    expect(SETTINGS_PAGE).toContain('sourceToneOf(item.source)');
-    expect(SETTINGS_PAGE).toContain('sourceNoteOf(item.source)');
+  it('草稿与运行值不同时才显示当前运行值', () => {
+    const item = itemOf('providers.llm.default.baseUrl');
+    const state = configRowStateOf(item, 'http://127.0.0.1:8089/v1', false);
+
+    expect(state.effectiveValue).toBe('https://api.example.com/v1');
+    expect(state.savedNote).toBeNull();
+  });
+
+  it('已保存但未重启时显示运行值与等待状态', () => {
+    const item = itemOf('providers.llm.default.baseUrl');
+    const saved: PendingConfigSave = {
+      draft: 'http://127.0.0.1:8089/v1',
+      value: 'http://127.0.0.1:8089/v1',
+    };
+    const state = configRowStateOf(item, saved.draft, false, saved);
+
+    expect(state.effectiveValue).toBe('https://api.example.com/v1');
+    expect(state.savedNote).toBe('已保存，等待重启。');
+    expect(SETTINGS_PAGE).toContain('rowStateOf(item).savedNote');
+  });
+
+  it('环境变量项在表单里只读，并说明修改位置', () => {
+    const item = itemOf('providers.llm.default.model', {
+      source: 'env',
+      value: 'env-model',
+    });
+    const state = configRowStateOf(item, draftOf(item), false);
+
+    expect(state.disabled).toBe(true);
+    expect(state.constraint).toContain('环境变量');
+    expect(state.constraint).toContain('重启');
+    expect(SETTINGS_PAGE).toContain('rowStateOf(item).disabled');
+    expect(SETTINGS_PAGE).toContain('rowStateOf(item).constraint');
   });
 });
 
@@ -236,20 +278,41 @@ describe('密钥显示', () => {
 
   it('即使响应里误带明文，也不出现在显示文案里', () => {
     const plaintext = 'sk-live-abcdef1234';
-    const display = valueDisplayOf(
-      itemOf('providers.llm.default.apiKey', {
-        value: plaintext,
-        secret: true,
-        configured: true,
-        masked: '****1234',
-      }),
-    );
+    const item = itemOf('providers.llm.default.apiKey', {
+      value: plaintext,
+      secret: true,
+      configured: true,
+      masked: '****1234',
+    });
+    const display = valueDisplayOf(item);
 
     expect(display).not.toContain(plaintext);
     expect(display).not.toContain('sk-live');
     expect(display).toBe('已设置 ····1234');
+    expect(secretPlaceholderOf(item)).toBe('已设置 ····1234；留空表示不修改');
     expect(SETTINGS_PAGE).toContain("fieldControlOf(item.path) === 'secret'");
     expect(SETTINGS_PAGE).toContain('type="password"');
+  });
+
+  it('修改或清除密钥时，当前运行值仍使用服务端掩码', () => {
+    const item = itemOf('providers.llm.default.apiKey', {
+      value: null,
+      secret: true,
+      configured: true,
+      masked: '****1234',
+    });
+
+    expect(configRowStateOf(item, 'sk-new-secret', false).effectiveValue).toBe('已设置 ····1234');
+    expect(configRowStateOf(item, '', true).effectiveValue).toBe('已设置 ····1234');
+    expect(secretPlaceholderOf(item, true)).toBe('将清除已保存的密钥');
+    expect(
+      configRowStateOf(
+        item,
+        '',
+        true,
+        { draft: '', value: '' },
+      ).savedNote,
+    ).toBe('已清除，等待重启。');
   });
 
   it('非密钥项显示真实值，空值有明确文案', () => {
@@ -269,9 +332,9 @@ describe('不可编辑项', () => {
     expect(locked.reason).toBeTruthy();
     expect(valueDisplayOf(locked)).toBe('—');
 
-    expect(SETTINGS_PAGE).toContain(':disabled="!item.editable"');
-    expect(SETTINGS_PAGE).toContain('item.reason !== undefined');
-    expect(SETTINGS_PAGE).toContain('{{ item.reason }}');
+    expect(SETTINGS_PAGE).not.toContain(':disabled="!item.editable"');
+    expect(SETTINGS_PAGE).toContain('rowStateOf(item).disabled');
+    expect(SETTINGS_PAGE).toContain('rowStateOf(item).constraint');
   });
 
   it('不可编辑项不会被分组过滤掉', () => {

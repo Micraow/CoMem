@@ -29,7 +29,7 @@ const SETUP_REQUIRED: ConsoleIdentityState = { status: 'setup-required', bootstr
 const UNAUTHENTICATED: ConsoleIdentityState = { status: 'unauthenticated' };
 const READY: ConsoleIdentityState = {
   status: 'ready',
-  identity: { subject: 'user:alice', scopes: ['comem://user/alice'] },
+  identity: { subject: 'user:alice', scopes: ['comem://user/alice'], isAdmin: false },
 };
 
 describe('还没有账号（needsSetup: true）', () => {

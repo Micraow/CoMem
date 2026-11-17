@@ -37,12 +37,13 @@ interface PreviewPayload {
 
 const api = useApi()
 const toast = useToast()
+const route = useRoute()
 
 const prompts = ref<readonly PromptSummaryPayload[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 
-const selectedId = ref<string | null>(null)
+const selectedId = ref(typeof route.query.prompt === 'string' ? route.query.prompt : null)
 const detail = ref<PromptDetailPayload | null>(null)
 const detailLoading = ref(false)
 const detailError = ref<string | null>(null)
@@ -215,6 +216,9 @@ onMounted(() => {
         </div>
 
         <div class="aside-scroll">
+          <p class="aside-pad body-sm">
+            这里调整 CoMem 怎样提炼和整理记忆。保存后，下一次处理会使用新规则。
+          </p>
           <div v-if="loading && prompts.length === 0" class="aside-pad stack-8" aria-busy="true">
             <div v-for="index in 6" :key="index" class="srow srow--skeleton">
               <UiSkeleton :width="`${44 + (index % 4) * 12}%`" height="12px" />

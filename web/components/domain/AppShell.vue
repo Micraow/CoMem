@@ -11,8 +11,7 @@
 import { LogOut, Menu, Moon, Sun } from 'lucide-vue-next'
 import { useColorMode, useMediaQuery } from '@vueuse/core'
 
-import { consoleIdentityState, consoleScopeLabel, logoutConsole } from '~/composables/consoleIdentity'
-import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
+import { consoleIdentityState, logoutConsole } from '~/composables/consoleIdentity'
 import { navLabelOf } from '~/utils/nav'
 
 const isMobile = useMediaQuery('(max-width: 767px)')
@@ -40,30 +39,12 @@ const currentLabel = computed(() => navLabelOf(route.path))
  */
 const identityState = consoleIdentityState()
 const identity = identityState.status === 'ready' ? identityState.identity : null
-const scopeRoot = useScopeRoot()
 
 const subjectInitial = computed(() => {
   const subject = identity?.subject ?? ''
   const id = subject.startsWith('user:') ? subject.slice('user:'.length) : subject
   const first = id.charAt(0)
   return first === '' ? '?' : first.toUpperCase()
-})
-
-const scopeOptions = computed(() =>
-  (identity?.scopes ?? []).map((scope) => ({
-    value: scope,
-    label: consoleScopeLabel(scope, identity?.subject ?? ''),
-  })),
-)
-
-/** 只有一个作用域时不显示选择器：那是没有选择的状态，不是「统一」。 */
-const showScopePicker = computed(() => scopeOptions.value.length > 1)
-
-const scopeModel = computed({
-  get: () => scopeRoot.value,
-  set: (value: string) => {
-    selectScopeRoot(value)
-  },
 })
 
 const loggingOut = ref(false)
@@ -123,14 +104,6 @@ watch(
         <span class="titlebar__spacer" />
 
         <div class="titlebar__group">
-          <UiSelect
-            v-if="showScopePicker"
-            v-model="scopeModel"
-            :options="scopeOptions"
-            size="sm"
-            aria-label="作用域"
-            class="scope-picker"
-          />
           <button
             type="button"
             class="iconbtn"
@@ -149,7 +122,10 @@ watch(
           >
             <LogOut :size="16" :stroke-width="1.4" />
           </button>
-          <span class="avatar" aria-hidden="true">{{ subjectInitial }}</span>
+          <NuxtLink to="/account" class="account-link" aria-label="我的账户">
+            <span class="account-link__label">我的账户</span>
+            <span class="avatar" aria-hidden="true">{{ subjectInitial }}</span>
+          </NuxtLink>
         </div>
       </header>
 
@@ -159,7 +135,46 @@ watch(
 </template>
 
 <style scoped>
-.scope-picker {
-  width: 168px;
+.account-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 2px 3px 2px 9px;
+  border-radius: var(--r-pill);
+  color: var(--label);
+  font-size: 13px;
+  font-weight: 550;
+  text-decoration: none;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.account-link:hover {
+  background: var(--fill-hover);
+  text-decoration: none;
+}
+
+.avatar {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: var(--fill-2);
+  box-shadow: var(--inset-hair), var(--inset-top);
+  color: var(--label);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+@media (max-width: 680px) {
+  .account-link__label {
+    display: none;
+  }
+
+  .account-link {
+    padding: 2px;
+  }
 }
 </style>

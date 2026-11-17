@@ -28,6 +28,7 @@ import {
 } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
 import { memoryBodyText } from '~/utils/memoryBody'
+import { memoryReviewTitleOf } from '~/components/domain/memoryReview'
 import type {
   PendingListPayload,
   PendingMemoryPayload,
@@ -42,6 +43,7 @@ import type {
  */
 interface BatchFailure {
   readonly uri: string
+  readonly title: string
   readonly reason: string
 }
 
@@ -63,14 +65,18 @@ const baselineLoading = ref(false)
 const baselineError = ref<string | null>(null)
 
 const busy = ref(false)
+const actionBusy = ref<ReviewAction | null>(null)
+const batchProgress = ref<{ readonly done: number; readonly total: number } | null>(null)
 const batchRejectOpen = ref(false)
 const batchReason = ref('')
 
-/** 上一轮批量操作里没成功的条目；名称在模板里由 URI 推，不重复存一份。 */
+/** 上一轮批量操作里没成功的条目。 */
 const batchFailures = ref<readonly BatchFailure[]>([])
 
-/** 基线请求的序号：切换选中时丢弃迟到的响应，否则会显示上一条的正文。 */
+/** 请求序号：切换选中或作用域后丢弃迟到响应，避免旧队列/旧正文覆盖当前页面。 */
+let queueToken = 0
 let baselineToken = 0
+let operationToken = 0
 
 const selectedMemory = computed<PendingMemoryPayload | null>(() => {
   if (memories.value === null || selectedUri.value === null) {
@@ -108,25 +114,60 @@ function baselineMessageOf(caught: unknown): string {
   return forbiddenMessageOf(caught, '你没有权限查看这条记忆的正文')
 }
 
-async function loadBaseline(uri: string | null): Promise<void> {
+/**
+ * 已有版本更新优先，其次是推断偏好提案，最后才是普通新候选。
+ *
+ * Dreamer 用 `preferences/inferred-*.md` 与同名 `topic` 标记推断提案。只认这个
+ * 明确标记：普通显式偏好和其它新候选同档。同一档内保留服务端顺序，不按时间重排。
+ */
+function pendingPriority(memory: PendingMemoryPayload): number {
+  if (memory.supersedes !== null) {
+    return 0
+  }
+  const topic = memory.fields['topic']
+  const inferred =
+    memory.memoryType === 'preferences' &&
+    (nameOf(memory.uri).startsWith('inferred-') ||
+      (typeof topic === 'string' && topic.startsWith('inferred-')))
+  if (inferred) {
+    return 1
+  }
+  return 2
+}
+
+function prioritized(memories: readonly PendingMemoryPayload[]): readonly PendingMemoryPayload[] {
+  return [...memories].sort((left, right) => pendingPriority(left) - pendingPriority(right))
+}
+
+async function loadBaseline(memory: PendingMemoryPayload | null): Promise<void> {
   baselineToken += 1
   const token = baselineToken
+  const scope = scopeRoot.value
   baseline.value = null
   baselineError.value = null
 
-  if (uri === null) {
+  // 新记忆没有旧版本；待生效正文已经随队列返回。只有覆盖写才有基线可读。
+  if (memory === null || memory.supersedes === null) {
     baselineLoading.value = false
     return
   }
 
   baselineLoading.value = true
   try {
-    const payload = await api.get<ContentReadPayload>('/content/read', { uri })
-    if (token === baselineToken) {
+    const payload = await api.get<ContentReadPayload>('/content/read', { uri: memory.supersedes })
+    if (
+      token === baselineToken &&
+      scope === scopeRoot.value &&
+      selectedUri.value === memory.uri
+    ) {
       baseline.value = memoryBodyText(payload.text)
     }
   } catch (caught) {
-    if (token === baselineToken) {
+    if (
+      token === baselineToken &&
+      scope === scopeRoot.value &&
+      selectedUri.value === memory.uri
+    ) {
       baselineError.value = baselineMessageOf(caught)
     }
   } finally {
@@ -137,143 +178,146 @@ async function loadBaseline(uri: string | null): Promise<void> {
 }
 
 async function load(): Promise<void> {
+  if (busy.value) return
+  const token = ++queueToken
+  const scope = scopeRoot.value
   loading.value = true
   error.value = null
   // 队列要重新取了：上一轮的失败条目对应的状态已经过期，留着只会误导。
   batchFailures.value = []
+  baselineToken += 1
+  baseline.value = null
+  baselineError.value = null
+  baselineLoading.value = false
 
   try {
     const payload = await api.get<PendingListPayload>('/memories/pending', {
-      scopeUri: scopeRoot.value,
+      scopeUri: scope,
     })
-    memories.value = payload.memories
+    if (token !== queueToken || scope !== scopeRoot.value) {
+      return
+    }
+
+    memories.value = prioritized(payload.memories)
 
     const present = new Set(payload.memories.map((memory) => memory.uri))
     checked.value = checked.value.filter((uri) => present.has(uri))
 
     if (selectedUri.value === null || !present.has(selectedUri.value)) {
-      selectedUri.value = payload.memories[0]?.uri ?? null
+      selectedUri.value = memories.value[0]?.uri ?? null
     }
   } catch (caught) {
+    if (token !== queueToken || scope !== scopeRoot.value) {
+      return
+    }
     // 队列本身读不到：403 是「没有权限看这个作用域的待复核队列」，不是「读取失败」。
     // 服务端原文带内部级别，不进界面（§11）；其它失败仍显示服务端消息。
     error.value = forbiddenMessageOf(caught, '你没有权限查看待复核队列')
     memories.value = null
     selectedUri.value = null
   } finally {
-    loading.value = false
-    await loadBaseline(selectedUri.value)
+    if (token === queueToken) {
+      loading.value = false
+    }
+  }
+
+  if (token === queueToken && scope === scopeRoot.value) {
+    await loadBaseline(selectedMemory.value)
   }
 }
 
 function selectUri(uri: string): void {
-  if (uri === selectedUri.value) {
+  if (uri === selectedUri.value || busy.value) {
     return
   }
   selectedUri.value = uri
-  void loadBaseline(uri)
+  void loadBaseline(selectedMemory.value)
 }
 
-/** 从队列里移出若干条，并把选中项落到下一条上。 */
-function dropFromQueue(uris: readonly string[]): void {
-  const dropped = new Set(uris)
-  const remaining = (memories.value ?? []).filter((memory) => !dropped.has(memory.uri))
+/** 从队列里移出若干条；若当前项被移走，优先落到原位置之后最近的一条。 */
+function dropFromQueue(uri: string): void {
+  const current = memories.value ?? []
+  const index = current.findIndex((memory) => memory.uri === uri)
+  const remaining = current.filter((memory) => memory.uri !== uri)
   memories.value = remaining
-  checked.value = checked.value.filter((uri) => !dropped.has(uri))
+  checked.value = checked.value.filter((checkedUri) => checkedUri !== uri)
 
-  if (selectedUri.value !== null && dropped.has(selectedUri.value)) {
-    selectedUri.value = remaining[0]?.uri ?? null
-    void loadBaseline(selectedUri.value)
+  if (selectedUri.value === uri) {
+    selectedUri.value = remaining[index]?.uri ?? remaining[index - 1]?.uri ?? null
+    void loadBaseline(selectedMemory.value)
   }
 }
 
-async function approveOne(uri: string): Promise<string | null> {
+type ReviewAction = 'approve' | 'reject'
+
+async function reviewOne(uri: string, action: ReviewAction, reason: string): Promise<string | null> {
   try {
-    await api.post<unknown>(memoryPath(uri, 'approve'))
+    await api.post<unknown>(memoryPath(uri, action), action === 'reject' ? { reason } : undefined)
     return null
   } catch (caught) {
     return actionErrorOf(caught)
   }
 }
 
-async function rejectOne(uri: string, reason: string): Promise<string | null> {
-  try {
-    await api.post<unknown>(memoryPath(uri, 'reject'), { reason })
-    return null
-  } catch (caught) {
-    return actionErrorOf(caught)
-  }
-}
-
-async function approveSelected(): Promise<void> {
+async function reviewSelected(action: ReviewAction, reason = ''): Promise<void> {
   const memory = selectedMemory.value
-  if (memory === null || busy.value) {
+  if (memory === null || busy.value || loading.value) {
     return
   }
 
+  const token = ++operationToken
   busy.value = true
-  const failure = await approveOne(memory.uri)
-  busy.value = false
-
-  if (failure === null) {
-    dropFromQueue([memory.uri])
-    toast.show('success', `已通过：${nameOf(memory.uri)}`)
+  actionBusy.value = action
+  const failure = await reviewOne(memory.uri, action, reason)
+  if (token !== operationToken) {
     return
   }
-  toast.show('error', failure)
+
+  busy.value = false
+  actionBusy.value = null
+  if (failure !== null) {
+    toast.show('error', failure)
+    return
+  }
+  dropFromQueue(memory.uri)
+  toast.show('success', `${action === 'approve' ? '已通过' : '已拒绝'}：${memoryReviewTitleOf(memory)}`)
 }
 
-async function rejectSelected(reason: string): Promise<void> {
-  const memory = selectedMemory.value
-  if (memory === null || busy.value) {
-    return
-  }
-
-  busy.value = true
-  const failure = await rejectOne(memory.uri, reason)
-  busy.value = false
-
-  if (failure === null) {
-    dropFromQueue([memory.uri])
-    toast.show('success', `已拒绝：${nameOf(memory.uri)}`)
-    return
-  }
-  toast.show('error', failure)
-}
-
-async function runBatch(action: 'approve' | 'reject', reason: string): Promise<void> {
+async function runBatch(action: ReviewAction, reason: string): Promise<void> {
   const uris = [...checked.value]
-  if (uris.length === 0 || busy.value) {
+  if (uris.length === 0 || busy.value || loading.value) {
     return
   }
 
+  const token = ++operationToken
   busy.value = true
+  batchProgress.value = { done: 0, total: uris.length }
   // 上一次的结果在这里清空：失败列表只描述「刚才那一轮」，不跨轮累积。
   batchFailures.value = []
-  const succeeded: string[] = []
-  const failures: BatchFailure[] = []
+  let succeeded = 0
 
-  for (const uri of uris) {
-    const failure = action === 'approve' ? await approveOne(uri) : await rejectOne(uri, reason)
-    if (failure === null) {
-      succeeded.push(uri)
-    } else {
-      failures.push({ uri, reason: failure })
+  for (const [index, uri] of uris.entries()) {
+    const failure = await reviewOne(uri, action, reason)
+    if (token !== operationToken) {
+      return
     }
+    if (failure === null) {
+      succeeded += 1
+      dropFromQueue(uri)
+    } else {
+      const memory = memories.value?.find((entry) => entry.uri === uri)
+      const title = memory === undefined ? nameOf(uri) : memoryReviewTitleOf(memory)
+      batchFailures.value = [...batchFailures.value, { uri, title, reason: failure }]
+    }
+    batchProgress.value = { done: index + 1, total: uris.length }
   }
 
   busy.value = false
-  dropFromQueue(succeeded)
-  batchFailures.value = failures
-
-  if (failures.length === 0) {
-    toast.show('success', `成功 ${succeeded.length} 条，失败 0 条`)
-    return
-  }
-
+  batchProgress.value = null
+  const failed = uris.length - succeeded
   toast.show(
-    succeeded.length === 0 ? 'error' : 'warning',
-    `成功 ${succeeded.length} 条，失败 ${failures.length} 条`,
+    failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'warning',
+    `成功 ${succeeded} 条，失败 ${failed} 条`,
   )
 }
 
@@ -300,7 +344,22 @@ onMounted(() => {
 
 // 作用域切换后复核队列是另一批记忆：重新取，并让选中项跟随新列表。
 watch(scopeRoot, () => {
+  queueToken += 1
+  baselineToken += 1
+  operationToken += 1
+  memories.value = null
+  loading.value = false
+  error.value = null
   selectedUri.value = null
+  checked.value = []
+  baseline.value = null
+  baselineLoading.value = false
+  baselineError.value = null
+  busy.value = false
+  actionBusy.value = null
+  batchProgress.value = null
+  batchFailures.value = []
+  batchRejectOpen.value = false
   void load()
 })
 </script>
@@ -317,7 +376,7 @@ watch(scopeRoot, () => {
         <p><b>{{ batchFailures.length }} 条没有处理成功：</b></p>
         <ul class="batch-failures__list">
           <li v-for="item in batchFailures" :key="item.uri" class="batch-failures__row">
-            <span class="batch-failures__name" :title="item.uri">{{ nameOf(item.uri) }}</span>
+            <span class="batch-failures__name" :title="item.uri">{{ item.title }}</span>
             <span class="batch-failures__reason">{{ item.reason }}</span>
           </li>
         </ul>
@@ -334,20 +393,26 @@ watch(scopeRoot, () => {
         :loading="loading"
         :error="error"
         :selected-uri="selectedUri"
+        :operation-busy="busy"
+        :batch-progress="batchProgress"
         @select="selectUri"
         @refresh="load"
         @batch-approve="runBatch('approve', '')"
         @batch-reject="openBatchReject"
-      />
+      >
+        <template #actions><DomainConsolidationPreview /></template>
+      </DomainReviewList>
 
       <DomainMemoryDiff
+        :key="scopeRoot"
         :memory="selectedMemory"
         :baseline="baseline"
         :baseline-loading="baselineLoading"
         :baseline-error="baselineError"
-        :busy="busy"
-        @approve="approveSelected"
-        @reject="rejectSelected"
+        :busy="busy || loading"
+        :action-busy="actionBusy"
+        @approve="reviewSelected('approve')"
+        @reject="reviewSelected('reject', $event)"
       />
     </div>
 
@@ -372,7 +437,7 @@ watch(scopeRoot, () => {
       </div>
     </UiDialog>
 
-    <UiToast />
+    <UiToast class="review-toast" />
   </div>
 </template>
 
@@ -381,6 +446,10 @@ watch(scopeRoot, () => {
    移动端（≤900px）`.content--split` 回到 block，这条规则不再起作用。 */
 .review-page {
   flex-direction: column;
+}
+
+:global(.toast-stack.review-toast) {
+  bottom: 80px;
 }
 
 .batch-failures {
@@ -421,7 +490,6 @@ watch(scopeRoot, () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--mono);
   color: var(--label);
 }
 

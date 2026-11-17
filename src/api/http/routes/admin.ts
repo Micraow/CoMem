@@ -94,6 +94,8 @@ type UserView = User & { readonly hasPassword: boolean };
 /** 用户列表项：用户视图 + 该主体在 `node_permission` 里的行数。 */
 interface SerializedUser extends UserView {
   readonly permissionCount: number;
+  /** 服务端系统管理员策略：`auth.adminUserIds` 或引导管理员。 */
+  readonly isAdmin: boolean;
 }
 
 /** 组列表项：组资料 + owner 是否存在 + 成员数 + 授权行数。 */
