@@ -99,7 +99,7 @@ export interface SearchQuery {
    * 工具，契约是磁盘上的全部节点（含已失效的历史版本）。
    */
   readonly asOf?: string;
-  readonly limit: number;
+  readonly limit: number; readonly returnCandidates?: boolean;
 }
 
 export interface SearchHit {

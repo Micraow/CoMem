@@ -492,15 +492,15 @@ export class SqliteFtsIndex implements RetrievalIndex {
       });
     }
 
+    const returnedLimit = query.returnCandidates === true ? candidateLimit : query.limit;
     this.#logger.debug('FTS5 检索', {
       candidates: candidateLimit,
-      returned: Math.min(hits.length, query.limit),
+      returned: Math.min(hits.length, returnedLimit),
       contextTypes: query.contextTypes?.length ?? 0,
     });
-    // SQL 取的是 limit × candidateMultiplier 条候选，多取的部分留给层级加权与
-    // 去重（`services/search.ts` 的 `#rank`），最终对外仍然是 limit 条上限
-    // （§8.2 的「候选不足」问题由权限子查询在 SQL 里解决）。
-    return hits.slice(0, query.limit);
+    // 默认严格返回 limit。检索服务显式请求候选池时保留多取的部分，交给层级加权
+    // 与去重；否则目录 L0/L1 的重复摘要会占满切片，后续文件永远到不了服务层。
+    return hits.slice(0, returnedLimit);
   }
 
   /**

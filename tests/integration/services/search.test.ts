@@ -1015,4 +1015,33 @@ describe('目录的 L1 概览行', () => {
 
     expect(hits).toEqual([]);
   });
+
+  it('重复的目录 L0/L1 行不挤出后续文件命中', async () => {
+    const first = 'comem://user/alice/mem';
+    const second = 'comem://user/alice/projects/demo/mem';
+    const file = `${second}/preferences/code-style.md`;
+    const text = 'TypeScript 严格模式';
+
+    for (const directory of [first, second]) {
+      await seed(directory, `${text} ${text}`, {
+        kind: 'directory',
+        level: 'L0',
+        abstract: text,
+      });
+      await index.upsert([
+        record(directory, `${text} 的概览 ${text}`, {
+          kind: 'directory',
+          level: 'L1',
+          abstract: text,
+        }),
+      ]);
+    }
+    await seed(file, `用户偏好 ${text}，使用 2 空格缩进。`, { abstract: text });
+
+    const service = await createService();
+    const hits = await service.find(text, findOptions({ limit: 3 }));
+
+    expect(hits).toHaveLength(3);
+    expect(hits.map((hit) => hit.uri)).toContain(file);
+  });
 });

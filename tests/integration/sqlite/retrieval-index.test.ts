@@ -87,8 +87,9 @@ function countRows(sql: string, ...params: SQLInputValue[]): number {
 /**
  * 包一层 `db`，记录 `search` 传给 SQL 的 `LIMIT`（最后一个绑定参数）。
  *
- * `candidateMultiplier` 只影响 SQL 的 LIMIT，最终结果条数被 `limit` 截断，所以只能
- * 在语句层观察。用 Proxy 委托给真实语句，不做 SQL 解析。
+ * `candidateMultiplier` 通常只扩大 SQL 候选池，结果条数仍被 `limit` 截断；只有
+ * 检索服务显式请求候选池时才返回多取部分。前者只能在语句层观察。用 Proxy 委托给
+ * 真实语句，不做 SQL 解析。
  */
 function createCapturingIndex(candidateMultiplier?: number): {
   readonly index: SqliteFtsIndex;
@@ -519,6 +520,21 @@ describe('search：candidateMultiplier', () => {
 
     expect(hits).toHaveLength(2);
     expect(capturing.limits).toEqual([2]);
+  });
+
+  it('检索服务请求候选池时，返回 limit × 系数条供排序去重', async () => {
+    const capturing = createCapturingIndex();
+
+    const hits = await capturing.index.search({
+      text: '记忆',
+      scopes: [SCOPE],
+      principals: ['user:alice'],
+      limit: 2,
+      returnCandidates: true,
+    });
+
+    expect(hits).toHaveLength(6);
+    expect(capturing.limits).toEqual([8]);
   });
 });
 

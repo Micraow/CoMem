@@ -126,8 +126,11 @@ export class Arms {
         updatedBefore: options.updatedBefore,
         asOf,
         limit: candidateLimit,
+        returnCandidates: true,
       });
-      const ranked = rankHits(hits, candidateLimit, this.#levelWeights).map((hit) => ({
+      // `hits` 是索引返回的完整候选池；若按最终 limit 先截断，目录 L0/L1 的重复
+      // 摘要会在去重后留下空位，后续文件永远进不来。
+      const ranked = rankHits(hits, hits.length, this.#levelWeights).map((hit) => ({
         ...hit,
         ranks: null,
       }));
@@ -182,7 +185,7 @@ export class Arms {
       limit: candidateLimit,
     });
     const enriched = enrichVectorHits(raw, options, vector.nodes);
-    const ranked = rankHits(enriched, candidateLimit, this.#levelWeights).map(
+    const ranked = rankHits(enriched, enriched.length, this.#levelWeights).map(
       (hit, index) => ({
         ...hit,
         ranks: { fts5: null, vector: index + 1, hybrid: null },
@@ -226,6 +229,7 @@ export class Arms {
         updatedBefore: options.updatedBefore,
         asOf,
         limit: candidateLimit,
+        returnCandidates: true,
       }),
       this.#embedQuery(vector, text, options),
     ]);
