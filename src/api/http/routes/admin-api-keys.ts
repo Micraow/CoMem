@@ -1,7 +1,6 @@
 /**
  * API Key 管理（`/admin/users/{id}/api-keys`、`/admin/api-keys/{keyId}`）。
  *
- * 函数体与拆分前逐字相同，只加了 `ok` 的类型实参与 import。
  */
 
 import type { FastifyInstance } from 'fastify';

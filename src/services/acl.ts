@@ -42,13 +42,6 @@
  * （§6.5「删库可重建」）。窗口内 `check` 可能按旧权限放行或拦截，这是文件与
  * SQLite 之间没有跨介质事务的必然代价。
  *
- * ## 为什么事务不调用 `withWriteTransaction`
- *
- * 那是 `adapters/sqlite/database.ts` 的**值**导出，而 `services/` 只允许
- * `import type` 引用适配层（§4.2）。这里用最小结构端口 `AclDatabase` 自己开
- * `BEGIN IMMEDIATE`，`PermissionRepository` 的两个写入方法检测到外层已有事务会
- * 直接复用，所以两步仍是一个事务。
- *
  * ## 并发：ACL 写入的锁契约（§10.6）
  *
  * 每个写方法都是「读整个 `.acl.json` → 改 → 写回」。读在锁外时两个并发写者各拿
@@ -62,36 +55,17 @@
  * | `purgePrincipal` | 全部目标 `exact`，**按 URI 升序** | 撤权横跨整库，没有单一路径能覆盖；多锁必须定序（见下） |
  *
  * **锁序规则（多锁时）**：按 `Uri.toString()` 字典序升序获取，释放顺序相反。
- * `FileSystemService.move` 用同一条规则（两个方向相反的 `move` 不会互等）。任何
- * 新增的多锁路径都必须沿用这条全局顺序，否则两个持有者各拿一把等另一把。
+ * `FileSystemService.move` 用同一条规则（两个方向相反的 `move` 不会互等）。
  *
  * **不能嵌套**：`PathLockManager` 不可重入（`adapters/fs/lock.ts` 按锁路径排队，
  * 持有者再拿同路径的锁会等自己，5 秒后 `CONFLICT`）。所以 `purgeSubtree` 持
- * `tree(root)` 期间**直接写文件**，不调 `setAcl`——后者要 `exact(descendant)`，
- * 与祖先的 `tree` 冲突，会等一个永远不会释放的锁。`writeAcl`（`./acl/write.ts`）
- * 因此要求调用方已经持有 `exact(uri)`。
+ * `tree(root)` 期间**直接写文件**，不调 `setAcl`；`writeAcl`（`./acl/write.ts`）
+ * 要求调用方已经持有 `exact(uri)`。
  *
- * **不加锁的两个方法**：`getAcl` 只读（`.acl.json` 是原子 `rename`，读到的要么是
- * 旧的完整内容要么是新的）；`materializeNode` / `syncEntriesFromFile` 只写派生表，
- * 而且由 `IndexObserver` 在 `FileSystemService` 已持有 `exact` / `tree` 的回调里
- * 调用——这里再加锁就是上面那条「自己等自己」。
-
- * ## 拆分后的模块（本文件只是门面，导出面与原实现一致）
+ * 不加锁的两个方法：`getAcl` 只读（`.acl.json` 是原子 `rename`）；`materializeNode`
+ * 只写派生表，且由 `IndexObserver` 在已持有锁的回调里调用。
  *
- * | 文件 | 职责 |
- * |---|---|
- * | `./acl/service.ts` | 编排：`AclService` 的公开方法、端口组装、单节点求权 |
- * | `./acl/snapshot.ts` | 快照读取：根 → 目标的链、按目录缓存 |
- * | `./acl/evaluate.ts` | 纯求值：owner、主体集合、代表级别、deny 判定 |
- * | `./acl/materialize.ts` | 物化：单节点 / 子树重算 |
- * | `./acl/write.ts` | `.acl.json` 写入与校验、撤权回滚、反查表重建 |
- * | `./acl/preset.ts` | 命名空间预置：根预置、组 owner 变更 |
- * | `./acl/purge.ts` | 清空子树授权、撤销共用的目录扫描 |
- * | `./acl/revoke.ts` | 按主体撤权（删账号） |
- * | `./acl/principals.ts` | 主体展开 |
- * | `./acl/transaction.ts` | `BEGIN IMMEDIATE` 端口事务 |
- * | `./acl/levels.ts` | 磁盘级别名 ↔ 领域级别 |
- * | `./acl/types.ts` | 端口与对外类型 |
+ * 实现按职责放在 `./acl/` 下；对外导出面与原实现一致。读代码从 `./acl/service.ts` 进。
  */
 
 export { AclService } from './acl/service.js';

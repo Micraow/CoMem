@@ -1,12 +1,13 @@
 import { ComemError, isRetryable } from '../domain/errors.js';
 import type {
+  LlmCallKind,
   LlmOptions,
   LlmProvider,
   LlmUsage,
 } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 
-import type { LlmCallLogPort } from './llm-call-log.js';
+import { persistLlmCall, type LlmCallLogPort } from './llm-call-log.js';
 import { llmCostUsd, type LlmPricing } from './llm-cost.js';
 
 export interface LlmStatsState {
@@ -167,4 +168,95 @@ export function talliedUsage(tally: LlmUsageTally): LlmUsage | null {
   return tally.complete
     ? { promptTokens: tally.promptTokens, completionTokens: tally.completionTokens }
     : null;
+}
+
+/**
+ * 一次逻辑调用的差异面：怎么发、成功的返回值怎么读、不完整时抛什么、失败后还重不重试。
+ * 重试循环、用量累计、调用日志与统计都在 `executeCall` 里，只有这一份。
+ */
+export interface LlmCallAttempt<T> {
+  readonly kind: LlmCallKind;
+  invoke(): Promise<T>;
+  usageOf(result: T): LlmUsage;
+  finishOf(result: T): 'stop' | 'length' | 'refusal';
+  /** `finishReason` 不是 `stop` 时抛的错误，消息按调用形态区分。 */
+  finishFailure(result: T): ComemError;
+  mayRetry(failure: ComemError, attempt: number): boolean;
+  isParseFailure?(failure: ComemError): boolean;
+}
+
+export async function executeCall<T>(
+  runtime: LlmRuntimeState,
+  options: LlmOptions | undefined,
+  call: LlmCallAttempt<T>,
+): Promise<T> {
+  const callStartedAt = new Date();
+  const callStartedMonotonic = performance.now();
+  const usageTally: LlmUsageTally = { promptTokens: 0, completionTokens: 0, complete: true };
+  let attempt = 0;
+
+  for (;;) {
+    attempt += 1;
+    const startedAt = Date.now();
+    let result: T;
+    try {
+      result = await call.invoke();
+    } catch (error) {
+      const failure = ComemError.from(error);
+      addFailedAttemptUsage(usageTally, failure);
+      if (call.mayRetry(failure, attempt)) {
+        logRetry(runtime, failure, attempt, call.isParseFailure?.(failure) ?? false);
+        await sleep(retryDelay(runtime, attempt));
+        continue;
+      }
+      const mapped = failCall(runtime, failure, attempt, startedAt, options);
+      persist(runtime, callStartedAt, callStartedMonotonic, call, options, attempt, usageTally, {
+        status: 'error',
+        errorCode: mapped.code,
+      });
+      throw mapped;
+    }
+
+    const usage = call.usageOf(result);
+    const finishReason = call.finishOf(result);
+    addAttemptUsage(usageTally, usage);
+    recordUsage(runtime, usage, call.kind, finishReason, startedAt, attempt);
+    if (finishReason !== 'stop') {
+      runtime.totals[finishReason === 'length' ? 'truncated' : 'failed'] += 1;
+      const failure = call.finishFailure(result);
+      persist(runtime, callStartedAt, callStartedMonotonic, call, options, attempt, usageTally, {
+        status: 'error',
+        errorCode: failure.code,
+      });
+      throw failure;
+    }
+
+    persist(runtime, callStartedAt, callStartedMonotonic, call, options, attempt, usageTally, {
+      status: 'success',
+      errorCode: null,
+    });
+    return result;
+  }
+}
+
+function persist<T>(
+  runtime: LlmRuntimeState,
+  startedAt: Date,
+  startedMonotonic: number,
+  call: LlmCallAttempt<T>,
+  options: LlmOptions | undefined,
+  attempts: number,
+  usageTally: LlmUsageTally,
+  outcome: { status: 'success' | 'error'; errorCode: string | null },
+): void {
+  persistLlmCall(runtime, {
+    startedAt,
+    durationMs: performance.now() - startedMonotonic,
+    kind: call.kind,
+    options,
+    status: outcome.status,
+    errorCode: outcome.errorCode,
+    attempts,
+    usage: talliedUsage(usageTally),
+  });
 }

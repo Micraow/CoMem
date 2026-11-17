@@ -51,29 +51,8 @@
  * 「锁内判定 → 锁外生成 → 锁内写回」三段，中间只留下「摘要可能比内容旧一拍」这一
  * 可接受竞态（见该函数注释）。
  *
- * ## 为什么事务不调用 `withWriteTransaction`
- *
- * 那是 `adapters/sqlite/database.ts` 的**值**导出，而 `services/` 只允许 `import type`
- * 引用适配层（§4.2）。`summary/persist.ts` 用最小结构端口 `SummaryDatabase` 自己开
- * `BEGIN IMMEDIATE`，`SqliteFtsIndex.upsert` 检测到外层已有事务会直接复用，所以索引
- * 行与新鲜度列仍在同一个事务里。
- *
- * ## 拆分后的模块（本文件只是门面，导出面与原实现一致）
- *
- * 实现按职责放在 `services/summary/` 下，调用方的 import 路径
- * （`services/summary.js`）与导出符号都不变：
- *
- * - `ports.ts`：公开契约（`SummaryDatabase`、配置、装配入参、失效结果）与全量端口
- * - `levels.ts`：目录在 `node.level` 上的两个取值（L0 / L1）
- * - `generators.ts`：`LlmSummarizer` / `RuleSummarizer`（模型调用与断网降级）
- * - `generation.ts`：L1 输入拼装（直接子文件摘要 + 直接子目录 L0 正文）与 L0 提取
- * - `freshness.ts`：`node` 表新鲜度四列的读写与消费
- * - `records.ts`：目录在索引里的 L0 / L1 两行的形状
- * - `persist.ts`：写摘要文件、索引两行、新鲜度、物化权限（事务与目录锁）
- * - `invalidate.ts`：正文 digest 比较、失效判定与向上传播
- * - `service.ts`：`SummaryService` 的装配壳
- *
- * 这个文件只做 re-export：改实现不要加在这里，读代码从 `service.ts` 进。
+ * 实现按职责放在 `services/summary/` 下；对外导出面与 import 路径不变。
+ * 写盘顺序与事务端口见 `summary/persist.ts` 文件头，失效判定见 `summary/invalidate.ts`。
  */
 
 export type {
