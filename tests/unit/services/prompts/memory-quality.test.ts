@@ -20,6 +20,8 @@ describe('memory prompt quality gates', () => {
     expect(prompt).toContain('不能把猜测写成结论')
     expect(prompt).toContain('较旧的验证结果不能覆盖较新的当前做法')
     expect(prompt).toContain('会改变适用范围的细节')
+    expect(prompt).toContain('第一行直接给出可执行结论')
+    expect(prompt).toContain('不要只写「按以下步骤操作」等提示语')
   })
 
   it('rewrite keeps history-dependent actions searchable and preserves exact nouns', () => {

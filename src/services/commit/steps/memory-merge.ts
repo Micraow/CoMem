@@ -56,11 +56,7 @@ import type { Logger } from '../../../domain/log.js';
 import type { MemoryLinkType } from '../../../domain/memory-link.js';
 import { getMemoryType } from '../../../domain/memory-types/index.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
-import type {
-  BatchOperation,
-  MergeOperation,
-  OperationFailureReason,
-} from '../../../domain/merge-op.js';
+import type { OperationFailureReason } from '../../../domain/merge-op.js';
 import { applyOperations, suppressConflicts } from '../../../domain/merge-op.js';
 import { Uri } from '../../../domain/uri.js';
 
@@ -70,6 +66,7 @@ import { evidenceTime } from '../../memory/evidence.js';
 
 import { CommitStep, type StepContext } from '../pipeline.js';
 import { EXTRACT_RESULT_KEY, isMemoryExtractResult } from './memory-extract.js';
+import { groupByUri } from './memory-merge-groups.js';
 
 /** 跨步骤传递产物的键（`summary_invalidate` 消费）。 */
 export const MERGE_RESULT_KEY = 'memory_merge.result';
@@ -120,45 +117,6 @@ const FAILURE_LABELS: Readonly<Record<OperationFailureReason, string>> = {
   patch_ambiguous: 'SEARCH 命中多处，不做模糊匹配',
   immutable_violation: 'immutable 字段已有值，不允许覆盖',
 };
-
-interface UriGroup {
-  kind: 'upsert' | 'delete';
-  readonly operations: MergeOperation[];
-}
-
-/**
- * 按 URI 分组，保持输出顺序。
- *
- * 分组键是 URI 字符串；组内保留字段级操作的相对顺序，组间保留首次出现顺序。顺序是
- * 语义的一部分（第 2 条 patch 依赖第 1 条的结果），不能用 `Map` 之外的排序。
- */
-function groupByUri(operations: readonly BatchOperation[]): Map<string, UriGroup> {
-  const groups = new Map<string, UriGroup>();
-
-  for (const operation of operations) {
-    const existing = groups.get(operation.uri);
-
-    if (operation.kind === 'delete') {
-      if (existing === undefined) {
-        groups.set(operation.uri, { kind: 'delete', operations: [] });
-      }
-      continue;
-    }
-
-    if (existing === undefined) {
-      groups.set(operation.uri, { kind: 'upsert', operations: [operation.operation] });
-      continue;
-    }
-    existing.operations.push(operation.operation);
-    if (existing.kind === 'delete') {
-      // `suppressConflicts` 已经消掉「同批次 upsert + delete」，走到这里说明契约被
-      // 绕过了。按 §11.5 第一种情况保留 upsert。
-      existing.kind = 'upsert';
-    }
-  }
-
-  return groups;
-}
 
 /** `state` 里的合并结果；`summary_invalidate` 用它做类型收窄，不用断言。 */
 export function isMemoryMergeResult(value: unknown): value is MemoryMergeResult {
@@ -270,7 +228,28 @@ export class MemoryMergeStep extends CommitStep {
             }
             // 全部字段操作都失败：不落盘。写盘只会把正文原样覆盖一遍（还会白改
             // 一次 updated_at、把已复核的记忆打回 pending）。
-            return result.applied === 0 ? null : result.value;
+            if (result.applied === 0) {
+              return null;
+            }
+            // 归档写入必须带正文。尤其新建 preferences 时，identity 操作可以先
+            // 成功、正文 patch 随后落空；只把 identity 写盘会生成 active 空壳。
+            // 这里只约束归档合并，不改 MemoryService 对手工 / MCP 写入的语义。
+            const hasContentField = schema.fields.some((field) => field.name === 'content');
+            const content = result.value['content'];
+            if (
+              hasContentField &&
+              (content === undefined ||
+                content === null ||
+                (typeof content === 'string' && content.trim() === ''))
+            ) {
+              skipped.push({
+                memoryType,
+                reasonCode: 'empty_content',
+                reason: `字段 content：归档合并后正文为空，未写入 ${uriString}。`,
+              });
+              return null;
+            }
+            return result.value;
           },
         });
       } catch (error) {

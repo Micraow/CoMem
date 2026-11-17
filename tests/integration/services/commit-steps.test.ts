@@ -931,6 +931,107 @@ describe('MemoryMergeStep', () => {
     const { step, diffs } = createMergeStep();
     // 不抛：一条已存在的记录不该拖垮整批操作。
     await step.run(
+  it('新 preferences 的正文 patch 落空时不生成只含 frontmatter 的空壳', async () => {
+    const emptyUri = `${SCOPE}/memories/preferences/homework-answer-style.md`;
+    const goodUri = `${SCOPE}/memories/preferences/keep-good-data.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'keep-good-data',
+      content: '正常正文',
+    });
+    writeSpy.mockClear();
+
+    const operations: BatchOperation[] = [
+      {
+        kind: 'upsert',
+        uri: emptyUri,
+        operation: { kind: 'replace', field: 'topic', value: 'homework-answer-style' },
+      },
+      {
+        kind: 'upsert',
+        uri: emptyUri,
+        operation: { kind: 'replace', field: 'topic', value: 'homework-answer-style' },
+      },
+      {
+        kind: 'upsert',
+        uri: emptyUri,
+        operation: {
+          kind: 'patch',
+          field: 'content',
+          blocks: [{ search: '一段新文件里不存在的正文', replace: '替换正文' }],
+        },
+      },
+      {
+        kind: 'upsert',
+        uri: goodUri,
+        operation: {
+          kind: 'patch',
+          field: 'content',
+          blocks: [{ search: '正常正文', replace: '正常正文已更新' }],
+        },
+      },
+    ];
+
+    const { step, diffs } = createMergeStep();
+    await step.run(
+      mergeContext(operations, [
+        [emptyUri, 'preferences'],
+        [goodUri, 'preferences'],
+      ]),
+    );
+
+    expect(await memory.read(Uri.parse(emptyUri))).toBeNull();
+    expect(
+      writeSpy.mock.calls.filter(([uri]) => uri.toString() === emptyUri),
+    ).toHaveLength(0);
+    expect((await memory.read(Uri.parse(goodUri)))?.fields['content']).toBe('正常正文已更新');
+    expect(diffs[0]?.operations).toMatchObject({ adds: [], updates: [{ uri: goodUri }] });
+    expect(diffs[0]?.skippedOperations.map((item) => item.reasonCode)).toEqual([
+      'patch_not_found',
+      'empty_content',
+    ]);
+    expect(diffs[0]?.summary).toMatchObject({ totalAdds: 0, totalUpdates: 1, totalSkipped: 2 });
+  });
+
+  it('归档合并把已有正文变成空串时跳过写入并保留原值', async () => {
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'code-style',
+      content: '必须保留的正常正文',
+    });
+    const before = await memory.read(Uri.parse(CODE_STYLE));
+    writeSpy.mockClear();
+
+    const { step, diffs } = createMergeStep();
+    await step.run(
+      mergeContext(
+        [
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+          },
+          {
+            kind: 'upsert',
+            uri: CODE_STYLE,
+            operation: { kind: 'replace', field: 'content', value: '   ' },
+          },
+        ],
+        [[CODE_STYLE, 'preferences']],
+      ),
+    );
+
+    expect(await memory.read(Uri.parse(CODE_STYLE))).toEqual(before);
+    expect(
+      writeSpy.mock.calls.filter(([uri]) => uri.toString() === CODE_STYLE),
+    ).toHaveLength(0);
+    expect(diffs[0]?.operations).toEqual({ adds: [], updates: [], deletes: [] });
+    expect(diffs[0]?.skippedOperations).toEqual([
+      expect.objectContaining({
+        memoryType: 'preferences',
+        reasonCode: 'empty_content',
+      }),
+    ]);
+  });
+
       mergeContext(operations, [
         [eventUri, 'events'],
         [CODE_STYLE, 'preferences'],
