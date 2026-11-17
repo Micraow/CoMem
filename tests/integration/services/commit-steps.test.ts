@@ -19,6 +19,7 @@ import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmOptions, LlmPrompt, LlmResult } from '../../../src/domain/llm.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
+import { casesMemoryType } from '../../../src/domain/memory-types/cases.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { eventsMemoryType } from '../../../src/domain/memory-types/events.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
@@ -34,7 +35,10 @@ import {
 import { ArchiveSummaryStep } from '../../../src/services/commit/steps/archive-summary.js';
 import { DreamerStep } from '../../../src/services/commit/steps/dreamer.js';
 import type { DreamerDiffArchive } from '../../../src/services/dreamer/archive-diff.js';
-import type { ExperiencePorts } from '../../../src/services/dreamer/experience.js';
+import {
+  type ExperiencePorts,
+} from '../../../src/services/dreamer/experience.js';
+import { validateExperienceEvidence } from '../../../src/services/dreamer/experience-evidence.js';
 import { DreamerService } from '../../../src/services/dreamer/service.js';
 import {
   EXTRACT_RESULT_KEY,
@@ -433,7 +437,7 @@ describe('MemoryExtractStep', () => {
     });
     await step.run(context);
 
-    expect(fakeMemory.calls).toHaveLength(8);
+    expect(fakeMemory.calls).toHaveLength(9);
     expect(fakeMemory.calls[0]).toMatchObject({ query: '我偏好 TypeScript 严格模式', topN: 3 });
 
     const result = extracted(context);
@@ -772,6 +776,46 @@ function createDistillArchive(): DreamerDiffArchive & {
   };
 }
 
+const DISTILL_CASE_A = `${SCOPE}/memories/cases/raid-install.md`;
+const DISTILL_CASE_B = `${SCOPE}/memories/cases/raid-upgrade.md`;
+const DISTILL_CASE_B_ARCHIVE = `${SCOPE}/sessions/sess_2/history/archive_001`;
+const DISTILL_CASE_EVIDENCE = [
+  {
+    kind: 'case' as const,
+    caseUri: DISTILL_CASE_A,
+    quote: '首次安装前关闭 RAID 后完成部署。',
+  },
+  {
+    kind: 'case' as const,
+    caseUri: DISTILL_CASE_B,
+    quote: '升级前关闭 RAID 后构建通过。',
+  },
+] as const;
+
+function distillCase(
+  suffix: string,
+  content: string,
+  source: string,
+): MemoryRecord {
+  const uri = Uri.parse(`${SCOPE}/memories/cases/${suffix}.md`);
+  return {
+    uri,
+    memoryType: casesMemoryType.type,
+    fields: { case: suffix, content },
+    status: 'active',
+    updatedAt: UPDATED_AT,
+    sources: [source],
+    validFrom: null,
+    validUntil: null,
+    supersedes: null,
+  };
+}
+
+const DISTILL_CASES = [
+  distillCase('raid-install', '首次安装前关闭 RAID 后完成部署。', ARCHIVE),
+  distillCase('raid-upgrade', '升级前关闭 RAID 后构建通过。', DISTILL_CASE_B_ARCHIVE),
+] as const;
+
 /** 经验归纳步骤的装配：默认用真实 `MemoryService` / `MemoryLinkService`。 */
 function createDistillStep(
   provider: FakeLlmProvider,
@@ -782,11 +826,19 @@ function createDistillStep(
   } = {},
 ): DreamerStep {
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
+  const memoryPort = options.memory ?? memory;
   const dreamer = new DreamerService({
     memory, llm, logger,
     stat: { stat: async () => null }, search: { glob: async () => [] },
     archive: {
-      memory: options.memory ?? memory, links: options.links ?? linkService, logger,
+      memory: {
+        read: (uri) => memoryPort.read(uri),
+        prefetch: (scope, schema, query, topN) => schema.type === casesMemoryType.type
+          ? Promise.resolve(DISTILL_CASES)
+          : memoryPort.prefetch(scope, schema, query, topN),
+        upsertMemory: (scopeUri, schema, input) => memoryPort.upsertMemory(scopeUri, schema, input),
+      },
+      links: options.links ?? linkService, logger,
       listCurrent: (scope, schema) => listCurrentMemories(
         {
           read: async (uri) => ({ text: Buffer.from(await store.readBytes(uri)).toString('utf8') }),
@@ -1419,11 +1471,15 @@ describe('DreamerStep', () => {
         situation: ['目标机器启用了 RAID，且安装步骤会访问同一组磁盘。'],
         approach: ['关闭 RAID。', '继续安装。'],
         reflection: ['本次安装完成。'],
-        evidence: [{
-          messageId: 'raid-1',
-          role: 'user',
-          quote: '这台机器启用了 RAID，安装需要访问同一组磁盘。',
-        }],
+        evidence: [
+          {
+            kind: 'message',
+            messageId: 'raid-1',
+            role: 'user',
+            quote: '这台机器启用了 RAID，安装需要访问同一组磁盘。',
+          },
+          ...DISTILL_CASE_EVIDENCE,
+        ],
         entityPages: [1],
       },
     ] } }]);
@@ -1450,11 +1506,15 @@ describe('DreamerStep', () => {
               situation: ['仓库依赖版本尚未锁定。'],
               approach: ['固定依赖版本。', '修改构建脚本。', '运行完整构建。'],
               reflection: ['固定版本后构建通过。', '只覆盖本次验证过的构建环境。'],
-              evidence: [{
-                messageId: 'm1',
-                role: 'user',
-                quote: '这次迁移踩了依赖版本的坑。',
-              }],
+              evidence: [
+                {
+                  kind: 'message',
+                  messageId: 'm1',
+                  role: 'user',
+                  quote: '这次迁移踩了依赖版本的坑。',
+                },
+                ...DISTILL_CASE_EVIDENCE,
+              ],
             },
           ],
         },
@@ -1472,27 +1532,36 @@ describe('DreamerStep', () => {
     const raw = await readFile(toDiskPath(dataDir, Uri.parse(EXPERIENCE)), 'utf8');
     expect(raw).toContain('memory_type: experiences');
     expect(raw).toContain('status: pending');
-    expect(raw).toContain(`sources:\n  - ${ARCHIVE}\n`);
+    expect(raw).toContain(
+      `sources:\n  - ${ARCHIVE}\n  - ${DISTILL_CASE_A}\n  - ${DISTILL_CASE_B}\n  - ${DISTILL_CASE_B_ARCHIVE}\n`,
+    );
     expect(raw).toContain('category: workflow');
     expect(raw).toContain('summary: 迁移前先固定依赖版本，再修改构建脚本。');
     expect(raw).toContain('迁移前先固定依赖版本，再修改构建脚本。');
     expect(raw).toContain('## 适用情境');
     expect(raw).toContain('## 做法');
     expect(raw).toContain('## 反思与边界');
-    expect(raw).toContain('user `m1`：这次迁移踩了依赖版本的坑。');
+    expect(raw).toContain(
+      `message \`m1\` (user)，archive \`${ARCHIVE}\`：这次迁移踩了依赖版本的坑。`,
+    );
+    expect(raw).toContain(`case \`${DISTILL_CASE_A}\``);
 
     const record = await memory.read(Uri.parse(EXPERIENCE));
     expect(record?.status).toBe('pending');
     expect(record?.fields['category']).toBe('workflow');
     expect(record?.fields['content']).toContain('迁移前先固定依赖版本，再修改构建脚本。');
     expect(record?.fields['content']).toContain('1. 固定依赖版本。');
-    expect(record?.sources).toEqual([ARCHIVE]);
+    expect(record?.sources).toEqual([
+      ARCHIVE,
+      DISTILL_CASE_A,
+      DISTILL_CASE_B,
+      DISTILL_CASE_B_ARCHIVE,
+    ]);
 
-    // `memory_link` 是 `sources` 的派生读模型：一次写入一条 `derived_from`。
+    // `memory_link` 是 `sources` 的派生读模型：案例和它背后的归档都可追溯。
     const links = linkService.linksOf(Uri.parse(EXPERIENCE));
-    expect(links).toHaveLength(1);
-    expect(links[0]?.toUri.toString()).toBe(ARCHIVE);
-    expect(links[0]?.linkType).toBe('derived_from');
+    expect(links.map((link) => link.toUri.toString())).toEqual(record?.sources);
+    expect(links.every((link) => link.linkType === 'derived_from')).toBe(true);
     expect(linkService.backlinksOf(Uri.parse(ARCHIVE)).map((link) => link.fromUri.toString())).toEqual([
       EXPERIENCE,
     ]);
@@ -1528,11 +1597,7 @@ describe('DreamerStep', () => {
               situation: ['需要迁移或升级尚未锁定版本的仓库。'],
               approach: ['固定依赖版本。', '升级依赖。', '运行完整构建。'],
               reflection: ['本次固定版本后升级成功。'],
-              evidence: [{
-                messageId: 'source',
-                role: 'user',
-                quote: '我偏好 TypeScript。',
-              }],
+              evidence: DISTILL_CASE_EVIDENCE,
             },
           ],
         },
@@ -1551,10 +1616,10 @@ describe('DreamerStep', () => {
     // 写回的是整段新正文，旧结论没有残留（upsert 是字段级合并，`content` 被覆盖）。
     const record = await memory.read(Uri.parse(EXPERIENCE));
     expect(record?.fields['content']).toContain('合并后的结论：先固定依赖版本，再升级。');
-    // 同一个 topic 还是一个文件、一份来源、一条链接。
+    // 同一个 topic 还是一个文件；旧来源保留，并追加这次引用的案例和归档。
     expect(await memory.listPending(Uri.parse(SCOPE))).toHaveLength(1);
-    expect(record?.sources).toEqual([ARCHIVE]);
-    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toHaveLength(1);
+    expect(record?.sources).toContain(ARCHIVE);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE)).length).toBeGreaterThan(1);
   });
 
   it('同一批重放两次不产生第二条经验：URI 由 topic 决定', async () => {
@@ -1566,25 +1631,22 @@ describe('DreamerStep', () => {
         situation: ['仓库需要迁移。'],
         approach: ['固定依赖版本。'],
         reflection: ['本次迁移成功。'],
-        evidence: [{
-          messageId: 'source',
-          role: 'user',
-          quote: '我偏好 TypeScript。',
-        }],
+        evidence: DISTILL_CASE_EVIDENCE,
       }] },
     };
 
     await createDistillStep(new FakeLlmProvider([output])).run(createContext());
     const first = await memory.read(Uri.parse(EXPERIENCE));
+    const firstLinks = linkService.linksOf(Uri.parse(EXPERIENCE));
     await createDistillStep(new FakeLlmProvider([output, output])).run(createContext());
 
     const pending = await memory.listPending(Uri.parse(SCOPE));
     expect(pending.map((record) => record.uri.toString())).toEqual([EXPERIENCE]);
     const second = await memory.read(Uri.parse(EXPERIENCE));
-    expect(second?.sources).toEqual([ARCHIVE]);
+    expect(second?.sources).toEqual(first?.sources);
     // 正文相同、来源相同：磁盘上的字段没有因为重放而多出一份。
     expect(second?.fields['content']).toBe(first?.fields['content']);
-    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toHaveLength(1);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual(firstLinks);
   });
 
   it('写出的经验追加进归档清单：重放不会留下同 URI 的两条记录', async () => {
@@ -1597,11 +1659,7 @@ describe('DreamerStep', () => {
         situation: ['仓库需要迁移。'],
         approach: ['固定依赖版本。'],
         reflection: ['本次迁移成功。'],
-        evidence: [{
-          messageId: 'source',
-          role: 'user',
-          quote: '我偏好 TypeScript。',
-        }],
+        evidence: DISTILL_CASE_EVIDENCE,
       }] },
     };
 
@@ -1654,6 +1712,12 @@ describe('DreamerStep', () => {
   });
 
   it('证据 ID、角色或 quote 与输入不精确匹配时拒绝整批写入', async () => {
+    const messageEvidence = {
+      kind: 'message' as const,
+      messageId: 'source',
+      role: 'user' as const,
+      quote: '我偏好 TypeScript。',
+    };
     const base = {
       category: 'workflow',
       topic: 'monorepo-migration',
@@ -1661,55 +1725,64 @@ describe('DreamerStep', () => {
       situation: ['仓库需要迁移。'],
       approach: ['固定依赖版本。'],
       reflection: ['本次迁移成功。'],
-      evidence: [{
-        messageId: 'source',
-        role: 'user',
-        quote: '我偏好 TypeScript。',
-      }],
+      evidence: [
+        ...DISTILL_CASE_EVIDENCE,
+        messageEvidence,
+      ],
     };
     const cases = [
       {
         reason: 'message_not_in_input',
-        evidence: { ...base.evidence[0], messageId: 'missing' },
+        evidence: { ...messageEvidence, messageId: 'missing' },
       },
       {
         reason: 'role_mismatch',
-        evidence: { ...base.evidence[0], role: 'assistant' },
+        evidence: { ...messageEvidence, role: 'assistant' as const },
       },
       {
         reason: 'quote_not_exact',
-        evidence: { ...base.evidence[0], quote: '我偏好 JavaScript。' },
+        evidence: { ...messageEvidence, quote: '我偏好 JavaScript。' },
       },
     ] as const;
 
     for (const item of cases) {
-      const provider = new FakeLlmProvider([{
-        json: { experiences: [{ ...base, evidence: [item.evidence] }] },
-      }]);
-      await expect(
-        createDistillStep(provider).run(createContext()),
-      ).rejects.toMatchObject({
+      let error: unknown;
+      try {
+        validateExperienceEvidence(
+          [{ ...base, evidence: [...DISTILL_CASE_EVIDENCE, item.evidence] }],
+          createContext().messages,
+          DISTILL_CASES,
+        );
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({
         code: 'INVALID_ARGUMENT',
         details: { reason: item.reason },
       });
-      expect(provider.remaining).toBe(0);
     }
 
-    const mixedProvider = new FakeLlmProvider([{
-      json: {
-        experiences: [
+    let mixedError: unknown;
+    try {
+      validateExperienceEvidence(
+        [
           base,
           {
             ...base,
             topic: 'another-topic',
-            evidence: [{ ...base.evidence[0], messageId: 'missing' }],
+            evidence: [
+              ...DISTILL_CASE_EVIDENCE,
+              { ...messageEvidence, messageId: 'missing' },
+            ],
           },
         ],
-      },
-    }]);
-    await expect(
-      createDistillStep(mixedProvider).run(createContext()),
-    ).rejects.toMatchObject({
+        createContext().messages,
+        DISTILL_CASES,
+      );
+    } catch (caught) {
+      mixedError = caught;
+    }
+    expect(mixedError).toMatchObject({
       code: 'INVALID_ARGUMENT',
       details: { reason: 'message_not_in_input' },
     });
@@ -1733,11 +1806,7 @@ describe('DreamerStep', () => {
         situation: ['写入关联边失败时。'],
         approach: ['继续写入记忆。'],
         reflection: ['本次记忆已落盘。'],
-        evidence: [{
-          messageId: 'source',
-          role: 'user',
-          quote: '我偏好 TypeScript。',
-        }],
+        evidence: DISTILL_CASE_EVIDENCE,
       }] } },
     ]);
 

@@ -5,6 +5,7 @@ import type { ArchiveMeta } from '../../../src/domain/archive.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
 import type { Logger } from '../../../src/domain/log.js';
 import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
+import { casesMemoryType } from '../../../src/domain/memory-types/cases.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../../src/domain/memory-types/preferences.js';
 import type { SessionMessage } from '../../../src/domain/session.js';
@@ -20,6 +21,8 @@ import type { MemoryRecord, MemoryWriteResult } from '../../../src/services/memo
 
 const SCOPE = Uri.parse('comem://user/alice');
 const ARCHIVE = Uri.parse(`${SCOPE}/sessions/sess_1/history/archive_001`);
+const CASE_A = `${SCOPE}/memories/cases/mips-add3.md`;
+const CASE_B = `${SCOPE}/memories/cases/mips-sll.md`;
 
 function record(
   path: string,
@@ -91,11 +94,24 @@ function experience(topic: string, claim: string) {
     situation: ['分析同类数据通路。'],
     approach: ['逐项检查控制信号和关键路径。'],
     reflection: ['本次分析确认了检查顺序。'],
-    evidence: [{
-      messageId: 'm1',
-      role: 'user',
-      quote: '继续整理 MIPS 数据通路。',
-    }],
+    evidence: [
+      { kind: 'case', caseUri: CASE_A, quote: '新增 add3 时先检查第三个读口。' },
+      { kind: 'case', caseUri: CASE_B, quote: '新增 sll 时复用 ALU 左移。' },
+    ],
+  };
+}
+
+function caseRecord(path: string, content: string, source: Uri): MemoryRecord {
+  return {
+    uri: Uri.parse(path),
+    memoryType: casesMemoryType.type,
+    fields: { case: Uri.parse(path).name.replace(/\.md$/u, ''), content },
+    status: 'active',
+    updatedAt: '2026-11-17T00:00:00.000Z',
+    sources: [source.toString()],
+    validFrom: null,
+    validUntil: null,
+    supersedes: null,
   };
 }
 
@@ -211,7 +227,12 @@ describe('Dreamer 经验上下文', () => {
     };
     const archiveMemory: ExperiencePorts['memory'] = {
       read: async (uri) => uri.equals(pending.uri) ? pending : null,
-      prefetch: async () => [],
+      prefetch: async (_scope, schema) => schema.type === casesMemoryType.type
+        ? [
+          caseRecord(CASE_A, '新增 add3 时先检查第三个读口。', ARCHIVE),
+          caseRecord(CASE_B, '新增 sll 时复用 ALU 左移。', ARCHIVE),
+        ]
+        : [],
       upsertMemory,
     };
     const log = logger();
@@ -270,7 +291,12 @@ describe('Dreamer 经验上下文', () => {
         listCurrent: async () => [existing],
         memory: {
           read: async () => null,
-          prefetch: async () => [],
+          prefetch: async (_scope, schema) => schema.type === casesMemoryType.type
+            ? [
+              caseRecord(CASE_A, '新增 add3 时先检查第三个读口。', ARCHIVE),
+              caseRecord(CASE_B, '新增 sll 时复用 ALU 左移。', ARCHIVE),
+            ]
+            : [],
           upsertMemory,
         },
         links: { addLinks: async () => ({ inserted: 1, merged: 0 }) },

@@ -6,13 +6,20 @@ import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 import { experiencesMemoryType } from '../../domain/memory-types/experiences.js';
 import { preferencesMemoryType } from '../../domain/memory-types/preferences.js';
 import { entitiesMemoryType } from '../../domain/memory-types/entities.js';
-import type { Uri } from '../../domain/uri.js';
+import { Uri } from '../../domain/uri.js';
 
 import type { MemoryRecord, MemoryWrite, MemoryWriteResult } from '../memory.js';
 import { renderMemoryUri } from '../memory.js';
 import type { MemoryLinkService } from '../memory-link.js';
 import type { ExistingExperience } from './archive-prompt.js';
 import { validateExperienceEvidence } from './experience-evidence.js';
+import { experienceSources } from './experience-sources.js';
+import {
+  historicalExperienceEvidence,
+  renderExperienceContent,
+} from './experience-render.js';
+
+export { historicalExperienceEvidence, renderExperienceContent } from './experience-render.js';
 
 import type { StepContext } from '../commit/pipeline.js';
 import { evidenceTime } from '../memory/evidence.js';
@@ -38,27 +45,24 @@ const EXPERIENCE_BUDGET = {
   evidence: 6,
 } as const;
 
-const claimSchema = z
-  .string()
-  .min(1)
-  .max(EXPERIENCE_BUDGET.claimChars)
-  .regex(SINGLE_LINE_PATTERN);
-const detailSchema = z
-  .string()
-  .min(1)
-  .max(EXPERIENCE_BUDGET.detailChars)
-  .regex(SINGLE_LINE_PATTERN);
-const messageIdSchema = z
-  .string()
-  .min(1)
-  .max(256)
-  .regex(SINGLE_LINE_PATTERN);
+const claimSchema = z.string().min(1).max(EXPERIENCE_BUDGET.claimChars).regex(SINGLE_LINE_PATTERN);
+const detailSchema = z.string().min(1).max(EXPERIENCE_BUDGET.detailChars).regex(SINGLE_LINE_PATTERN);
+const messageIdSchema = z.string().min(1).max(256).regex(SINGLE_LINE_PATTERN);
+const caseUriSchema = z.string().min(1).max(2_048).regex(SINGLE_LINE_PATTERN);
 
-const experienceEvidenceSchema = z.strictObject({
-  messageId: messageIdSchema,
-  role: z.enum(['user', 'assistant']),
-  quote: detailSchema,
-});
+const experienceEvidenceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('message'),
+    messageId: messageIdSchema,
+    role: z.enum(['user', 'assistant']),
+    quote: detailSchema,
+  }),
+  z.strictObject({
+    kind: z.literal('case'),
+    caseUri: caseUriSchema,
+    quote: detailSchema,
+  }),
+]);
 
 export interface ExperiencePorts {
   /** active 与 pending 记录；用于发现同 topic 冲突，防止未读正文被覆盖。 */
@@ -103,7 +107,8 @@ export interface ExperienceCatalogEntry {
  *
  * `topic` 是 identity（决定文件路径）。`claim` 是能独立检索的结论；
  * `situation / approach / reflection` 分别承担适用边界、做法、结果与未决限制。
- * `evidence` 只接受本次输入消息的 ID、角色和逐字片段，服务端写前核对。
+ * `evidence` 引用本次消息或已读取的具体案例；服务端写前核对 URI、逐字片段
+ * 和可见案例集合。消息或案例都可以独立形成有效证据。
  * 服务端再确定性地渲染 `content`，不能让模型把引用伪装成实测。
  * schema 在这里而不是领域层，是因为 `generateJson` 需要把形状翻译成供应商的
  * JSON Schema；领域类型不带运行时信息（与 `memory-extract.ts` 同一份理由）。
@@ -118,22 +123,6 @@ export const experienceSchema = z.strictObject({
   reflection: z.array(detailSchema).min(1).max(EXPERIENCE_BUDGET.reflection),
   evidence: z.array(experienceEvidenceSchema).min(1).max(EXPERIENCE_BUDGET.evidence),
 });
-
-/** 结构化归纳结果 → 给人阅读、供检索的 Markdown 正文。 */
-export function renderExperienceContent(experience: z.infer<typeof experienceSchema>): string {
-  const bullets = (items: readonly string[]) => items.map((item) => `- ${item}`).join('\n');
-  const steps = experience.approach.map((item, index) => `${index + 1}. ${item}`).join('\n');
-  return [
-    // L0 摘要取正文第一行；这里必须先是完整、可独立理解的结论。
-    experience.claim,
-    `## 适用情境\n\n${bullets(experience.situation)}`,
-    `## 做法\n\n${steps}`,
-    `## 反思与边界\n\n${bullets(experience.reflection)}`,
-    `## 原文证据\n\n${experience.evidence
-      .map(({ messageId, role, quote }) => `- ${role} \`${messageId}\`：${quote}`)
-      .join('\n')}`,
-  ].join('\n\n');
-}
 
 /** 一条记忆记录 → 提示词里的「已有经验」。正文取 `content` 字段，不带标题。 */
 export function existingExperienceFromRecord(record: MemoryRecord): ExistingExperience {
@@ -189,17 +178,19 @@ export async function writeExperiences(
   ports: ExperiencePorts,
   context: StepContext,
   experiences: readonly z.infer<typeof experienceSchema>[],
+  cases: readonly MemoryRecord[],
   entities: readonly MemoryRecord[],
   assertWrite?: (uri: Uri) => Promise<boolean>,
 ): Promise<MemoryWriteResult[]> {
   const { memory, links, logger } = ports;
   // 先验证整批，再开始写入，避免第二条引用错误时第一条已经落盘。
-  validateExperienceEvidence(experiences, context.messages);
+  const citedCases = validateExperienceEvidence(experiences, context.messages, cases);
   const written: MemoryWriteResult[] = [];
   const seen = new Set<string>();
   for (const experience of experiences) {
     const { category, topic } = experience;
-    const content = renderExperienceContent(experience);
+    const evidenceCases = citedCases.get(topic) ?? [];
+    const provenance = experienceSources(evidenceCases, context.archiveUri);
 
     let uri: Uri;
     try {
@@ -224,8 +215,17 @@ export async function writeExperiences(
       uri,
       ...(experience.entityPages === undefined || invalidEntity ? {} :
         { structure: { entityRefs: experience.entityPages.flatMap((page) => entities[page - 1]?.entityId ?? []) } }),
-      provenance: { sources: [context.archiveUri], evidenceAt: evidenceTime(context.messages) },
-      update: (current) => ({ ...current, topic, category, content }),
+      provenance: { sources: provenance, evidenceAt: evidenceTime(context.messages) },
+      update: (current) => ({
+        ...current,
+        topic,
+        category,
+        content: renderExperienceContent(
+          experience,
+          historicalExperienceEvidence(typeof current['content'] === 'string' ? current['content'] : ''),
+          context.archiveUri.toString(),
+        ),
+      }),
     }).catch((error: unknown) => {
       const failure = ComemError.from(error);
       if (failure.details?.['reason'] !== 'stale_evidence' && failure.details?.['reason'] !== 'forgotten_evidence') throw error;
@@ -235,7 +235,7 @@ export async function writeExperiences(
     written.push(write);
 
     try {
-      await links.addLinks(uri, [{ toUri: context.archiveUri, linkType: 'derived_from' }]);
+      await links.addLinks(uri, provenance.map((toUri) => ({ toUri, linkType: 'derived_from' })));
     } catch (error) {
       logger.error('记忆关联边写入失败，已忽略：记忆已落盘，可从 sources 重建。', {
         archive: context.archiveUri.toString(),

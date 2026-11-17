@@ -30,7 +30,8 @@ describe('memory prompt quality gates', () => {
     expect(prompt).toContain('`claim`：一句可直接检索、单独理解的完整结论')
     expect(prompt).toContain('用户长期采用的格式、语言、详略、审美或工具选择 → 偏好')
     expect(prompt).toContain('单次答题结果、一道题答错、一次格式偏差')
-    expect(prompt).toContain('`quote` 必须逐字复制该消息正文中的一段连续文本')
+    expect(prompt).toContain('消息和案例都可以作为证据')
+    expect(prompt).toContain('`quote` 必须逐字存在于对应消息或案例正文')
     expect(prompt).toContain('证据出现冲突且本次会话没有解决时')
     expect(prompt).toContain('本次的具体参数与结果 → `cases`')
     expect(prompt).toContain('未提供原始工具输出，不能外推到其他版本')
@@ -44,21 +45,32 @@ describe('memory prompt quality gates', () => {
       situation: ['在已有单周期数据通路上新增指令。'],
       approach: ['列出新增控制信号。', '检查写回与访存路径。', '验证关键路径。'],
       reflection: ['本次两条例题按该顺序检查通过。'],
-      evidence: [{
-        messageId: 'assistant-1',
-        role: 'assistant',
-        quote: '先列出新增的控制信号，再检查写回与访存路径。',
-      }],
+      evidence: [
+        {
+          kind: 'case',
+          caseUri: 'comem://user/alice/memories/cases/add3.md',
+          quote: '先列出新增的控制信号，再检查写回与访存路径。',
+        },
+        {
+          kind: 'case',
+          caseUri: 'comem://user/alice/memories/cases/sll.md',
+          quote: 'sll 复用 ALU 左移，只扩 ALUSrc 输入。',
+        },
+      ],
     })
 
-    const content = renderExperienceContent(experience)
+    const content = renderExperienceContent(
+      experience,
+      [],
+      'comem://user/alice/sessions/sess_1/history/archive_001',
+    )
     expect(content.split('\n')[0]).toBe(experience.claim)
     expect(content).toContain('## 适用情境')
     expect(content).toContain('## 做法')
     expect(content).toContain('1. 列出新增控制信号。')
     expect(content).toContain('## 反思与边界')
     expect(content).toContain('## 原文证据')
-    expect(content).toContain('assistant `assistant-1`：先列出新增的控制信号')
+    expect(content).toContain('case `comem://user/alice/memories/cases/add3.md`：先列出新增的控制信号')
   })
 
   it('rejects free-text evidence, missing structure and invalid citation roles', () => {
@@ -69,7 +81,11 @@ describe('memory prompt quality gates', () => {
       situation: ['仓库需要迁移。'],
       approach: ['固定依赖版本。'],
       reflection: ['本次构建通过。'],
-      evidence: [{ messageId: 'm1', role: 'user', quote: '本次构建通过。' }],
+      evidence: [
+        { kind: 'message', messageId: 'm1', role: 'user', quote: '本次构建通过。' },
+        { kind: 'case', caseUri: 'comem://user/alice/memories/cases/build-one.md', quote: '构建通过。' },
+        { kind: 'case', caseUri: 'comem://user/alice/memories/cases/build-two.md', quote: '构建通过。' },
+      ],
     }
 
     expect(experienceSchema.safeParse({ ...base, evidence: [] }).success).toBe(false)

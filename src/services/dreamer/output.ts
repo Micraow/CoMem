@@ -7,6 +7,7 @@ import { experienceSchema } from './experience.js';
 import { inferenceSchema } from './preferences.js';
 
 import type { ConsolidationOperation } from '../../domain/consolidation.js';
+import { ComemError } from '../../domain/errors.js';
 
 /**
  * 模型每一轮的输出。
@@ -15,14 +16,14 @@ import type { ConsolidationOperation } from '../../domain/consolidation.js';
  * 常见的形状错误，为它让整轮解析失败、再重试一次毫无收益——归一化成 `null` 之后
  * `validateOperations` 会给出「content 不能为空」这种能定位的消息。
  */
-export const consolidationOutputSchema = z.object({
+export const consolidationOutputSchema = z.strictObject({
   action: z.enum(['read', 'finish']).optional(),
   experiences: z.array(experienceSchema).optional(),
   inferences: z.array(inferenceSchema).optional(),
   uris: z.array(z.string()).optional(),
   operations: z
     .array(
-      z.object({
+      z.strictObject({
         kind: z.enum(['add', 'update', 'delete']),
         uri: z.string(),
         content: z.string().nullish(),
@@ -33,6 +34,16 @@ export const consolidationOutputSchema = z.object({
 });
 
 export type ConsolidationOutput = z.infer<typeof consolidationOutputSchema>;
+
+/** 手动整理只改现有记忆；经验只允许由归档阶段基于本次材料生成。 */
+export function assertManualOutput(output: ConsolidationOutput): void {
+  if ((output.experiences?.length ?? 0) === 0) return;
+  throw new ComemError(
+    'INVALID_ARGUMENT',
+    '手动整理请使用 operations 提交新增、更新或删除。',
+    { reason: 'manual_experience_rejected' },
+  );
+}
 
 /** `operations` 缺省时是空列表（模型认为不需要改）。 */
 export function normalizeOperations(output: ConsolidationOutput): readonly ConsolidationOperation[] {

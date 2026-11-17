@@ -13,7 +13,7 @@ import {
 import type { MemoryWriteResult } from '../memory.js';
 import { applyPlans } from './apply.js';
 import { buildExperiencePrompt, experiencePromptMessages } from './archive-prompt.js';
-import { unreadCaseMutations, withCaseContext } from './cases.js';
+import { relatedCasesForArchive, unreadCaseMutations, withCaseContext } from './cases.js';
 import { userEvidence, type PreferenceEvidence } from './evidence.js';
 import {
   existingExperienceFromRecord,
@@ -22,7 +22,7 @@ import {
   writeExperiences,
 } from './experience.js';
 import { collectInventory } from './inventory.js';
-import { consolidationOutputSchema, describeOperations, normalizeOperations, type ConsolidationOutput } from './output.js';
+import { assertManualOutput, consolidationOutputSchema, describeOperations, normalizeOperations, type ConsolidationOutput } from './output.js';
 import { planOperations } from './plan.js';
 import { buildConsolidationPrompt, withInferences } from './prompt.js';
 import { writeInferences } from './preferences.js';
@@ -46,8 +46,9 @@ export class DreamerService {
     const messages = experiencePromptMessages(context.messages);
     if (messages.length === 0) return [];
     const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
-    const [{ catalog, existing, entities }, caseCandidates] = await Promise.all([
+    const [{ catalog, existing, entities }, currentCases, caseCandidates] = await Promise.all([
       experienceContext(archive, context, authorize),
+      archive.listCurrent(context.scopeUri, casesMemoryType),
       archive.memory.prefetch(
         context.scopeUri,
         casesMemoryType,
@@ -55,13 +56,12 @@ export class DreamerService {
         DEFAULT_PREFETCH_TOP_N,
       ),
     ]);
-    const relatedCases = (
-      await Promise.all(
-        caseCandidates.map(
-          async (record) => await authorize(record.uri) ? [record] : [],
-        ),
-      )
-    ).flat();
+    const relatedCases = await relatedCasesForArchive(
+      currentCases,
+      caseCandidates,
+      context.archiveUri,
+      authorize,
+    );
     const currentEvidence = context.scopeUri.scope === 'user' ? userEvidence(context.archiveUri, context.messages) : [];
     const evidence = currentEvidence.length === 0 ? [] : [...currentEvidence, ...await archive.evidence(context.scopeUri, context.archiveUri)];
     const preferences = await explicitPreferenceContext(archive, context, authorize);
@@ -131,7 +131,14 @@ export class DreamerService {
       });
       return false;
     });
-    const written = await writeExperiences(archive, context, safeExperiences, entities, authorize);
+    const written = await writeExperiences(
+      archive,
+      context,
+      safeExperiences,
+      relatedCases,
+      entities,
+      authorize,
+    );
     const inferred = await writeInferences(this.#deps, context.scopeUri, output.inferences ?? [], evidence, authorize, false, context.archiveUri);
     const writes = [...written, ...inferred.writes];
     this.#deps.logger.info('Dreamer 归档整理完成', { archive: context.archiveUri.toString(), written: writes.length });
@@ -196,6 +203,7 @@ export class DreamerService {
       const output = await this.#model(withInferences(buildConsolidationPrompt({
         scope: directory.toStringAsDirectory(), inventory, reads, iteration, maxIterations,
       }), evidence));
+      assertManualOutput(output);
       if (output.action !== 'read') {
         if (output.action !== 'finish') throw new ComemError('INVALID_ARGUMENT', 'Dreamer 手动整理需要 read 或 finish 动作。');
         const operations = normalizeOperations(output);

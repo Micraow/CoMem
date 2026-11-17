@@ -94,7 +94,41 @@ const EXTRACTED_EVENT = {
   ],
 } as const;
 
-/** 当前可信来源契约下的经验夹具；引用归档中最后一条助手消息。 */
+const CASE_A = `${SCOPE}/memories/cases/payment-gateway-retry.md`;
+const CASE_B = `${SCOPE}/memories/cases/payment-idempotency.md`;
+
+const EXTRACTED_CASES = [
+  {
+    kind: 'upsert',
+    pageId: 101,
+    type: 'cases',
+    identity: { case: 'payment-gateway-retry' },
+    operations: [
+      { kind: 'replace', field: 'case', value: 'payment-gateway-retry' },
+      {
+        kind: 'replace',
+        field: 'content',
+        value: '支付模块统一在网关层重试。\n\n## 结果\n\n网关层设置 3 秒超时和 2 次重试。',
+      },
+    ],
+  },
+  {
+    kind: 'upsert',
+    pageId: 102,
+    type: 'cases',
+    identity: { case: 'payment-idempotency' },
+    operations: [
+      { kind: 'replace', field: 'case', value: 'payment-idempotency' },
+      {
+        kind: 'replace',
+        field: 'content',
+        value: '业务层向网关透传幂等键。\n\n## 结果\n\n同一个幂等键随重试提交。',
+      },
+    ],
+  },
+] as const;
+
+/** 两个独立案例支持归纳；消息仍可补充用户当次要求。 */
 const DISTILLED_EXPERIENCE = {
   category: 'workflow',
   topic: 'payment-gateway-retry-design',
@@ -102,15 +136,20 @@ const DISTILLED_EXPERIENCE = {
   situation: ['支付模块需要统一重试策略。'],
   approach: ['网关设置 3 秒超时和 2 次重试。', '业务层生成并透传幂等键。'],
   reflection: ['本次只覆盖会话中提出的支付网关配置。'],
-  evidence: [{
-    messageId: stableMessageId(
-      'assistant',
-      CONVERSATION[3]?.text ?? '',
-      '2026-11-10T02:00:04.000Z',
-    ),
-    role: 'assistant',
-    quote: '好的，网关层超时 3 秒、重试 2 次，幂等键由业务层透传。',
-  }],
+  evidence: [
+    { kind: 'case', caseUri: CASE_A, quote: '网关层设置 3 秒超时和 2 次重试。' },
+    { kind: 'case', caseUri: CASE_B, quote: '业务层向网关透传幂等键。' },
+    {
+      kind: 'message',
+      messageId: stableMessageId(
+        'assistant',
+        CONVERSATION[3]?.text ?? '',
+        '2026-11-10T02:00:04.000Z',
+      ),
+      role: 'assistant',
+      quote: '好的，网关层超时 3 秒、重试 2 次，幂等键由业务层透传。',
+    },
+  ],
 } as const;
 
 /** 对照用例的抽取结果：显式「记住」时期望落到画像。 */
@@ -339,7 +378,7 @@ describe('被动捕获：普通 Codex 会话 → 记忆（真实容器 + 假模�
   it('experience_distill 写的 experiences 是 pending：不点「复核」就检索不到', async () => {
     await writeCodexSession(CONVERSATION);
     llm = await startModel({
-      extraction: { operations: [EXTRACTED_EVENT] },
+      extraction: { operations: [EXTRACTED_EVENT, ...EXTRACTED_CASES] },
       experiences: { experiences: [DISTILLED_EXPERIENCE] },
     });
     const configPath = await writeConfig(llm.baseUrl);
@@ -382,7 +421,7 @@ describe('被动捕获：普通 Codex 会话 → 记忆（真实容器 + 假模�
   it('报告里的 memoriesPendingReview 必须等于磁盘上待复核的记忆条数', async () => {
     await writeCodexSession(CONVERSATION);
     llm = await startModel({
-      extraction: { operations: [EXTRACTED_EVENT] },
+      extraction: { operations: [EXTRACTED_EVENT, ...EXTRACTED_CASES] },
       experiences: { experiences: [DISTILLED_EXPERIENCE] },
     });
     const configPath = await writeConfig(llm.baseUrl);
@@ -396,14 +435,14 @@ describe('被动捕获：普通 Codex 会话 → 记忆（真实容器 + 假模�
     });
     const pending = await container.services.memory.listPending(Uri.parse(SCOPE));
 
-    // 磁盘真相：1 条 active（events，来自 `memory_extract` + `memory_merge`）
-    // + 1 条 pending（experiences，来自 `experience_distill`）。
+    // 磁盘真相：3 条 active（events + 两个 cases，来自抽取与合并）
+    // + 1 条 pending（experiences，来自 Dreamer）。
     expect(pending.map((record) => record.uri.toString())).toEqual([EXPERIENCE_URI]);
 
     // 报告必须与磁盘一致。当前实现下是 0 / 1——两个计数都只看得见
     // `memory_diff.json` 里的那一条 events。
     expect(extraction.memoriesPendingReview).toBe(pending.length);
-    expect(extraction.memoriesExtracted).toBe(pending.length + 1);
+    expect(extraction.memoriesExtracted).toBe(pending.length + 3);
   });
 });
 

@@ -18,8 +18,7 @@ export function withCaseContext(
   if (cases.length === 0) return prompt;
   const entries = cases.map((record) => [
     `### ${record.uri.toString()}`,
-    `任务：${String(record.fields['task'] ?? '')}`,
-    `结果：${String(record.fields['outcome'] ?? '')}`,
+    `来源：${JSON.stringify(record.sources)}`,
     pageContent(record),
   ].join('\n'));
   return {
@@ -36,6 +35,29 @@ export function withCaseContext(
       },
     ],
   };
+}
+
+/** 当前归档刚写入的案例与检索预取案例按 URI 去重，并逐条求读权限。 */
+export async function relatedCasesForArchive(
+  currentCases: readonly MemoryRecord[],
+  prefetched: readonly MemoryRecord[],
+  currentArchive: Uri,
+  canUse: (uri: Uri) => Promise<boolean>,
+): Promise<readonly MemoryRecord[]> {
+  const records = new Map<string, MemoryRecord>();
+  for (const record of currentCases) {
+    if (record.sources.includes(currentArchive.toString())) {
+      records.set(record.uri.toString(), record);
+    }
+  }
+  for (const record of prefetched) records.set(record.uri.toString(), record);
+  return (
+    await Promise.all(
+      [...records.values()].map(
+        async (record) => await canUse(record.uri) ? [record] : [],
+      ),
+    )
+  ).flat();
 }
 
 /**
