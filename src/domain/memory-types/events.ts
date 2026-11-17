@@ -9,7 +9,11 @@ import type { MemoryTypeSchema } from '../memory-type.js';
  */
 export const eventsMemoryType = {
   type: 'events',
-  description: '决策、里程碑等一次性发生的事实',
+  description: [
+    '某个时间真实发生的事件、决定、承诺、进展或结果。',
+    '只记录发生本身与当时必要的背景，不把方案草稿、解题步骤、完整执行过程或可复用做法写成事件。',
+    '具体任务的尝试、参数、失败分支与结果归 `cases`；跨案例抽象归 `experiences`。',
+  ].join('\n'),
   directory: 'memories/events',
   filename: '{event}.md',
   operationMode: 'addOnly',

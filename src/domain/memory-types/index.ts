@@ -1,11 +1,12 @@
 /**
  * 内置记忆类型汇总（架构文档 §11.1）。
  *
- * 八个类型不多不少。查找用 `getMemoryType`，不要直接下标：`Record` 的下标会命中原型
+ * 九个类型不多不少。查找用 `getMemoryType`，不要直接下标：`Record` 的下标会命中原型
  * 链上的 `__proto__` / `constructor`，把模型给的类型名变成任意对象。
  */
 
 import type { MemoryTypeSchema } from '../memory-type.js';
+import { casesMemoryType } from './cases.js';
 import { entitiesMemoryType } from './entities.js';
 import { eventsMemoryType } from './events.js';
 import { experiencesMemoryType } from './experiences.js';
@@ -16,6 +17,7 @@ import { rulesMemoryType } from './rules.js';
 import { soulMemoryType } from './soul.js';
 
 export {
+  casesMemoryType,
   entitiesMemoryType,
   eventsMemoryType,
   experiencesMemoryType,
@@ -43,6 +45,7 @@ export const BUILTIN_MEMORY_TYPE_NAMES = [
   'preferences',
   'entities',
   'events',
+  'cases',
   'identity',
   'soul',
   'experiences',
@@ -52,7 +55,7 @@ export const BUILTIN_MEMORY_TYPE_NAMES = [
 export type MemoryType = (typeof BUILTIN_MEMORY_TYPE_NAMES)[number];
 
 /**
- * 八个内置类型，键必须是 `MemoryType` 的每个成员。
+ * 九个内置类型，键必须是 `MemoryType` 的每个成员。
  *
  * 查找用 `getMemoryType`，不要直接下标：`Record` 的下标会命中原型链上的
  * `__proto__` / `constructor`，把模型给的类型名变成任意对象。
@@ -62,6 +65,7 @@ export const BUILTIN_MEMORY_TYPES: Readonly<Record<MemoryType, MemoryTypeSchema>
   preferences: preferencesMemoryType,
   entities: entitiesMemoryType,
   events: eventsMemoryType,
+  cases: casesMemoryType,
   identity: identityMemoryType,
   soul: soulMemoryType,
   experiences: experiencesMemoryType,

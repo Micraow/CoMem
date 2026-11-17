@@ -321,10 +321,11 @@ L0 从 L1 正文提取，两层不会互相矛盾。**摘要是目录级的**，
 
 | 对话里出现 | 落到 |
 |---|---|
-| 稳定身份事实（名字、角色、沟通风格） | `profile`（`memories/profile.md`，单文件） |
+| 稳定身份事实（名字、年龄段、所在地、职业） | `profile`（`memories/profile.md`，单文件） |
 | 某天的决策、里程碑 | `events`（`memories/events/`） |
+| 一次具体任务的尝试、参数与结果 | `cases`（`memories/cases/`） |
 | 以后能照做的经验教训 | `experiences`（`memories/experiences/`，待复核） |
-| 喜好、习惯、取舍 | `preferences` |
+| 沟通风格、喜好、习惯、取舍 | `preferences` |
 
 「它把这件事写进 profile 了」是这次对话的内容被判成了稳定身份，不是 `remember` 的固定行为。想确认写了什么，直接看 `memories/` 下的文件。
 

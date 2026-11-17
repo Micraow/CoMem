@@ -9,6 +9,7 @@ import {
 } from '../../../src/domain/memory-type.js';
 import {
   BUILTIN_MEMORY_TYPES,
+  casesMemoryType,
   getMemoryType,
   preferencesMemoryType,
   profileMemoryType,
@@ -43,6 +44,12 @@ describe('renderPath', () => {
     }
     expect(renderPath(rules, { scenario: 'license-review', rule: 'must-locate-license' })).toBe(
       'memories/rules/license-review/must-locate-license.md',
+    );
+  });
+
+  it('cases 使用具体任务标识写入独立目录', () => {
+    expect(renderPath(casesMemoryType, { case: 'mips-sll-datapath' })).toBe(
+      'memories/cases/mips-sll-datapath.md',
     );
   });
 
@@ -132,8 +139,8 @@ describe('identityFields', () => {
 });
 
 describe('内置记忆类型', () => {
-  it('八个内置类型的键与 type 一致', () => {
-    expect(Object.keys(BUILTIN_MEMORY_TYPES)).toHaveLength(8);
+  it('九个内置类型的键与 type 一致', () => {
+    expect(Object.keys(BUILTIN_MEMORY_TYPES)).toHaveLength(9);
     for (const [type, memoryType] of Object.entries(BUILTIN_MEMORY_TYPES)) {
       expect(memoryType.type).toBe(type);
     }
@@ -147,6 +154,15 @@ describe('内置记忆类型', () => {
 
   it('getMemoryType 命中内置类型', () => {
     expect(getMemoryType('preferences')).toBe(preferencesMemoryType);
+    expect(getMemoryType('cases')).toBe(casesMemoryType);
+  });
+
+  it('cases 只承载具体任务，偏好与事件说明把稳定行为和真实发生分流', () => {
+    expect(casesMemoryType.description).toContain('具体任务案例');
+    expect(casesMemoryType.description).toContain('尝试');
+    expect(casesMemoryType.description).toContain('观察结果');
+    expect(preferencesMemoryType.description).toContain('跨会话稳定选择');
+    expect(getMemoryType('events')?.description).toContain('真实发生');
   });
 
   /**

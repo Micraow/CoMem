@@ -458,6 +458,8 @@ docker run -d \
 │       │       │   │   └── retrieval-pipeline.md
 │       │       │   ├── events/
 │       │       │   │   └── 2026-11-05-architecture-decision.md
+│       │       │   ├── cases/
+│       │       │   │   └── mips-sll-datapath.md
 │       │       │   ├── experiences/
 │       │       │   │   └── monorepo-migration.md   # 待复核
 │       │       │   └── rules/
@@ -585,6 +587,7 @@ alice 的代码风格偏好、正在做的 CoMem 项目，以及最近一次架�
 - `preferences/` —— 按话题组织的偏好
 - `entities/` —— 项目、组织等实体
 - `events/` —— 决策与里程碑
+- `cases/` —— 具体任务的尝试、参数与结果
 - `experiences/` —— 从执行结果蒸馏的经验
 - `rules/` —— 必须遵守的约束
 
@@ -605,6 +608,10 @@ CoMem 是一个面向 AI agent 的上下文记忆数据库，2026 年 9 月启�
 ### events/2026-11-05-architecture-decision.md
 
 决定采用单包 + 内部四层分层，不做 npm workspace 多包。
+
+### cases/mips-sll-datapath.md
+
+一次具体任务的输入、实际尝试和仿真结果。它不自动升级为通用经验。
 
 ### experiences/monorepo-migration.md
 
@@ -1977,7 +1984,7 @@ export const preferencesMemoryType = {
 
 **`memories/` 下不是记忆的文件会记一条 warn。** `read` / `listPending` 读 `.abstract.md` 这类文件时解析不出记忆 frontmatter（没有 `memory_type`），按「不存在」处理并记 `warn`——这是既有行为，不是新问题；看到日志里出现它，先确认读的 URI 是不是记忆文件。
 
-内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`identity`、`soul`、`experiences`、`rules`。
+内置类型：`profile`、`preferences`、`entities`、`events`（`addOnly`）、`cases`、`identity`、`soul`、`experiences`、`rules`。
 
 **浏览器新建记忆的路径也由服务端算。** 控制台的「新建记忆」只收类型、标题/主题与正文，提交到 `POST /memories`；`domain/memory-types/creation.ts` 的 `deriveCreationIdentity` 把标题映射成该类型的 identity 值（单段类型整份标题作值；`rules` 的 `{scenario}/{rule}.md` 按 `/` 分成两段；`events` 缺日期前缀时补今天的本地日期），再交给 `renderMemoryUri` / `renderPath` 用 schema 的 `filename` 模板渲染。响应带最终 URI，控制台只做跳转——路径规则仍然只有 `memories/` 下这一份，前端没有模板解析器。同类型同标题再次提交走 `upsertMemory` 的字段级合并，响应里的 `created` 区分「新建」与「更新」；`events` 是 `addOnly`，撞名返回 `ALREADY_EXISTS`。
 
@@ -1987,12 +1994,13 @@ export const preferencesMemoryType = {
 
 | 判定 | 内容 | 归位 |
 |---|---|---|
-| 收录 | 姓名或称谓、年龄段、籍贯与当前所在地、当前学历职业与雇主、关系状态、长期健康、稳定的沟通风格 | `profile` |
+| 收录 | 姓名或称谓、年龄段、籍贯与当前所在地、当前学历职业与雇主、关系状态、长期健康 | `profile` |
 | 日期型转变、已完成事件、做过的决定 | 「2026-10 离职」 | `events` |
-| 喜好、习惯、对做法的取舍 | 「偏好 2 空格缩进」 | `preferences` |
+| 沟通风格、喜好、习惯、对做法的取舍 | 「偏好 2 空格缩进」 | `preferences` |
 | 具体项目、库、工具、组织、第三方人物 | 「`Settings::nextHop` 是三级映射」 | `entities` |
-| 必须遵守的约束、可复用流程 | | `rules` / `experiences` |
-| 一次性技术细节、临时状态、推断、性格评价 | 类型签名、配置值、代码片段、「他很严谨」 | 丢弃 |
+| 一次具体任务的尝试、参数与结果 | 「给 MIPS 添加 sll，仿真通过」 | `cases` |
+| 必须遵守的约束、跨案例可复用流程 | | `rules` / `experiences` |
+| 一次性技术细节、临时状态、推断、性格评价、无保留价值的一次计算 | 类型签名、代码片段、「他很严谨」 | 丢弃或留在原会话 |
 
 **格式契约**：正文是一组 bullet（不带小标题），每条以 `(as of YYYY-MM-DD)` 结尾、单条不超过 30 字（日期后缀不算），同一可变状态只留最新值。
 

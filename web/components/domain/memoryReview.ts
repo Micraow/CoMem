@@ -12,13 +12,14 @@ const TYPE_IDENTITY_KEYS: Readonly<Record<string, readonly string[]>> = {
   preferences: ['topic'],
   entities: ['name'],
   events: ['event'],
+  cases: ['case'],
   identity: ['name'],
   soul: ['name'],
   experiences: ['topic'],
   rules: ['rule'],
 }
 
-const GENERIC_IDENTITY_KEYS = ['topic', 'rule', 'event', 'name', 'scenario'] as const
+const GENERIC_IDENTITY_KEYS = ['topic', 'rule', 'event', 'case', 'name', 'scenario'] as const
 
 export interface ReviewCitation {
   readonly uri: string

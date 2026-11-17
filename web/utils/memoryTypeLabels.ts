@@ -2,7 +2,7 @@
  * 记忆类型 → 中文名与徽章配色（复核队列、检索命中共用一份）。
  *
  * 取值来自 `src/domain/memory-types/index.ts` 的 `BUILTIN_MEMORY_TYPE_NAMES`：内置
- * 八个类型，`BUILTIN_MEMORY_TYPES` 的键、`TTL_EXEMPT_MEMORY_TYPES` 的成员、
+ * 九个类型，`BUILTIN_MEMORY_TYPES` 的键、`TTL_EXEMPT_MEMORY_TYPES` 的成员、
  * `MemoryRecord.memoryType` 的取值都从那个数组派生，顺序也就是这里与提示词里的展示
  * 顺序。
  *
@@ -16,7 +16,7 @@
  *
  * 读路径**刻意开放**：`src/services/memory/document.ts` 的
  * `MemoryDocument.memoryType` 是 `string`，注释写明「`read` 不该因为一个自定义类型
- * 没注册进内置表而返回不存在」。所以这两个函数也接受任意字符串——内置八个翻译成
+ * 没注册进内置表而返回不存在」。所以这两个函数也接受任意字符串——内置九个翻译成
  * 中文名，其余原样输出。把入参收窄成 `MemoryType` 会把「写进去了、界面显示不出来」
  * 变成编译期拒绝，而自定义类型是合法数据；统一显示成「未知」同样是删掉它的名字。
  *
@@ -30,6 +30,7 @@ export const MEMORY_TYPES = [
   'preferences',
   'entities',
   'events',
+  'cases',
   'identity',
   'soul',
   'experiences',
@@ -44,6 +45,7 @@ const MEMORY_TYPE_LABEL = {
   preferences: '偏好',
   entities: '实体',
   events: '事件',
+  cases: '案例',
   identity: '身份',
   soul: '原则',
   experiences: '经验',
@@ -59,6 +61,7 @@ const MEMORY_TYPE_VARIANT = {
   preferences: 'gray',
   entities: 'gray',
   events: 'gray',
+  cases: 'gray',
   identity: 'gray',
   soul: 'gray',
   experiences: 'blue',

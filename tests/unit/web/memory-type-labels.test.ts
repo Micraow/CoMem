@@ -5,7 +5,7 @@
  * 控制台是独立包，不能 `import` 领域类型，所以取值在两边各声明了一份。那份重复是
  * 构造成本，不是设计选择：这里把「两份必须一样」变成测试失败，否则它会静默漂移成
  * 「服务端多一个记忆类型、界面显示英文原值」——`ReviewList.vue` 与 `HitList.vue`
- * 改之前就是这个状态：八个内置类型里只有 `experiences` / `rules` 有配色，名字全部
+ * 改之前就是这个状态：早期内置类型里只有 `experiences` / `rules` 有配色，名字全部
  * 直接打印原值。
  *
  * 断言里写的是**文档里的取值**（硬编码，架构文档 §11.1 的清单），不是从实现里推导
@@ -29,12 +29,13 @@ import {
 } from '../../../web/utils/memoryTypeLabels.js'
 
 describe('记忆类型文案', () => {
-  it('清单是文档里的八个，且与领域清单双向一致', () => {
+  it('清单是文档里的九个，且与领域清单双向一致', () => {
     expect([...MEMORY_TYPES]).toEqual([
       'profile',
       'preferences',
       'entities',
       'events',
+      'cases',
       'identity',
       'soul',
       'experiences',
@@ -59,6 +60,7 @@ describe('记忆类型文案', () => {
       preferences: 'preferences',
       entities: 'entities',
       events: 'events',
+      cases: 'cases',
       identity: 'identity',
       soul: 'soul',
       experiences: 'experiences',
@@ -69,6 +71,7 @@ describe('记忆类型文案', () => {
       preferences: 'preferences',
       entities: 'entities',
       events: 'events',
+      cases: 'cases',
       identity: 'identity',
       soul: 'soul',
       experiences: 'experiences',
@@ -80,12 +83,13 @@ describe('记忆类型文案', () => {
     expect(Object.keys(domainToWeb).sort()).toEqual([...DOMAIN_MEMORY_TYPES].sort())
   })
 
-  it('八个类型都有中文名，顺序即清单顺序', () => {
+  it('九个类型都有中文名，顺序即清单顺序', () => {
     expect(MEMORY_TYPES.map(memoryTypeLabelOf)).toEqual([
       '画像',
       '偏好',
       '实体',
       '事件',
+      '案例',
       '身份',
       '原则',
       '经验',
@@ -103,6 +107,7 @@ describe('记忆类型文案', () => {
 
   it('徽章配色沿用复核闸门的语义', () => {
     expect(MEMORY_TYPES.map(memoryTypeVariantOf)).toEqual([
+      'gray',
       'gray',
       'gray',
       'gray',

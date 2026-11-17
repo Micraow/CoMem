@@ -4,6 +4,7 @@ import { ComemError } from '../../../src/domain/errors.js';
 import { renderPath } from '../../../src/domain/memory-type.js';
 import { deriveCreationIdentity } from '../../../src/domain/memory-types/creation.js';
 import {
+  casesMemoryType,
   eventsMemoryType,
   preferencesMemoryType,
   profileMemoryType,
@@ -44,5 +45,13 @@ describe('deriveCreationIdentity', () => {
     }
     expect(caught).toBeInstanceOf(ComemError);
     expect((caught as ComemError).code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('cases 用具体任务名生成文件名，不伪造日期', () => {
+    const identity = deriveCreationIdentity(casesMemoryType, ' MIPS sll 数据通路 ', NOW);
+    expect(identity).toEqual({ case: 'MIPS-sll-数据通路' });
+    expect(renderPath(casesMemoryType, identity)).toBe(
+      'memories/cases/MIPS-sll-数据通路.md',
+    );
   });
 });

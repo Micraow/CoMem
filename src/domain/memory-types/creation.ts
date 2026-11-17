@@ -10,7 +10,7 @@
  * | 占位符 | 类型 | 标题怎么用 |
  * |---|---|---|
  * | 0 个 | `profile` / `identity` / `soul` | 填 identity 字段（`name`），路径固定 |
- * | 1 个 | `preferences` / `entities` / `events` / `experiences` | 整份标题填那个占位符 |
+ * | 1 个 | `preferences` / `entities` / `events` / `cases` / `experiences` | 整份标题填那个占位符 |
  * | 多个 | `rules`（`{scenario}/{rule}.md`） | 标题按 `/` 分段，依次填 |
  *
  * `events` 的 `event` 字段约定是 `YYYY-MM-DD-<slug>`（`events.ts` 的字段描述），

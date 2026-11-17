@@ -2,12 +2,19 @@ import { validateOperations, type ConsolidationOperation } from '../../domain/co
 import { ComemError } from '../../domain/errors.js';
 import type { LlmPrompt } from '../../domain/llm.js';
 import { memoryContentOf } from '../../domain/memory-type.js';
+import { casesMemoryType } from '../../domain/memory-types/cases.js';
 import { Uri } from '../../domain/uri.js';
 import type { StepContext } from '../commit/pipeline.js';
-import { pageContent, stripToolParts } from '../commit/steps/memory-extract.js';
+import {
+  DEFAULT_PREFETCH_TOP_N,
+  pageContent,
+  retrievalQuery,
+  stripToolParts,
+} from '../commit/steps/memory-extract.js';
 import type { MemoryWriteResult } from '../memory.js';
 import { applyPlans } from './apply.js';
 import { buildExperiencePrompt } from './archive-prompt.js';
+import { unreadCaseMutations, withCaseContext } from './cases.js';
 import { userEvidence, type PreferenceEvidence } from './evidence.js';
 import {
   existingExperienceFromRecord,
@@ -40,18 +47,33 @@ export class DreamerService {
     const messages = stripToolParts(context.messages);
     if (messages.length === 0) return [];
     const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
-    const { catalog, existing, entities } = await experienceContext(archive, context, authorize);
+    const [{ catalog, existing, entities }, caseCandidates] = await Promise.all([
+      experienceContext(archive, context, authorize),
+      archive.memory.prefetch(
+        context.scopeUri,
+        casesMemoryType,
+        retrievalQuery(context.messages),
+        DEFAULT_PREFETCH_TOP_N,
+      ),
+    ]);
+    const relatedCases = (
+      await Promise.all(
+        caseCandidates.map(
+          async (record) => await authorize(record.uri) ? [record] : [],
+        ),
+      )
+    ).flat();
     const currentEvidence = context.scopeUri.scope === 'user' ? userEvidence(context.archiveUri, context.messages) : [];
     const evidence = currentEvidence.length === 0 ? [] : [...currentEvidence, ...await archive.evidence(context.scopeUri, context.archiveUri)];
     const preferences = await explicitPreferenceContext(archive, context, authorize);
-    const base = buildExperiencePrompt({
+    const base = withCaseContext(buildExperiencePrompt({
       catalog,
       messages,
       existing,
       preferences,
       today: new Date().toISOString().slice(0, 10),
       entities: entities.map((record, index) => ({ pageId: index + 1, content: pageContent(record), aliases: record.fields['aliases'] })),
-    });
+    }), relatedCases);
     const explicit = evidence.some(({ session }) => !session.equals(currentEvidence[0]?.session ?? session))
       ? preferences : [];
     let output = await this.#model(withInferences(base, evidence, explicit));
@@ -75,14 +97,14 @@ export class DreamerService {
         loaded.push(existingExperienceFromRecord(record));
         readableTopics.add(topic);
       }
-      const retryBase = buildExperiencePrompt({
+      const retryBase = withCaseContext(buildExperiencePrompt({
         catalog,
         messages,
         existing: loaded,
         preferences,
         today: new Date().toISOString().slice(0, 10),
         entities: entities.map((record, index) => ({ pageId: index + 1, content: pageContent(record), aliases: record.fields['aliases'] })),
-      });
+      }), relatedCases);
       const retryPrompt = withInferences(retryBase, evidence, explicit);
       output = await this.#model({
         ...retryPrompt,
@@ -178,6 +200,14 @@ export class DreamerService {
       if (output.action !== 'read') {
         if (output.action !== 'finish') throw new ComemError('INVALID_ARGUMENT', 'Dreamer 手动整理需要 read 或 finish 动作。');
         const operations = normalizeOperations(output);
+        const unreadCases = unreadCaseMutations(scope, operations, reads);
+        if (unreadCases.length > 0) {
+          throw new ComemError(
+            'INVALID_ARGUMENT',
+            '整理具体案例前必须先读取正文；未读取的案例不会被更新或删除。',
+            { unreadCases },
+          );
+        }
         trace.push({ iteration, action: 'finish', readUris: [], summary: describeOperations(operations) });
         return { operations, trace, inferences: output.inferences };
       }
