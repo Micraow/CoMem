@@ -40,7 +40,7 @@ hermes memory setup
 hermes memory status
 ```
 
-在 `hermes memory setup` 中选择 **CoMem**，填入上面的隔离 CoMem 地址；认证开启时填写同一账号的 API Key。Hermes 会把密钥保存到隔离配置目录的 `.env`，变量名是 `COMEM_TOKEN`。不要读取、复制或展示现有配置里的密钥。非敏感配置也可按 [Memory Provider 说明](../integrations/hermes-memory/README.md) 手动写入。无 API Key 的回环连接会以 `server.subject`（默认 `user:local`）写入；此时控制台也必须登录这个账号。
+在 `hermes memory setup` 中选择 **CoMem**，填入上面的隔离 CoMem 地址，并优先填写控制台当前账号所属的 API Key。表单默认使用 `COMEM_TOKEN` 作为密钥环境变量名，Hermes 会把它保存到隔离配置目录的 `.env`；`COMEM_BASE_URL` 可覆盖服务地址。推荐始终使用同一账号的 Key，包括回环连接。无 Key 且 `auth.trustLoopback: true` 时会以 `server.subject`（默认 `user:local`）写入，可能与控制台登录账号不同。不要读取、复制或展示现有配置里的密钥。非敏感配置也可按 [Memory Provider 说明](../integrations/hermes-memory/README.md) 手动写入。
 
 启动这个隔离配置的 Hermes 网关并打开新会话，告诉它一条值得长期保留的偏好，例如「我的每周读书笔记标题固定用『纸舟』」。然后在 CoMem 控制台检查会话到达、归档和记忆复核；再在 Hermes 新开会话，问「我通常给每周读书笔记起什么标题？」。配置状态、会话归档和实际召回是三项不同的检查。归档完成后 live `messageCount` 可以是 0，`lastCommitAt` 才是提交成功的证据；不能用任务列表是否为空单独判断采集失败。
 

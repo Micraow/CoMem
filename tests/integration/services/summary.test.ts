@@ -657,7 +657,7 @@ describe('锁内不得跨越慢操作（§10.6）', () => {
     expect((await summaryFiles(PREFERENCES)).abstract).toBe('慢摘要');
   });
 
-  it('慢生成期间到达的改动不被吞：pending 归零后再次加回，下一轮再重算', async () => {
+  it('慢生成期间到达的额外改动不被本轮快照消费', async () => {
     await makeDirectory(PREFERENCES);
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
     await seedRow(STYLE);
@@ -671,7 +671,7 @@ describe('锁内不得跨越慢操作（§10.6）', () => {
     };
 
     const service = createService({ generator: slowGenerator });
-    // 生成期间模拟一次并发写把 pending 加回（`markStale` 之外的写者）。
+    // 生成期间模拟一次并发写增加 pending（`markStale` 之外的写者）。
     const inflight = service.markStale(Uri.parse(PREFERENCES));
     await new Promise((resolve) => setTimeout(resolve, 20));
     db.prepare('UPDATE node SET summary_pending = summary_pending + 1 WHERE uri = ?').run(
@@ -679,8 +679,399 @@ describe('锁内不得跨越慢操作（§10.6）', () => {
     );
     await inflight;
 
-    // 第一段清零 → 慢操作期间的 +1 留下：写回时 consume(快照) 不应把它抹成 0。
+    // 本轮只消费生成前记下的快照；慢操作期间的 +1 在写回后仍然保留。
     expect(freshness(PREFERENCES).pending).toBe(1);
+  });
+});
+
+describe('同目录摘要刷新合并', () => {
+  function deferred(): {
+    readonly promise: Promise<void>;
+    readonly resolve: () => void;
+  } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  it('生成期间到达的重复失效共享一次模型调用', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(PREFERENCES, {
+      kind: 'directory',
+      baseline: stableDigest(STABLE_ABSTRACT),
+      entries: 1,
+    });
+    await seedRow(STYLE);
+
+    const entered = deferred();
+    const release = deferred();
+    let calls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          calls += 1;
+          entered.resolve();
+          await release.promise;
+        }
+        return {
+          abstract: STABLE_ABSTRACT,
+          overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const first = service.markStale(Uri.parse(PREFERENCES));
+    await entered.promise;
+    const second = service.markStale(Uri.parse(PREFERENCES));
+    const third = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    await Promise.all([first, second, third]);
+    expect(calls).toBe(1);
+  });
+
+  it('显式 regenerate 与并发 observer 失效合并，不重复生成同一输入', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(PREFERENCES, {
+      kind: 'directory',
+      baseline: stableDigest(STABLE_ABSTRACT),
+      entries: 1,
+    });
+    await seedRow(STYLE);
+
+    const entered = deferred();
+    const release = deferred();
+    let preferenceCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          preferenceCalls += 1;
+          entered.resolve();
+          await release.promise;
+        }
+        return {
+          abstract: STABLE_ABSTRACT,
+          overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const regenerated = service.regenerate(Uri.parse(PREFERENCES));
+    await entered.promise;
+    const invalidated = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    await Promise.all([regenerated, invalidated]);
+    expect(preferenceCalls).toBe(1);
+  });
+
+  it('生成期间输入确实变化时只追加一轮，最终摘要使用最新输入', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n第一版。\n');
+    await seedRow(PREFERENCES, {
+      kind: 'directory',
+      baseline: stableDigest('第一版摘要'),
+      entries: 1,
+    });
+    await seedRow(STYLE, {
+      abstract: '第一版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第一版。\n'),
+    });
+    await seedRow(MEMORIES, {
+      kind: 'directory',
+      baseline: stableDigest(STABLE_ABSTRACT),
+      entries: 1,
+    });
+
+    const firstEntered = deferred();
+    const release = deferred();
+    let preferenceCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() !== PREFERENCES) {
+          return {
+            abstract: STABLE_ABSTRACT,
+            overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+            degraded: false,
+          };
+        }
+        preferenceCalls += 1;
+        if (preferenceCalls === 1) {
+          firstEntered.resolve();
+          await release.promise;
+        }
+        const abstract = input.children[0]?.abstract ?? '';
+        return {
+          abstract,
+          overview: `# preferences\n\n${abstract}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const first = service.markStale(Uri.parse(PREFERENCES));
+    await firstEntered.promise;
+    await writeText(STYLE, '# 风格\n\n第二版。\n');
+    await seedRow(STYLE, {
+      abstract: '第二版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第二版。\n'),
+    });
+    const second = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    await Promise.all([first, second]);
+    expect(preferenceCalls).toBe(2);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('第二版摘要');
+  });
+
+  it('共享一次生成的并发通知只向父目录传播一次', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 1 });
+    await seedRow(STYLE);
+    await seedRow(MEMORIES, {
+      kind: 'directory',
+      baseline: stableDigest('旧摘要'),
+      entries: 100,
+    });
+
+    const entered = deferred();
+    const release = deferred();
+    let preferenceCalls = 0;
+    let memoriesCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          preferenceCalls += 1;
+          entered.resolve();
+          await release.promise;
+        }
+        if (input.uri.toString() === MEMORIES) {
+          memoriesCalls += 1;
+        }
+        return {
+          abstract: STABLE_ABSTRACT,
+          overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const first = service.markStale(Uri.parse(PREFERENCES));
+    await entered.promise;
+    const second = service.markStale(Uri.parse(PREFERENCES));
+    const third = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    const results = await Promise.all([first, second, third]);
+    expect(preferenceCalls).toBe(1);
+    expect(memoriesCalls).toBe(0);
+    expect(results[0]?.markedStale).toEqual([MEMORIES]);
+    expect(results[1]?.markedStale).toEqual([]);
+    expect(results[2]?.markedStale).toEqual([]);
+    expect(freshness(MEMORIES).pending).toBe(1);
+  });
+
+  it('生成期间的真实写入未达到阈值时保留 pending，不为同一输入再调模型', async () => {
+    await makeDirectory(PREFERENCES);
+    const files = [
+      STYLE,
+      ...Array.from({ length: 49 }, (_, index) => `${PREFERENCES}/note-${String(index).padStart(2, '0')}.md`),
+    ];
+    for (const [index, file] of files.entries()) {
+      await writeText(file, `第 ${index} 份正文。\n`);
+      await seedRow(file, index === 0 ? { abstract: '旧摘要' } : {});
+    }
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: files.length });
+
+    const entered = deferred();
+    const release = deferred();
+    let calls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() !== PREFERENCES) {
+          return {
+            abstract: STABLE_ABSTRACT,
+            overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+            degraded: false,
+          };
+        }
+        calls += 1;
+        entered.resolve();
+        await release.promise;
+        return {
+          abstract: input.children[0]?.abstract ?? '',
+          overview: `# preferences\n\n${input.children[0]?.abstract ?? ''}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const first = service.markStale(Uri.parse(PREFERENCES));
+    await entered.promise;
+    await writeText(STYLE, '# 风格\n\n生成期间的新正文。\n');
+    await seedRow(STYLE, {
+      abstract: '新摘要',
+      bodyDigest: stableDigest('# 风格\n\n生成期间的新正文。\n'),
+    });
+    const second = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    await Promise.all([first, second]);
+    expect(calls).toBe(1);
+    expect(freshness(PREFERENCES).pending).toBe(1);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('旧摘要');
+  });
+
+  it('显式 regenerate 与真实写入失效并发时收敛到写入后的输入', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n第一版。\n');
+    await seedRow(PREFERENCES, {
+      kind: 'directory',
+      baseline: stableDigest('第一版摘要'),
+      entries: 1,
+    });
+    await seedRow(STYLE, {
+      abstract: '第一版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第一版。\n'),
+    });
+
+    const entered = deferred();
+    const release = deferred();
+    let preferenceCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() !== PREFERENCES) {
+          return {
+            abstract: STABLE_ABSTRACT,
+            overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+            degraded: false,
+          };
+        }
+        preferenceCalls += 1;
+        if (preferenceCalls === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+        const abstract = input.children[0]?.abstract ?? '';
+        return {
+          abstract,
+          overview: `# preferences\n\n${abstract}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const regenerated = service.regenerate(Uri.parse(PREFERENCES));
+    await entered.promise;
+    await writeText(STYLE, '# 风格\n\n第二版。\n');
+    await seedRow(STYLE, {
+      abstract: '第二版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第二版。\n'),
+    });
+    const invalidated = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    await Promise.all([regenerated, invalidated]);
+    expect(preferenceCalls).toBe(2);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('第二版摘要');
+  });
+
+  it('生成抛错后清理 single-flight，并保留待刷新计数供下一次重试', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 1 });
+    await seedRow(STYLE);
+
+    let preferenceCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          preferenceCalls += 1;
+          if (preferenceCalls === 1) {
+            throw new Error('generator failed');
+          }
+        }
+        return {
+          abstract: STABLE_ABSTRACT,
+          overview: `# ${input.uri.name}\n\n${STABLE_ABSTRACT}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    await expect(service.markStale(Uri.parse(PREFERENCES))).rejects.toThrow('generator failed');
+    expect(freshness(PREFERENCES).pending).toBe(1);
+
+    await service.markStale(Uri.parse(PREFERENCES));
+    expect(preferenceCalls).toBe(2);
+    expect(freshness(PREFERENCES).pending).toBe(0);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe(STABLE_ABSTRACT);
+  });
+
+  it('生成失败时也保留生成期间到达的尾批，下一次重试不会丢写入', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n第一版。\n');
+    await seedRow(PREFERENCES, { kind: 'directory', baseline: null, entries: 1 });
+    await seedRow(STYLE, {
+      abstract: '第一版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第一版。\n'),
+    });
+
+    const entered = deferred();
+    const release = deferred();
+    let preferenceCalls = 0;
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        if (input.uri.toString() === PREFERENCES) {
+          preferenceCalls += 1;
+          if (preferenceCalls === 1) {
+            entered.resolve();
+            await release.promise;
+            throw new Error('generator failed');
+          }
+        }
+        const abstract = input.children[0]?.abstract ?? '';
+        return {
+          abstract,
+          overview: `# ${input.uri.name}\n\n${abstract}`,
+          degraded: false,
+        };
+      },
+    };
+    const service = createService({ generator });
+
+    const first = service.markStale(Uri.parse(PREFERENCES));
+    await entered.promise;
+    await writeText(STYLE, '# 风格\n\n第二版。\n');
+    await seedRow(STYLE, {
+      abstract: '第二版摘要',
+      bodyDigest: stableDigest('# 风格\n\n第二版。\n'),
+    });
+    const second = service.markStale(Uri.parse(PREFERENCES));
+    release.resolve();
+
+    const failed = await Promise.allSettled([first, second]);
+    expect(failed.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    expect(freshness(PREFERENCES).pending).toBe(2);
+
+    await service.markStale(Uri.parse(PREFERENCES));
+    expect(preferenceCalls).toBe(2);
+    expect(freshness(PREFERENCES).pending).toBe(0);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('第二版摘要');
   });
 });
 

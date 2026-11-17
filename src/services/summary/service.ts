@@ -23,10 +23,8 @@ import type { Uri } from '../../domain/uri.js';
 
 import type { AclService } from '../acl.js';
 
-import { readFreshness } from './freshness.js';
-import { summarize } from './generation.js';
 import { invalidateNode, propagateFrom } from './invalidate.js';
-import { persistSummary, withDirectoryLock } from './persist.js';
+import { SummaryRefreshCoordinator } from './refresh.js';
 import type {
   InvalidationResult,
   SummaryContext,
@@ -46,6 +44,7 @@ export class SummaryService {
   readonly #thresholds: FreshnessThresholds;
   readonly #acl: Pick<AclService, 'materializeNode'>;
   readonly #locks: PathLockManager | undefined;
+  readonly #refresher: SummaryRefreshCoordinator;
 
   constructor(deps: SummaryServiceDeps) {
     this.#nodes = deps.nodes;
@@ -59,6 +58,7 @@ export class SummaryService {
     this.#thresholds = deps.config.freshness ?? DEFAULT_FRESHNESS_THRESHOLDS;
     this.#acl = deps.acl;
     this.#locks = deps.locks;
+    this.#refresher = new SummaryRefreshCoordinator(this.#context());
   }
 
   /**
@@ -68,7 +68,6 @@ export class SummaryService {
    * 调用方要的是「重建」，跳过「看起来还新」的目录只会让显式重建变成空操作。
    */
   async regenerate(rootUri: Uri): Promise<readonly string[]> {
-    const ports = this.#context();
     const recomputed: string[] = [];
 
     const visit = async (directoryUri: Uri): Promise<void> => {
@@ -78,14 +77,7 @@ export class SummaryService {
           await visit(entry.uri);
         }
       }
-      // 慢操作（模型调用）在锁外生成，只在写回时持锁（§10.6「锁内不得跨越慢操作」）。
-      // 快照在生成**之前**读：写回时 `pending = max(pending - 快照, 0)`，生成期间到达
-      // 的改动留在计数里（`consumeChanges`）。
-      const snapshot = readFreshness(ports.db, directoryUri.toString()).pendingChanges;
-      const summary = await summarize(ports, directoryUri);
-      await withDirectoryLock(ports.locks, directoryUri, () =>
-        persistSummary(ports, directoryUri, summary, snapshot, null),
-      );
+      await this.#refresher.force(directoryUri);
       recomputed.push(directoryUri.toString());
     };
 
@@ -105,7 +97,11 @@ export class SummaryService {
    * 有测试：正文没变（第 2 步）与「只记脏」（第 4 步的 else 分支）。
    */
   async invalidate(nodeUri: Uri): Promise<InvalidationResult> {
-    return invalidateNode(this.#context(), nodeUri);
+    return invalidateNode(
+      this.#context(),
+      nodeUri,
+      (directoryUri, changes) => this.#refresher.invalidate(directoryUri, changes),
+    );
   }
 
   /**
@@ -121,7 +117,12 @@ export class SummaryService {
    * `directoryUri` 是要标脏的目录本身（不是被写的文件），因为它没有文件可供比较。
    */
   async markStale(directoryUri: Uri): Promise<InvalidationResult> {
-    return propagateFrom(this.#context(), directoryUri, directoryUri);
+    return propagateFrom(
+      this.#context(),
+      directoryUri,
+      directoryUri,
+      (directory, changes) => this.#refresher.invalidate(directory, changes),
+    );
   }
 
   /**

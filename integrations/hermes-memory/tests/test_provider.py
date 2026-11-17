@@ -653,6 +653,16 @@ class ProviderTests(unittest.TestCase):
         provider = self.module.CoMemMemoryProvider({"base_url": "http://127.0.0.1:1933"})
         self.assertEqual(provider._settings.base_url, "http://127.0.0.1:1933/api/v1")
 
+    def test_config_schema_recommends_console_account_key(self) -> None:
+        schema = {
+            field["key"]: field
+            for field in self.module.CoMemMemoryProvider().get_config_schema()
+        }
+        token = schema["token"]
+        self.assertEqual(token["env_var"], "COMEM_TOKEN")
+        self.assertIn("same account", token["description"])
+        self.assertIn("loopback", token["description"])
+
     def test_no_explicit_config_reads_the_active_hermes_profile(self) -> None:
         home = tempfile.TemporaryDirectory()
         try:

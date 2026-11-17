@@ -22,7 +22,7 @@ hermes memory status
 
 Choose **CoMem** in the provider list. The same provider configuration is available in Hermes's memory-provider panel. `hermes memory setup comem` activates CoMem with the default local address, but does not prompt for remote or custom settings.
 
-The default API address is `http://127.0.0.1:1933/api/v1`. For a loopback CoMem server with `auth.trustLoopback: true`, no credential is required, but the provider then acts as the server's configured `server.subject` (`user:local` by default). Sign in to the CoMem console with that same account, or give both the provider and MCP server an API key for the account you use in the console. For a remote or container endpoint, run the interactive setup and enter a CoMem API key when prompted. Hermes stores the key as `COMEM_TOKEN` in the profile's `.env`.
+The default API address is `http://127.0.0.1:1933/api/v1`. The setup form names `COMEM_TOKEN` as the default environment variable for the API key and stores an entered key under that name in the profile's `.env`; `COMEM_BASE_URL` can override the endpoint. Use an API key issued to the same CoMem account that you use in the console. That is also the recommended setup for a loopback server: without a key, `auth.trustLoopback: true` authenticates the provider as the server's configured `server.subject` (`user:local` by default), which may not be the browser login account. For a remote or container endpoint, the API key is required.
 
 The equivalent non-secret configuration is:
 

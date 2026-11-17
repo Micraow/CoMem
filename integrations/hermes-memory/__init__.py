@@ -372,7 +372,11 @@ class CoMemMemoryProvider(MemoryProvider):
             {
                 "key": "token",
                 "label": "CoMem API key",
-                "description": "Optional for a loopback endpoint with loopback trust enabled.",
+                "description": (
+                    "Recommended: a CoMem API key for the same account you use in the CoMem "
+                    "console. Leave empty only for a loopback endpoint with loopback trust; "
+                    "that mode uses the server's configured subject."
+                ),
                 "secret": True,
                 "env_var": "COMEM_TOKEN",
             },

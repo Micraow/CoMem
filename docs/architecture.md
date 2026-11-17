@@ -1577,7 +1577,11 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 **为什么是「事件计数」而不是「脏标记」。** 同一个文件反复改，脏标记只算一次，永远到不了阈值。计数才反映「这个目录的摘要落后了多少次改动」。
 
-**为什么消费时要减而不是清零。** 重算过程中可能又有新改动进来。写回时 `pending = max(pending - 消费时的快照, 0)`，生成期间到达的改动保留。
+**为什么消费时要减而不是清零。** 开始生成前先把本轮计数持久化并记下快照，不提前清零；写回成功后执行 `pending = max(pending - 消费时的快照, 0)`。生成失败时计数仍在，下一次失效或健康检查能看到待刷新工作；生成期间到达的改动也继续保留。
+
+**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要）。尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型；输入确实变化，则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
+
+**摘要写入不反向触发失效。** `.abstract.md` / `.overview.md` 由 `MetadataFileStore` 直接原子写入；`IndexObserver` 只接收正文写入、删除与移动通知，不监听这两个元数据文件。摘要生成因此不会通过 observer 递归触发自己。
 
 **两个入口，语义不同。** `SummaryService.invalidate(nodeUri)` 先比较正文 digest 是否变化再传播（上面第 2 步）；`SummaryService.markStale(directoryUri)` 跳过比较，从这个目录本身开始传播。**已经知道内容确实变了的调用方必须用 `markStale`**：批量写入的顺序是「写文件 → 批量 `index.upsert` → 标脏」，等标脏被调用时索引里已经是新 digest，`invalidate` 的比较必然相等，整条传播链被静默跳过——文件写了、目录摘要停在旧内容，不报错也不失败。用错的另一种形态更彻底：`invalidate` 从 `node.parent()` 开始传播，把目录 URI 传给它时目标目录连一次判定都拿不到，第一次写入后该目录的摘要直接是 `null`（不是「停在旧内容」）。规则收在 `src/services/write-through.ts`：它的依赖类型是 `Pick<SummaryService, 'markStale'>`，实现里连 `invalidate` 都拿不到；`tests/integration/services/write-through.test.ts` 的替身也只实现 `markStale`，`markStale` 被换成 `invalidate` 时该用例的类型对不上。
 
@@ -1773,7 +1777,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 - `TREE` 与祖先 / 后代的 `EXACT` 互斥：一次慢 `EXACT` 会挡住整棵子树的写入与 `rm -r`。
 - 默认获取超时 5000 ms：慢操作一进锁，持有时间放大上百到上千倍，并发的写者 5 秒后直接 `CONFLICT`。
 
-**这条规则的来源是一次实测。** W83 用 `summary.generator: llm` 跑 ingest 时，`SummaryService.#invalidateDirectory` 把 `generator.generate`（模型调用）放在目录的 `EXACT` 锁里，摘要一算 7–9 秒；期间的提取写操作要拿祖先 `TREE` 锁，正好撞上这把手慢锁，5 秒后 `CONFLICT`。当时的绕法是「必须把 `summary.generator` 设成 `rule` 才能跑通 ingest」。修复是把 `#invalidateDirectory` 拆成三段：锁内判定 → **锁外生成** → 锁内写回，锁持有时间从 ≈9 秒降到几毫秒（见 `src/services/summary.ts` 该方法注释）。代价是「摘要可能比目录内容旧一拍」——这是可接受的：第一段锁已把 `pending` 清零，生成期间到达的改动会经 `markStale` 重新计数，下一轮失效再重算，最终收敛。
+**这条规则的来源是一次实测。** W83 用 `summary.generator: llm` 跑 ingest 时，`SummaryService.#invalidateDirectory` 把 `generator.generate`（模型调用）放在目录的 `EXACT` 锁里，摘要一算 7–9 秒；期间的提取写操作要拿祖先 `TREE` 锁，正好撞上这把手慢锁，5 秒后 `CONFLICT`。当时的绕法是「必须把 `summary.generator` 设成 `rule` 才能跑通 ingest」。修复把流程拆成锁内判定 → **锁外生成** → 锁内写回，锁持有时间从 ≈9 秒降到几毫秒。生成开始前持久化本轮 `pending` 快照，只有写回成功才消费；失败时计数保留。生成期间到达的改动由目录协调器组成尾批，在写回后比较输入 digest，必要时只为最新输入追加重算，最终收敛。
 
 **为什么 TREE 而不是只锁文件**：`rm -r resources/foo` 要保证「删索引 → 删文件」期间没有人往 `foo/` 里写。只锁 `foo` 自身挡不住写 `foo/bar.md` 的人。
 
@@ -2799,7 +2803,7 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 **`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
 覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
 的内容。`SummaryService` 对路径里含 `.history` 的目录直接返回 `unchanged`，摘要传播在
-那里停（`src/services/summary/invalidate.ts:167`）。
+那里停（`src/services/summary/refresh.ts:173`）。
 
 **`reconcile` 重放必须带上 `valid_*`。** 从磁盘重建索引行时，有效期从 frontmatter 重新
 解析（`src/services/reconcile.ts:372`），不取旧行。漏掉这一步（或退回只重放 status 与

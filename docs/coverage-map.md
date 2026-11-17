@@ -188,7 +188,7 @@
 | `excludeDelivered` / `maxQueries` / `readConcurrency` / `quotaPreset` 的逐请求覆盖 | 与全局配置重复；逐请求覆盖那一半没有调用方 | `grep` 全仓无 `excludeDelivered` / `readConcurrency`；`quotaPreset` 只在 `config/schema.ts:194`（配置项保留）与 `domain/assembly.ts:85` 出现 |
 | `SessionStatus` 的 `committing` / `committed` / `failed` | 三个值没有写入点，会话本身从不进入这些状态（归档失败表达在 `task.status`） | `domain/session.ts:23` 收敛为 `open` / `archived` |
 | `ArchivePhaseStatus.failed` | 阶段二终态失败只写 `task.status=failed`，归档停在 `ready`（同时是已知限制） | `domain/archive.ts:20` 的 `ArchivePhaseStatus` 只有 `preparing` / `ready`；`services/commit/pipeline.ts:185` 起无失败写入 |
-| `SummaryState` 与两个从不写入的 frontmatter 字段（`summary_state` / `summary_digest`） | 描述成活的失效机制，实际失效走索引三列 | `node.summary_baseline` / `summary_pending` / `summary_entries`（`migrations/0001_init.sql:132`）；`services/summary/service.ts:123` `markStale` |
+| `SummaryState` 与两个从不写入的 frontmatter 字段（`summary_state` / `summary_digest`） | 描述成活的失效机制，实际失效走索引三列 | `node.summary_baseline` / `summary_pending` / `summary_entries`（`migrations/0001_init.sql:132`）；`services/summary/service.ts:119` `markStale` |
 | `GroupMember.role` 的存储语义 | 列只写常量 `'member'`、永不参与授权，却让返回值出现「owner 但没有任何 owner 能力」 | `services/identity.ts:121` `roleOf` 从 `app_group.owner_user_id` 派生；显式写 `role` 现在 `INVALID_ARGUMENT`（用例 `admin-access-control.test.ts:438`「显式写 role → INVALID_ARGUMENT，不落成员行」） |
 | `GET /stats/memories` | 零调用方：实现、SQL、测试都在，路由表里没有它（`210a06f` 的提交说明给了删除前的行数） | `src/api/http/routes/` 下无该路由文件与 `/stats` 前缀；`docs/architecture.md` 的 §14 路由表已无该端点 |
 | `request_log` 上三个无查询使用的索引 | 只写不读的表，多维护三棵 B 树 | `migrations/0006_drop_request_log_indexes.sql`，只保留 `request_log_created` |

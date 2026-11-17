@@ -12,7 +12,7 @@
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import type { NodeRepository } from '../../adapters/sqlite/node-repository.js';
-import type { NodeKind } from '../../domain/node.js';
+import { stableDigest, type NodeKind } from '../../domain/node.js';
 import {
   extractAbstract,
   truncateToChars,
@@ -36,6 +36,12 @@ export interface SummaryGenerationPorts {
 /** 列一个目录的直接子项所需的端口。 */
 type SummaryChildPorts = Pick<SummaryGenerationPorts, 'store' | 'metadata' | 'nodes'>;
 
+export interface GeneratedDirectorySummary {
+  readonly summary: DirectorySummary;
+  /** 生成这份摘要时模型看到目录输入的稳定 digest。 */
+  readonly inputDigest: string;
+}
+
 /**
  * 生成一个目录的 L0 + L1（**只生成，不落盘**，§9.2）。
  *
@@ -49,7 +55,20 @@ export async function summarize(
   ports: SummaryGenerationPorts,
   directoryUri: Uri,
 ): Promise<DirectorySummary> {
-  const children = await summaryChildren(ports, directoryUri);
+  return (await summarizeWithInput(ports, directoryUri)).summary;
+}
+
+/**
+ * 生成摘要并返回输入 digest。
+ *
+ * 同一目录的生成在模型调用之外进行。期间到达的重复通知可以比较当前输入与
+ * 已完成生成的输入：digest 相同说明那次生成已经覆盖了它们，不必再打一次模型。
+ */
+export async function summarizeWithInput(
+  ports: SummaryGenerationPorts,
+  directoryUri: Uri,
+): Promise<GeneratedDirectorySummary> {
+  const { children, inputDigest } = await readSummaryInput(ports, directoryUri);
   const generated = await ports.generator.generate({ uri: directoryUri, children });
 
   const overview = truncateToChars(generated.overview, ports.config.overviewMaxChars);
@@ -58,7 +77,18 @@ export async function summarize(
     extractAbstract(overview),
     ports.config.abstractMaxChars,
   );
-  return { abstract, overview, degraded: generated.degraded };
+  return {
+    summary: { abstract, overview, degraded: generated.degraded },
+    inputDigest,
+  };
+}
+
+/** 当前目录摘要输入的 digest；不调用生成器。 */
+export async function summaryInputDigest(
+  ports: SummaryGenerationPorts,
+  directoryUri: Uri,
+): Promise<string> {
+  return (await readSummaryInput(ports, directoryUri)).inputDigest;
 }
 
 /**
@@ -67,10 +97,10 @@ export async function summarize(
  * 子项从磁盘列，不从索引列：磁盘是真相，索引可能落后（§7）。文件摘要取索引里的
  * `abstract`（§9.1 明确它作为父目录 L1 的输入），目录摘要取 `.abstract.md` 正文。
  */
-async function summaryChildren(
+async function readSummaryInput(
   ports: SummaryChildPorts,
   directoryUri: Uri,
-): Promise<readonly SummaryChild[]> {
+): Promise<{ readonly children: readonly SummaryChild[]; readonly inputDigest: string }> {
   const entries = await ports.store.list(directoryUri);
   const children: SummaryChild[] = [];
   for (const entry of entries) {
@@ -81,5 +111,27 @@ async function summaryChildren(
         : (ports.nodes.get(entry.uri.toString())?.abstract ?? '');
     children.push({ uri: entry.uri, name: entry.uri.name, kind, abstract });
   }
-  return children;
+  // ContentStore 已按名称排序；这里仍显式规范化，避免未来端口实现或并发列目录
+  // 让同一组子项因顺序不同算出不同 digest、再触发无意义的追加摘要。
+  children.sort((left, right) => {
+    if (left.name < right.name) return -1;
+    if (left.name > right.name) return 1;
+    const leftUri = left.uri.toString();
+    const rightUri = right.uri.toString();
+    if (leftUri < rightUri) return -1;
+    if (leftUri > rightUri) return 1;
+    return 0;
+  });
+  return {
+    children,
+    inputDigest: stableDigest(JSON.stringify({
+      uri: directoryUri.toString(),
+      children: children.map((child) => ({
+        uri: child.uri.toString(),
+        name: child.name,
+        kind: child.kind,
+        abstract: child.abstract,
+      })),
+    })),
+  };
 }

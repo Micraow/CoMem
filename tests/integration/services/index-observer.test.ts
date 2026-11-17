@@ -18,6 +18,11 @@ import { SqliteFtsIndex } from '../../../src/adapters/sqlite/retrieval-index.js'
 import type { EmbeddingProvider, EmbeddingResult } from '../../../src/domain/embedding.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
+import type {
+  DirectorySummary,
+  SummaryGenerator,
+  SummaryInput,
+} from '../../../src/domain/summary.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { InheritingAuthorizer } from '../../../src/bootstrap/container.js';
 import { AclService } from '../../../src/services/acl.js';
@@ -46,6 +51,8 @@ interface Harness {
 }
 
 interface HarnessOptions {
+  /** 默认用规则摘要；需要阻塞或计数时注入假生成器。 */
+  readonly summaryGenerator?: SummaryGenerator;
   /**
    * 注入一个**没有建表**的向量仓储，复现默认配置
    * （`providers.embedding.type === 'disabled'`，`ensureSchema` 不跑）。
@@ -110,7 +117,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     store,
     db,
     acl,
-    generator: new RuleSummarizer(),
+    generator: options.summaryGenerator ?? new RuleSummarizer(),
     logger,
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },
     locks,
@@ -320,6 +327,48 @@ describe('IndexObserver.onNodeWritten', () => {
     expect(summary?.abstract).toContain('note.md');
     // 摘要生成会写父目录自己的索引行（L0）。
     expect(harness.nodes.get(directory.toString())?.level).toBe('L0');
+  });
+
+  it('同一父目录的并发写后通知共享一次摘要生成', async () => {
+    const directory = Uri.parse(`${ROOT}/memories/preferences`);
+    const file = directory.child('note.md');
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredResolve = resolve;
+    });
+    let releaseResolve!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    const calls = new Map<string, number>();
+    const generator: SummaryGenerator = {
+      async generate(input: SummaryInput): Promise<DirectorySummary> {
+        const uri = input.uri.toString();
+        calls.set(uri, (calls.get(uri) ?? 0) + 1);
+        if (uri === directory.toString()) {
+          enteredResolve();
+          await release;
+        }
+        return { abstract: '偏好目录', overview: '# preferences\n\n偏好目录', degraded: false };
+      },
+    };
+    const local = await createHarness({ summaryGenerator: generator });
+    try {
+      await local.filesystem.write(file, '第一版。', PRINCIPALS);
+      const drained = local.observer.drain();
+      await entered;
+
+      await local.filesystem.write(file, '第二版。', PRINCIPALS);
+      await local.filesystem.write(file, '第三版。', PRINCIPALS);
+      releaseResolve();
+      await drained;
+
+      expect(calls.get(directory.toString())).toBe(1);
+      expect((await local.summary.read(directory))?.abstract).toBe('偏好目录');
+    } finally {
+      releaseResolve();
+      await local.close();
+    }
   });
 
   it('重写正文后 bodyDigest 跟着变', async () => {
