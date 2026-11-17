@@ -881,6 +881,10 @@ describe('会话与任务', () => {
     const task = resultOf(await inject({ method: 'GET', url: `/api/v1/tasks/${taskId}` }));
     expect((task['task'] as Record<string, unknown>)['status']).toBe('pending');
 
+    const recent = resultOf(await inject({ method: 'GET', url: '/api/v1/tasks?view=recent&status=pending&limit=1' }));
+    expect((recent['tasks'] as Record<string, unknown>[]).map((item) => item['id'])).toEqual([taskId]);
+    expect((await inject({ method: 'GET', url: '/api/v1/tasks?view=unknown' })).statusCode).toBe(400);
+
     const retry = await inject({ method: 'POST', url: `/api/v1/tasks/${taskId}/retry` });
     expect(retry.statusCode).toBe(409);
 

@@ -18,12 +18,8 @@ export const TASK_STATUSES = ['pending', 'running', 'done', 'failed'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 /**
- * `/tasks` 只会返回**可认领**的任务（§10.4）：`pending`，或租约过期的 `running`。
- *
- * 单独声明这个子集而不是让消费方用 `TaskStatus` 加 `??` 兜底：`done` / `failed`
- * 在这个接口里不会出现，为它们写文案是给「不会发生的状态」写代码；而用兜底又会把
- * 「真的出现了意外状态」变成空白。子集的每个成员都必须仍是 `TaskStatus`
- * （`satisfies`），删掉一个状态时这里跟着编译失败。
+ * 默认队列视图只返回可认领状态；`view=recent` 返回完整 TaskStatus。
+ * 子集用于任务执行器的认领契约。
  */
 export const CLAIMABLE_TASK_STATUSES = [
   'pending',

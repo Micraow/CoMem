@@ -52,12 +52,7 @@ export interface TaskRow {
   readonly updatedAt: string;
 }
 
-/**
- * `claimable()` 返回的行：`status` 已收缩到可认领集合。
- *
- * SQL 的 `WHERE` 只留下 `pending` 与「租约过期的 `running`」，所以返回类型如实写成
- * `ClaimableTaskStatus`——`/tasks` 的消费方不需要为 `done` / `failed` 写分支。
- */
+/** 执行器认领候选的状态子集；recent() 返回完整状态。 */
 export interface ClaimableTaskRow extends Omit<TaskRow, 'status'> {
   readonly status: ClaimableTaskStatus;
 }
@@ -139,11 +134,7 @@ function requireTaskStatus(value: string): TaskStatus {
 }
 
 /**
- * `type` 列的解析。
- *
- * 旧写法是 `text(row['type']) as TaskType`：`as` 让「表里有个类型不在联合里」这件事
- * 不可见，那个值会被当成 `archive` 一路走到 `CommitRunner`。写入路径只接受
- * `TaskType`，所以非法值说明表被改坏了。
+ * 数据库任务类型按领域取值校验；异常值按 INTERNAL 返回。
  */
 function requireTaskType(value: string): TaskType {
   if (!isTaskType(value)) {
@@ -387,6 +378,14 @@ export class TaskRepository {
       )
       .all(now.toISOString(), limit)
       .map(toClaimableTaskRow);
+  }
+
+  /** 最近更新的任务；过滤先于 LIMIT，终态也能用于归档核对。 */
+  recent(limit: number, status?: TaskStatus): readonly TaskRow[] {
+    const where = status === undefined ? '' : 'WHERE status = ?';
+    return this.#db.prepare(
+      `SELECT ${TASK_COLUMNS} FROM task ${where} ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    ).all(...(status === undefined ? [limit] : [status, limit])).map(toTaskRow);
   }
 
   /**

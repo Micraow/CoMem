@@ -6,8 +6,8 @@
  * 状态的入口」拆成两处，所以这里声明一个**最小结构端口** `TaskQueryStore`，由
  * bootstrap 注入 `TaskRepository`（`AclDatabase` 的同一做法）。
  *
- * `GET /tasks` 返回的是**可认领**的任务（`pending` 或租约过期的 `running`），不是
- * 全表：已经 `done` 的归档任务没有动作可做，列出来只会让运维以为队列里堆了东西。
+ * `GET /tasks` 默认返回可认领的任务；`view=recent` 返回最近更新的全部状态，
+ * 供控制台查看运行中、完成和失败的归档记录。两种视图都只允许系统管理员。
  *
  * `retry` 只对 `failed` 的任务生效：把一个 `pending` 任务「重试」是空操作，把一个
  * `running` 任务重试会和正在跑的执行器抢同一行——两者都返回 `CONFLICT` 而不是
@@ -89,6 +89,7 @@ export interface ClaimableTaskRecord extends Omit<TaskRecord, 'status'> {
 export interface TaskQueryStore {
   get(id: string): TaskRecord | null;
   claimable(now: Date, limit: number): readonly ClaimableTaskRecord[];
+  recent(limit: number, status?: TaskStatus): readonly TaskRecord[];
   requeue(id: string, now: Date): void;
 }
 
@@ -118,9 +119,9 @@ interface TaskResponse {
   readonly task: TaskRecord;
 }
 
-/** `GET /tasks` 的响应体：只含可认领的任务（`pending` 或租约过期的 `running`）。 */
+/** `GET /tasks` 的响应体；recent 视图包含全部状态。 */
 interface TaskListResponse {
-  readonly tasks: readonly ClaimableTaskRecord[];
+  readonly tasks: readonly TaskRecord[];
   readonly total: number;
 }
 
@@ -149,10 +150,15 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
       app.get<{ Querystring: Record<string, unknown> }>('/', async (request) => {
         assertSystemAdmin(request, systemAdmin);
         const query = requireRecord(request.query, 'tasks/list');
-        const limit = optionalQueryInteger(query, 'limit', DEFAULT_TASK_LIMIT, { min: 1 });
+        const limit = optionalQueryInteger(query, 'limit', DEFAULT_TASK_LIMIT, { min: 1, max: 1000 });
         const status = requireStatus(optionalString(query, 'status'));
-        const claimable = taskStore.claimable(new Date(), limit);
-        const tasks = status === undefined ? claimable : claimable.filter((task) => task.status === status);
+        const view = optionalString(query, 'view') ?? 'claimable';
+        if (view !== 'claimable' && view !== 'recent') {
+          throw new ComemError('INVALID_ARGUMENT', 'view 只能是 claimable / recent。');
+        }
+        const tasks = view === 'recent'
+          ? taskStore.recent(limit, status)
+          : taskStore.claimable(new Date(), limit).filter((task) => status === undefined || task.status === status);
         return ok<TaskListResponse>({ tasks, total: tasks.length });
       });
 

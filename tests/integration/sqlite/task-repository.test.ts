@@ -302,3 +302,15 @@ describe('countByStatus', () => {
     expect(repository.countByStatus('failed')).toBe(0);
   });
 });
+
+
+describe('recent', () => {
+  it('保留运行中和终态，按更新时间倒序，先过滤后限量', () => {
+    repository.insert(row({ id: 'queued', updatedAt: at(1).toISOString() }));
+    repository.insert(row({ id: 'finished', status: 'done', updatedAt: at(2).toISOString() }));
+    repository.insert(row({ id: 'failed', status: 'failed', updatedAt: at(3).toISOString() }));
+    repository.insert(row({ id: 'active', status: 'running', leaseUntil: at(60).toISOString(), updatedAt: at(4).toISOString() }));
+    expect(repository.recent(3).map((task) => task.id)).toEqual(['active', 'failed', 'finished']);
+    expect(repository.recent(1, 'done').map((task) => task.id)).toEqual(['finished']);
+  });
+});

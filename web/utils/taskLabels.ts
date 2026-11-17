@@ -20,17 +20,10 @@ export const TASK_TYPES = ['archive'] as const
 
 export type TaskType = (typeof TASK_TYPES)[number]
 
-/**
- * `/tasks` 只返回**可认领**的状态（`src/domain/task.ts` 的 `ClaimableTaskStatus`）。
- *
- * `done` / `failed` 不会出现在这张表里：`GET /tasks` 的 SQL 只留 `pending` 与租约
- * 过期的 `running`。所以这里不声明它们的文案——写出来也没有生产者能让它出现在界面
- * 上。也不保留 `?? 原值` 的兜底：那会把「服务端返回了意外状态」显示成一串英文，
- * 而正确做法是让那个状态在类型上不成立（`TaskPayload.status` 用这个子集）。
- */
+/** 默认任务队列只含可认领状态；recent 视图包含全部状态。 */
 export const CLAIMABLE_TASK_STATUSES = ['pending', 'running'] as const
-
-export type ClaimableTaskStatus = (typeof CLAIMABLE_TASK_STATUSES)[number]
+export const TASK_STATUSES = ['pending', 'running', 'done', 'failed'] as const
+export type TaskStatus = (typeof TASK_STATUSES)[number]
 
 /** 类型 → 标签。漏一个 `TaskType` 即编译失败，多一个键也是。 */
 const TASK_TYPE_LABEL = {
@@ -41,12 +34,14 @@ export function taskTypeLabelOf(type: TaskType): string {
   return TASK_TYPE_LABEL[type]
 }
 
-/** 状态 → 标签。漏一个 `ClaimableTaskStatus` 即编译失败，多一个键也是。 */
+/** 状态 → 标签。漏一个 `TaskStatus` 即编译失败，多一个键也是。 */
 const TASK_STATUS_LABEL = {
   pending: '排队中',
   running: '运行中',
-} satisfies Record<ClaimableTaskStatus, string>
+  done: '已完成',
+  failed: '失败',
+} satisfies Record<TaskStatus, string>
 
-export function taskStatusLabelOf(status: ClaimableTaskStatus): string {
+export function taskStatusLabelOf(status: TaskStatus): string {
   return TASK_STATUS_LABEL[status]
 }

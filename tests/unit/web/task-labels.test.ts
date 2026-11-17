@@ -18,6 +18,7 @@ import {
 import {
   CLAIMABLE_TASK_STATUSES,
   TASK_TYPES,
+  TASK_STATUSES,
   taskStatusLabelOf,
   taskTypeLabelOf,
 } from '../../../web/utils/taskLabels.js'
@@ -38,7 +39,7 @@ describe('任务标签映射', () => {
     for (const status of CLAIMABLE_TASK_STATUSES) {
       expect(DOMAIN_STATUSES).toContain(status)
     }
-    // 这两个状态不会出现在 `/tasks` 的响应里，所以标签表不为它们写文案。
+    // 默认认领视图不含终态，recent 视图包含完整状态。
     expect(CLAIMABLE_TASK_STATUSES).not.toContain('done')
     expect(CLAIMABLE_TASK_STATUSES).not.toContain('failed')
   })
@@ -48,7 +49,8 @@ describe('任务标签映射', () => {
       expect(taskTypeLabelOf(type)).not.toBe('')
       expect(taskTypeLabelOf(type)).not.toBe(type)
     }
-    for (const status of CLAIMABLE_TASK_STATUSES) {
+    expect([...TASK_STATUSES]).toEqual([...DOMAIN_STATUSES])
+    for (const status of TASK_STATUSES) {
       expect(taskStatusLabelOf(status)).not.toBe('')
       expect(taskStatusLabelOf(status)).not.toBe(status)
     }

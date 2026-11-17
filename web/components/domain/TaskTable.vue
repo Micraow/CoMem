@@ -2,21 +2,8 @@
 /**
  * 任务表（架构文档 §10.4 的任务恢复、§14 的 `/tasks`）。
  *
- * `GET /tasks` 返回的是**可认领**的任务：`pending`，或租约过期的 `running`。
- * 这意味着表里每一个 `running` 行都是**孤儿**——没人续租，正常的执行器不会再碰它。
- * 界面必须把这件事说出来（「租约已过期」+「下次启动扫描会回收」），否则运维会把它
- * 读成「正在跑」，然后等一个不会发生的完成。
- *
- * ## 为什么没有重试按钮
- *
- * 重试接口只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期
- * 的 `running`）——`failed` 行永远不会出现在这张表里。按钮挂在一行永远不出现的
- * 数据上就是不可达的死路，所以整列删掉，不补一个「没有失败任务」的假空态。
- *
- * ## 状态为什么不用红黄绿
- *
- * §16.1：不用颜色单独表意。两个状态用强调色的深浅（实心 → 描边）加文字表达，
- * 深浅两套外观都成立，色盲用户也读得出来。
+ * 会话页使用 recent 视图，显示全部状态；租约过期只对 running 行求值。
+ * 完成记录保留在表中，便于确认自动归档是否执行。
  *
  * ## 权限不足不是故障
  *
@@ -113,7 +100,7 @@ watch(
       flush
     >
       <template #actions>
-        <span class="caption">按创建时间升序，只含可认领的任务</span>
+        <span class="caption">最近更新的 100 条任务</span>
       </template>
 
       <UiEmpty v-if="props.forbidden" forbidden />
@@ -173,7 +160,7 @@ watch(
         </tbody>
       </UiTable>
 
-      <UiEmpty v-else v-slot="{ size }" title="队列是空的">
+      <UiEmpty v-else v-slot="{ size }" title="还没有任务记录">
         <RotateCcw :size="size" :stroke-width="1.4" />
       </UiEmpty>
     </UiCard>

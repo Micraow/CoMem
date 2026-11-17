@@ -40,7 +40,7 @@ import {
 import {
   taskStatusLabelOf,
   taskTypeLabelOf,
-  type ClaimableTaskStatus,
+  type TaskStatus,
 } from '~/utils/taskLabels'
 
 useHead({ title: '概览 · CoMem 控制台' })
@@ -70,7 +70,9 @@ type BadgeVariant = 'blue' | 'green' | 'red' | 'orange' | 'purple' | 'teal' | 'g
 const TASK_STATUS_VARIANT = {
   pending: 'gray',
   running: 'blue',
-} satisfies Record<ClaimableTaskStatus, BadgeVariant>
+  done: 'green',
+  failed: 'red',
+} satisfies Record<TaskStatus, BadgeVariant>
 
 const healthBadge = computed(() =>
   health.value === null ? null : healthBadgeOf(health.value),

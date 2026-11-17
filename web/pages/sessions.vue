@@ -79,7 +79,7 @@ async function loadTasks(silent = false): Promise<void> {
     loadingTasks.value = true
   }
   try {
-    const payload = await api.get<TaskListPayload>('/tasks')
+    const payload = await api.get<TaskListPayload>('/tasks', { view: 'recent' })
     tasks.value = payload.tasks
     tasksError.value = null
     tasksForbidden.value = false
@@ -127,7 +127,7 @@ async function commitSession(sessionId: string): Promise<void> {
   }
 }
 
-const hasRunningTask = computed(() => tasks.value.some((task) => task.status === 'running'))
+const hasRunningTask = computed(() => tasks.value.some((task) => task.status === 'running' || task.status === 'pending'))
 
 const { pause: stopPolling, resume: startPolling } = useIntervalFn(
   () => {
