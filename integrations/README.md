@@ -207,9 +207,9 @@ root-<16 hex>                       # 无 origin，真实 git root 哈希
 无 origin 仓库因 realpath 不同而得到不同 ID。绝对路径和 remote 原文不会出现在
 `projectId`、Hook 日志或 Hermes outbox 中。
 
-`POST /sessions` 与 `/context` 只在解析成功时携带 `projectId`。会话原文仍保存在
-个人根的 `sessions/`；项目 ID 只收窄该项目提取出的记忆和自动召回范围。显式配置
-是覆盖自动识别的唯一入口。
+`/context`、`POST /sessions`、写消息与提交只在解析成功时携带 `projectId`。会话原文
+仍保存在个人根的 `sessions/`；项目 ID 只收窄该项目提取出的记忆和自动召回范围。
+显式配置是覆盖自动识别的唯一入口。
 
 **409 有两种语义。** 同一会话、同一项目绑定的 `ALREADY_EXISTS` 表示复用；
 legacy 未绑定会话收到一个项目时由服务端先持久化绑定再按复用处理；不同项目绑定
@@ -771,8 +771,8 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 |---|---|---|
 | 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, projectId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}` | `result: {rendered, items, tokensUsed, dropped, degradation, deliveryToken}`；空 query 取开局背景 |
 | 建会话 | `POST /api/v1/sessions`，`{sessionId, projectId?}` | 身份取请求认证；409 `ALREADY_EXISTS` 时复用，409 `CONFLICT` 是项目绑定冲突 |
-| 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
-| 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关 |
+| 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...], projectId?}` | 2xx 后才前进游标；项目绑定不一致返回 409 `CONFLICT` |
+| 提交 | `POST /api/v1/sessions/{id}/commit`，`{projectId?}` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关；项目绑定不一致返回 409 `CONFLICT` |
 | 开销上报 | `POST /api/v1/telemetry/hook`，`{event, sessionId, phases}` | 任意；失败静默 |
 | 自检 | `GET /health` | 2xx |
 

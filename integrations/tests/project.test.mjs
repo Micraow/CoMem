@@ -227,10 +227,18 @@ test('Node 的 context、ensure 与采集入口都发送解析后的 projectId',
 
     const contexts = calls.filter((call) => call.path === '/api/v1/context');
     const sessions = calls.filter((call) => call.path === '/api/v1/sessions');
+    const writes = calls.filter((call) => (
+      call.path.endsWith('/messages') || call.path.endsWith('/commit')
+    ));
     assert.equal(contexts.length, 2);
     assert.ok(contexts.every((call) => call.body.projectId === 'integration-project'));
     assert.equal(sessions.length, 3);
     assert.ok(sessions.every((call) => call.body.projectId === 'integration-project'));
+    assert.ok(writes.length >= 3);
+    assert.ok(
+      writes.every((call) => call.body.projectId === 'integration-project'),
+      JSON.stringify(writes),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

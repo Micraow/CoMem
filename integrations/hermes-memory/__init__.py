@@ -447,20 +447,26 @@ class _Client:
             if error.status != 409 or error.code != "ALREADY_EXISTS":
                 raise
 
-    def append(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+    def append(
+        self, session_id: str, messages: list[dict[str, Any]], project_id: str
+    ) -> None:
         encoded = urllib.parse.quote(session_id, safe="")
+        body: dict[str, Any] = {"messages": messages}
+        if project_id:
+            body["projectId"] = project_id
         self.request(
             "POST",
             f"/sessions/{encoded}/messages",
-            {"messages": messages},
+            body,
             timeout=_CAPTURE_TIMEOUT_S,
         )
 
-    def commit(self, session_id: str) -> None:
+    def commit(self, session_id: str, project_id: str) -> None:
         encoded = urllib.parse.quote(session_id, safe="")
+        body: dict[str, Any] = {"projectId": project_id} if project_id else {}
         try:
             self.request(
-                "POST", f"/sessions/{encoded}/commit", {}, timeout=_CAPTURE_TIMEOUT_S
+                "POST", f"/sessions/{encoded}/commit", body, timeout=_CAPTURE_TIMEOUT_S
             )
         except _HttpFailure as error:
             if error.status != 400 or error.code != "INVALID_ARGUMENT":
@@ -925,8 +931,8 @@ class CoMemMemoryProvider(MemoryProvider):
                 )
                 continue
             self._client.ensure_session(session_id, project_id or "")
-            self._client.append(session_id, messages)
-            self._client.commit(session_id)
+            self._client.append(session_id, messages, project_id or "")
+            self._client.commit(session_id, project_id or "")
             path.unlink(missing_ok=True)
             processed += 1
 

@@ -34,6 +34,7 @@ import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { sanitizeCapturedText } from '../lib/sanitize.mjs';
 import { captureSource } from '../lib/source.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
+import { withProjectId } from '../lib/project.mjs';
 import { ensureSession } from './stop.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
@@ -99,8 +100,9 @@ export async function handlePostToolUse(event, deps) {
   }
 
   const captureStartedAt = process.hrtime.bigint();
+  let projectId;
   try {
-    await ensureSession(event, deps);
+    projectId = await ensureSession(event, deps);
   } catch (error) {
     // 只有 `ALREADY_EXISTS` 在 ensureSession 里被当作复用。项目绑定冲突是
     // `CONFLICT`，必须留诊断，不能伪装成会话已存在。
@@ -116,6 +118,7 @@ export async function handlePostToolUse(event, deps) {
   try {
     await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/messages`, {
       messages: [toToolMessage(event)],
+      ...withProjectId(projectId),
     });
   } catch (error) {
     // 采集失败不打断工具循环。游标不涉及消息，重投由下一次 PostToolUse 自己带。

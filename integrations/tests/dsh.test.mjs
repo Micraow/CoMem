@@ -16,7 +16,9 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
   );
   const requests = [];
   let receivedMessages;
+  let receivedCommit;
   const received = new Promise((resolve) => { receivedMessages = resolve; });
+  const committed = new Promise((resolve) => { receivedCommit = resolve; });
   const server = createServer(async (request, response) => {
     let text = '';
     for await (const chunk of request) text += chunk;
@@ -25,6 +27,7 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ status: 'ok', result: { rendered: '背景正文' } }));
     if (request.url.endsWith('/messages')) receivedMessages(body);
+    if (request.url.endsWith('/commit')) receivedCommit(body);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const listeners = new Map();
@@ -65,6 +68,15 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     assert.equal(body.messages[0].source.machineId.length, 16);
     const sessionCreate = requests.find((entry) => entry.path === '/api/v1/sessions');
     assert.equal(sessionCreate.body.projectId, 'dsh-project');
+    assert.equal(body.projectId, 'dsh-project');
+    const commitBody = await Promise.race([
+      committed,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('commit timed out')),
+        2000,
+      ).unref()),
+    ]);
+    assert.equal(commitBody.projectId, 'dsh-project');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(projectDir, { recursive: true, force: true });

@@ -451,6 +451,18 @@ class ProviderTests(unittest.TestCase):
                 and r["body"].get("projectId") == "hermes-project"
             ][-1]
             self.assertEqual(create["body"]["sessionId"], provider._session_id_of("native-session"))
+            append = next(
+                r
+                for r in reversed(self.api.requests)
+                if r["path"].endswith("/messages")
+            )
+            commit = next(
+                r
+                for r in reversed(self.api.requests)
+                if r["path"].endswith("/commit")
+            )
+            self.assertEqual(append["body"]["projectId"], "hermes-project")
+            self.assertEqual(commit["body"]["projectId"], "hermes-project")
             self.assertEqual(list(provider._outbox_dir.glob("*.json")), [])
         finally:
             project_dir.cleanup()

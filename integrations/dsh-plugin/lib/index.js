@@ -47,6 +47,7 @@ import { createHttpClient } from '../../lib/http.mjs';
 import { DEFAULT_MAX_CONTEXT_BYTES } from '../../lib/injection.mjs';
 import { budgetForEvent, createDeadline, HOOK_BUDGETS_MS } from '../../lib/lifecycle.mjs';
 import { sanitizeCapturedMessages } from '../../lib/sanitize.mjs';
+import { withProjectId } from '../../lib/project.mjs';
 import { handleSessionStart } from '../../servers/session-start.mjs';
 import { handleUserPromptSubmit } from '../../servers/user-prompt-submit.mjs';
 import { ensureSession } from '../../servers/stop.mjs';
@@ -386,9 +387,15 @@ function start(ctx, rawConfig) {
     // 提交没有「用户按回车的延迟」可比；用与 PreCompact 同一个宽上限。
     const http = clientFor(config, config.commitTimeoutMs);
     try {
-      await ensureSession({ sessionId, cwd: cwdOf(session) }, { config, http });
-      await http.post(`${SESSIONS_PATH}/${sessionId}/messages`, { messages });
-      await http.post(`${SESSIONS_PATH}/${sessionId}/commit`, {});
+      const projectId = await ensureSession(
+        { sessionId, cwd: cwdOf(session) },
+        { config, http },
+      );
+      await http.post(`${SESSIONS_PATH}/${sessionId}/messages`, {
+        messages,
+        ...withProjectId(projectId),
+      });
+      await http.post(`${SESSIONS_PATH}/${sessionId}/commit`, withProjectId(projectId));
       entry.messages = entry.messages.slice(snapshot.length);
       if (entry.messages.length === 0) {
         pending.delete(session.id);

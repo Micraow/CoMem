@@ -221,6 +221,7 @@ async function reportCaptureFailure(dir, event, error) {
  *
  * @param {{ sessionId: string, cwd?: string }} event
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient> }} deps
+ * @returns {Promise<string | undefined>} 本次会话使用的 projectId
  */
 export async function ensureSession(event, deps) {
   const projectId = await resolveProjectId(event.cwd);
@@ -237,9 +238,10 @@ export async function ensureSession(event, deps) {
         || error.serverCode === 'ALREADY_EXISTS'
         || error.code === 'ALREADY_EXISTS'
       )
-    ) return;
+    ) return projectId;
     throw error;
   }
+  return projectId;
 }
 
 /**
@@ -294,8 +296,11 @@ export async function captureSession(event, deps) {
         return { captured: 0, committed: false, bypassed: false };
       }
 
-      await ensureSession(event, deps);
-      await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/messages`, { messages: pending });
+      const projectId = await ensureSession(event, deps);
+      await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/messages`, {
+        messages: pending,
+        ...withProjectId(projectId),
+      });
       // 到这一步服务端已经接收，游标可以前进。
       await advanceCursor(event.sessionId, messages.length, { dir });
 
@@ -304,7 +309,10 @@ export async function captureSession(event, deps) {
       // `session.autoCommit`——那个配置只决定后台调度器什么时候自动提交、归档时
       // 保留最近几条（`keepRecentCount`），不影响这次显式调用。hook 负责「每轮
       // 结束后提一次」。
-      await deps.http.post(`${SESSIONS_PATH}/${event.sessionId}/commit`, {});
+      await deps.http.post(
+        `${SESSIONS_PATH}/${event.sessionId}/commit`,
+        withProjectId(projectId),
+      );
       return { captured: pending.length, committed: true, bypassed: false };
     },
     { dir: deps.config.tmpDir },
