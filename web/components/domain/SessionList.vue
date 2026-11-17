@@ -128,7 +128,7 @@ function toDisplayPart(part: SessionPartPayload): DisplayPart {
 </script>
 
 <script setup lang="ts">
-import { CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
+import { Archive, CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
 
 import {
   ApiClientError,
@@ -138,6 +138,7 @@ import {
 } from '~/composables/useApi'
 
 import { formatDateTimeWithSeconds, formatRelativeTime } from '~/utils/format'
+import { sessionArchiveRouteOf } from '~/utils/sessionArchive'
 
 const props = withDefaults(
   defineProps<{
@@ -213,6 +214,10 @@ function toggleTool(messageId: string): void {
 
 function partsOf(sessionId: string): readonly SessionMessagePayload[] {
   return snapshots.value[sessionId] ?? []
+}
+
+function archiveRouteOf(session: SessionSummaryPayload): string | null {
+  return sessionArchiveRouteOf(session, partsOf(session.id).length)
 }
 
 /**
@@ -320,10 +325,30 @@ function commitTitleOf(session: SessionSummaryPayload): string {
 
           <UiEmpty
             v-else-if="partsOf(session.id).length === 0"
-            v-slot="{ size }"
-            :title="session.status === 'open' ? '这个会话还没有消息' : '没有待提交的消息'"
+            :title="
+              archiveRouteOf(session) !== null
+                ? '已归档'
+                : session.status === 'open'
+                  ? '这个会话还没有消息'
+                  : '没有待提交的消息'
+            "
           >
-            <MessageSquare :size="size" :stroke-width="1.4" />
+            <template #default="{ size }">
+              <Archive
+                v-if="archiveRouteOf(session) !== null"
+                :size="size"
+                :stroke-width="1.4"
+              />
+              <MessageSquare v-else :size="size" :stroke-width="1.4" />
+            </template>
+            <template v-if="archiveRouteOf(session) !== null" #extra>
+              <NuxtLink
+                :to="archiveRouteOf(session) ?? undefined"
+                class="session__archive-link btn btn--secondary btn--sm"
+              >
+                查看历史归档
+              </NuxtLink>
+            </template>
           </UiEmpty>
 
           <ol v-else class="messages">

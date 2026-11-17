@@ -70,12 +70,12 @@ function associationOf(item: LlmCallPayload): string {
       v-else-if="props.items.length === 0"
       v-slot="{ size }"
       title="还没有模型调用记录"
-      text="接口正常返回，但当前账号还没有记录，或诊断记录已关闭。"
+      text="接口正常返回，但当前账号还没有 CoMem 模型调用记录。"
     >
       <Bot :size="size" :stroke-width="1.4" />
     </UiEmpty>
 
-    <UiTable v-else caption="模型调用记录">
+    <UiTable v-else caption="CoMem 模型调用记录">
       <thead>
         <tr>
           <th scope="col">用途</th>

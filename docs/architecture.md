@@ -2935,7 +2935,7 @@ owner 的 `manage` 只来自组根 `.acl.json` 里的 `user:{owner} = manage` �
 
 两个容易漏的出口按「无权限完全不出现」各多做一道求权：
 
-- `GET /memories/pending`：`listPending` 递归扫 `memories/`，走的是**不传 `principals`** 的 `rawFilesystem`——`restricted` 切断或显式 `deny` 的子目录照样会被列出，而一条待复核记录的 URI、`fields`、`sources` 全是内容。路由层在 scope 根求 read 之后，再按**每条记录自己的 URI** 逐条求 read，无权限的记录整条不返回。
+- `GET /memories/pending`：`listPending` 递归扫 `memories/`，走的是**不传 `principals`** 的 `rawFilesystem`——`restricted` 切断或显式 `deny` 的子目录照样会被列出，而一条待复核记录的 URI、`fields`、`sources` 全是内容。路由层在 scope 根求 read 之后，再按**每条记录自己的 URI** 逐条求 read，无权限的记录整条不返回。路由先处理完整队列再做 ACL 过滤、统计和截页：`total` 是当前身份可读记录的全量，`oldestPendingAgeSeconds` 也只从这些记录计算；`limit` 只截 `memories` 数组。因此第 101 条以后、排在受限记录之后的记录仍会计入摘要。精确统计的代价是每次请求遍历该 scope 的完整待复核队列。
 - `GET /memories/{uri}/links`：查询的 URI 已求 read，边的**另一端**是独立资源，要再求一次 read（`links` 查 `to`，`backlinks` 查 `from`）。`backlinks` 列出的 `comem://user/bob/memories/profile/health-condition.md` 已经说出了 Bob 有哪些记忆，所以无权限的边也整条不返回，不留占位或打码。
 
 **待复核列表的三个有效期字段始终输出。** `GET /memories/pending` 的每条记录都带
@@ -3603,13 +3603,13 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 |---|---|
 | 登录 | 有账号但浏览器里没有可用会话时出现；用户名 + 密码换 session token，成功后回 `redirect` |
 | 我的账户 | 右上角进入；显示本人系统角色，管理自己的 API Key，验证当前密码后可换新密码并重新登录 |
-| 概览 | 四个指标 + 待处理任务；指标与待复核数都来自 `GET /health`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
+| 概览 | 四个指标 + 待处理任务；全局健康指标来自 `GET /health`，当前空间可读待复核摘要来自 `GET /memories/pending`，任务卡来自 `GET /tasks`；新装空态可直接新建第一条记忆 |
 | 文件树 | 左树右详情；工具栏可新建记忆；**目录树按需展开**（每次 `GET /fs/ls` 拉一层，不在首屏拉整棵树）；详情分 L0/L1/L2 三档切换；显示摘要来源与新鲜度；`memories/` 下的节点另有「关联」区块，文件还有「记忆」区块（类型、状态、能否被检索、有效期） |
 | 检索 | 输入 query，选「直接查找 / 先理解再检索」，显示每条命中的名次、层级、命中原因（不显示分数：四种引擎的分数量纲不可比，见 §8.4）；结果标题用摘要或文件名、URI 降为第二行；右上角如实显示实际引擎（关键词匹配 / 向量检索 / 混合检索，读 `GET /health` 的 `retrieval.engine`）；0 命中区分「库空」与「无匹配」，并说明关键词引擎的边界 |
 | 记忆复核 | 待确认列表优先显示更新与推断偏好；详情展示正文、真实的版本差异及来源；逐条更新通过 / 拒绝的结果 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 系统管理员入口；用户列表显示服务器判定的角色，组成员列表区分所有者和成员。管理员可以为其他用户设置或重置密码；查看或管理节点读写权限使用「权限管理」 |
-| 会话与任务 | 会话列表、归档列表、最近 100 条任务（包含运行中、完成与失败）；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
+| 会话与任务 | 会话列表、归档列表、最近 100 条任务（包含运行中、完成与失败）；已提交且 live 消息为空的会话展开后显示「已归档」，并直接链接到该会话的真实 `history/` 目录；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
 | 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
@@ -3618,7 +3618,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 **一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
 
-- **概览页：`GET /tasks` 与 `GET /health` 分开。** `/tasks` 是系统管理员专属（§12.4），因为 `task` 表没有可求权的目标；`/health` 对任何身份可用。两个请求曾经共用一个 `Promise.all` 和一个 `catch`：`/tasks` 的一次 403 会把健康徽标与四张指标卡一起置空，部署者按文档起来、打开首页看到的是一片空白。`web/pages/index.vue` 现在给两个请求各配加载态与错误：非管理员在任务卡的位置看到「需要管理员权限」的空态，健康徽标与指标照常显示。
+- **概览页：`GET /tasks`、`GET /health` 与 `GET /memories/pending` 分开。** `/tasks` 是系统管理员专属（§12.4），因为 `task` 表没有可求权的目标；`/health` 对任何身份可用；待复核摘要按当前空间和当前身份过滤。三个请求各配加载态与错误：任务 403 不遮挡健康徽标和指标，待复核查询失败也不影响其它全局指标。
 - **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。「我的账户」并排显示登录账号与系统角色。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
 - **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
@@ -3634,7 +3634,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 **403 的判定与文案分开。** `isForbidden`（`web/composables/useApi.ts`）是唯一的判定点，「取一条对应文案」与「置一个 forbidden 状态」都走它；句子由各页面按语义给：「需要管理员权限」（用户与组页、概览页任务卡、提示词页写操作）、「你没有权限复核这条记忆」、「你没有权限查看这条记忆的正文」、「你没有权限查看待复核队列」、「你没有权限查看这个节点」。403 显示状态或固定文案，其它失败仍显示服务端消息——服务端原文带 `auth.adminUserIds`、`需要 write（3）级别` 这类内部术语，进界面只会让人去搜文档；而存储 / IO 故障的原文正是排查依据，不该被 403 的文案盖掉。
 
-**身份来自登录。** 控制台只有一个身份来源：浏览器里的会话。
+**身份来自登录。** 控制台只有一个身份来源：浏览器里的会话。概览、监控与复核页都监听侧栏当前空间；切换空间后分别重新请求该空间的待复核摘要或队列，并用请求序号丢弃迟到响应。复核操作完成后从复核页返回概览时，概览会重新请求摘要，不复用上一空间的待复核缓存。
 `web/plugins/console-identity.ts` 在应用挂载前先探测引导状态（`GET /bootstrap`
 恒定 200；**不用** 404 推断，那会拿「错误」当正常信号，还会发一个登出语义的写
 请求去做只读探测），再读 `sessionStorage`：
@@ -3689,7 +3689,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 **界面上不存在的元素，都是刻意删掉的。** 下面这些位置读起来像「漏了」，实际是取舍，不要按「应该有」补回去：
 
-- 概览页与监控页**不再预取 `/memories/pending`**：待复核条数与最老一条的年龄直接读 `GET /health` 的 `memory.*`。那个端点不排序、先截断 100 条，拿返回条数当总数会偏小，前端再取一页算「最老」也算不准。
+- 概览页与监控页的待复核卡**只请求一页 `/memories/pending`**：响应里的 `total` 与 `oldestPendingAgeSeconds` 已由服务端对完整可读队列计算，`limit=1` 不把返回数组长度冒充总数。`GET /health` 的 `memory.*` 保留为公开全库运维口径，不再用于当前空间待复核卡。
 - 每张 Hook 事件卡里的「后台处理」行**并成全局一行**：后台耗时按阶段，同一份进程级快照不属于任何事件（§17.2）。
 - 「模型成本累计」卡片在没配 `providers.llm.default.pricing` 时显示「未配置单价，成本不可计算」，不显示 `$0.0000`；配了单价时真实花费 0 才显示 0（§17.4）。
 - 任务表与会话页**没有重试按钮**：`POST /tasks/{id}/retry` 只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期），界面上永远点不到一个能重试的行；重启会把租约过期的任务重置回排队。要重试只能走接口。
@@ -3850,7 +3850,7 @@ HTTP 请求与 LLM 调用记录；`retainDays` / `retainRows` 同时裁剪两张
 
 **没有按身份的聚合端点。** `src/api/http/routes/` 里没有 `stats.ts`，也没有 `GET /stats/memories`：按记忆类型分布、冷热分桶、最老记忆年龄都需要全表聚合，而调用方只有控制台的「监控」页——它现在读 `GET /health`。
 
-`GET /health` 的 `memory` 与 `summary` 两段是治理视图：`memory.pendingReview`（待复核）、`memory.orphanTasks`（租约过期的任务）、`memory.oldestPendingAgeSeconds`（最老待复核）、`summary.pendingDirs` / `summary.degradedDirs`（待刷新 / 降级摘要的目录数）、`memory.profileFormat`（画像格式自查，§11.1）。全库规模看 `index.totalNodes`。分类分布、冷热分桶、最老记忆年龄没有出口；要看就用 `sqlite3` 查 `_meta/comem.sqlite` 的 `node` 表。
+`GET /health` 的 `memory` 与 `summary` 两段是治理视图：`memory.pendingReview`（全库待复核）、`memory.orphanTasks`（租约过期的任务）、`memory.oldestPendingAgeSeconds`（全库最老待复核）、`summary.pendingDirs` / `summary.degradedDirs`（待刷新 / 降级摘要的目录数）、`memory.profileFormat`（画像格式自查，§11.1）。全库规模看 `index.totalNodes`。这些字段不带请求空间或逐条 ACL 语义；控制台当前空间的待复核摘要走 `GET /memories/pending`。分类分布、冷热分桶、最老记忆年龄没有出口；要看就用 `sqlite3` 查 `_meta/comem.sqlite` 的 `node` 表。
 
 **`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/` 里没有单会话视图的路由。下面的 JSON 保留的是需求形状（归档次数、消息数、抽取增删改、召回与提交耗时、Hook 开销），不是可调用的接口：
 
@@ -3968,12 +3968,16 @@ HTTP 请求与 LLM 调用记录；`retainDays` / `retainRows` 同时裁剪两张
 
 ### 17.10 控制台「监控」页
 
-控制台「监控」页（§16），数据源是 `GET /health`、`GET /metrics` 与
-`GET /telemetry/llm-calls`：
+控制台「监控」页（§16），数据源是 `GET /health`、`GET /memories/pending`、
+`GET /metrics` 与 `GET /telemetry/llm-calls`：
+
+页面可见时每 3 秒刷新当前账号个人根的 `/sessions` 与模型调用第一页，隐藏时暂停；
+后台刷新并入新记录并保留用户已加载的更早分页。Hermes 捕获只认个人根里已完成提交的
+`hermes-*` 会话，模型表只统计 CoMem 内部调用，不包含 Hermes 回答生成。
 
 | 区块 | 内容 |
 |---|---|
-| 记忆健康度 | `GET /health` 的四张卡（索引节点数、待处理任务、待复核条数与其最老一条的年龄、摘要降级目录数）。待复核数与最老年龄都读 `health.memory.*`，不再预取 `/memories/pending` 在前端重算 |
+| 记忆健康度 | 四张卡：全局索引节点数、待处理任务与摘要降级目录数读 `GET /health`；待复核条数与最老一条的年龄读当前空间的 `GET /memories/pending` 摘要。服务端先按 scope 与逐条 ACL 过滤完整队列，再计算 `total` / `oldestPendingAgeSeconds`；`limit=1` 只限制返回数组，不影响统计 |
 | 开销归因 | 每个 Hook 事件**最近一轮**的四阶段阻塞耗时；后台异步耗时另起一行，**按阶段不按事件** |
 | 吞吐与用量 | 进程启动以来的请求数、平均耗时、prompt / completion token、成本累计（未配单价时卡片显示「未配置单价，成本不可计算」而不是 `$0`） |
 | 最近的模型调用 | 当前认证主体自己的最近记录：用途、模型、开始时间、耗时、输入/输出/合计 token、成本、状态、错误码、`requestId` 与 `sessionId`；cursor 继续加载更早记录 |

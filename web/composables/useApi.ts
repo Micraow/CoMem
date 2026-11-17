@@ -409,8 +409,8 @@ export interface HealthPayload {
    * 记忆健康度（§17.5）。`oldestPendingAgeSeconds` 为 null 表示没有待复核记忆。
    *
    * 这两个字段由 `ObservabilityService.health()` 计算、`routes/ops.ts` 的封套带出；
-   * 不要改回从 `GET /memories/pending` 的第一页重算——那个端点不排序且会截断，
-   * 「第一条」不是「最老一条」。
+   * 它们是公开运维端点的全库口径，不按当前控制台空间或 ACL 收窄。控制台待复核卡
+   * 使用 `PendingListPayload` 的 `total` / `oldestPendingAgeSeconds`。
    */
   readonly memory: {
     readonly pendingReview: number
@@ -563,6 +563,10 @@ export interface PendingMemoryPayload {
 /** `GET /memories/pending`。 */
 export interface PendingListPayload {
   readonly scope: string
+  /** 当前身份在该空间内可读的待复核总数；不受 `limit` 截页影响。 */
+  readonly total: number
+  /** 可读待复核记录中最老一条的年龄；没有记录或时间不可解析时为 `null`。 */
+  readonly oldestPendingAgeSeconds: number | null
   readonly memories: readonly PendingMemoryPayload[]
 }
 

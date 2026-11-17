@@ -221,7 +221,8 @@ const VISIBLE_METRICS: readonly { readonly name: string; readonly label: string 
  * 监控（架构文档 §17.10；控制台十个页面里的第十页）。
  *
  * 模型调用明细来自 `GET /telemetry/llm-calls`；`/metrics` 继续只提供聚合运行时
- * 指标，`/health` 提供服务和记忆队列快照。三块独立加载、独立报错。
+ * 指标，`/health` 提供全局健康快照，`/memories/pending` 提供当前空间里当前身份
+ * 可读的待复核摘要。各块独立加载、独立报错。
  *
  * Hermes 捕获状态来自现有 `/sessions`：只认可已有提交时间的 `hermes-*` 会话；
  * 归档只能证明写入成功，不能证明召回内容被模型采用。
@@ -232,6 +233,7 @@ const VISIBLE_METRICS: readonly { readonly name: string; readonly label: string 
  * （§17.1 的「两套」是有意的）。这里各取所需，不做合并：合并会造出第三套口径。
  */
 import { RefreshCw } from 'lucide-vue-next'
+import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 
 import type { SessionListPayload } from '~/components/domain/SessionList.vue'
 import type { MonitorUsage } from '~/components/domain/MetricsChart.vue'
@@ -244,9 +246,15 @@ import {
   useScopeRoot,
   type HealthPayload,
   type LlmCallListPayload,
+  type PendingListPayload,
 } from '~/composables/useApi'
 import { consoleIdentityState } from '~/composables/consoleIdentity'
 import { healthBadgeOf } from '~/utils/healthLabels'
+import {
+  LIVE_REFRESH_INTERVAL_MS,
+  mergeRefreshedCalls,
+  personalScopeOf,
+} from '~/utils/monitorLive'
 
 useHead({ title: '监控 · CoMem 控制台' })
 
@@ -256,22 +264,36 @@ const api = useApi()
 const config = useRuntimeConfig()
 const scopeRoot = useScopeRoot()
 const identityState = consoleIdentityState()
-const currentSubject =
-  identityState.status === 'ready' ? identityState.identity.subject : null
+const identity = identityState.status === 'ready' ? identityState.identity : null
+const currentSubject = identity?.subject ?? null
+const personalScope = computed(() => personalScopeOf(identity?.scopes ?? []))
+const documentVisibility = useDocumentVisibility()
 
 const health = ref<HealthPayload | null>(null)
 const healthError = ref<string | null>(null)
+const pendingReview = ref<PendingListPayload | null>(null)
+const pendingReviewError = ref<string | null>(null)
+const pendingReviewLoading = ref(false)
 const metricsText = ref<string | null>(null)
 const metricsError = ref<string | null>(null)
 const sessions = ref<SessionListPayload['sessions'] | null>(null)
 const sessionsError = ref<string | null>(null)
+const sessionsLoading = ref(false)
 const calls = ref<LlmCallListPayload['items']>([])
 const nextCursor = ref<string | null>(null)
 const callsError = ref<string | null>(null)
+const callsLoadedMore = ref(false)
 
 const loading = ref(false)
 const callsLoading = ref(false)
 const callsLoadingMore = ref(false)
+const callsRefreshing = ref(false)
+let pendingReviewToken = 0
+let pendingReviewInFlight = false
+let sessionsRequestVersion = 0
+let callsRequestVersion = 0
+let pageMounted = false
+let liveRefreshRunning = false
 
 const series = computed<PrometheusSeries>(() =>
   metricsText.value === null ? {} : parsePrometheus(metricsText.value),
@@ -328,6 +350,45 @@ async function loadHealth(): Promise<void> {
   }
 }
 
+async function loadPendingReview(silent = false): Promise<void> {
+  if (silent && pendingReviewInFlight) {
+    return
+  }
+  const token = ++pendingReviewToken
+  const scope = scopeRoot.value
+  pendingReviewError.value = null
+  if (scope === '') {
+    pendingReview.value = null
+    pendingReviewInFlight = false
+    pendingReviewLoading.value = false
+    return
+  }
+
+  pendingReviewInFlight = true
+  if (!silent) {
+    pendingReviewLoading.value = true
+  }
+  try {
+    const payload = await api.get<PendingListPayload>('/memories/pending', {
+      scopeUri: scope,
+      limit: 1,
+    })
+    if (token === pendingReviewToken && scope === scopeRoot.value) {
+      pendingReview.value = payload
+    }
+  } catch (caught) {
+    if (token === pendingReviewToken && scope === scopeRoot.value) {
+      pendingReview.value = null
+      pendingReviewError.value = forbiddenMessageOf(caught, '你没有权限查看待复核队列')
+    }
+  } finally {
+    if (token === pendingReviewToken) {
+      pendingReviewInFlight = false
+      pendingReviewLoading.value = false
+    }
+  }
+}
+
 async function loadMetrics(): Promise<void> {
   metricsError.value = null
   try {
@@ -338,20 +399,34 @@ async function loadMetrics(): Promise<void> {
   }
 }
 
-async function loadSessions(): Promise<void> {
+async function loadSessions(silent = false): Promise<void> {
+  const requestVersion = ++sessionsRequestVersion
+  const targetScope = personalScope.value
   sessionsError.value = null
-  if (scopeRoot.value === '') {
-    sessions.value = []
+  if (!silent) {
+    sessionsLoading.value = true
+  }
+  if (targetScope === '') {
+    sessions.value = null
+    sessionsError.value = '当前账号没有可读取的个人空间。'
+    sessionsLoading.value = false
     return
   }
   try {
     const payload = await api.get<SessionListPayload>('/sessions', {
-      scopeUri: scopeRoot.value,
+      scopeUri: targetScope,
     })
-    sessions.value = payload.sessions
+    if (requestVersion === sessionsRequestVersion && targetScope === personalScope.value) {
+      sessions.value = payload.sessions
+    }
   } catch (caught) {
-    sessions.value = null
-    sessionsError.value = errorMessageOf(caught)
+    if (requestVersion === sessionsRequestVersion && targetScope === personalScope.value) {
+      sessionsError.value = errorMessageOf(caught)
+    }
+  } finally {
+    if (requestVersion === sessionsRequestVersion) {
+      sessionsLoading.value = false
+    }
   }
 }
 
@@ -362,9 +437,20 @@ function callsErrorMessage(caught: unknown): string {
   return forbiddenMessageOf(caught, '没有权限查看模型调用记录。')
 }
 
-async function loadCalls(reset: boolean): Promise<void> {
+async function loadCalls(reset: boolean, silent = false): Promise<void> {
+  if (!reset && (callsLoading.value || callsRefreshing.value || callsLoadingMore.value)) {
+    return
+  }
+  if (reset && silent && (callsLoading.value || callsRefreshing.value || callsLoadingMore.value)) {
+    return
+  }
+  const requestVersion = ++callsRequestVersion
   if (reset) {
-    callsLoading.value = true
+    if (silent) {
+      callsRefreshing.value = true
+    } else {
+      callsLoading.value = true
+    }
   } else {
     callsLoadingMore.value = true
   }
@@ -376,47 +462,124 @@ async function loadCalls(reset: boolean): Promise<void> {
       queryParams['cursor'] = nextCursor.value
     }
     const payload = await api.get<LlmCallListPayload>('/telemetry/llm-calls', queryParams)
-    const source = reset ? [] : calls.value
-    const seen = new Set(source.map((item) => item.id))
-    calls.value = [
-      ...source,
-      ...payload.items.filter((item) => !seen.has(item.id)),
-    ]
-    nextCursor.value = payload.nextCursor
+    if (requestVersion !== callsRequestVersion) {
+      return
+    }
+    if (reset && silent && callsLoadedMore.value) {
+      calls.value = mergeRefreshedCalls(calls.value, payload.items)
+    } else {
+      const source = reset ? [] : calls.value
+      const seen = new Set(source.map((item) => item.id))
+      calls.value = [
+        ...source,
+        ...payload.items.filter((item) => !seen.has(item.id)),
+      ]
+      nextCursor.value = payload.nextCursor
+      callsLoadedMore.value = !reset
+    }
   } catch (caught) {
-    callsError.value = callsErrorMessage(caught)
+    if (requestVersion === callsRequestVersion) {
+      callsError.value = callsErrorMessage(caught)
+    }
   } finally {
-    callsLoading.value = false
-    callsLoadingMore.value = false
+    if (requestVersion === callsRequestVersion) {
+      callsLoading.value = false
+      callsLoadingMore.value = false
+      callsRefreshing.value = false
+    }
   }
 }
 
 async function load(): Promise<void> {
-  if (loading.value || callsLoading.value || callsLoadingMore.value) {
+  if (
+    loading.value ||
+    liveRefreshRunning ||
+    callsLoading.value ||
+    callsLoadingMore.value ||
+    callsRefreshing.value
+  ) {
     return
   }
   loading.value = true
   await Promise.allSettled([
     loadHealth(),
+    loadPendingReview(),
     loadMetrics(),
-    loadSessions(),
+    loadSessions(false),
     loadCalls(true),
   ])
   loading.value = false
 }
 
 function loadMore(): void {
-  if (nextCursor.value === null || callsLoading.value || callsLoadingMore.value) {
+  if (
+    nextCursor.value === null ||
+    callsLoading.value ||
+    callsRefreshing.value ||
+    callsLoadingMore.value
+  ) {
     return
   }
   void loadCalls(false)
 }
 
+async function refreshLiveData(): Promise<void> {
+  if (liveRefreshRunning || loading.value || documentVisibility.value !== 'visible') {
+    return
+  }
+  liveRefreshRunning = true
+  try {
+    await Promise.allSettled([
+      loadSessions(true),
+      loadCalls(true, true),
+      loadPendingReview(true),
+    ])
+  } finally {
+    liveRefreshRunning = false
+  }
+}
+
+const { pause: stopPolling, resume: startPolling } = useIntervalFn(
+  () => {
+    void refreshLiveData()
+  },
+  LIVE_REFRESH_INTERVAL_MS,
+  { immediate: false },
+)
+
 watch(scopeRoot, () => {
-  void loadSessions()
+  pendingReview.value = null
+  void loadPendingReview()
 })
 
-onMounted(load)
+watch(
+  documentVisibility,
+  (visibility) => {
+    if (visibility === 'visible') {
+      startPolling()
+      if (pageMounted) {
+        void refreshLiveData()
+      }
+    } else {
+      stopPolling()
+    }
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  pageMounted = true
+  void load()
+})
+
+onBeforeUnmount(() => {
+  pageMounted = false
+  stopPolling()
+  pendingReviewToken += 1
+  pendingReviewInFlight = false
+  sessionsRequestVersion += 1
+  callsRequestVersion += 1
+})
 </script>
 
 <template>
@@ -434,7 +597,19 @@ onMounted(load)
               去配置模型
             </NuxtLink>
           </template>
-          <UiButton variant="secondary" size="sm" :disabled="loading" @click="load">
+          <UiButton
+            variant="secondary"
+            size="sm"
+            :disabled="
+              loading ||
+              liveRefreshRunning ||
+              callsLoading ||
+              callsLoadingMore ||
+              callsRefreshing ||
+              pendingReviewLoading
+            "
+            @click="load"
+          >
             <RefreshCw :size="14" :stroke-width="1.5" />
             刷新
           </UiButton>
@@ -444,16 +619,16 @@ onMounted(load)
       <section class="section">
         <DomainHermesCaptureStatus
           :sessions="sessions"
-          :loading="loading"
+          :loading="sessionsLoading"
           :error="sessionsError"
           :current-subject="currentSubject"
         />
       </section>
 
       <section class="section">
-        <UiCard title="模型调用记录" panel flush>
+        <UiCard title="CoMem 模型调用" panel flush>
           <template #head>
-            <span class="caption">当前账号 · 每次模型请求 · 新的在前</span>
+            <span class="caption">当前账号 · 新的在前</span>
           </template>
           <DomainModelRequestTable
             :items="calls"
@@ -469,7 +644,18 @@ onMounted(load)
       <section class="section">
         <h2 class="section__title">记忆健康度</h2>
         <UiErrorCallout v-if="healthError !== null" class="mb-16" :message="healthError" />
-        <DomainHealthCards v-else :health="health" :loading="loading" />
+        <DomainHealthCards
+          v-else
+          :health="health"
+          :pending-review="pendingReview"
+          :loading="loading"
+          :pending-review-loading="pendingReviewLoading"
+        />
+        <UiErrorCallout
+          v-if="pendingReviewError !== null"
+          class="mt-16"
+          :message="pendingReviewError"
+        />
       </section>
 
       <section class="section">

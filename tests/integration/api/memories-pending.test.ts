@@ -1,17 +1,18 @@
 /**
- * `GET /memories/pending`：逐条按记录自身的 URI 求 read（架构文档 §12.4）。
+ * `GET /memories/pending`：逐条按记录自身的 URI 求 read，并返回当前身份可读队列的
+ * 精确总数与最老年龄（架构文档 §12.4）。
  *
  * 端点只对 `scope` 求一次 read，随后 `MemoryService.listPending` 用装配给它的
  * `rawFilesystem` 递归 `list` / `read`——这条路径不传 principals，也不再求权。于是
  * 「scope 根可读、某个子目录被 `restricted` 切断」时，子目录下的待复核记录会整条
  * 出现在响应里：URI、`fields`、`sources` 全都是内容。
  *
- * 用例用两个身份：A 是 scope 所有者，待复核记录都在 A 的 `memories/` 下；B 只有 A
- * 根目录的 read。两个子目录各放一条 pending——`memories/experiences/` 继承根的
- * read，B 读得到；`memories/rules/` 被设成 `restricted`（不带条目），B 读不到。
+ * 用例同时固定 scope、逐条 ACL、超过 100 条和 `.history` 四条边界：B 只有 A 根目录
+ * 的 read 时，`memories/experiences/` 继承根的 read 可见，受限的
+ * `memories/rules/` 整条不可见，也不能进入总数或最老年龄。
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { IdentityResolver } from '../../../src/api/http/middleware.js';
 import { createHttpServer } from '../../../src/api/http/server.js';
+import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import type { AclEntry } from '../../../src/domain/acl.js';
 import { experiencesMemoryType } from '../../../src/domain/memory-types/experiences.js';
@@ -174,6 +176,14 @@ function pendingOf(subject: string): Promise<{ readonly body: string; readonly s
   });
 }
 
+async function setUpdatedAt(uri: string, updatedAt: string): Promise<void> {
+  const file = toDiskPath(dataDir, Uri.parse(uri));
+  const text = await readFile(file, 'utf8');
+  const replaced = text.replace(/^updated_at:.*$/mu, `updated_at: ${updatedAt}`);
+  expect(replaced).not.toBe(text);
+  await writeFile(file, replaced, 'utf8');
+}
+
 describe('GET /memories/pending：逐条按记录 URI 求 read', () => {
   it('restricted 子目录下的 pending 整条不返回，可读的那条照常返回', async () => {
     await seedPendingMemories();
@@ -198,6 +208,8 @@ describe('GET /memories/pending：逐条按记录 URI 求 read', () => {
 
     const result = resultOf(response);
     const memories = result['memories'] as Record<string, unknown>[];
+    expect(result['total']).toBe(1);
+    expect(result['oldestPendingAgeSeconds']).toEqual(expect.any(Number));
     // 对照：没有把整批记录滤掉，可读的那条带完整字段返回。
     expect(memories).toHaveLength(1);
     expect(memories[0]).toMatchObject({
@@ -222,9 +234,99 @@ describe('GET /memories/pending：逐条按记录 URI 求 read', () => {
 
     const result = resultOf(response);
     const memories = result['memories'] as Record<string, unknown>[];
+    expect(result['total']).toBe(2);
     expect(memories).toHaveLength(2);
     expect(memories.map((record) => record['uri'])).toEqual(
       expect.arrayContaining([EXPERIENCES_URI, RULES_URI]),
     );
+  });
+
+  it('最老年龄只计算当前身份可读的记录', async () => {
+    await seedPendingMemories();
+    await setUpdatedAt(RULES_URI, '2000-01-01T00:00:00.000Z');
+    await restrictRulesDirectory();
+
+    const result = resultOf(await pendingOf(VIEWER));
+    const oldest = result['oldestPendingAgeSeconds'] as number;
+    // 受限记录早于 2000 年；若它混进统计，年龄会是二十多年，而不是本次测试刚写入的经验。
+    expect(result['total']).toBe(1);
+    expect(oldest).toBeGreaterThanOrEqual(0);
+    expect(oldest).toBeLessThan(60);
+  });
+
+  it('总数统计全部可读记录，返回列表仍按默认 100 条截页', async () => {
+    const started = requireContainer();
+    for (let index = 0; index < 101; index += 1) {
+      await started.services.memory.upsertMemory(
+        Uri.parse(OWNER_ROOT),
+        experiencesMemoryType,
+        {
+          topic: `bulk-${String(index).padStart(3, '0')}`,
+          content: `第 ${String(index)} 条待复核经验。`,
+        },
+      );
+    }
+    await started.services.indexObserver.drain();
+
+    const response = await pendingOf(OWNER);
+    expect(response.statusCode).toBe(200);
+    const result = resultOf(response);
+    expect(result['total']).toBe(101);
+    expect(result['memories']).toHaveLength(100);
+  });
+
+  it('只统计请求 scope，不混入同一身份可读的另一个空间', async () => {
+    const started = requireContainer();
+    const otherRoot = 'comem://user/c';
+    await started.services.acl.ensureRootPreset(Uri.parse(otherRoot));
+    await started.services.acl.setAcl(
+      Uri.parse(otherRoot),
+      (current) => ({
+        mode: current.mode,
+        entries: [...current.entries, { principal: OWNER, level: 1, effect: 'allow' }],
+      }),
+      'user:c',
+      principalsOf('user:c'),
+    );
+    await started.services.memory.upsertMemory(
+      Uri.parse(otherRoot),
+      experiencesMemoryType,
+      { topic: 'other-space', content: '另一个空间里的待复核经验。' },
+    );
+    await seedPendingMemories();
+    await started.services.indexObserver.drain();
+
+    const result = resultOf(await pendingOf(OWNER));
+    expect(result['scope']).toBe(OWNER_ROOT);
+    expect(result['total']).toBe(2);
+    expect((result['memories'] as Record<string, unknown>[]).map((record) => record['uri'])).not.toContain(
+      `${otherRoot}/memories/experiences/other-space.md`,
+    );
+  });
+
+  it('覆盖写产生的 .history 版本不计入总数', async () => {
+    const started = requireContainer();
+    const first = await started.services.memory.upsertMemory(
+      Uri.parse(OWNER_ROOT),
+      experiencesMemoryType,
+      { topic: 'versioned', content: '第一版。' },
+    );
+    await started.services.memory.approve(first.uri);
+    await started.services.memory.upsertMemory(Uri.parse(OWNER_ROOT), experiencesMemoryType, {
+      uri: first.uri,
+      update: () => ({ content: '第二版。' }),
+    });
+    await started.services.indexObserver.drain();
+
+    const result = resultOf(await pendingOf(OWNER));
+    expect(result['total']).toBe(1);
+    const memories = result['memories'] as Record<string, unknown>[];
+    expect(memories).toHaveLength(1);
+    expect(memories[0]?.['uri']).toBe(first.uri.toString());
+    expect(
+      memories.every(
+        (memory) => typeof memory['uri'] === 'string' && !memory['uri'].includes('/.history/'),
+      ),
+    ).toBe(true);
   });
 });

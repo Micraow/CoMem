@@ -7,9 +7,10 @@
  *
  * ## 待复核的数字从哪来
  *
- * 直接读 `GET /health` 的 `memory.pendingReview` 与 `memory.oldestPendingAgeSeconds`。
- * 不要改成从 `GET /memories/pending` 数条数或取第一条的 `updatedAt`：那个端点不
- * 排序、先截断 100 条，「第一条」不是「最老一条」，数量也只是下限。
+ * `GET /health` 的 `memory.*` 是全库运维口径，不按当前控制台空间或 ACL 收窄。
+ * 因此待复核卡读 `GET /memories/pending` 返回的 `total` 与
+ * `oldestPendingAgeSeconds`；服务端先过滤完整可读队列再截页与统计。其余三张卡
+ * 继续使用 `GET /health`。
  *
  * ## 降级比例的分母
  *
@@ -39,12 +40,14 @@ export function formatDuration(seconds: number): string {
 </script>
 
 <script setup lang="ts">
-import type { HealthPayload } from '~/composables/useApi'
+import type { HealthPayload, PendingListPayload } from '~/composables/useApi'
 import { hasSummaryFailure, isRuleSummary } from '~/utils/healthLabels'
 
 const props = defineProps<{
   health: HealthPayload | null
+  pendingReview: PendingListPayload | null
   loading: boolean
+  pendingReviewLoading: boolean
 }>()
 
 interface StatCard {
@@ -52,6 +55,7 @@ interface StatCard {
   readonly label: string
   readonly value: string
   readonly sub: string | null
+  readonly loading: boolean
 }
 
 /**
@@ -66,34 +70,37 @@ const summaryFailed = computed(
 
 const stats = computed<readonly StatCard[]>(() => {
   const health = props.health
-  const memory = health?.memory ?? null
   return [
     {
       key: 'nodes',
       label: '索引节点数',
       value: health === null ? '—' : String(health.index.totalNodes),
       sub: health === null ? null : `服务版本 ${health.version}`,
+      loading: health === null,
     },
     {
       key: 'queue',
       label: '待处理任务',
       value: health === null ? '—' : String(health.queue.pending),
       sub: health === null ? null : `处理中 ${health.queue.processing}`,
+      loading: health === null,
     },
     {
       key: 'review',
       label: '待复核记忆',
-      value: memory === null ? '—' : String(memory.pendingReview),
+      value: props.pendingReview === null ? '—' : String(props.pendingReview.total),
       sub:
-        memory?.oldestPendingAgeSeconds == null
+        props.pendingReview?.oldestPendingAgeSeconds == null
           ? null
-          : `最老一条 ${formatDuration(memory.oldestPendingAgeSeconds)}前`,
+          : `最老一条 ${formatDuration(props.pendingReview.oldestPendingAgeSeconds)}前`,
+      loading: props.pendingReview === null,
     },
     {
       key: 'degraded',
       label: ruleSummary.value ? '规则摘要目录数' : '摘要降级目录数',
       value: health === null ? '—' : String(health.summary.degradedDirs),
       sub: health === null ? null : `待刷新 ${health.summary.pendingDirs}`,
+      loading: health === null,
     },
   ]
 })
@@ -113,7 +120,11 @@ const degradedPercent = computed<number>(() =>
   <div class="health">
     <div class="stats">
       <div v-for="stat in stats" :key="stat.key" class="stat">
-        <UiSkeleton v-if="props.loading && props.health === null" width="56px" height="26px" />
+        <UiSkeleton
+          v-if="stat.loading && (stat.key === 'review' ? props.pendingReviewLoading : props.loading)"
+          width="56px"
+          height="26px"
+        />
         <span v-else class="stat__v">{{ stat.value }}</span>
         <span class="stat__k">{{ stat.label }}</span>
         <span v-if="stat.sub !== null" class="stat__sub">{{ stat.sub }}</span>

@@ -11,6 +11,7 @@ import type { SessionSummaryPayload } from '~/components/domain/SessionList.vue'
 import { deriveVerification, type VerificationTone } from '~/utils/connectGuide'
 import { fileRouteOf } from '~/utils/fileRoute'
 import { formatDateTimeWithSeconds } from '~/utils/format'
+import { completedHermesSessions } from '~/utils/monitorLive'
 
 const props = defineProps<{
   readonly sessions: readonly SessionSummaryPayload[] | null
@@ -33,6 +34,8 @@ const TONE_VARIANT = {
   idle: 'gray',
 } as const satisfies Record<VerificationTone, 'green' | 'orange' | 'red' | 'gray'>
 
+const hermesSessions = computed(() => completedHermesSessions(props.sessions))
+
 const check = computed(() => {
   if (props.loading && props.sessions === null) {
     return {
@@ -41,11 +44,11 @@ const check = computed(() => {
     }
   }
   const result = deriveVerification({
-    host: 'hermes',
     health: null,
     healthError: null,
-    sessions: props.sessions,
+    sessions: hermesSessions.value,
     sessionsError: props.error,
+    currentSubject: props.currentSubject,
   })
   return result.checks.find((candidate) => candidate.key === 'sessions') ?? {
     tone: 'fail' as const,
@@ -54,12 +57,7 @@ const check = computed(() => {
 })
 
 const archivedSessions = computed(() =>
-  (props.sessions ?? [])
-    .filter(
-      (session) =>
-        session.id.startsWith('hermes-') && session.lastCommitAt !== null,
-    )
-    .sort(
+  [...(hermesSessions.value ?? [])].sort(
       (left, right) =>
         Date.parse(right.lastCommitAt ?? '') - Date.parse(left.lastCommitAt ?? ''),
     ),
@@ -67,10 +65,10 @@ const archivedSessions = computed(() =>
 const latestArchived = computed(() => archivedSessions.value[0] ?? null)
 
 const detail = computed(() =>
-  check.value.tone === 'warn' && props.sessions !== null
-    ? '当前范围还没有已归档的 Hermes 会话。'
+  check.value.tone === 'warn' && hermesSessions.value !== null
+    ? '当前账号个人空间还没有已归档的 Hermes 会话。'
     : check.value.tone === 'ok'
-      ? `当前范围有 ${String(archivedSessions.value.length)} 个已归档的 Hermes 会话。`
+      ? `当前账号个人空间有 ${String(archivedSessions.value.length)} 个已归档的 Hermes 会话。`
     : check.value.detail,
 )
 </script>

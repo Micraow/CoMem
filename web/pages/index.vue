@@ -2,12 +2,13 @@
 /**
  * 概览（架构文档 §16 的第一页）。
  *
- * 四个指标 + 待处理任务。指标全部来自 `GET /health`，任务卡来自 `GET /tasks`。
- * `/metrics` 是 Prometheus 文本，不套信封，且它的计数与 `/health` 重叠，
- * 在浏览器里再解析一份只会得到两套口径。
+ * 四个指标 + 待处理任务。全局健康指标来自 `GET /health`，待复核摘要来自
+ * `GET /memories/pending`，任务卡来自 `GET /tasks`。`/metrics` 是 Prometheus
+ * 文本，不套信封，且它的计数与 `/health` 重叠，在浏览器里再解析一份只会得到两套口径。
  *
- * 待复核数直接读 `health.memory.pendingReview`：`GET /memories/pending` 不排序、
- * 先截断 100 条，拿它的返回条数当总数只会得到一个偏小的值。
+ * 待复核数不能用 `health.memory.pendingReview`：那是公开运维端点的全库口径。
+ * 控制台显示当前空间里当前身份可读的队列，总数与最老年龄由
+ * `GET /memories/pending` 在 ACL 过滤后计算；这里传 `limit=1`，只取摘要。
  *
  * 「最近请求」没有对应端点：`request_log` 只落 SQLite，没有 HTTP 读出口。
  * 这里退一步展示任务队列——它是同一批后台工作里唯一可读的部分。
@@ -24,9 +25,12 @@ import { AlertTriangle, CheckCircle2, Plug, Plus, RefreshCw } from 'lucide-vue-n
 
 import {
   errorMessageOf,
+  forbiddenMessageOf,
   isForbidden,
   useApi,
+  useScopeRoot,
   type HealthPayload,
+  type PendingListPayload,
   type TaskPayload,
 } from '~/composables/useApi'
 import { isFreshInstall } from '~/utils/connectGuide'
@@ -50,16 +54,21 @@ const TASK_PREVIEW_LIMIT = 8
 
 const api = useApi()
 const router = useRouter()
+const scopeRoot = useScopeRoot()
 
 const health = useState<HealthPayload | null>('comem-health', () => null)
 const tasks = useState<readonly TaskPayload[] | null>('comem-tasks', () => null)
+const pendingReview = ref<PendingListPayload | null>(null)
 
 const loadingHealth = ref(false)
 const loadingTasks = ref(false)
+const loadingPendingReview = ref(false)
 const healthError = ref<string | null>(null)
 const tasksError = ref<string | null>(null)
+const pendingReviewError = ref<string | null>(null)
 /** 任务列表要系统管理员；这个状态与「取失败了」分开表达。 */
 const tasksForbidden = ref(false)
+let pendingReviewToken = 0
 
 /**
  * 状态的文案在 `taskLabels.ts`（与任务表共用一份）。这里只留徽章的档位，那是这一页
@@ -102,8 +111,8 @@ const stats = computed<readonly { key: string; label: string; value: string; ton
     {
       key: 'review',
       label: '待复核记忆',
-      value: health.value === null ? '—' : String(health.value.memory.pendingReview),
-      tone: (health.value?.memory.pendingReview ?? 0) > 0 ? 'is-orange' : undefined,
+      value: pendingReview.value === null ? '—' : String(pendingReview.value.total),
+      tone: (pendingReview.value?.total ?? 0) > 0 ? 'is-orange' : undefined,
     },
     {
       key: 'degraded',
@@ -152,11 +161,47 @@ async function loadTasks(): Promise<void> {
   }
 }
 
+async function loadPendingReview(): Promise<void> {
+  const token = ++pendingReviewToken
+  const scope = scopeRoot.value
+  pendingReviewError.value = null
+  if (scope === '') {
+    pendingReview.value = null
+    loadingPendingReview.value = false
+    return
+  }
+
+  loadingPendingReview.value = true
+  try {
+    const payload = await api.get<PendingListPayload>('/memories/pending', {
+      scopeUri: scope,
+      limit: 1,
+    })
+    if (token === pendingReviewToken && scope === scopeRoot.value) {
+      pendingReview.value = payload
+    }
+  } catch (caught) {
+    if (token === pendingReviewToken && scope === scopeRoot.value) {
+      pendingReview.value = null
+      pendingReviewError.value = forbiddenMessageOf(caught, '你没有权限查看待复核队列')
+    }
+  } finally {
+    if (token === pendingReviewToken) {
+      loadingPendingReview.value = false
+    }
+  }
+}
+
 async function load(): Promise<void> {
-  await Promise.all([loadHealth(), loadTasks()])
+  await Promise.all([loadHealth(), loadTasks(), loadPendingReview()])
 }
 
 onMounted(load)
+
+watch(scopeRoot, () => {
+  pendingReview.value = null
+  void loadPendingReview()
+})
 
 /**
  * 新装的数据根没有索引、没有排队任务、任务列表也是空的——这不是「队列是空的」，
@@ -192,7 +237,7 @@ function onCreated(uri: string): void {
           <UiButton
             variant="secondary"
             size="sm"
-            :disabled="loadingHealth || loadingTasks"
+            :disabled="loadingHealth || loadingTasks || loadingPendingReview"
             @click="load"
           >
             <RefreshCw :size="14" :stroke-width="1.5" />
@@ -202,10 +247,23 @@ function onCreated(uri: string): void {
       </DomainPageHeader>
 
       <UiErrorCallout v-if="healthError !== null" class="mb-24" :message="healthError" />
+      <UiErrorCallout
+        v-if="pendingReviewError !== null"
+        class="mb-24"
+        :message="pendingReviewError"
+      />
 
       <div class="stats mb-24">
         <div v-for="stat in stats" :key="stat.key" class="stat rise">
-          <UiSkeleton v-if="health === null && healthError === null" width="56px" height="26px" />
+          <UiSkeleton
+            v-if="
+              stat.key === 'review'
+                ? loadingPendingReview && pendingReview === null
+                : health === null && healthError === null
+            "
+            width="56px"
+            height="26px"
+          />
           <span v-else class="stat__v" :class="stat.tone">{{ stat.value }}</span>
           <span class="stat__k">{{ stat.label }}</span>
         </div>

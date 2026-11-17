@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { ComemError } from '../../../domain/errors.js';
 import type { MemoryLink } from '../../../domain/memory-link.js';
 import type { NodeStatus } from '../../../domain/node.js';
+import { MILLISECONDS_PER_SECOND } from '../../../domain/time.js';
 import { Uri } from '../../../domain/uri.js';
 import type { MemoryRecord } from '../../../services/memory.js';
 import { ok } from '../envelope.js';
@@ -66,6 +67,10 @@ interface SerializedMemoryRecord {
 /** `GET /memories/pending` 的响应体。 */
 interface MemoryPendingResponse {
   readonly scope: string;
+  /** 当前身份在该 scope 内可读的待复核总数，不受 `limit` 影响。 */
+  readonly total: number;
+  /** 上述记录中最老一条的年龄；没有记录或 `updatedAt` 不可解析时为 `null`。 */
+  readonly oldestPendingAgeSeconds: number | null;
   readonly memories: readonly SerializedMemoryRecord[];
 }
 
@@ -118,6 +123,23 @@ function serializeRecord(record: MemoryRecord): SerializedMemoryRecord {
   };
 }
 
+/** 与 `/health` 同口径：以 `updatedAt` 计算，时钟回拨时按 0 秒报。 */
+function oldestPendingAgeSecondsOf(
+  records: readonly MemoryRecord[],
+  now = Date.now(),
+): number | null {
+  let oldestTimestamp: number | null = null;
+  for (const record of records) {
+    const timestamp = Date.parse(record.updatedAt);
+    if (!Number.isNaN(timestamp) && (oldestTimestamp === null || timestamp < oldestTimestamp)) {
+      oldestTimestamp = timestamp;
+    }
+  }
+  return oldestTimestamp === null
+    ? null
+    : Math.max(0, Math.floor((now - oldestTimestamp) / MILLISECONDS_PER_SECOND));
+}
+
 export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { memory, memoryLink, authorizer } = services;
 
@@ -131,13 +153,13 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
         const scopeUri = optionalString(query, 'scopeUri') ?? scopeOfSubject(context.subject);
         const scope = Uri.parse(scopeUri);
         await authorizer.assert(scope, READ, context.principals);
-        const records = await memory.listPending(scope, { limit });
+        // 先取完整队列再过滤、计数，最后才截页。若把 limit 传给底层扫描，无权记录或
+        // 更深处的记录会先占掉名额，total 与 oldest 也都只能看到前 100 条。
+        const records = await memory.listPending(scope);
         // §12.4：scope 根可读不代表子树可读。`listPending` 走的是**不传 principals**
         // 的 `rawFilesystem`，`restricted` 切断或显式 deny 的子目录照样会被递归列出；
         // 而一条待复核记录的 URI、`fields`、`sources` 全都是内容。所以按**记录自己的
         // URI** 逐条求 read，无权限的整条不返回——不返回空字段，也不打码。
-        //
-        // `limit` 约束扫描条数；被过滤掉的条目不会换成更深处的记录。
         //
         // 不逐条 `assert` + try/catch：那会把 SQL / 物化表 / IO 故障也归成「无权限」，
         // 把真实的存储问题静默隐藏成「这里没有记录」。
@@ -145,11 +167,12 @@ export function createMemoryRoutes(services: HttpRouteServices): HttpRouteGroup 
           records.map((record) => record.uri),
           context.principals,
         );
+        const visible = records.filter((record) => readable.has(record.uri.toString()));
         return ok<MemoryPendingResponse>({
           scope: scope.toString(),
-          memories: records
-            .filter((record) => readable.has(record.uri.toString()))
-            .map(serializeRecord),
+          total: visible.length,
+          oldestPendingAgeSeconds: oldestPendingAgeSecondsOf(visible),
+          memories: visible.slice(0, limit).map(serializeRecord),
         });
       });
 
