@@ -12,6 +12,7 @@
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import type { NodeRepository } from '../../adapters/sqlite/node-repository.js';
+import type { ConversationTextMessage } from '../../domain/conversation.js';
 import { stableDigest, type NodeKind } from '../../domain/node.js';
 import {
   extractAbstract,
@@ -21,7 +22,9 @@ import {
   type SummaryGenerator,
 } from '../../domain/summary.js';
 import type { Uri } from '../../domain/uri.js';
+import type { AclService } from '../acl.js';
 
+import { isArchiveRoot, readArchiveConversation } from './dialogue.js';
 import type { SummaryServiceConfig } from './ports.js';
 
 /** 生成一个目录概览所需的端口。 */
@@ -29,12 +32,16 @@ export interface SummaryGenerationPorts {
   readonly store: ContentStore;
   readonly metadata: MetadataFileStore;
   readonly nodes: Pick<NodeRepository, 'get'>;
+  readonly acl: Pick<AclService, 'hasIndependentAcl'>;
   readonly generator: SummaryGenerator;
   readonly config: SummaryServiceConfig;
 }
 
 /** 列一个目录的直接子项所需的端口。 */
-type SummaryChildPorts = Pick<SummaryGenerationPorts, 'store' | 'metadata' | 'nodes'>;
+type SummaryChildPorts = Pick<
+  SummaryGenerationPorts,
+  'store' | 'metadata' | 'nodes' | 'config' | 'acl'
+>;
 
 export interface GeneratedDirectorySummary {
   readonly summary: DirectorySummary;
@@ -68,8 +75,13 @@ export async function summarizeWithInput(
   ports: SummaryGenerationPorts,
   directoryUri: Uri,
 ): Promise<GeneratedDirectorySummary> {
-  const { children, inputDigest } = await readSummaryInput(ports, directoryUri);
-  const generated = await ports.generator.generate({ uri: directoryUri, children });
+  const { children, inputDigest, sourceText, dialogue } = await readSummaryInput(ports, directoryUri);
+  const generated = await ports.generator.generate({
+    uri: directoryUri,
+    children,
+    sourceText,
+    dialogue,
+  });
 
   const overview = truncateToChars(generated.overview, ports.config.overviewMaxChars);
   // L0 从 L1 提取（§9.1）：两层各生成一遍必然互相矛盾。
@@ -100,17 +112,49 @@ export async function summaryInputDigest(
 async function readSummaryInput(
   ports: SummaryChildPorts,
   directoryUri: Uri,
-): Promise<{ readonly children: readonly SummaryChild[]; readonly inputDigest: string }> {
+): Promise<{
+  readonly children: readonly SummaryChild[];
+  readonly sourceText: string | undefined;
+  readonly dialogue: readonly ConversationTextMessage[] | undefined;
+  readonly inputDigest: string;
+}> {
   const entries = await ports.store.list(directoryUri);
   const children: SummaryChild[] = [];
   for (const entry of entries) {
+    const indexed = ports.nodes.get(entry.uri.toString());
+    // 子目录有自己的 ACL 文件时，摘要不能把它的 L0 带进父目录。这样受限归档即使
+    // 使用真实对话生成概览，也不会通过 history / session 的祖先摘要扩大可见范围。
+    if (
+      entry.kind === 'directory' &&
+      await ports.acl.hasIndependentAcl(entry.uri)
+    ) {
+      continue;
+    }
+    // 待复核 / 已归档节点不进入目录摘要生成请求，也不进入 digest。正文仍可按 URI
+    // 读取；这里遵循检索面只认 active 的同一状态边界。版本文件由 store 提前隐藏。
+    if (
+      indexed !== null &&
+      indexed.contextType === 'memory' &&
+      indexed.status !== 'active'
+    ) {
+      continue;
+    }
     const kind: NodeKind = entry.kind === 'directory' ? 'directory' : 'document';
-    const abstract =
-      kind === 'directory'
-        ? (await ports.metadata.readSummary(entry.uri)).abstract
-        : (ports.nodes.get(entry.uri.toString())?.abstract ?? '');
+    let abstract: string;
+    if (kind === 'directory') {
+      abstract = isArchiveRoot(entry.uri)
+        ? ''
+        : (await ports.metadata.readSummary(entry.uri)).abstract;
+    } else {
+      abstract = indexed?.abstract ?? '';
+    }
     children.push({ uri: entry.uri, name: entry.uri.name, kind, abstract });
   }
+  const archiveConversation = await readArchiveConversation(
+    ports.store,
+    directoryUri,
+    ports.config.overviewMaxChars,
+  );
   // ContentStore 已按名称排序；这里仍显式规范化，避免未来端口实现或并发列目录
   // 让同一组子项因顺序不同算出不同 digest、再触发无意义的追加摘要。
   children.sort((left, right) => {
@@ -124,8 +168,12 @@ async function readSummaryInput(
   });
   return {
     children,
+    sourceText: archiveConversation?.sourceText,
+    dialogue: archiveConversation?.dialogue,
     inputDigest: stableDigest(JSON.stringify({
       uri: directoryUri.toString(),
+      sourceText: archiveConversation?.sourceText ?? null,
+      dialogue: archiveConversation?.dialogue ?? null,
       children: children.map((child) => ({
         uri: child.uri.toString(),
         name: child.name,

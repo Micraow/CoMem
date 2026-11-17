@@ -44,6 +44,11 @@ export function buildSummaryPrompt(input: SummaryPromptInput): LlmPrompt {
   const abstractMaxChars = input.abstractMaxChars ?? ABSTRACT_MAX_CHARS;
   const overviewMaxChars = input.overviewMaxChars ?? OVERVIEW_MAX_CHARS;
   const renderer = promptRenderer();
+  const sourceText = input.sourceText?.trim();
+  const renderedInput = renderer.render('summarize-user', {
+    uri: input.uri.toString(),
+    children: renderChildren(input),
+  });
 
   return {
     system: renderer.render('summarize-system', {
@@ -53,10 +58,9 @@ export function buildSummaryPrompt(input: SummaryPromptInput): LlmPrompt {
     messages: [
       {
         role: 'user',
-        content: renderer.render('summarize-user', {
-          uri: input.uri.toString(),
-          children: renderChildren(input),
-        }),
+        content: sourceText === undefined || sourceText === ''
+          ? renderedInput
+          : `${renderedInput}\n\n## 本批对话事实\n\n${sourceText}`,
       },
     ],
   };

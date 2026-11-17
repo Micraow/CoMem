@@ -60,6 +60,26 @@ function ruleTitle(uri: Uri): string {
   return uri.name === '' ? uri.toString() : uri.name;
 }
 
+function dialogueFacts(dialogue: SummaryInput['dialogue']): {
+  readonly user: string;
+  readonly assistant: string;
+} {
+  let user = '';
+  let assistant = '';
+  for (const message of dialogue ?? []) {
+    const sentence = firstSentence(message.content);
+    if (sentence === '') {
+      continue;
+    }
+    if (message.role === 'user' && user === '') {
+      user = sentence;
+    } else if (message.role === 'assistant') {
+      assistant = sentence;
+    }
+  }
+  return { user, assistant };
+}
+
 /**
  * 调模型的摘要生成器（§9.2 的实现 1）。
  *
@@ -82,6 +102,7 @@ export class LlmSummarizer implements SummaryGenerator {
     const prompt = buildSummaryPrompt({
       uri: input.uri,
       children: input.children,
+      sourceText: input.sourceText,
       abstractMaxChars: this.#options.abstractMaxChars,
       overviewMaxChars: this.#options.overviewMaxChars,
     });
@@ -105,13 +126,19 @@ export class LlmSummarizer implements SummaryGenerator {
  */
 export class RuleSummarizer implements SummaryGenerator {
   async generate(input: SummaryInput): Promise<DirectorySummary> {
-    const lines =
+    const dialogue = dialogueFacts(input.dialogue);
+    const childLines =
       input.children.length === 0
         ? [EMPTY_DIRECTORY_TEXT]
         : input.children.map((child) => {
             const sentence = firstSentence(child.abstract);
             return sentence === '' ? `- ${child.name}` : `- ${child.name}：${sentence}`;
           });
+    const dialogueLines = [
+      ...(dialogue.user === '' ? [] : [`- 对话：${dialogue.user}`]),
+      ...(dialogue.assistant === '' ? [] : [`- 回复：${dialogue.assistant}`]),
+    ];
+    const lines = [...dialogueLines, ...childLines];
     const overview = [`# ${ruleTitle(input.uri)}`, '', ...lines].join('\n');
     return { abstract: extractAbstract(overview), overview, degraded: true };
   }

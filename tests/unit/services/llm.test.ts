@@ -368,4 +368,24 @@ describe('提示词模板', () => {
     expect(rendered).toContain('profile.md');
     expect(rendered).toContain('alice，后端工程师。');
   });
+
+  it('归档摘要把本批对话事实作为明确输入，不从 messages.jsonl 生成 L0', () => {
+    const prompt = buildSummaryPrompt({
+      uri: Uri.parse('comem://user/alice/sessions/s1/history/archive_001'),
+      children: [
+        {
+          uri: Uri.parse('comem://user/alice/sessions/s1/history/archive_001/messages.jsonl'),
+          name: 'messages.jsonl',
+          kind: 'document',
+          abstract: '',
+        },
+      ],
+      sourceText: '### user\n我们决定保留原始归档消息。\n\n### assistant\n摘要应直接概括这次决定。',
+    });
+    const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
+
+    expect(rendered).toContain('本批对话事实');
+    expect(rendered).toContain('我们决定保留原始归档消息。');
+    expect(rendered).toContain('摘要应直接概括这次决定。');
+  });
 });

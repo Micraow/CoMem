@@ -1536,16 +1536,51 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 ### 9.2 生成
 
-自底向上。一个目录的 L1 输入是「直接子文件的摘要」+「直接子目录的 L0 正文」：
+自底向上。一个目录的 L1 输入是「状态为 active 的直接子文件摘要」+「没有独立 ACL
+边界的直接子目录 L0 正文」：
 
 ```
 叶子目录 → 父目录 → ... → scope 根
 ```
 
+只有 `contextType = memory` 且状态为 `pending` / `archived` 的文件不进入生成请求，
+也不进入输入 digest；审批把文件索引状态改为 `active` 后，下一次显式重建或正常失效
+重算才会把它带入。archived session / resource / skill 目录不能因为状态名相同而从
+摘要树中消失。`.history` 版本文件仍由目录存储层提前隐藏，不依赖这条状态过滤。
+
+**直接子目录有自己的 `.acl.json` 时，父目录摘要不读它的 L0。** 文件没有独立 ACL，
+继承所在目录；目录的 `.acl.json` 就是摘要聚合不得跨过的权限边界。子目录仍可在同一
+可见面内生成自己的摘要，但其正文不会进入 `history/`、session 或其他更上层摘要。
+判断复用 `AclService.hasIndependentAcl()`，没有新增配置项。
+
+**归档根的真实对话 L0 永远不进入父摘要。** 无独立 ACL 时，父摘要仍把
+`archive_NNN/` 作为导航子目录列出，但传入的 L0 是空串；有独立 ACL 时整个子项跳过。
+因此事后给一个原先无 ACL 的归档加限制，下一次生成不会继续把该归档正文卷进
+`history/`、session 或更高层。这个规则不会批量重写存量摘要：已经由旧版本写入更高层
+的文本仍留在旧 `.overview.md` 中，直到运维显式重建对应目录；加 `.acl.json` 本身不会
+自动失效祖先摘要。部署升级不能把这条存量泄漏边界说成已修复。
+
+**归档根目录（`archive_NNN/`）额外使用本批对话事实。** 摘要生成经 `readSummaryInput`
+读取归档根自己的受控 `messages.jsonl`，只取 user / assistant 的 `text` parts，不包含
+image / context URI、tool_use / tool_result、`source`（host / machineId / cwd）或文件
+元数据。正常 4000 字预算按头尾各留一半，连续装入完整的消息块，保留开头意图和最终
+纠正 / 答复，中间明确省略；预算小于省略标记时严格截到配置长度。材料进入摘要输入
+digest 与 single-flight 尾批，所以初始归档、之后 `markStale(archiveRoot)` 和无参数
+`regenerate(archiveRoot)` 都从同一个 JSONL 得到同一份输入，不会用“仅知道
+messages.jsonl”的空材料覆盖已生成的概览。
+
+该材料仍走原本的目录摘要模型调用，没有为 `messages.jsonl` 单独生成 L0，也没有改写
+原始 JSONL。规则生成器从材料中保留首条用户意图、末条助手答复和直接子节点，继续明确
+标记 `degraded: true`。
+
+**存量目录不会自动获得新排序。** 已生成且仍新鲜的 `experiences/.overview.md` 等父目录
+摘要要等正常失效重算，或运维显式重建对应目录；部署本身不批量扫描、不触碰原始文件。
+
 `SummaryGenerator` 是 Strategy，两个实现：
 
 - `LlmSummarizer`：调 `LlmProvider`，按固定结构产出（标题、简述、快速导航、逐条详述）
-- `RuleSummarizer`：断网降级。取子节点名字 + 各自摘要首句拼接，不调模型
+- `RuleSummarizer`：断网降级。有归档对话时保留首条用户意图与末条助手答复，再取
+  子节点名字 + 各自摘要首句；不调模型
 
 两者实现同一个 `SummaryGenerator` 接口（`domain/summary.ts`），`services/summary.ts` 按配置选择。降级不是静默的：结果带 `degraded: true`，控制台显示，`health` 工具报告。
 
@@ -1579,7 +1614,7 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 **为什么消费时要减而不是清零。** 开始生成前先把本轮计数持久化并记下快照，不提前清零；写回成功后执行 `pending = max(pending - 消费时的快照, 0)`。生成失败时计数仍在，下一次失效或健康检查能看到待刷新工作；生成期间到达的改动也继续保留。
 
-**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要）。尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型；输入确实变化，则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
+**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要，以及归档根目录可选的本批对话材料）。尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型；输入确实变化，则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
 
 **摘要写入不反向触发失效。** `.abstract.md` / `.overview.md` 由 `MetadataFileStore` 直接原子写入；`IndexObserver` 只接收正文写入、删除与移动通知，不监听这两个元数据文件。摘要生成因此不会通过 observer 递归触发自己。
 
@@ -1600,7 +1635,7 @@ commit(sessionId, options)
 │   6. 创建 task，返回 { taskId, archiveUri }
 │
 └─ 阶段二（后台）
-    1. 生成归档摘要（L0/L1）
+    1. 生成归档摘要（L0/L1；正常 LLM 模式同时使用本批 user/assistant 文本事实）
     2. 从归档消息抽取记忆操作，写 memory_operations.json
     3. 应用补丁合并，写 memory_diff.json
     4. 标记祖先摘要失效并重算
@@ -2040,6 +2075,8 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 **`skippedOperations` 是「这条操作为什么没生效」的稳定出口。** 每条跳过带三个字段：`memoryType`、机器可读的 `reasonCode`、给用户看的 `reason`（完整句子，带 URI）。抽取阶段的弱校验（编号越界、类型不存在、identity 拼不出路径）、字段级合并失败（`patch_not_found` / `patch_ambiguous` / `immutable_violation`）、写盘冲突都在这里汇合，`memory_diff.json` 原样落盘，控制台与运维按它查证。
 
+**归档合并后的正文为空时整条不动。** 目标 schema 有 `content` 字段、但字段级操作的全部结果仍让正文缺失或只有空白时，`memory_merge` 记 `empty_content` 并跳过这个 URI：新目标不创建 frontmatter 空壳，已有目标保留原正文，同一归档里其它 URI 照常处理。这个闸门只约束归档合并；没有 `content` 字段的合法 schema，以及手工写入、MCP 写入不受影响。`patch_not_found` 等真实字段失败仍逐条保留，不能拿 `empty_content` 冒充补丁诊断。
+
 **`addOnly` 的目标已存在是跳过，不是失败。** `events` 是「某时发生了什么」，写入模式是 `addOnly`：文件已存在时 `MemoryService.upsertMemory` 抛 `ALREADY_EXISTS`（§11.1「覆盖写等于篡改历史」）。`memory_merge` 捕获它，把这条操作记进 `skippedOperations` 后继续处理其余 URI——一条已存在的记录不该让整批归档失败。`reasonCode` 分两种：正文与已有记录**相同**是重放（`already_exists`，幂等，重跑多少次结果一样）；**不同**则是同 URI 的另一条事件（`uri_conflict`，本次内容没有落盘）。
 
 **为什么这两种必须分开。** `events` 的 URI 由 `{event}.md` 的 identity 值拼出，是调用方（模型）指定的标识，不是正文派生的哈希——「同 URI」不等于「同内容」。都写成「已存在」会把「换个 `event` 标识」这个动作藏起来；分开记，`memory_diff.json` 才能回答「是重放，还是两条不同的事件撞了名字」。无论哪种，事件都不可覆盖写，能做的只有跳过并记录。
@@ -2055,10 +2092,22 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 - 控制台「记忆复核」直接展示新增正文；更新按 `supersedes` 读取上一版本，再展示行级差异。
 - 人工通过 → `active`；通过时可以把正文改成复核后的版本，若编辑则同时提交用户看到的
   `updatedAt` 作为版本标记；拒绝 → 回退到被顶替的版本，没有版本可回时删除并记录原因
-**归档合并后的正文为空时整条不动。** 目标 schema 有 `content` 字段、但字段级操作的全部结果仍让正文缺失或只有空白时，`memory_merge` 记 `empty_content` 并跳过这个 URI：新目标不创建 frontmatter 空壳，已有目标保留原正文，同一归档里其它 URI 照常处理。这个闸门只约束归档合并；没有 `content` 字段的合法 schema，以及手工写入、MCP 写入不受影响。`patch_not_found` 等真实字段失败仍逐条保留，不能拿 `empty_content` 冒充补丁诊断。
-
   （§11.11）
 - 其余类型直接 `active`
+
+**编辑后通过与普通通过共用 `POST /memories/{uri}/approve`。** 空 body 保持旧行为：
+`pending` / `archived → active`，已经 `active` 时 200 幂等空操作。编辑请求体是
+`{content, expectedUpdatedAt}`；`content` 必须 trim 后非空，目标 schema 必须有 string
+型 `content` 字段，`expectedUpdatedAt` 必须是待复核响应里原样带出的 `updatedAt`。服务端
+在同一个 `exact(uri)` 锁内重新读取文档，只有它仍是 `pending` 且 `updatedAt` 等于版本
+标记时才把 `content` 映射进 `fields.content`、更新 `updatedAt` 并置 `active`。写回保留
+`createdAt`、`sources`、`validFrom` / `validUntil`、`supersedes`、记忆类型、实体 / 链接
+及其它 schema 字段，URI 与 ACL 不变。
+
+**过期编辑不能覆盖新版本或已生效正文。** 记录已经 `active` / 非 `pending` 时，编辑审批
+返回 409 `CONFLICT`（`details.reason = "not_pending"`）；`expectedUpdatedAt` 不匹配时
+返回 409（`stale_pending`）。两个并发编辑只有一个在锁内通过，后到者按 active 冲突返回，
+不会把另一个正文覆盖后又声称通过。缺少版本标记或空白正文返回 400 `INVALID_ARGUMENT`。
 
 **`status` 键存在但值非法 = 不可解析的记忆。** `domain/node.ts` 的 `parseStatusField(raw)`
 分三档：键**缺失** → `active`（兼容没有这个键的历史文件）；合法值 → 照抄；**存在但非法**
@@ -2076,20 +2125,6 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 **两侧的结论刻意不同。** 检索路径按「磁盘上有什么」工作，所以 `find` 仍能命中它（文件
 存在、索引行是 `active`）；内容层按「是不是一条可解析的记忆」工作，所以读不到。`find`
 的契约是「这里有东西」，`read` 的契约是「这是一条记忆」。
-
-**编辑后通过与普通通过共用 `POST /memories/{uri}/approve`。** 空 body 保持旧行为：
-`pending` / `archived → active`，已经 `active` 时 200 幂等空操作。编辑请求体是
-`{content, expectedUpdatedAt}`；`content` 必须 trim 后非空，目标 schema 必须有 string
-型 `content` 字段，`expectedUpdatedAt` 必须是待复核响应里原样带出的 `updatedAt`。服务端
-在同一个 `exact(uri)` 锁内重新读取文档，只有它仍是 `pending` 且 `updatedAt` 等于版本
-标记时才把 `content` 映射进 `fields.content`、更新 `updatedAt` 并置 `active`。写回保留
-`createdAt`、`sources`、`validFrom` / `validUntil`、`supersedes`、记忆类型、实体 / 链接
-及其它 schema 字段，URI 与 ACL 不变。
-
-**过期编辑不能覆盖新版本或已生效正文。** 记录已经 `active` / 非 `pending` 时，编辑审批
-返回 409 `CONFLICT`（`details.reason = "not_pending"`）；`expectedUpdatedAt` 不匹配时
-返回 409（`stale_pending`）。两个并发编辑只有一个在锁内通过，后到者按 active 冲突返回，
-不会把另一个正文覆盖后又声称通过。缺少版本标记或空白正文返回 400 `INVALID_ARGUMENT`。
 
 ### 11.7 记忆 TTL 与过期清扫
 

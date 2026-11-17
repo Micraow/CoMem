@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { conversationTextMessages } from '../../../src/domain/conversation.js';
 import { ComemError } from '../../../src/domain/errors.js';
 import {
   estimateTokens,
@@ -254,5 +255,59 @@ describe('renderMessageText', () => {
     };
 
     expect(renderMessageText(message)).toBe('');
+  });
+});
+
+describe('conversationTextMessages', () => {
+  it('只保留 user / assistant 的 text parts', () => {
+    const base = message('2026-11-05T16:00:00.000Z');
+    const material = conversationTextMessages([
+      {
+        ...base,
+        role: 'user',
+        source: { host: 'codex', machineId: 'machine-a', cwd: '/private/repo' },
+        parts: [
+          { kind: 'text', text: '用户原话。' },
+          {
+            kind: 'tool_result',
+            toolUseId: 'one',
+            output: 'SECRET_TOKEN=private',
+            isError: false,
+          },
+          {
+            kind: 'context',
+            uri: 'comem://user/alice/private.md',
+            abstract: '不应进入',
+          },
+          { kind: 'image', url: 'https://private.example/x.png', alt: '不应进入' },
+        ],
+      },
+      {
+        ...base,
+        id: 'assistant',
+        role: 'assistant',
+        parts: [{ kind: 'text', text: '助手结论。' }],
+      },
+      {
+        ...base,
+        id: 'system',
+        role: 'system',
+        parts: [{ kind: 'text', text: 'system-only' }],
+      },
+      {
+        ...base,
+        id: 'tool',
+        role: 'tool',
+        parts: [{ kind: 'text', text: 'tool-only' }],
+      },
+    ]);
+
+    expect(material).toEqual([
+      { role: 'user', content: '用户原话。' },
+      { role: 'assistant', content: '助手结论。' },
+    ]);
+    expect(JSON.stringify(material)).not.toContain('SECRET_TOKEN');
+    expect(JSON.stringify(material)).not.toContain('machine-a');
+    expect(JSON.stringify(material)).not.toContain('comem://user/alice/private.md');
   });
 });

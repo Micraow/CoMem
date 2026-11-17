@@ -268,7 +268,7 @@ describe('实体抽取产物', () => {
 });
 
 describe('ArchiveSummaryStep', () => {
-  it('工作记忆关闭时只重建归档目录摘要', async () => {
+  it('工作记忆关闭时只重建一次归档摘要，并由摘要服务读取受控 JSONL', async () => {
     const regenerate = vi.fn<(rootUri: Uri) => Promise<string[]>>(async () => [ARCHIVE]);
     const generate = vi.fn();
     const writeSummary = vi.fn();
@@ -282,6 +282,7 @@ describe('ArchiveSummaryStep', () => {
 
     await step.run(createContext());
 
+    expect(regenerate).toHaveBeenCalledOnce();
     expect(regenerate).toHaveBeenCalledWith(Uri.parse(ARCHIVE));
     expect(generate).not.toHaveBeenCalled();
     expect(writeSummary).not.toHaveBeenCalled();
@@ -896,41 +897,6 @@ describe('MemoryMergeStep', () => {
     expect(diffs[0]?.summary).toMatchObject({ totalUpdates: 1, totalSkipped: 1 });
   });
 
-  it('addOnly 类型目标已存在时降级成跳过，同批其它 URI 照常写入', async () => {
-    const eventUri = `${SCOPE}/memories/events/2026-11-08-conflict.md`;
-    await memory.upsertMemory(Uri.parse(SCOPE), eventsMemoryType, {
-      event: '2026-11-08-conflict',
-      content: '第一条事件。',
-      occurredAt: '2026-11-08T00:00:00.000Z',
-    });
-    const before = await memory.read(Uri.parse(eventUri));
-
-    const operations: BatchOperation[] = [
-      {
-        kind: 'upsert',
-        uri: eventUri,
-        operation: { kind: 'replace', field: 'event', value: '2026-11-08-conflict' },
-      },
-      {
-        kind: 'upsert',
-        uri: eventUri,
-        operation: { kind: 'replace', field: 'content', value: '另一条事件。' },
-      },
-      {
-        kind: 'upsert',
-        uri: CODE_STYLE,
-        operation: { kind: 'replace', field: 'topic', value: 'code-style' },
-      },
-      {
-        kind: 'upsert',
-        uri: CODE_STYLE,
-        operation: { kind: 'replace', field: 'content', value: '新增的偏好' },
-      },
-    ];
-
-    const { step, diffs } = createMergeStep();
-    // 不抛：一条已存在的记录不该拖垮整批操作。
-    await step.run(
   it('新 preferences 的正文 patch 落空时不生成只含 frontmatter 的空壳', async () => {
     const emptyUri = `${SCOPE}/memories/preferences/homework-answer-style.md`;
     const goodUri = `${SCOPE}/memories/preferences/keep-good-data.md`;
@@ -1032,6 +998,41 @@ describe('MemoryMergeStep', () => {
     ]);
   });
 
+  it('addOnly 类型目标已存在时降级成跳过，同批其它 URI 照常写入', async () => {
+    const eventUri = `${SCOPE}/memories/events/2026-11-08-conflict.md`;
+    await memory.upsertMemory(Uri.parse(SCOPE), eventsMemoryType, {
+      event: '2026-11-08-conflict',
+      content: '第一条事件。',
+      occurredAt: '2026-11-08T00:00:00.000Z',
+    });
+    const before = await memory.read(Uri.parse(eventUri));
+
+    const operations: BatchOperation[] = [
+      {
+        kind: 'upsert',
+        uri: eventUri,
+        operation: { kind: 'replace', field: 'event', value: '2026-11-08-conflict' },
+      },
+      {
+        kind: 'upsert',
+        uri: eventUri,
+        operation: { kind: 'replace', field: 'content', value: '另一条事件。' },
+      },
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'topic', value: 'code-style' },
+      },
+      {
+        kind: 'upsert',
+        uri: CODE_STYLE,
+        operation: { kind: 'replace', field: 'content', value: '新增的偏好' },
+      },
+    ];
+
+    const { step, diffs } = createMergeStep();
+    // 不抛：一条已存在的记录不该拖垮整批操作。
+    await step.run(
       mergeContext(operations, [
         [eventUri, 'events'],
         [CODE_STYLE, 'preferences'],

@@ -237,7 +237,10 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     db,
     // 不用真实 ACL 的用例里物化没有意义：`AllowAllAuthorizer` 根本不读
     // `node_permission`。需要真实权限行的用例会传 `realAcl: true`。
-    acl: acl ?? { materializeNode: async (): Promise<void> => undefined },
+    acl: acl ?? {
+      materializeNode: async (): Promise<void> => undefined,
+      hasIndependentAcl: async (): Promise<boolean> => false,
+    },
     generator: new RuleSummarizer(),
     logger,
     config: { abstractMaxChars: 256, overviewMaxChars: 4000 },

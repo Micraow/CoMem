@@ -35,9 +35,7 @@ import type { ContentPart, SessionMessage } from '../domain/session.js';
 import type { Uri } from '../domain/uri.js';
 
 import type { StepContextPorts } from '../services/commit/pipeline.js';
-
-/** `archive_NNN/messages.jsonl`（§6.5）。 */
-const MESSAGES_FILE_NAME = 'messages.jsonl';
+import { messagesUri } from '../services/session/storage.js';
 
 /** 归档完成标记（§10.1：唯一的完成信号，最后写）。 */
 const DONE_FILE_NAME = '.done';
@@ -200,7 +198,7 @@ async function readMessages(
   archiveUri: Uri,
   deps: ArchivePortsDeps,
 ): Promise<readonly SessionMessage[]> {
-  const document = await deps.store.readText(archiveUri.child(MESSAGES_FILE_NAME));
+  const document = await deps.store.readText(messagesUri(archiveUri));
   return parseMessages(document.text, archiveUri, deps.logger);
 }
 

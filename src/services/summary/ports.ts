@@ -64,7 +64,7 @@ export interface SummaryServiceDeps {
    * `materializeNode` 一个方法，与 `ArchiveSummaryStep` 取 `Pick<SummaryService, ...>`
    * 同一取舍：不需要整个 `AclService` 的测试不该造一个。
    */
-  readonly acl: Pick<AclService, 'materializeNode'>;
+  readonly acl: Pick<AclService, 'materializeNode' | 'hasIndependentAcl'>;
   /** 每个目录一把 EXACT 锁；省略时不加锁（见文件头「并发」）。 */
   readonly locks?: PathLockManager;
 }

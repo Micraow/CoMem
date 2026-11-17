@@ -205,6 +205,8 @@ export class AclService implements Authorizer {
     await materializeOneNode(this.#ports(), uri);
   }
 
+  async hasIndependentAcl(uri: Uri): Promise<boolean> { return await this.#aclFile.read(uri) !== null; }
+
   /** 目标（可能不存在）沿祖先链的权限。实现见 `./acl/guard.ts`。 */
   async hasAncestorPermission(uri: Uri, action: AclAction, principals: readonly string[]): Promise<boolean> {
     return ancestorPermission(this.#ports(), uri, action, principals);

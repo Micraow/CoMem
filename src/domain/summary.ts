@@ -8,6 +8,7 @@
  * `services/summary.ts`，这里只定义 Strategy 的形状，不关心模型怎么调。
  */
 
+import type { ConversationTextMessage } from './conversation.js';
 import type { NodeKind } from './node.js';
 import type { Uri } from './uri.js';
 
@@ -57,6 +58,8 @@ export interface SummaryChild {
 export interface SummaryInput {
   readonly uri: Uri;
   readonly children: readonly SummaryChild[];
+  readonly sourceText?: string;
+  readonly dialogue?: readonly ConversationTextMessage[];
 }
 
 /** 摘要生成策略（架构文档 §9.2）。只有 `services/summary.ts` 需要实现它。 */

@@ -42,7 +42,7 @@ export class SummaryService {
   readonly #logger: Logger;
   readonly #config: SummaryServiceConfig;
   readonly #thresholds: FreshnessThresholds;
-  readonly #acl: Pick<AclService, 'materializeNode'>;
+  readonly #acl: Pick<AclService, 'materializeNode' | 'hasIndependentAcl'>;
   readonly #locks: PathLockManager | undefined;
   readonly #refresher: SummaryRefreshCoordinator;
 
