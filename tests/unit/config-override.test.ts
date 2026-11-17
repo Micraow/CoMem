@@ -35,7 +35,9 @@ function overridePath(): string {
 }
 
 function writeConfig(content: string): string {
-  writeFileSync(configPath(), `dataDir: "${tempDir}"\n${content}`, 'utf8');
+  // 路径要用 JSON.stringify 转义：YAML 双引号里 `\U` 是非法转义，Windows 的
+  // `C:\Users\...` 直接写进双引号会让整个文件解析失败。
+  writeFileSync(configPath(), `dataDir: ${JSON.stringify(tempDir)}\n${content}`, 'utf8');
   return configPath();
 }
 
@@ -199,8 +201,11 @@ describe('writeOverrideFile', () => {
       providers: { llm: { default: { apiKey: 'sk-secret' } } },
     });
 
-    const mode = statSync(overridePath()).mode & 0o777;
-    expect(mode).toBe(0o600);
+    // Windows 没有 POSIX 权限位
+    if (process.platform !== 'win32') {
+      const mode = statSync(overridePath()).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
     expect(readFileSync(overridePath(), 'utf8')).toContain('sk-secret');
   });
 

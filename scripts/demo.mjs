@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 演示脚本的辅助进程（`scripts/demo.sh` 调用）。
+ * 演示脚本的辅助进程（`scripts/e2e.mjs` 调用）。
  *
  * 这里只做两件 shell 不擅长的事：**等**（轮询 `/health` 直到服务就绪、轮询
  * `.abstract.md` 直到摘要落盘）和**断言**（失败时打印可读的原因并以非零码退出）。
@@ -8,7 +8,7 @@
  *
  * ## 为什么把「会话 ID / 任务 ID」写进 state.json
  *
- * 每一步是独立的 node 进程（`demo.sh` 一行一个命令，读起来就是一条时间线）。
+ * 每一步是独立的 node 进程（`e2e.mjs` 一个步骤一行命令，读起来就是一条时间线）。
  * 进程间唯一的共享状态是临时目录里的一个 JSON 文件，不用环境变量传参——环境变量
  * 在 `set -u` 下漏一个就是一句「未绑定变量」，而 JSON 能直接 `cat` 出来看。
  *
@@ -24,6 +24,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // ── 参数 ──────────────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ if (command === undefined) {
 
 const args = parseArgs(rest);
 const BASE_URL = String(args['base-url'] ?? process.env.COMEM_DEMO_BASE_URL ?? 'http://127.0.0.1:19330').replace(/\/+$/u, '');
-const DEMO_ROOT = String(args.root ?? process.env.COMEM_DEMO_ROOT ?? '/tmp/comem-demo');
+const DEMO_ROOT = String(args.root ?? process.env.COMEM_DEMO_ROOT ?? join(tmpdir(), 'comem-demo'));
 const DATA_DIR = join(DEMO_ROOT, 'data');
 const STATE_PATH = join(DEMO_ROOT, 'state.json');
 
@@ -188,7 +189,12 @@ async function waitReady() {
   for (;;) {
     try {
       const health = await api.get('/health');
-      detail(`服务已就绪（${Date.now() - startedAt}ms）：status=${health.status}，版本 ${health.version}，索引 ${health.index.nodes} 个节点`);
+      // 字段名跟着 `/health` 的响应走，写错会静默打印 `undefined`，所以不认识就报错。
+      const nodes = health.index?.totalNodes;
+      if (typeof nodes !== 'number') {
+        throw new Error(`/health 响应里没有 index.totalNodes：${JSON.stringify(health.index)}`);
+      }
+      detail(`服务已就绪（${Date.now() - startedAt}ms）：status=${health.status}，版本 ${health.version}，索引 ${nodes} 个节点`);
       return;
     } catch (error) {
       if (Date.now() >= deadline) {
@@ -304,12 +310,14 @@ async function showArchive() {
   detail(`任务 ${task.task.id}：status=${task.task.status}，stepsDone=[${task.task.stepsDone.join(', ')}]`);
 
   const archiveDir = join(DATA_DIR, 'user', 'local', 'sessions', sessionId, 'history', archiveUri.slice(archiveUri.lastIndexOf('/') + 1));
-  const meta = JSON.parse(readFileSync(join(archiveDir, '.meta.json'), 'utf8'));
-  detail(`归档元数据 ${archiveDir}/.meta.json：`);
+  const metaPath = join(archiveDir, '.meta.json');
+  const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+  detail(`归档元数据 ${metaPath}：`);
   detail(`  phase1.status=${meta.phase1.status}，archived=${meta.phase1.archivedMessageIds.length} 条，stepsDone=[${meta.stepsDone.join(', ')}]`);
 
-  const messages = readFileSync(join(archiveDir, 'messages.jsonl'), 'utf8').trim().split('\n');
-  detail(`归档消息 ${archiveDir}/messages.jsonl：${messages.length} 行（每行一条消息）`);
+  const messagesPath = join(archiveDir, 'messages.jsonl');
+  const messages = readFileSync(messagesPath, 'utf8').trim().split('\n');
+  detail(`归档消息 ${messagesPath}：${messages.length} 行（每行一条消息）`);
 
   if (!llmEnabled) {
     detail('阶段二需要模型：设置 COMEM_LLM_KEY 后重跑，会真实执行四步并写 .done。');

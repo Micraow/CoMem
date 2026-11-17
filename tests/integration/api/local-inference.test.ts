@@ -285,54 +285,60 @@ describe('POST /api/v1/inference/local/start', () => {
     });
   });
 
-  it('启动假服务后等到就绪，stop 收掉同一个 pid', async () => {
-    newRoot();
-    const port = await freePort();
-    writeFakeInference(port);
-    app = await createApp(managerOf({ endpoint: `http://127.0.0.1:${String(port)}` }));
+  // TODO: 启动路径写死了 POSIX 命令（`nice` / `taskset` / `.venv/bin/python`, 见
+  // `src/adapters/local-inference/manager.ts:166`）, 假推理服务本身也是 `#!/bin/sh`
+  // 本机推理在 Windows 上不可用
+  it.skipIf(process.platform === 'win32')(
+    '启动假服务后等到就绪，stop 收掉同一个 pid',
+    async () => {
+      newRoot();
+      const port = await freePort();
+      writeFakeInference(port);
+      app = await createApp(managerOf({ endpoint: `http://127.0.0.1:${String(port)}` }));
 
-    const started = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/start',
-      payload: {},
-    });
-    expect(started.statusCode).toBe(200);
-    expect(resultOf(started)).toEqual({
-      started: true,
-      ready: true,
-      endpoint: `http://127.0.0.1:${String(port)}`,
-      dimension: 1024,
-    });
+      const started = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/start',
+        payload: {},
+      });
+      expect(started.statusCode).toBe(200);
+      expect(resultOf(started)).toEqual({
+        started: true,
+        ready: true,
+        endpoint: `http://127.0.0.1:${String(port)}`,
+        dimension: 1024,
+      });
 
-    const status = resultOf(
-      await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
-    );
-    expect(status).toMatchObject({
-      available: true,
-      running: true,
-      managed: true,
-      dimension: 1024,
-      backend: 'fake',
-      device: 'cpu',
-      model: 'Qwen3-Embedding-0.6B',
-      missing: ['rerank-model'],
-      startCommand: null,
-    });
+      const status = resultOf(
+        await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
+      );
+      expect(status).toMatchObject({
+        available: true,
+        running: true,
+        managed: true,
+        dimension: 1024,
+        backend: 'fake',
+        device: 'cpu',
+        model: 'Qwen3-Embedding-0.6B',
+        missing: ['rerank-model'],
+        startCommand: null,
+      });
 
-    const pidPath = join(dataDir, '_meta', 'local-inference.pid');
-    const pid = (JSON.parse(readFileSync(pidPath, 'utf8')) as { pid: number }).pid;
-    expect(pid).toBeGreaterThan(0);
+      const pidPath = join(dataDir, '_meta', 'local-inference.pid');
+      const pid = (JSON.parse(readFileSync(pidPath, 'utf8')) as { pid: number }).pid;
+      expect(pid).toBeGreaterThan(0);
 
-    const stopped = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/stop',
-      payload: {},
-    });
-    expect(stopped.statusCode).toBe(200);
-    expect(resultOf(stopped)).toEqual({ stopped: true });
-    await waitUntilGone(pid);
-    expect(existsSync(pidPath)).toBe(false);
-  });
+      const stopped = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/stop',
+        payload: {},
+      });
+      expect(stopped.statusCode).toBe(200);
+      expect(resultOf(stopped)).toEqual({ stopped: true });
+      await waitUntilGone(pid);
+      expect(existsSync(pidPath)).toBe(false);
+    },
+  );
 
   it('外部服务已就绪时不启动第二个进程，且 stop 不碰它', async () => {
     newRoot();
@@ -372,79 +378,85 @@ describe('POST /api/v1/inference/local/start', () => {
     expect(externalServer?.listening).toBe(true);
   });
 
-  it('存活但未就绪的托管进程仍可停止', async () => {
-    newRoot();
-    const port = await freePort();
-    writeFakeInference(port, { busy: true });
-    app = await createApp(managerOf({
-      endpoint: `http://127.0.0.1:${String(port)}`,
-      startTimeoutMs: 200,
-    }));
+  it.skipIf(process.platform === 'win32')(
+    '存活但未就绪的托管进程仍可停止',
+    async () => {
+      newRoot();
+      const port = await freePort();
+      writeFakeInference(port, { busy: true });
+      app = await createApp(managerOf({
+        endpoint: `http://127.0.0.1:${String(port)}`,
+        startTimeoutMs: 200,
+      }));
 
-    const started = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/start',
-      payload: {},
-    });
-    expect(started.statusCode).toBe(409);
-    expect(errorOf(started)['details']).toMatchObject({
-      started: true,
-      ready: false,
-    });
+      const started = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/start',
+        payload: {},
+      });
+      expect(started.statusCode).toBe(409);
+      expect(errorOf(started)['details']).toMatchObject({
+        started: true,
+        ready: false,
+      });
 
-    const status = resultOf(
-      await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
-    );
-    expect(status).toMatchObject({
-      running: false,
-      managed: true,
-    });
-    const pidPath = join(dataDir, '_meta', 'local-inference.pid');
-    const pid = (JSON.parse(readFileSync(pidPath, 'utf8')) as { pid: number }).pid;
+      const status = resultOf(
+        await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
+      );
+      expect(status).toMatchObject({
+        running: false,
+        managed: true,
+      });
+      const pidPath = join(dataDir, '_meta', 'local-inference.pid');
+      const pid = (JSON.parse(readFileSync(pidPath, 'utf8')) as { pid: number }).pid;
 
-    const stopped = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/stop',
-      payload: {},
-    });
-    expect(stopped.statusCode).toBe(200);
-    await waitUntilGone(pid);
-  });
+      const stopped = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/stop',
+        payload: {},
+      });
+      expect(stopped.statusCode).toBe(200);
+      await waitUntilGone(pid);
+    },
+  );
 
-  it('pid 启动时刻不匹配时不停止被复用的进程', async () => {
-    newRoot();
-    const port = await freePort();
-    writeFakeInference(port);
-    app = await createApp(managerOf({ endpoint: `http://127.0.0.1:${String(port)}` }));
-    const started = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/start',
-      payload: {},
-    });
-    expect(started.statusCode).toBe(200);
+  it.skipIf(process.platform === 'win32')(
+    'pid 启动时刻不匹配时不停止被复用的进程',
+    async () => {
+      newRoot();
+      const port = await freePort();
+      writeFakeInference(port);
+      app = await createApp(managerOf({ endpoint: `http://127.0.0.1:${String(port)}` }));
+      const started = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/start',
+        payload: {},
+      });
+      expect(started.statusCode).toBe(200);
 
-    const pidPath = join(dataDir, '_meta', 'local-inference.pid');
-    const record = JSON.parse(readFileSync(pidPath, 'utf8')) as {
-      pid: number;
-      startTime: string;
-    };
-    writeFileSync(pidPath, `${JSON.stringify({ ...record, startTime: '0' })}\n`, 'utf8');
+      const pidPath = join(dataDir, '_meta', 'local-inference.pid');
+      const record = JSON.parse(readFileSync(pidPath, 'utf8')) as {
+        pid: number;
+        startTime: string;
+      };
+      writeFileSync(pidPath, `${JSON.stringify({ ...record, startTime: '0' })}\n`, 'utf8');
 
-    const status = resultOf(
-      await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
-    );
-    expect(status).toMatchObject({ managed: false });
-    const stopped = await app.inject({
-      method: 'POST',
-      url: '/api/v1/inference/local/stop',
-      payload: {},
-    });
-    expect(stopped.statusCode).toBe(409);
-    expect(existsSync(pidPath)).toBe(false);
-    expect(() => process.kill(record.pid, 0)).not.toThrow();
+      const status = resultOf(
+        await app.inject({ method: 'GET', url: '/api/v1/inference/local' }),
+      );
+      expect(status).toMatchObject({ managed: false });
+      const stopped = await app.inject({
+        method: 'POST',
+        url: '/api/v1/inference/local/stop',
+        payload: {},
+      });
+      expect(stopped.statusCode).toBe(409);
+      expect(existsSync(pidPath)).toBe(false);
+      expect(() => process.kill(record.pid, 0)).not.toThrow();
 
-    writeFileSync(pidPath, `${JSON.stringify(record)}\n`, 'utf8');
-  });
+      writeFileSync(pidPath, `${JSON.stringify(record)}\n`, 'utf8');
+    },
+  );
 
   it('未知监听者未就绪时不 spawn 子进程去抢端口', async () => {
     newRoot();

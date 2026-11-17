@@ -111,10 +111,20 @@
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import * as ts from 'typescript';
+
+/**
+ * 仓库相对路径统一用正斜杠
+ *
+ * TypeScript 的 `fileName` 本来就是正斜杠，而 `path.relative` 在 Windows 上返回
+ * 反斜杠
+ */
+function relativePosix(rootDir: string, fileName: string): string {
+  return relative(rootDir, fileName).split('\\').join('/');
+}
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PRODUCTION_ROOT = 'src';
@@ -451,13 +461,13 @@ function isDeclarationName(node: ts.Identifier): boolean {
 }
 
 function scopeOf(rootDir: string, file: ts.SourceFile): string {
-  return relative(rootDir, file.fileName).split(sep)[0] ?? '';
+  return relativePosix(rootDir, file.fileName).split('/')[0] ?? '';
 }
 
 function locationOf(rootDir: string, node: ts.Node): { file: string; line: number } {
   const sourceFile = node.getSourceFile();
   const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-  return { file: relative(rootDir, sourceFile.fileName), line: line + 1 };
+  return { file: relativePosix(rootDir, sourceFile.fileName), line: line + 1 };
 }
 
 /** 值位置判定：任一祖先节点是 TypeNode 时，这个标识符出现在类型位置。 */
@@ -713,7 +723,7 @@ function collectTargets(
     if (file.isDeclarationFile || scopeOf(rootDir, file) !== PRODUCTION_ROOT) {
       continue;
     }
-    const relativeFile = relative(rootDir, file.fileName);
+    const relativeFile = relativePosix(rootDir, file.fileName);
     // 入口模块自身的导出是根，不是待检查的目标。
     if (entryGuardOf(file) !== null) {
       continue;
@@ -966,7 +976,7 @@ function collectMethodTargets(
     }
     const { line } = file.getLineAndCharacterOfPosition(member.getStart());
     targets.push({
-      id: `${relative(rootDir, file.fileName)}#${owner}.${name}`,
+      id: `${relativePosix(rootDir, file.fileName)}#${owner}.${name}`,
       owner,
       name,
       symbol,
@@ -1441,7 +1451,7 @@ function classifyMethods(
         id: target.id,
         owner: target.owner,
         name: target.name,
-        file: relative(rootDir, target.file.fileName),
+        file: relativePosix(rootDir, target.file.fileName),
         line: target.line,
         category,
         reachableCalls: counts.reachable,
@@ -1562,7 +1572,7 @@ function classify(
     id: target.id,
     name: target.name,
     kind: target.kind,
-    file: relative(rootDir, target.file.fileName),
+    file: relativePosix(rootDir, target.file.fileName),
     line: target.line,
     category,
     valueRefs,
@@ -1643,7 +1653,7 @@ export function analyzeReachability(rootDir: string): ReachabilityResult {
     }
     entryFiles.add(file);
     entries.push({
-      file: relative(rootDir, file.fileName),
+      file: relativePosix(rootDir, file.fileName),
       line: guard.line,
       evidence: guard.text,
     });
@@ -1726,7 +1736,7 @@ export function analyzeReachability(rootDir: string): ReachabilityResult {
 
   const modules: ModuleRecord[] = productionFiles
     .map((file): ModuleRecord => {
-      const relativeFile = relative(rootDir, file.fileName);
+      const relativeFile = relativePosix(rootDir, file.fileName);
       if (reachableModules.has(file)) {
         return {
           file: relativeFile,

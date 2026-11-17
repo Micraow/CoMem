@@ -65,6 +65,14 @@ import { configSchema } from '../src/config/schema.js';
 import { errorMessage } from '../src/domain/errors.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+/**
+ * 统一路径分隔符
+ * `ts.parseJsonConfigFileContent` 返回的文件路径统一用正斜杠
+ * 用 `join` 从 `ROOT` 拼出来的路径用系统分隔符.
+ * 直接 `startsWith` 在 Windows 上会把文件集悄悄判空, L1/L2 空转, 比较前归一到正斜杠
+ */
+const toSlash = (path: string): string => path.split(sep).join('/');
 const SRC_DIR = join(ROOT, 'src');
 const SCHEMA_FILE = join(ROOT, 'src', 'config', 'schema.ts');
 /**
@@ -139,7 +147,7 @@ function fail(message: string): never {
 function locationOf(node: ts.Node): string {
   const sourceFile = node.getSourceFile();
   const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
-  return `${relative(ROOT, sourceFile.fileName)}:${String(line + 1)}`;
+  return `${toSlash(relative(ROOT, sourceFile.fileName))}:${String(line + 1)}`;
 }
 
 function propertyNameOf(node: ts.PropertyName | ts.PrivateIdentifier): string | null {
@@ -305,7 +313,7 @@ function main(): void {
 
   const schemaSource = program.getSourceFile(SCHEMA_FILE);
   if (schemaSource === undefined) {
-    fail(`找不到 ${relative(ROOT, SCHEMA_FILE)}，无法读取 ComemConfig 类型。`);
+    fail(`找不到 ${toSlash(relative(ROOT, SCHEMA_FILE))}，无法读取 ComemConfig 类型。`);
   }
   const typeAlias = schemaSource.statements.find(
     (statement): statement is ts.TypeAliasDeclaration =>
@@ -325,7 +333,7 @@ function main(): void {
 
   const sourceFiles = program
     .getSourceFiles()
-    .filter((file) => !file.isDeclarationFile && file.fileName.startsWith(`${SRC_DIR}${sep}`));
+    .filter((file) => !file.isDeclarationFile && toSlash(file.fileName).startsWith(toSlash(SRC_DIR) + '/'));
 
   const reads = new Set<string>();
 
@@ -456,7 +464,7 @@ function main(): void {
   const assemblySources = program
     .getSourceFiles()
     .filter(
-      (file) => !file.isDeclarationFile && file.fileName.startsWith(`${ASSEMBLY_DIR}${sep}`),
+      (file) => !file.isDeclarationFile && toSlash(file.fileName).startsWith(toSlash(ASSEMBLY_DIR) + '/'),
     );
   if (assemblySources.length > 0) {
     const readsConfig = (node: ts.Node): boolean => {
