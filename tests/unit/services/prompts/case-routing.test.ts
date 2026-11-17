@@ -9,9 +9,16 @@ describe('案例记忆的类型路由', () => {
   it('cases 保存具体任务的尝试和结果，并允许无价值任务跳过', () => {
     expect(casesMemoryType.directory).toBe('memories/cases');
     expect(casesMemoryType.filename).toBe('{case}.md');
+    expect(casesMemoryType.fields.map(({ name }) => name)).toEqual([
+      'case',
+      'content',
+      'updatedAt',
+    ]);
     expect(casesMemoryType.description).toContain('具体任务案例');
     expect(casesMemoryType.description).toContain('实际尝试');
     expect(casesMemoryType.description).toContain('观察结果');
+    expect(casesMemoryType.description).toContain('## 尝试');
+    expect(casesMemoryType.description).toContain('## 结果');
     expect(casesMemoryType.description).toContain('不写记忆');
   });
 

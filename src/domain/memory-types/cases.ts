@@ -46,20 +46,6 @@ export const casesMemoryType = {
       description: '具体任务案例标识，小写短横线；同类题目也应保留能区分本次任务的标识',
     },
     {
-      name: 'task',
-      type: 'string',
-      merge: 'replace',
-      required: true,
-      description: '一句话说明本次任务目标、对象和必要约束',
-    },
-    {
-      name: 'outcome',
-      type: 'string',
-      merge: 'replace',
-      required: true,
-      description: '观察结果：success / failure / partial / unfinished / unknown',
-    },
-    {
       name: 'content',
       type: 'string',
       merge: 'patch',

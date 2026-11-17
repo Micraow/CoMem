@@ -8,6 +8,7 @@ import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
 import type { AssembledItem, AssemblyCandidate } from '../../../src/domain/assembly.js';
 import type { Logger } from '../../../src/domain/log.js';
+import { renderItem } from '../../../src/domain/render.js';
 import { estimateTokens } from '../../../src/domain/session.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
@@ -101,13 +102,25 @@ function overviewOnly(uri: string): AssemblyCandidate {
 async function assembleItem(
   assembler: ContextAssembler,
   entry: AssemblyCandidate,
+  maxTokens = 10_000,
 ): Promise<AssembledItem | undefined> {
   const result = await assembler.assemble(
     [entry],
-    { maxTokens: 10_000, quotaPreset: 'chat' },
+    { maxTokens, quotaPreset: 'chat' },
     AUTH_PRINCIPALS,
   );
   return result.items[0];
+}
+
+/** 只够装下指定概览、装不下全文的预算。 */
+function overviewBudget(entry: AssemblyCandidate, overview: string): number {
+  return estimateTokens(renderItem({
+    uri: entry.uri,
+    contextType: entry.contextType,
+    score: entry.score,
+    detail: 'overview',
+    text: overview,
+  }));
 }
 
 describe('概览读取', () => {
@@ -115,7 +128,12 @@ describe('概览读取', () => {
     await writeBody(BODY, '原文正文');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
-    const item = await assembleItem(createAssembler(), overviewOnly(DIRECTORY.toString()));
+    const entry = overviewOnly(DIRECTORY.toString());
+    const item = await assembleItem(
+      createAssembler(),
+      entry,
+      overviewBudget(entry, 'L1 概览正文'),
+    );
     expect(item?.detail).toBe('overview');
     expect(item?.text).toBe('L1 概览正文');
   });
@@ -126,7 +144,12 @@ describe('概览读取', () => {
     await writeBody(BODY, '# 标题\n\n原文正文');
     await metadata.writeSummary(DIRECTORY, '一句话摘要', 'L1 概览正文');
 
-    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    const entry = overviewOnly(BODY);
+    const item = await assembleItem(
+      createAssembler(),
+      entry,
+      overviewBudget(entry, '标题\n\n原文正文'),
+    );
     expect(item?.detail).toBe('overview');
     expect(item?.text).toBe('标题\n\n原文正文');
   });
@@ -134,7 +157,12 @@ describe('概览读取', () => {
   it('L1 缺失时用「标题树 + 首段」降级', async () => {
     await writeBody(BODY, ['# 标题', '', '首段。', '', '## 子标题', '', '其余。'].join('\n'));
 
-    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    const entry = overviewOnly(BODY);
+    const item = await assembleItem(
+      createAssembler(),
+      entry,
+      overviewBudget(entry, '标题\n  子标题\n\n首段。'),
+    );
     expect(item?.text).toBe('标题\n  子标题\n\n首段。');
   });
 
@@ -155,7 +183,12 @@ describe('概览读取', () => {
   it('正文只有标题时返回标题树', async () => {
     await writeBody(BODY, '# 只有标题');
 
-    const item = await assembleItem(createAssembler(), overviewOnly(BODY));
+    const entry = overviewOnly(BODY);
+    const item = await assembleItem(
+      createAssembler(),
+      entry,
+      overviewBudget(entry, '只有标题'),
+    );
     expect(item?.text).toBe('只有标题');
   });
 
@@ -172,10 +205,16 @@ describe('概览读取', () => {
   });
 
   it('读之前先求权（check 被调用）', async () => {
+    await writeBody(BODY, '原文正文');
     const authorizer: Authorizer = new AllowAllAuthorizer();
     const check = vi.spyOn(authorizer, 'check');
 
-    await assembleItem(createAssembler(authorizer), overviewOnly(BODY));
+    const entry = overviewOnly(BODY);
+    await assembleItem(
+      createAssembler(authorizer),
+      entry,
+      overviewBudget(entry, '原文正文'),
+    );
     expect(check).toHaveBeenCalledTimes(1);
     expect((check.mock.calls[0]?.[0] as Uri).toString()).toBe(BODY);
   });

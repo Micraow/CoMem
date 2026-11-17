@@ -30,8 +30,6 @@ function memoryRecord(overrides?: Partial<MemoryRecord>): MemoryRecord {
     memoryType: casesMemoryType.type,
     fields: {
       case: 'mips-sll-datapath',
-      task: '为单周期 MIPS 数据通路添加 sll。',
-      outcome: 'success',
       content: '首行结论\n\n## 尝试\n\n复用 ALU 左移。\n\n## 结果\n\n仿真通过。',
     },
     status: 'active',

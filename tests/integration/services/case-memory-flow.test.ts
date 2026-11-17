@@ -22,8 +22,6 @@ const CASE_EXTRACTION = {
     identity: { case: 'mips-sll-datapath' },
     operations: [
       { kind: 'replace', field: 'case', value: 'mips-sll-datapath' },
-      { kind: 'replace', field: 'task', value: '为单周期 MIPS 数据通路添加 sll。' },
-      { kind: 'replace', field: 'outcome', value: 'success' },
       {
         kind: 'replace',
         field: 'content',
@@ -134,10 +132,8 @@ describe('cases 记忆链路', () => {
       const record = await container.services.memory.read(Uri.parse(CASE_URI));
       expect(record?.status).toBe('active');
       expect(record?.memoryType).toBe('cases');
-      expect(record?.fields).toMatchObject({
-        task: '为单周期 MIPS 数据通路添加 sll。',
-        outcome: 'success',
-      });
+      expect(record?.fields).not.toHaveProperty('task');
+      expect(record?.fields).not.toHaveProperty('outcome');
       expect(record?.fields['content']).toContain('复用现有写回路径');
 
       const hits = await container.services.search.find('sll', {
