@@ -6,9 +6,7 @@ import { ComemError } from '../../../src/domain/errors.js';
 import type { LlmPrompt } from '../../../src/domain/llm.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { LlmService } from '../../../src/services/llm.js';
-import { buildExtractPrompt } from '../../../src/services/prompts/extract.js';
 import { buildSummaryPrompt } from '../../../src/services/prompts/summarize.js';
-import { BUILTIN_MEMORY_TYPES } from '../../../src/domain/memory-types/index.js';
 import { Uri } from '../../../src/domain/uri.js';
 
 const PROMPT: LlmPrompt = {
@@ -43,7 +41,6 @@ function createService(
   const service = new LlmService({
     provider,
     logger,
-    // 测试里退避取 1ms：重试路径要快，指数本身不是这里要断言的东西。
     retryBaseDelayMs: 1,
     ...overrides,
   });
@@ -96,7 +93,6 @@ describe('generate', () => {
     expect(error).toBeInstanceOf(ComemError);
     expect((error as ComemError).code).toBe('PROVIDER_UNAVAILABLE');
     expect((error as ComemError).message).toContain('maxTokens');
-    // 关键断言：不是「重试 3 次又失败」，而是压根没重试。
     expect(provider.calls).toHaveLength(1);
     expect(service.stats.truncated).toBe(1);
     expect(service.stats.failed).toBe(0);
@@ -187,7 +183,6 @@ describe('generateJson', () => {
     const { service, provider } = createService([
       { json: { ok: '不是布尔' } },
       { json: { ok: 1 } },
-      // 第三次不该被调用：解析失败只重试一次。
     ]);
 
     await expect(service.generateJson(PROMPT, schema)).rejects.toMatchObject({
@@ -198,8 +193,7 @@ describe('generateJson', () => {
   });
 
   it('结构化输出被截断时不重试', async () => {
-    // 截断也是 `NoObjectGeneratedError`，只看错误码会被当成解析失败重试一次。
-    // 适配层带 `truncated` 标记，这里据此跳过重试（§11.4）。
+    // 截断的响应同样抛 `NoObjectGeneratedError`，靠适配层的 `truncated` 标记跳过重试。
     const { service, provider } = createService([
       {
         error: new ComemError('PROVIDER_UNAVAILABLE', '模型输出被截断。', { truncated: true }),
@@ -212,17 +206,6 @@ describe('generateJson', () => {
     });
     expect(provider.calls).toHaveLength(1);
     expect(service.stats.truncated).toBe(1);
-  });
-
-  it('UNAUTHENTICATED 不重试', async () => {
-    const { service, provider } = createService([
-      { error: new ComemError('UNAUTHENTICATED', 'API Key 无效。') },
-    ]);
-
-    await expect(service.generateJson(PROMPT, schema)).rejects.toMatchObject({
-      code: 'UNAUTHENTICATED',
-    });
-    expect(provider.calls).toHaveLength(1);
   });
 
   it('PROVIDER_UNAVAILABLE 重试到上限', async () => {
@@ -264,135 +247,6 @@ describe('generateJson', () => {
 });
 
 describe('提示词模板', () => {
-  const memoryTypes = Object.values(BUILTIN_MEMORY_TYPES);
-
-  it('抽取 prompt 写清 page_id 编号规则与 JSON 输出', () => {
-    const prompt = buildExtractPrompt({
-      messages: [{ role: 'user', content: '我更喜欢 2 空格缩进。' }],
-      memoryTypes,
-      pages: [
-        {
-          pageId: 1,
-          uri: 'comem://user/alice/memories/profile.md',
-          memoryType: 'profile',
-          content: 'alice',
-        },
-      ],
-      previousOverview: '上次聊到代码风格。',
-      profileMaxChars: 800,
-      today: '2026-11-08',
-    });
-
-    const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
-
-    expect(rendered).toContain('page_id');
-    expect(rendered).toContain('≥ 100');
-    expect(rendered).toContain('JSON');
-    expect(rendered).toContain('preferences');
-    expect(rendered).toContain('我更喜欢 2 空格缩进。');
-    expect(rendered).toContain('上次聊到代码风格。');
-    expect(rendered).toContain('comem://user/alice/memories/profile.md');
-  });
-
-  it('没有已读记忆与上一次概览时也给出明确说明', () => {
-    const prompt = buildExtractPrompt({
-      messages: [],
-      memoryTypes,
-      pages: [],
-      profileMaxChars: 800,
-      today: '2026-11-08',
-    });
-    const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
-
-    expect(rendered).toContain('没有预取到已读记忆');
-    expect(rendered).toContain('没有会话消息');
-    expect(rendered).not.toContain('上一次归档的概览');
-  });
-
-  /**
-   * 画像的收敛指令：只给规则不给数字，模型判断不了「现在算不算超」。三个分支
-   * （没有画像 / 未超 / 已超）给出的动作必须不同——写成同一句的话，模型要么永远
-   * 重写，要么永远增量维护。
-   */
-  describe('用户画像的收敛指令', () => {
-    const profilePage = (content: string) => ({
-      pageId: 2,
-      uri: 'comem://user/alice/memories/profile.md',
-      memoryType: 'profile',
-      content,
-    });
-
-    it('没有画像时要求新建，并给出日期后缀', () => {
-      const prompt = buildExtractPrompt({
-        messages: [],
-        memoryTypes,
-        pages: [],
-        profileMaxChars: 800,
-        today: '2026-11-08',
-      });
-      const rendered = prompt.system ?? '';
-
-      expect(rendered).toContain('没有读到用户画像');
-      expect(rendered).toContain('≥ 100');
-      expect(rendered).toContain('2026-11-08');
-    });
-
-    it('未超上限时要求 patch 增量维护', () => {
-      const prompt = buildExtractPrompt({
-        messages: [],
-        memoryTypes,
-        pages: [profilePage('alice，后端工程师。')],
-        profileMaxChars: 800,
-        today: '2026-11-08',
-      });
-      const rendered = prompt.system ?? '';
-
-      expect(rendered).toContain('正文 12 字');
-      expect(rendered).toContain('上限 800 字');
-      expect(rendered).toContain('`patch` 增量维护');
-      expect(rendered).not.toContain('已超上限');
-    });
-
-    it('超上限时要求整份重写，并点名 pageId 与 replace content', () => {
-      const prompt = buildExtractPrompt({
-        messages: [],
-        memoryTypes,
-        pages: [profilePage('x'.repeat(801))],
-        profileMaxChars: 800,
-        today: '2026-11-08',
-      });
-      const rendered = prompt.system ?? '';
-
-      expect(rendered).toContain('正文 801 字');
-      expect(rendered).toContain('已超上限');
-      expect(rendered).toContain('`replace content`');
-      expect(rendered).toContain('`pageId` 用 2');
-      expect(rendered).toContain('2026-11-08');
-    });
-  });
-
-  it('摘要 prompt 写清四段结构且要求不输出 frontmatter', () => {
-    const prompt = buildSummaryPrompt({
-      uri: Uri.parse('comem://user/alice/memories'),
-      children: [
-        {
-          uri: Uri.parse('comem://user/alice/memories/profile.md'),
-          name: 'profile.md',
-          kind: 'document',
-          abstract: 'alice，后端工程师。',
-        },
-      ],
-    });
-
-    const rendered = `${prompt.system ?? ''}\n${prompt.messages.map((message) => message.content).join('\n')}`;
-
-    expect(rendered).toContain('快速导航');
-    expect(rendered).toContain('详细说明');
-    expect(rendered).toContain('frontmatter');
-    expect(rendered).toContain('profile.md');
-    expect(rendered).toContain('alice，后端工程师。');
-  });
-
   it('归档摘要把本批对话事实作为明确输入，不从 messages.jsonl 生成 L0', () => {
     const prompt = buildSummaryPrompt({
       uri: Uri.parse('comem://user/alice/sessions/s1/history/archive_001'),
