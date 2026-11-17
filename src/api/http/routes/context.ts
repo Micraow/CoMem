@@ -22,7 +22,8 @@ export function createContextRoutes({ search, observability }: Pick<HttpRouteSer
             if (!(error instanceof ComemError) || error.details?.['reason'] !== 'invalid_context_receipt') throw error;
           });
           return search.automaticContext(query, {
-            ...identity, scopes: await search.defaultScopes(identity.subject, identity.principals), sessionId: optionalString(body, 'sessionId'),
+            ...identity, scopes: [], sessionId: optionalString(body, 'sessionId'),
+            projectId: optionalString(body, 'projectId'),
             contextEpoch: optionalString(body, 'contextEpoch'),
             maxTokens: optionalInteger(body, 'maxTokens', 1600, { min: 1, max: 16000 }),
             maxBytes: optionalInteger(body, 'maxBytes', 9000, { min: 0, max: 64000 }),

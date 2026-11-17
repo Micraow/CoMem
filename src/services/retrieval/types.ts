@@ -123,15 +123,15 @@ export interface SearchServiceDeps {
   /** 意图分析（§8.4）和可选的自动召回压缩（§8.6）；缺省时 `search` 用原查询。 */
   readonly llm?: Pick<LlmService, 'generateJson'>;
   /**
-   * 会话服务，两个用途：
+   * 会话服务，三个用途：
    *
-   * - `load`：最近消息的来源（§8.4 的「用 session」）。只用来解析指代（「那它呢」）。
-   *   不注入时按「历史为空」处理：查询仍然会重写，只是省略的主语补不回来。
+   * - `load` / `recentMessages`：最近消息来源（§8.4）。`readSessionMeta` 只读项目绑定，
+   *   不加载消息正文；不注入时按「历史为空」处理。
    * - `totalMessageCount`：跨轮去重的轮次时钟（§8.7）。**不能换成 `load` 的
    *   `messageCount`**：那是 live 未提交条数（`shouldAutoCommit` 的判据），提交后
    *   归零，时钟会倒退。
    */
-  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'> & Partial<Pick<SessionService, 'recentMessages'>>;
+  readonly sessions?: Pick<SessionService, 'load' | 'totalMessageCount'> & Partial<Pick<SessionService, 'recentMessages' | 'readSessionMeta'>>;
   readonly readableScopes?: (principals: readonly string[]) => readonly string[];
   /**
    * 嵌入（§8.3、§18 的 `retrieval.engine`）。只有 `vector` / `hybrid` 用到。
