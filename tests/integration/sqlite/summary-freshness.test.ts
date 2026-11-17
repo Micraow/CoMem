@@ -7,7 +7,7 @@ import { currentVersion, openDatabase, runMigrations } from '../../../src/adapte
 const URI = 'comem://user/alice/memories/preferences';
 const UPDATED_AT = '2026-11-08T00:00:00.000Z';
 
-/** 插入一行 `node`，只填建表必填列（摘要新鲜度三列走默认值）。 */
+/** 插入一行 `node`，只填建表必填列（摘要新鲜度四列走默认值）。 */
 function insertNode(db: DatabaseSync): void {
   db.prepare(
     `INSERT INTO node (
@@ -35,13 +35,13 @@ function row(db: DatabaseSync): Record<string, unknown> | undefined {
 }
 
 /**
- * 目录摘要的新鲜度三列（§9.3）。
+ * 目录摘要的新鲜度四列（§9.3）。
  *
  * 早期这是 `0003_summary_freshness.sql` 的一个 `ALTER TABLE ADD COLUMN` 迁移；
  * 现在三列直接写进唯一的初始 schema（`0001_init.sql`），迁移不再分版本。
- * 这里断言的是**最终结构的行为**：三列的默认值、可写、以及 `NOT NULL` 约束。
+ * 这里断言的是**最终结构的行为**：四列的默认值、可写、以及 `NOT NULL` 约束。
  */
-describe('node 摘要新鲜度三列', () => {
+describe('node 摘要新鲜度四列', () => {
   it('幂等：runMigrations 跑两次不炸', () => {
     const db = openDatabase(':memory:');
     try {
@@ -65,8 +65,9 @@ describe('node 摘要新鲜度三列', () => {
       expect(inserted?.['abstract']).toBe('偏好目录的摘要');
       expect(inserted?.['body_digest']).toBe('digest-before-0003');
       expect(inserted?.['status']).toBe('active');
-      // 三列的初始值就是「从未生成过摘要」（§9.3「没有基线」）。
+      // 初始值就是「从未生成过摘要」；旧版本的 input digest 也未知。
       expect(inserted?.['summary_baseline']).toBeNull();
+      expect(inserted?.['summary_input_digest']).toBeNull();
       expect(Number(inserted?.['summary_pending'])).toBe(0);
       expect(Number(inserted?.['summary_entries'])).toBe(0);
     } finally {
@@ -102,11 +103,17 @@ describe('node 摘要新鲜度三列', () => {
       insertNode(db);
 
       db.prepare(
-        'UPDATE node SET summary_baseline = ?, summary_pending = ?, summary_entries = ? WHERE uri = ?',
-      ).run('baseline-after-generation', 3, 2, URI);
+        `UPDATE node
+            SET summary_baseline = ?,
+                summary_input_digest = ?,
+                summary_pending = ?,
+                summary_entries = ?
+          WHERE uri = ?`,
+      ).run('baseline-after-generation', 'input-after-generation', 3, 2, URI);
 
       const updated = row(db);
       expect(updated?.['summary_baseline']).toBe('baseline-after-generation');
+      expect(updated?.['summary_input_digest']).toBe('input-after-generation');
       expect(Number(updated?.['summary_pending'])).toBe(3);
       expect(Number(updated?.['summary_entries'])).toBe(2);
     } finally {

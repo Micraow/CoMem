@@ -5,7 +5,7 @@
  * 正文）。两行的文本长度与信噪比不同，`bm25 × levelWeight` 才有意义——在此之前
  * `levelWeights.l1` 没有任何行可乘（§8.5）。
  *
- * 新鲜度三列只在 L0 行上有意义（`0004_node_level_rows.sql`），所以
+ * 新鲜度四列只在 L0 行上有意义（`0004_node_level_rows.sql`），所以
  * `freshness.ts` 的 `FRESHNESS_ROW_SQL` 也从这里取 `DIRECTORY_LEVEL`：两处同时
  * 引用同一个常量，改层级不会留下一条只改了一半的 `WHERE`。
  */

@@ -54,7 +54,7 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 | `baseUrl` | 否 | 共享配置或 `http://127.0.0.1:1933` | 显式覆盖共享 `config.yaml` / `COMEM_BASE_URL` |
 | `token` | 否 | 配置文件里的值 | `Authorization: Bearer`。显式写空串会覆盖配置文件 / 环境变量里的 token |
 | `timeoutMs` | 否 | `5000` | 普通请求的单次 HTTP 超时；每轮召回使用独立总预算 |
-| `recallTimeoutMs` | 否 | `2000` | 每轮召回总预算（1000–29000ms）。不填时读客户端配置文件或环境变量 |
+| `recallTimeoutMs` | 否 | `8000` | 每轮召回总预算（1000–29000ms）。不填时读客户端配置文件或环境变量 |
 
 默认配置来自 `~/.config/comem/config.yaml`（或 `COMEM_CONFIG_FILE` 指定的文件；
 `COMEM_*` 环境变量优先），与 Hook 和 stdio MCP 代理完全同一套。可放：

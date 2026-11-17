@@ -12,6 +12,8 @@ import {
   truncateToChars,
   type SummaryFreshness,
 } from '../../../src/domain/summary.js';
+import { digestSummaryInput } from '../../../src/domain/summary-input.js';
+import { Uri } from '../../../src/domain/uri.js';
 
 const OVERVIEW = [
   '# alice 的长期记忆',
@@ -25,7 +27,13 @@ const OVERVIEW = [
 ].join('\n');
 
 function freshness(overrides: Partial<SummaryFreshness> = {}): SummaryFreshness {
-  return { baseline: 'digest', pendingChanges: 0, totalEntries: 100, ...overrides };
+  return {
+    baseline: 'digest',
+    inputDigest: 'input-digest',
+    pendingChanges: 0,
+    totalEntries: 100,
+    ...overrides,
+  };
 }
 
 describe('extractAbstract', () => {
@@ -166,7 +174,12 @@ describe('consumeChanges', () => {
       1,
     );
 
-    expect(consumed).toEqual({ baseline: 'abc', pendingChanges: 3, totalEntries: 300 });
+    expect(consumed).toEqual({
+      baseline: 'abc',
+      inputDigest: 'input-digest',
+      pendingChanges: 3,
+      totalEntries: 300,
+    });
   });
 });
 
@@ -174,9 +187,49 @@ describe('recordChange', () => {
   it('每次改动加一，不改其它字段', () => {
     expect(recordChange(freshness({ pendingChanges: 5, totalEntries: 300 }))).toEqual({
       baseline: 'digest',
+      inputDigest: 'input-digest',
       pendingChanges: 6,
       totalEntries: 300,
     });
+  });
+});
+
+describe('summaryInputDigest', () => {
+  const input = {
+    uri: Uri.parse('comem://user/alice/memories/preferences'),
+    children: [
+      {
+        uri: Uri.parse('comem://user/alice/memories/preferences/b.md'),
+        name: 'b.md',
+        kind: 'document' as const,
+        abstract: 'B',
+      },
+      {
+        uri: Uri.parse('comem://user/alice/memories/preferences/a'),
+        name: 'a',
+        kind: 'directory' as const,
+        abstract: 'A',
+      },
+    ],
+  };
+
+  it('子项顺序不影响 digest', () => {
+    expect(digestSummaryInput({ ...input, children: [...input.children].reverse() })).toBe(
+      digestSummaryInput(input),
+    );
+  });
+
+  it('子项摘要变化会改变 digest', () => {
+    const changed = input.children.map((child, index) =>
+      index === 0 ? { ...child, abstract: 'B changed' } : child
+    );
+    expect(digestSummaryInput({ ...input, children: changed })).not.toBe(digestSummaryInput(input));
+  });
+
+  it('归档对话材料变化会改变 digest', () => {
+    expect(digestSummaryInput({ ...input, sourceText: '新的本批事实' })).not.toBe(
+      digestSummaryInput({ ...input, sourceText: '旧的本批事实' }),
+    );
   });
 });
 

@@ -47,6 +47,13 @@ export interface LlmOptions {
   readonly timeoutMs?: number;
   /** 上游取消信号；HTTP 请求断开时用它中止模型调用 */
   readonly abortSignal?: AbortSignal;
+  /**
+   * 是否允许应用层在同一次逻辑调用内自动重试，默认允许。
+   *
+   * 已有单一硬 deadline、到点后必须立即降级的调用设为 `false`，避免供应商标注
+   * 可重试的失败在预算耗尽后继续进入退避。
+   */
+  readonly retry?: boolean;
 }
 
 export interface LlmUsage {

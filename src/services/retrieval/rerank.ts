@@ -25,13 +25,13 @@ import type {
 /**
  * 查询重排的预算（毫秒），只在接口层给了 `deadlineAt` 时生效。
  *
- * 12000 是**推导值**：本地 0.6B 重排 50 条候选实测 p95 为 9.35 秒
- * （`eval/README.md` 的 105 条基线）。12 秒是 p95 的 1.28 倍，仍覆盖绝大多数
+ * 15000 是**推导值**：本地 0.6B 重排 50 条候选实测 p95 为 9.35 秒
+ * （`eval/README.md` 的 105 条基线）。15 秒给远程网关与冷启动留额外余量，仍覆盖绝大多数
  * 查询；超过它的调用退回融合分并标注 `Degraded`。**不沿用
  * `providers.rerank.timeoutSeconds` 的 30 秒**：那是「不静默降级」的配置预算，
  * 30 秒的重排等待会直接吃掉 MCP 工具总上限（见 `api/deadline.ts`）。
  */
-const QUERY_RERANK_TIMEOUT_MS = 12_000;
+const QUERY_RERANK_TIMEOUT_MS = 15_000;
 
 /**
  * 重排候选文本的兜底上限：512 个字符（Unicode 码点）。

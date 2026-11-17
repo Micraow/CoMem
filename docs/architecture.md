@@ -120,6 +120,8 @@ export interface LlmResult {
 
 `finishReason` 是接口的一部分，不是实现细节：抽取管线要靠它区分「模型说完了」和「被截断了」，截断时重试同样的上限只会再截断一次，必须报错让人调大 `maxTokens`。
 
+`LlmOptions.retry` 默认允许应用层重试。已有单一硬 deadline、到点后必须立即降级的调用显式设为 `false`；该设置同时覆盖供应商错误重试和结构化输出解析重试。
+
 实现放在 `adapters/llm/ai-sdk-provider.ts`，内部用 Vercel AI SDK：
 
 ```ts
@@ -303,7 +305,7 @@ CoMem/
 
 **为什么叫 `api/` 不叫 `interfaces/`。** `interface` 是 TypeScript 关键字，一个叫 `interfaces/` 的目录会让人以为里面装的是类型定义，实际装的是 HTTP 和 MCP 两套协议的路由。改名消除歧义。
 
-**节点模型不在内存里。** 节点的状态分两处：`node` 表的行（`kind`、`context_type`、`status`、摘要基线三列，§8.1）与文件本身（正文 + frontmatter，§6.7）。`domain/node.ts` 只放不依赖 IO 的规则——`ContextType` / `NodeStatus` 的枚举与守卫、URI → `context_type` 的推导、正文摘要 `stableDigest`。曾经有一对 `Node` 抽象类与 `Document` / `Directory` 子类表达同一棵对象树，生产代码从不实例化（只有测试 `new`），已删除。
+**节点模型不在内存里。** 节点的状态分两处：`node` 表的行（`kind`、`context_type`、`status`、摘要新鲜度四列，§8.1）与文件本身（正文 + frontmatter，§6.7）。`domain/node.ts` 只放不依赖 IO 的规则——`ContextType` / `NodeStatus` 的枚举与守卫、URI → `context_type` 的推导、正文摘要 `stableDigest`。曾经有一对 `Node` 抽象类与 `Document` / `Directory` 子类表达同一棵对象树，生产代码从不实例化（只有测试 `new`），已删除。
 
 ## 6. URI 与磁盘布局
 
@@ -729,7 +731,7 @@ summary: URI 规范与路径规范化规则
 
 这样摘要跟着文件走：移动、复制、备份都不用额外维护。重建索引时扫一遍文件头就够，一次 LLM 都不调。文档层只建模 `summary` 一个字段，其余键写回时原样保留。
 
-**文件摘要的失效不写在文件头上。** `write` / `edit` 改动正文后，写入路径调 `SummaryService.markStale(父目录)`（`src/services/write-through.ts`）；基线摘要、待刷新计数与生成时的直接子项数存在索引的 `node.summary_baseline` / `node.summary_pending` / `node.summary_entries` 三列（§8.1）。是否立刻重算由 §9.3 的阈值判定，只记脏的目录等下一次改动再判定。
+**文件摘要的失效不写在文件头上。** `write` / `edit` 改动正文后，写入路径调 `SummaryService.markStale(父目录)`（`src/services/write-through.ts`）；基线摘要、生成输入 digest、待刷新计数与生成时的直接子项数存在索引的 `node.summary_baseline` / `node.summary_input_digest` / `node.summary_pending` / `node.summary_entries` 四列（§8.1）。是否立刻重算由 §9.3 的阈值判定，只记脏的目录等下一次改动再判定。
 
 **边界：只有 Markdown 支持。** 代码、JSON、纯文本没有统一的 frontmatter 语法（`#` 在 Python 是注释，在 C 里是预处理指令），强行加会破坏原文。这类文件的摘要存在索引的 `node.abstract` 字段里，重建时重算。资源目录里文档占绝大多数，代码文件重算是可接受的成本，不为了统一而污染原文。
 
@@ -803,6 +805,7 @@ CREATE TABLE node (
   valid_until    TEXT,
   -- 目录摘要的新鲜度（§9.3）。只在 kind = 'directory' 的行上有意义
   summary_baseline TEXT,             -- 当前摘要基于哪份 L0 正文（digest）
+  summary_input_digest TEXT,         -- 上次生成实际使用的目录输入（digest）
   summary_pending  INTEGER NOT NULL DEFAULT 0,   -- 未消费的变更次数
   summary_entries  INTEGER NOT NULL DEFAULT 0,   -- 生成摘要时的直接子项数
   -- 访问热度（§17.5 的热度衰减输入）与 TTL 的判据（§11.7）：记忆的最后使用
@@ -1004,6 +1007,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 | 0008 | `0008_bootstrap_admin.sql` | 首个管理员引导令牌 |
 | 0009 | `0009_memory_structure.sql` | `memory_entity` / `memory_alias` / `memory_entity_ref` 与旧链接逐起点迁移标记 |
 | 0010 | `0010_llm_call_log.sql` | `llm_call_log`：按认证主体查询的逐次 LLM 用途、模型、token、耗时与结果（§17.4） |
+| 0011 | `0011_summary_input_digest.sql` | `node.summary_input_digest`：非 force 刷新在调用模型前比较目录输入（§9.3） |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -1018,7 +1022,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 
 - `app_user`（含 `password_hash`、`session_epoch`）/ `app_group`（含 `owner_user_id` 外键
   `ON DELETE SET NULL`）/ `group_member`（`ON DELETE CASCADE`）/ `api_key`（`ON DELETE CASCADE`）
-- `node`（含摘要新鲜度三列、`access_count` / `last_accessed_at`）及其索引、
+- `node`（含摘要新鲜度四列、`access_count` / `last_accessed_at`）及其索引、
   `node_fts`（FTS5）。`expires_at` 已由 0005 删除（§11.7 的滑动窗口改为清扫时现算）
 - `node_permission`（含 `effect`）/ `acl_entry`
 - `task` / `request_log`；`llm_call_log` 由 0010 新建
@@ -1287,7 +1291,7 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 RRF 用于排序，没有通用的「无答案」判定；自动路径移除相对分数门槛。注入指令要求只使用相关且归属明确的事实，新指示优先；这能约束使用方式，不能保证下游模型总能忽略无关候选。真实自然语言效果和冷查询延迟仍需在实际使用中确认。
 
-**自动召回压缩。** `retrieval.assembly.compressRecall` 默认开启；没有配置 `providers.llm.default` 时跳过压缩，继续交付原条目。普通自动请求在检索、再次求权、去重和预算组装之后，将当前问题、用于消解指代的近期对话尾部与可交付的召回条目发给该模型；开局和固定画像不参与压缩。模型返回来源编号与精简正文，每个来源最多一条；服务端用原条目还原 URI、归属和来源层级，转义正文，输出 `items[].compressed: true` 和 `compressed="true"` 标签属性。只有估算 token 数减少且字节数不增加才采用。有效的空数组表示不投放召回，固定背景照常交付。超时、模型错误或编号无效则交付原条目，并在 `degradation` 说明。`retrieval.assembly.compressRecallTimeoutMs` 设置压缩阶段最多等待多久，默认 1000 毫秒（每轮 Hook 2 秒预算的一半），允许 1–30000 毫秒（HTTP 请求总上限 30 秒）。实际等待还受请求剩余时间与模型供应商自身超时限制。Hook 默认有 2 秒总时限，可在客户端配置 `recallTimeoutMs`（§15.9）；只调服务端压缩上限不会延长宿主等待。回执只覆盖最终实际交付的来源，按压缩前的来源内容指纹去重。来源校验不验证生成正文的事实含义。此步骤不写入画像或记忆，也不用于主动 `search`。
+**自动召回压缩。** `retrieval.assembly.compressRecall` 默认开启；没有配置 `providers.llm.default` 时跳过压缩，继续交付原条目。普通自动请求在检索、再次求权、去重和预算组装之后，将当前问题、用于消解指代的近期对话尾部与可交付的召回条目发给该模型；开局和固定画像不参与压缩。模型返回来源编号与精简正文，每个来源最多一条；服务端用原条目还原 URI、归属和来源层级，转义正文，输出 `items[].compressed: true` 和 `compressed="true"` 标签属性。只有估算 token 数减少且字节数不增加才采用。有效的空数组表示不投放召回，固定背景照常交付。超时、模型错误或编号无效则交付原条目，并在 `degradation` 说明。压缩调用显式禁用应用层自动重试，单次压缩预算到点后不会再启动第二次供应商调用；到点的取消原因保留为 `PROVIDER_UNAVAILABLE` 超时，调用日志的 `attempts` 记录实际尝试数。`retrieval.assembly.compressRecallTimeoutMs` 设置压缩阶段最多等待多久，默认 5000 毫秒，允许 1–30000 毫秒（HTTP 请求总上限 30 秒）。实际等待还受请求剩余时间与模型供应商自身超时限制。普通 Hook 默认有 8 秒总时限，可在客户端配置 `recallTimeoutMs`（§15.9）；只调服务端压缩上限不会延长宿主等待。回执只覆盖最终实际交付的来源，按压缩前的来源内容指纹去重。来源校验不验证生成正文的事实含义。此步骤不写入画像或记忆，也不用于主动 `search`。
 
 `search` 有一个 `mode="context"` 变体：返回的不是命中列表，而是一段**可直接塞进模型上下文**的文本。这是「检索结果 → 模型输入」的独立一层。
 
@@ -1614,7 +1618,7 @@ messages.jsonl”的空材料覆盖已生成的概览。
 
 **为什么消费时要减而不是清零。** 开始生成前先把本轮计数持久化并记下快照，不提前清零；写回成功后执行 `pending = max(pending - 消费时的快照, 0)`。生成失败时计数仍在，下一次失效或健康检查能看到待刷新工作；生成期间到达的改动也继续保留。
 
-**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要，以及归档根目录可选的本批对话材料）。尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型；输入确实变化，则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
+**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。每次非 force 生成前，协调器先计算当前目录输入的稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要，以及归档根目录可选的本批对话材料），并与 `node.summary_input_digest` 比较。相同就消费本轮 pending 并返回 `unchanged` / `stale`，不调用模型；不同才把同一份已读取输入交给生成器，成功落盘时把它的 digest 与摘要一起写回。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest；尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型，输入确实变化则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。`force` 跳过 digest 比较，始终保持显式全量重建语义。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
 
 **摘要写入不反向触发失效。** `.abstract.md` / `.overview.md` 由 `MetadataFileStore` 直接原子写入；`IndexObserver` 只接收正文写入、删除与移动通知，不监听这两个元数据文件。摘要生成因此不会通过 observer 递归触发自己。
 
@@ -3271,7 +3275,7 @@ interface AddResourceInput {
 
 **每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「不读模型就不该限时」，而是 30 秒是检索路径的推导值，对不调模型、只查索引与读盘的操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
 
-30000 是**推导值**：MCP 检索路径的三段上游预算之和是 10000（意图分析）+ 6000（查询嵌入）+ 12000（重排）= 28000 毫秒，留 2000 给本地索引、ACL 与序列化。三段预算的来源见 `services/retrieval/intent.ts` 的 `REWRITE_TIMEOUT_MS`、`services/retrieval/arms.ts` 的 `QUERY_EMBED_TIMEOUT_MS`、`services/retrieval/rerank.ts` 的 `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
+30000 是交互调用的硬上限。意图分析 10000、查询嵌入 10000、重排 15000 是各阶段上限，不是每段都应等满的累计承诺；前序阶段耗时后，`remainingBudget` 会继续收紧后续阶段，最终由接口层在 30 秒到点。三段预算的来源见 `services/retrieval/intent.ts` 的 `REWRITE_TIMEOUT_MS`、`services/retrieval/arms.ts` 的 `QUERY_EMBED_TIMEOUT_MS`、`services/retrieval/rerank.ts` 的 `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
 
 **这一层兜的是「上游预算本身失效」。** 没有它时 16 个工具没有任何工具级上限：`find` / `search` / `rule_search` 会一直等供应商返回，`search` 的最坏等待约 91 秒——意图分析 3 次重试 × 10 秒，查询嵌入与重排各 30 秒（5 路 `find` 并行，嵌入不叠加）。`providers.*.timeoutSeconds` 只校验正数（`src/config/schema.ts` 里都是 `positive()`），写 3600 也合法，因此那种配置下的最坏等待不封顶。宿主看到的现象是 agent 卡住，用户看不出卡在哪一环。
 
@@ -3281,7 +3285,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 **只停止等待，不取消在途调用。** `runWithDeadline` 用 `Promise.race` 加一个 `unref()` 的定时器；到点后调用方不再等，上游能不能立刻停下是上游契约的事——工具层不假设每个上游都正确响应 `AbortSignal`。
 
-**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由把 `deadlineAt` 传给 `SearchService`，上游预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析最多使用剩余的一半。provider 将预算视为上限，到期由 AbortController 中止在途 HTTP；总上限只停止等待。Hook 的等待预算更短（开局 4 秒、普通轮次 2 秒），断开客户端当前不会取消服务端的 30 秒任务，冷查询可能被宿主放弃。真实模型延迟尚未验证。
+**到期之前先降级，降级在结果里可见。** 工具与 HTTP 检索路由把 `deadlineAt` 传给 `SearchService`，上游预算取 `min(上限, 剩余时间 - min(1s, 剩余/5))`，意图分析最多使用剩余的一半。provider 将预算视为上限，到期由 AbortController 中止在途 HTTP；总上限只停止等待。普通 Hook 的召回预算默认 8 秒（会话开局仍为 4 秒），断开客户端当前不会取消服务端的 30 秒任务，冷查询可能被宿主放弃。
 
 `find` / `rule_search` / `search`（`mode=context`）在 `degradation` 或 `rerankFailure` 非空时，于命中列表后追加 `Degraded:` 行：
 
@@ -3554,12 +3558,12 @@ integrations/
 | 写 worker 载荷（`Stop`） | 是 | 5–20ms |
 | 归档 + 抽取 + 合并 + 摘要 | **否**（后台） | 几秒到几十秒 |
 
-**每个事件一个总预算，不是「每个请求 5 秒」。** `timeoutMs`（默认 5 秒）只约束**一次 HTTP 尝试**；一个 hook 里顺序发三次请求就是三倍，`GET` 还有重试。用户在 `UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。预算按**墙上时钟**从**进程启动**算起（`performance.timeOrigin`）：读 stdin、检索、采集、上报都从同一个 deadline 里扣，子请求共享同一个 `AbortSignal`。值在 `integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`（`SessionEnd` 单列在 `SESSION_END_BUDGET_MS`）。每轮自动召回可用客户端 `recallTimeoutMs` 或 `COMEM_RECALL_TIMEOUT_MS` 覆盖默认 2000ms（1000–29000ms）；其 HTTP 请求直接沿用事件剩余预算，不受通用 `timeoutMs` 限制。安装器为 Claude Code 和 Codex 的该事件设置 30 秒宿主上限，29 秒配置上限为启动和退出留余量。DSH 插件使用同一配置。
+**每个事件一个总预算，不是「每个请求 5 秒」。** `timeoutMs`（默认 5 秒）只约束**一次 HTTP 尝试**；一个 hook 里顺序发三次请求就是三倍，`GET` 还有重试。用户在 `UserPromptSubmit` 上等的是这个端口上所有请求加起来的时间。预算按**墙上时钟**从**进程启动**算起（`performance.timeOrigin`）：读 stdin、检索、采集、上报都从同一个 deadline 里扣，子请求共享同一个 `AbortSignal`。值在 `integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`（`SessionEnd` 单列在 `SESSION_END_BUDGET_MS`）。每轮自动召回可用客户端 `recallTimeoutMs` 或 `COMEM_RECALL_TIMEOUT_MS` 覆盖默认 8000ms（1000–29000ms）；其 HTTP 请求直接沿用事件剩余预算，不受通用 `timeoutMs` 限制。安装器为 Claude Code 和 Codex 的该事件设置 30 秒宿主上限，29 秒配置上限为启动和退出留余量。DSH 插件使用同一配置。
 
 | 事件 | 总预算 | 依据 |
 |---|---|---|
 | `SessionStart` | 4000ms | 会话开局一次；上下文与技能目录并发请求。4 秒是已有宿主等待预算，新上下文路径未做真实模型延迟测量 |
-| `UserPromptSubmit` | 默认 2000ms，可调 | **每轮按回车都付**。宿主默认给 30s，30s 与挂住没有区别；本节典型 60–180ms、本机实测 54ms，2s 是典型值的约 10 倍，超了退化成「本轮没有记忆」 |
+| `UserPromptSubmit` | 默认 8000ms，可调 | **每轮按回车都付**。宿主默认给 30s；8s 覆盖慢网关与召回压缩，同时为宿主输出和退出保留余量，超了退化成「本轮没有记忆」 |
 | `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的约 30 倍 |
 | `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
 | `Stop` | 1000ms | 主进程只写载荷 + spawn；实测 44ms |
@@ -4108,7 +4112,7 @@ retrieval:
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
     compressRecall: true  # 配置了模型时，自动尝试压缩
-    compressRecallTimeoutMs: 1000 # 毫秒，受请求剩余时间约束
+    compressRecallTimeoutMs: 5000 # 毫秒，受请求剩余时间约束
   rerank:
     enabled: false        # 默认关；关掉时 find 路径不调用重排模型
     keepTopN: 0           # 重排后保留前 N 条；0 = 只重排不截断

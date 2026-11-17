@@ -270,7 +270,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 | 事件 | 总预算 | 依据 |
 |---|---|---|
 | `SessionStart` | 4000ms | 会话开局一次；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒还能接受」定；本机空载实测 57ms |
-| `UserPromptSubmit` | 默认 2000ms，可调 | **每轮按回车都付**。宿主默认给 30s（Claude Code 官方），30s 与挂住没有区别；§15.9 典型 60–180ms、本机实测 54ms，2s 是典型值的 ~10 倍，超了退化成「本轮没有记忆」 |
+| `UserPromptSubmit` | 默认 8000ms，可调 | **每轮按回车都付**。宿主默认给 30s（Claude Code 官方）；8s 覆盖慢网关与召回压缩，同时为宿主输出和退出保留余量，超了退化成「本轮没有记忆」 |
 | `PreToolUse` | 1000ms | 纯本地判断、不发请求；本机实测 29ms。它出现在**每次工具调用**前，取实测的 ~30 倍 |
 | `PostToolUse` | 2000ms | 两次顺序 POST；§17.2 的采集写入 5–20ms，2s 是 100 倍 |
 | `Stop` | 1000ms | 主进程只写载荷 + spawn；`tests/stop.test.mjs` 实测 44ms |
@@ -634,7 +634,7 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `baseUrl` | `COMEM_BASE_URL` | `http://127.0.0.1:1933` | 服务端地址 |
 | `token` | `COMEM_TOKEN` | 空 | 可选的 Bearer token |
 | `timeoutMs` | `COMEM_TIMEOUT_MS` | `5000` | 普通 HTTP 单次请求超时；每轮召回直接用 `recallTimeoutMs` 的剩余时间 |
-| `recallTimeoutMs` | `COMEM_RECALL_TIMEOUT_MS` | `2000` | 每轮自动召回的总等待时间（1000–29000ms），包括检索与压缩。调大时同时检查服务端压缩超时 |
+| `recallTimeoutMs` | `COMEM_RECALL_TIMEOUT_MS` | `8000` | 每轮自动召回的总等待时间（1000–29000ms），包括检索与压缩。调大时同时检查服务端压缩超时和宿主 Hook 上限 |
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |

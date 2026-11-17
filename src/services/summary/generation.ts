@@ -13,13 +13,15 @@ import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import type { NodeRepository } from '../../adapters/sqlite/node-repository.js';
 import type { ConversationTextMessage } from '../../domain/conversation.js';
-import { stableDigest, type NodeKind } from '../../domain/node.js';
+import type { NodeKind } from '../../domain/node.js';
+import { digestSummaryInput } from '../../domain/summary-input.js';
 import {
   extractAbstract,
   truncateToChars,
   type DirectorySummary,
   type SummaryChild,
   type SummaryGenerator,
+  type SummaryInput,
 } from '../../domain/summary.js';
 import type { Uri } from '../../domain/uri.js';
 import type { AclService } from '../acl.js';
@@ -49,6 +51,12 @@ export interface GeneratedDirectorySummary {
   readonly inputDigest: string;
 }
 
+/** 已读取的目录输入；同一份对象随后交给生成器，避免比较与生成读到两份输入。 */
+export interface PreparedSummaryInput {
+  readonly input: SummaryInput;
+  readonly inputDigest: string;
+}
+
 /**
  * 生成一个目录的 L0 + L1（**只生成，不落盘**，§9.2）。
  *
@@ -71,16 +79,35 @@ export async function summarize(
  * 同一目录的生成在模型调用之外进行。期间到达的重复通知可以比较当前输入与
  * 已完成生成的输入：digest 相同说明那次生成已经覆盖了它们，不必再打一次模型。
  */
-export async function summarizeWithInput(
+async function summarizeWithInput(
   ports: SummaryGenerationPorts,
   directoryUri: Uri,
 ): Promise<GeneratedDirectorySummary> {
+  return generatePreparedSummary(
+    ports,
+    await prepareSummaryInput(ports, directoryUri),
+  );
+}
+
+/** 读取并规范化目录输入，不调用生成器。 */
+export async function prepareSummaryInput(
+  ports: SummaryChildPorts,
+  directoryUri: Uri,
+): Promise<PreparedSummaryInput> {
   const { children, inputDigest, sourceText, dialogue } = await readSummaryInput(ports, directoryUri);
+  return {
+    input: { uri: directoryUri, children, sourceText, dialogue },
+    inputDigest,
+  };
+}
+
+/** 用已经读取的输入生成摘要，确保 digest 与生成器收到的内容一致。 */
+export async function generatePreparedSummary(
+  ports: Pick<SummaryGenerationPorts, 'generator' | 'config'>,
+  prepared: PreparedSummaryInput,
+): Promise<GeneratedDirectorySummary> {
   const generated = await ports.generator.generate({
-    uri: directoryUri,
-    children,
-    sourceText,
-    dialogue,
+    ...prepared.input,
   });
 
   const overview = truncateToChars(generated.overview, ports.config.overviewMaxChars);
@@ -91,7 +118,7 @@ export async function summarizeWithInput(
   );
   return {
     summary: { abstract, overview, degraded: generated.degraded },
-    inputDigest,
+    inputDigest: prepared.inputDigest,
   };
 }
 
@@ -166,20 +193,16 @@ async function readSummaryInput(
     if (leftUri > rightUri) return 1;
     return 0;
   });
-  return {
+  const result = {
+    uri: directoryUri,
     children,
     sourceText: archiveConversation?.sourceText,
     dialogue: archiveConversation?.dialogue,
-    inputDigest: stableDigest(JSON.stringify({
-      uri: directoryUri.toString(),
-      sourceText: archiveConversation?.sourceText ?? null,
-      dialogue: archiveConversation?.dialogue ?? null,
-      children: children.map((child) => ({
-        uri: child.uri.toString(),
-        name: child.name,
-        kind: child.kind,
-        abstract: child.abstract,
-      })),
-    })),
+  };
+  return {
+    children,
+    sourceText: result.sourceText,
+    dialogue: result.dialogue,
+    inputDigest: digestSummaryInput(result),
   };
 }

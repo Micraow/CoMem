@@ -199,7 +199,7 @@ class ProviderTests(unittest.TestCase):
             self.provider._session_id_of("native-session"),
         )
         self.assertEqual(context["auth"], "Bearer test-token")
-        self.assertLessEqual(context["body"]["budgetMs"], 6500)
+        self.assertEqual(context["body"]["budgetMs"], 7500)
 
     def test_queue_prefetch_does_not_issue_a_speculative_request(self) -> None:
         self.provider.queue_prefetch("completed turn", session_id="native-session")

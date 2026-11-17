@@ -162,8 +162,10 @@ interface SeedOptions {
   readonly bodyDigest?: string;
   readonly contextType?: ContextType;
   readonly baseline?: string | null;
+  readonly inputDigest?: string | null;
   readonly pending?: number;
   readonly entries?: number;
+  readonly status?: 'active' | 'pending' | 'archived';
 }
 
 /** 写入一行索引，并顺带设置新鲜度三列（它们不在 `NodeRow` 上）。 */
@@ -182,27 +184,44 @@ async function seedRow(uri: string, options: SeedOptions = {}): Promise<void> {
       bodyDigest: options.bodyDigest ?? 'seed-digest',
       size: 0,
       updatedAt: UPDATED_AT,
-      status: 'active',
+      status: options.status ?? 'active',
       content: '',
     },
   ]);
   db.prepare(
-    'UPDATE node SET summary_baseline = ?, summary_pending = ?, summary_entries = ? WHERE uri = ?',
-  ).run(options.baseline ?? null, options.pending ?? 0, options.entries ?? 0, uri);
+    `UPDATE node
+        SET summary_baseline = ?,
+            summary_input_digest = ?,
+            summary_pending = ?,
+            summary_entries = ?
+      WHERE uri = ?`,
+  ).run(
+    options.baseline ?? null,
+    options.inputDigest ?? null,
+    options.pending ?? 0,
+    options.entries ?? 0,
+    uri,
+  );
 }
 
 interface FreshnessView {
   readonly baseline: string | null;
+  readonly inputDigest: string | null;
   readonly pending: number;
   readonly entries: number;
 }
 
 function freshness(uri: string): FreshnessView {
   const row = db
-    .prepare('SELECT summary_baseline, summary_pending, summary_entries FROM node WHERE uri = ?')
+    .prepare(
+      `SELECT summary_baseline, summary_input_digest, summary_pending, summary_entries
+         FROM node WHERE uri = ?`,
+    )
     .get(uri);
   return {
     baseline: typeof row?.['summary_baseline'] === 'string' ? row['summary_baseline'] : null,
+    inputDigest:
+      typeof row?.['summary_input_digest'] === 'string' ? row['summary_input_digest'] : null,
     pending: Number(row?.['summary_pending'] ?? 0),
     entries: Number(row?.['summary_entries'] ?? 0),
   };
@@ -620,6 +639,128 @@ describe('degraded', () => {
     // 落盘不算数，`read` 要把它回填上来：调用方（`GET /content/abstract`）读的是
     // `read` 的返回值，恒为 false 就等于静默降级（§17.9）。
     expect((await service.read(Uri.parse(PREFERENCES)))?.degraded).toBe(true);
+  });
+});
+
+describe('摘要输入 digest 空跑', () => {
+  it('非 force 且输入相同：消费 pending，不调用生成器', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(STYLE, { abstract: '代码风格摘要。' });
+
+    const { generator, inputs } = spyGenerator((input) => input.children[0]?.abstract ?? '');
+    const service = createService({ generator });
+    const preferenceCalls = (): number =>
+      inputs.filter((input) => input.uri.toString() === PREFERENCES).length;
+
+    await service.markStale(Uri.parse(PREFERENCES));
+    expect(preferenceCalls()).toBe(1);
+    expect(freshness(PREFERENCES).inputDigest).not.toBeNull();
+
+    const repeated = await service.markStale(Uri.parse(PREFERENCES));
+
+    expect(preferenceCalls()).toBe(1);
+    expect(freshness(PREFERENCES).pending).toBe(0);
+    expect(repeated.recomputed).toEqual([PREFERENCES]);
+    expect(repeated.markedStale).toEqual([]);
+  });
+
+  it('输入变化时调用生成器，并更新持久化 digest', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(STYLE, { abstract: '旧摘要。' });
+
+    const { generator, inputs } = spyGenerator((input) => input.children[0]?.abstract ?? '');
+    const service = createService({ generator });
+    await service.markStale(Uri.parse(PREFERENCES));
+    const firstDigest = freshness(PREFERENCES).inputDigest;
+
+    await seedRow(STYLE, { abstract: '新摘要。' });
+    await service.markStale(Uri.parse(PREFERENCES));
+
+    expect(inputs.filter((input) => input.uri.toString() === PREFERENCES)).toHaveLength(2);
+    expect(freshness(PREFERENCES).inputDigest).not.toBe(firstDigest);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('新摘要。');
+  });
+
+  it('force regenerate 忽略相同输入，仍调用生成器', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(STYLE, { abstract: '代码风格摘要。' });
+
+    const { generator, inputs } = spyGenerator((input) => input.children[0]?.abstract ?? '');
+    const service = createService({ generator });
+    await service.markStale(Uri.parse(PREFERENCES));
+    const digest = freshness(PREFERENCES).inputDigest;
+
+    await service.regenerate(Uri.parse(PREFERENCES));
+
+    expect(inputs.filter((input) => input.uri.toString() === PREFERENCES)).toHaveLength(2);
+    expect(freshness(PREFERENCES).inputDigest).toBe(digest);
+  });
+
+  it('pending / archived memory 的正文变化不触发模型', async () => {
+    await makeDirectory(PREFERENCES);
+    const pending = `${PREFERENCES}/pending.md`;
+    const archived = `${PREFERENCES}/archived.md`;
+    await writeText(pending, '# pending\n\n旧待复核正文。\n');
+    await writeText(archived, '# archived\n\n旧归档正文。\n');
+    await seedRow(pending, {
+      abstract: '旧待复核摘要',
+      bodyDigest: stableDigest('# pending\n\n旧待复核正文。\n'),
+      status: 'pending',
+    });
+    await seedRow(archived, {
+      abstract: '旧归档摘要',
+      bodyDigest: stableDigest('# archived\n\n旧归档正文。\n'),
+      status: 'archived',
+    });
+
+    const { generator, inputs } = spyGenerator(() => '无关摘要');
+    const service = createService({ generator });
+    await service.regenerate(Uri.parse(PREFERENCES));
+
+    await writeText(pending, '# pending\n\n新的待复核正文。\n');
+    await seedRow(pending, {
+      abstract: '新待复核摘要',
+      bodyDigest: stableDigest('# pending\n\n旧待复核正文。\n'),
+      status: 'pending',
+    });
+    await service.invalidate(Uri.parse(pending));
+
+    await writeText(archived, '# archived\n\n新的归档正文。\n');
+    await seedRow(archived, {
+      abstract: '新归档摘要',
+      bodyDigest: stableDigest('# archived\n\n旧归档正文。\n'),
+      status: 'archived',
+    });
+    await service.invalidate(Uri.parse(archived));
+
+    expect(inputs.filter((input) => input.uri.toString() === PREFERENCES)).toHaveLength(1);
+    expect(freshness(PREFERENCES).pending).toBe(0);
+  });
+
+  it('active 变 pending 会改变有效输入，必须重算移除旧摘要', async () => {
+    await makeDirectory(PREFERENCES);
+    await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
+    await seedRow(STYLE, { abstract: '生效中的摘要' });
+
+    const { generator, inputs } = spyGenerator((input) =>
+      input.children.length === 0 ? '空目录' : (input.children[0]?.abstract ?? '')
+    );
+    const service = createService({ generator });
+    await service.regenerate(Uri.parse(PREFERENCES));
+
+    await writeText(STYLE, '# 风格\n\n等待复核的新正文。\n');
+    await seedRow(STYLE, {
+      abstract: '等待复核的摘要',
+      bodyDigest: stableDigest('# 风格\n\n代码风格正文。\n'),
+      status: 'pending',
+    });
+    await service.invalidate(Uri.parse(STYLE));
+
+    expect(inputs.filter((input) => input.uri.toString() === PREFERENCES)).toHaveLength(2);
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('空目录');
   });
 });
 

@@ -26,6 +26,11 @@ export async function compressRecall(
 ): Promise<AssembledItem[]> {
   const timeoutMs = remainingBudget(options.deadlineAt, waitMs) ?? waitMs;
   const controller = new AbortController();
+  const timeoutError = () => {
+    const error = budgetExceeded('召回压缩（LLM）', timeoutMs);
+    controller.abort(error);
+    return error;
+  };
   options.onUpstream?.('llm');
   try {
     const sessionContext = options.sessionId === undefined
@@ -40,8 +45,8 @@ export async function compressRecall(
       maxTokens,
       timeoutMs,
       abortSignal: controller.signal,
-    }), timeoutMs,
-    () => budgetExceeded('召回压缩（LLM）', timeoutMs));
+      retry: false,
+    }), timeoutMs, timeoutError);
     const seen = new Set<number>();
     return output.items.map(({ source, text: raw }) => {
       const item = sources[source];

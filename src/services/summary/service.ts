@@ -3,7 +3,7 @@
  *
  * 方法体全部是「取端口 → 调一个模块函数」。逻辑分别在 `generators.ts`（L0 / L1 的
  * 模型调用与降级）、`generation.ts`（L1 输入拼装）、`invalidate.ts`（失效判定与
- * 向上传播）、`persist.ts`（写盘与索引两行）、`freshness.ts`（新鲜度三列）里；
+ * 向上传播）、`persist.ts`（写盘与索引两行）、`freshness.ts`（新鲜度四列）里；
  * 本类只守住公开面与端口（`../summary.ts` 的导出面与原实现一致）。
  */
 

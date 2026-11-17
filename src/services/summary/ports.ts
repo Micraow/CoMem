@@ -20,7 +20,7 @@ import type { AclService } from '../acl.js';
 /**
  * `services/` 不能 import `node:sqlite`（§4.2，连类型导入都算依赖）。
  *
- * 这里只声明本服务用到的最小形状：新鲜度三列在 `node` 表上，读一行、写一行。
+ * 这里只声明本服务用到的最小形状：新鲜度四列在 `node` 表上，读一行、写一行。
  * `DatabaseSync` 结构上可赋值。与 `AclService` 的 `AclDatabase` 同一做法。
  */
 export interface SummaryDatabase {

@@ -16,6 +16,12 @@ async function fixture(env: NodeJS.ProcessEnv, run: (client: {
   readonly requests: readonly string[];
   respondWith: (items: object[]) => void;
   recall(query: string, extra?: Record<string, unknown>): Promise<{ rendered: string; items: { uri: string; text: string }[]; deliveryToken: string | null; degradation: string | null }>;
+  llmCalls: () => readonly {
+    purpose: string;
+    status: string;
+    errorCode: string | null;
+    attempts: number;
+  }[];
 }) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), 'comem-recall-compression-'));
   let override: object[] | undefined;
@@ -50,7 +56,14 @@ async function fixture(env: NodeJS.ProcessEnv, run: (client: {
         const response = await app.inject({ method: 'POST', url: '/api/v1/context', payload: { query, sessionId: 'recall', ...extra } });
         expect(response.statusCode, response.body).toBe(200);
         return response.json().result;
-      } });
+      }, llmCalls: () => container.db.prepare(
+        'SELECT purpose, status, error_code AS errorCode, attempts FROM llm_call_log',
+      ).all() as {
+        purpose: string;
+        status: string;
+        errorCode: string | null;
+        attempts: number;
+      }[] });
     } finally {
       await app.close();
       await container.close();
@@ -121,11 +134,13 @@ it.each([
 });
 
 it('配置的短超时先于请求总时限中止模型并回退', async () => {
-  await fixture({ COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL_TIMEOUT_MS: '25' }, async ({ recall }) => {
+  await fixture({ COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL_TIMEOUT_MS: '25' }, async ({ recall, llmCalls }) => {
     const fetch = globalThis.fetch;
     let aborted = false;
+    let attempts = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       if (!String(input).endsWith('/chat/completions')) return fetch(input, init);
+      attempts += 1;
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
       aborted = init?.signal?.aborted === true;
       return fetch(input, init);
@@ -134,5 +149,14 @@ it('配置的短超时先于请求总时限中止模型并回退', async () => {
     expect(result.rendered).toContain('purchased last year');
     expect(result.degradation).toContain('超时');
     await vi.waitFor(() => expect(aborted).toBe(true));
+    expect(attempts).toBe(1);
+    await vi.waitFor(() => expect(llmCalls()).toEqual([
+      expect.objectContaining({
+        purpose: 'recall_compression',
+        status: 'error',
+        errorCode: 'PROVIDER_UNAVAILABLE',
+        attempts: 1,
+      }),
+    ]));
   });
 });

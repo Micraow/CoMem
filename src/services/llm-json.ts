@@ -62,9 +62,11 @@ export async function executeJsonCall<T>(
       if (parseFailure) {
         parseFailures += 1;
       }
-      const mayRetry = parseFailure
-        ? parseFailures < JSON_PARSE_ATTEMPTS
-        : canRetry(runtime, failure, attempt, options);
+      const mayRetry =
+        options?.retry !== false &&
+        (parseFailure
+          ? parseFailures < JSON_PARSE_ATTEMPTS
+          : canRetry(runtime, failure, attempt, options));
       if (mayRetry && attempt < runtime.maxAttempts && options?.abortSignal?.aborted !== true) {
         logRetry(runtime, failure, attempt, parseFailure);
         await sleep(retryDelay(runtime, attempt));

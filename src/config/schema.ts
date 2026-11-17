@@ -194,7 +194,7 @@ const retrievalSchema = z.object({
       dedupTurns: z.number().int().nonnegative().default(3),
       quotaPreset: z.enum(QUOTA_PRESETS).default('coding'),
       compressRecall: z.boolean().default(true),
-      compressRecallTimeoutMs: z.number().int().positive().max(30000).default(1000),
+      compressRecallTimeoutMs: z.number().int().positive().max(30000).default(5000),
     })
     .prefault({}),
   /**

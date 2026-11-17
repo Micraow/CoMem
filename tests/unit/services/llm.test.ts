@@ -237,6 +237,30 @@ describe('generateJson', () => {
     });
     expect(provider.calls).toHaveLength(3);
   });
+
+  it('retry=false 时结构化调用只尝试一次', async () => {
+    const { service, provider } = createService([
+      { error: new ComemError('PROVIDER_UNAVAILABLE', '供应商不可用。') },
+      { json: { ok: true } },
+    ]);
+
+    await expect(
+      service.generateJson(PROMPT, schema, { retry: false }),
+    ).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE' });
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it('retry=false 时结构化解析失败也不重试', async () => {
+    const { service, provider } = createService([
+      { json: { ok: '不是布尔' } },
+      { json: { ok: true } },
+    ]);
+
+    await expect(
+      service.generateJson(PROMPT, schema, { retry: false }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(provider.calls).toHaveLength(1);
+  });
 });
 
 describe('提示词模板', () => {

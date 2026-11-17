@@ -28,8 +28,8 @@ from agent.secret_scope import get_secret
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:1933/api/v1"
-_PREFETCH_BUDGET_MS = 6500
-_PREFETCH_TIMEOUT_S = 7.0
+_PREFETCH_BUDGET_MS = 7500
+_PREFETCH_TIMEOUT_S = 7.5
 _CAPTURE_TIMEOUT_S = 4.0
 _PROCESS_OUTBOX_LIMIT = 10
 _MAX_CONTEXT_TOKENS = 1200

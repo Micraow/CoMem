@@ -67,7 +67,7 @@
  * - `levels.ts`：目录在 `node.level` 上的两个取值（L0 / L1）
  * - `generators.ts`：`LlmSummarizer` / `RuleSummarizer`（模型调用与断网降级）
  * - `generation.ts`：L1 输入拼装（直接子文件摘要 + 直接子目录 L0 正文）与 L0 提取
- * - `freshness.ts`：`node` 表新鲜度三列的读写与消费
+ * - `freshness.ts`：`node` 表新鲜度四列的读写与消费
  * - `records.ts`：目录在索引里的 L0 / L1 两行的形状
  * - `persist.ts`：写摘要文件、索引两行、新鲜度、物化权限（事务与目录锁）
  * - `invalidate.ts`：正文 digest 比较、失效判定与向上传播

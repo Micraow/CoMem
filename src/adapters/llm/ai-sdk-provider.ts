@@ -282,6 +282,9 @@ export class AiSdkLlmProvider implements LlmProvider {
     try {
       return await operation(abortSignal);
     } catch (error) {
+      if (options?.abortSignal?.reason instanceof ComemError) {
+        throw options.abortSignal.reason;
+      }
       throw mapProviderError(error, { timedOut, timeoutMs }, ERROR_MAP_OPTIONS);
     } finally {
       clearTimeout(timer);

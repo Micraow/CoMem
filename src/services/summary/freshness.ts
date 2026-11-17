@@ -1,12 +1,13 @@
 /**
- * 摘要新鲜度：`node` 表上的三列（§9.3）。
+ * 摘要新鲜度：`node` 表上的四列（§9.3）。
  *
  * `summary_baseline` 是上次生成时 L0 正文的摘要，`summary_pending` 是「生成之后
- * 又变了几次」，`summary_entries` 是生成时的直接子项数。三列只在目录的 L0 行上
- * 有意义（`0004_node_level_rows.sql`）。
+ * 又变了几次」，`summary_entries` 是生成时的直接子项数，`summary_input_digest`
+ * 是模型实际收到的目录输入摘要。四列只在目录的 L0 行上有意义
+ * （`0004_node_level_rows.sql`、`0011_summary_input_digest.sql`）。
  *
  * 判定（`shouldRecompute`）与计数变换（`recordChange` / `consumeChanges`）是
- * `domain/summary.ts` 的纯函数；本文件只负责这三列的读写，不重复判定。
+ * `domain/summary.ts` 的纯函数；本文件只负责这四列的读写，不重复判定。
  */
 
 import { consumeChanges, type SummaryFreshness } from '../../domain/summary.js';
@@ -14,7 +15,7 @@ import { consumeChanges, type SummaryFreshness } from '../../domain/summary.js';
 import { DIRECTORY_LEVEL } from './levels.js';
 import type { SummaryDatabase } from './ports.js';
 
-/** 摘要新鲜度三列只在目录的 L0 行上有意义（`0004_node_level_rows.sql`）。 */
+/** 摘要新鲜度四列只在目录的 L0 行上有意义。 */
 const FRESHNESS_ROW_SQL = `level = '${DIRECTORY_LEVEL}'`;
 
 function nullableText(value: unknown): string | null {
@@ -29,12 +30,13 @@ function integer(value: unknown): number {
 export function readFreshness(db: SummaryDatabase, uri: string): SummaryFreshness {
   const row = db
     .prepare(
-      `SELECT summary_baseline, summary_pending, summary_entries
+      `SELECT summary_baseline, summary_input_digest, summary_pending, summary_entries
          FROM node WHERE uri = ? AND ${FRESHNESS_ROW_SQL}`,
     )
     .get(uri);
   return {
     baseline: nullableText(row?.['summary_baseline']),
+    inputDigest: nullableText(row?.['summary_input_digest']),
     pendingChanges: integer(row?.['summary_pending']),
     totalEntries: integer(row?.['summary_entries']),
   };
@@ -51,6 +53,17 @@ export function writePendingChanges(
     .run(pendingChanges, uri);
 }
 
+/** 输入没有变化时消费这批 pending，不触碰摘要与输入 digest。 */
+export function consumePendingChanges(
+  db: SummaryDatabase,
+  uri: string,
+  snapshotPending: number,
+): void {
+  const current = readFreshness(db, uri);
+  const consumed = consumeChanges(current, snapshotPending);
+  writePendingChanges(db, uri, consumed.pendingChanges);
+}
+
 /**
  * 写回新鲜度（§9.3「消费时减而不是清零」）。
  *
@@ -61,19 +74,26 @@ export function consumeFreshness(
   db: SummaryDatabase,
   uri: string,
   baseline: string,
+  inputDigest: string,
   snapshotPending: number,
   entries: number,
 ): void {
   const current = readFreshness(db, uri);
   const consumed = consumeChanges(
-    { baseline, pendingChanges: current.pendingChanges, totalEntries: entries },
+    {
+      baseline,
+      inputDigest,
+      pendingChanges: current.pendingChanges,
+      totalEntries: entries,
+    },
     snapshotPending,
   );
   db.prepare(
     `UPDATE node
         SET summary_baseline = ?,
+            summary_input_digest = ?,
             summary_pending = ?,
             summary_entries = ?
       WHERE uri = ? AND ${FRESHNESS_ROW_SQL}`,
-  ).run(baseline, consumed.pendingChanges, entries, uri);
+  ).run(baseline, inputDigest, consumed.pendingChanges, entries, uri);
 }

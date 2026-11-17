@@ -95,7 +95,7 @@ retrieval:
     dedupTurns: 3         # 这么多轮内投过的 URI 不再投
     quotaPreset: coding   # chat | coding
     compressRecall: true  # 配置了模型时，自动召回组装后尝试提炼
-    compressRecallTimeoutMs: 1000 # 压缩等待上限，受请求剩余时间约束
+    compressRecallTimeoutMs: 5000 # 压缩等待上限，受请求剩余时间约束
   # 重排：默认关。打开后融合结果先过重排模型，再按 keepTopN 截断。
   rerank:
     enabled: false

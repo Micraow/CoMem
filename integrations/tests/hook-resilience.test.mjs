@@ -349,7 +349,7 @@ test(
   },
 );
 
-test('召回总预算可超过默认 2s，且不受通用单请求超时截断', { timeout: 10_000 }, async () => {
+test('召回总预算可由客户端覆盖，且不受通用单请求超时截断', { timeout: 10_000 }, async () => {
   let serverBudget;
   const server = await startServer(async (request, response, body) => {
     if (request.url !== '/api/v1/context') {
@@ -429,7 +429,7 @@ test(
       assertCleanExit(result);
       assert.ok(diagnosticLines(result.stderr).length >= 1, '不可达也要留一行诊断');
       // 连不上必须立刻失败：等到预算才报错说明它在傻等。本机实测 55–70ms，
-      // 1000ms 留了 15 倍余量，又明显小于 2000ms 的预算。
+      // 1000ms 留了 8 倍余量，又明显小于默认 8000ms 的预算。
       assert.ok(
         result.elapsedMs < 1000,
         `用了 ${result.elapsedMs.toFixed(0)}ms，不可达端口不该等满预算`,

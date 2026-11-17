@@ -90,7 +90,7 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `retrieval.assembly.dedupTurns` | `3` | 同一会话这么多轮内投过的 URI 不再投（召回账本，§8.7） |
 | `retrieval.assembly.quotaPreset` | `coding` | `chat`（记忆 5 / 资料 3 / 技能 2）或 `coding`（3 / 5 / 2） |
 | `retrieval.assembly.compressRecall` | `true` | 配置了生成模型时，自动召回默认把当前问题、近期对话尾部和候选正文交给 `providers.llm.default` 提炼；没有配置模型、超时或结果无效时，注入原条目。设 `COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL=false` 可关闭 |
-| `retrieval.assembly.compressRecallTimeoutMs` | `1000` | 压缩阶段等待上限（毫秒，1–30000）；实际等待不会超出当前请求剩余预算，Hook 默认 2 秒，可在客户端用 `recallTimeoutMs` 调整。可用 `COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL_TIMEOUT_MS` 或控制台「检索 → 召回压缩超时（毫秒）」设置，保存后重启（§8.6） |
+| `retrieval.assembly.compressRecallTimeoutMs` | `5000` | 压缩阶段等待上限（毫秒，1–30000）；实际等待不会超出当前请求剩余预算，普通 Hook 默认 8 秒，可在客户端用 `recallTimeoutMs` 调整。可用 `COMEM_RETRIEVAL_ASSEMBLY_COMPRESS_RECALL_TIMEOUT_MS` 或控制台「检索 → 召回压缩超时（毫秒）」设置，保存后重启（§8.6） |
 | `session.autoCommit.enabled` | `true` | 自动提交开关。关掉就只能手动 `commit` |
 | `session.autoCommit.pendingTokenThreshold` | `150000` | 未提交 token **严格大于**该值才提交（§10.2.1） |
 | `session.autoCommit.messageCountThreshold` | `100` | 未提交消息数严格大于该值才提交 |
@@ -1962,11 +1962,12 @@ Codex」，导出目录是一次性的。
 某个目录」的接口，只能靠再写一次该目录下的文件来触发。
 
 **供应商速率限制或模型费用异常。** 摘要刷新按目录 single-flight：同一目录期间的并发失效
-共享一轮生成，输入未变就不追加调用。`llm_call_log` 中仍可看到不同目录并行，也可看到一轮
-生成期间内容确实变化后追加的一轮；这两种调用都合理。若同一目录、同一输入在生成完成之后
-又顺序触发，当前实现会重新生成；诊断时可对照相邻调用的提示词摘要与写入时间。摘要文件写入
-本身不会触发第二次 observer 通知。共享一轮生成的并发通知只向上传播一次；摘要生成失败时，
-本轮 `pending` 不会被消费，下一轮写入仍会重试。
+共享一轮生成。非 force 刷新在调用模型前比较当前目录输入与
+`node.summary_input_digest`；同一输入会消费 `pending` 并直接结束，不再调用模型。
+`llm_call_log` 中仍可看到不同目录并行，也可看到输入确实变化后追加的一轮。诊断时对照相邻
+调用的提示词摘要与写入时间；摘要文件写入本身不会触发第二次 observer 通知。共享一轮生成的
+并发通知只向上传播一次；摘要生成失败时，本轮 `pending` 不会被消费，下一轮写入仍会重试。
+显式重建（`force`）跳过输入 digest 比较，相同输入也会重新生成。
 
 ### 检索不到刚写的内容
 
@@ -2011,7 +2012,7 @@ Codex」，导出目录是一次性的。
 I/O 出了问题，后者说明单个上游在预算内没答上来。
 
 **调 `providers.*.timeoutSeconds` 不会让 MCP 工具等更久。** 30 秒是工具层与 HTTP 检索两条
-路由的硬上限，上游预算（查询嵌入 6 秒、重排 12 秒）各自另有限制；调大只影响单次
+路由的硬上限，上游预算（查询嵌入 10 秒、重排 15 秒）各自另有限制；调大只影响单次
 上游调用（hook HTTP 尝试也会取剩余预算与 `min(5 秒, 剩余)`）。`Degraded` 出现得频繁而
 工具不超时，说明预算不够或供应商变慢，先确认模型与网络，再考虑提高上限
 （`ToolRegistry` 的装配参数，默认 `API_CALL_DEADLINE_MS`，不暴露给模型）。
@@ -2352,7 +2353,8 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
     `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`，两侧共用；到点后 MCP
     返回 `isError` 文本 `TOOL_DEADLINE_EXCEEDED: …`，HTTP 返回 503
     `PROVIDER_UNAVAILABLE`（`details.reason = 'deadline_exceeded'`，架构文档 §13.3）。
-    30 秒是推导值：28 秒上游预算（意图分析 10 + 嵌入 6 + 重排 12）+ 2 秒本地余量。
+    30 秒是交互调用的硬上限。意图分析 10 秒、查询嵌入 10 秒、重排 15 秒是各阶段
+    上限；前序阶段会消耗剩余预算，后续阶段由 `remainingBudget` 继续收紧。
     三条路径是 `/search/find`、`/search/search` 的 `mode=list` 与 `mode=context`。
 
     **`POST /search/grep`、`/search/glob` 与 fs / read / list / tree 等不调模型的端点

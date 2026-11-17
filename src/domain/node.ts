@@ -2,7 +2,7 @@
  * 节点相关的领域规则（架构文档 §4.1、§6.6、§6.7、§9.3）。
  *
  * **没有内存里的节点对象。** 节点的状态存在两处：`node` 表的行（`kind`、
- * `context_type`、`status`、摘要基线三列，见 `migrations/0001_init.sql`）与文件本身
+ * `context_type`、`status`、摘要新鲜度四列，见 `migrations/0001_init.sql` 与 `0011`）与文件本身
  * （正文 + frontmatter）。这里只放不依赖 IO 的规则：类别与状态的枚举和守卫、
  * URI → `context_type` 的推导、正文摘要 `stableDigest`。失效传播比较摘要，不读文件。
  */
@@ -181,7 +181,8 @@ export function stableDigest(input: string): string {
  *
  * 失效**不在这里**：`summary_state` / `summary_digest` 是旧机制，生产从不写，
  * 已删除。真实的失效传播走 `SummaryService.markStale()` 与 `node` 表的
- * `summary_baseline` / `summary_pending` / `summary_entries` 三列
+ * `summary_baseline` / `summary_input_digest` / `summary_pending` /
+ * `summary_entries` 四列
  * （`migrations/0001_init.sql`）——那套是索引侧的状态，不落在文件头上。
  */
 export interface DocumentFrontmatter {

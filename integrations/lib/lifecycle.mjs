@@ -60,7 +60,7 @@ export const SESSION_END_BUDGET_MS = 1200;
  * | 事件 | 预算 | 依据 |
  * |---|---|---|
  * | `session_start` | 4000 | 会话开局一次性；三次 GET 并发。宿主上限 600s 不构成约束，按「开局多等 4 秒用户还能接受」定；本机空载实测 57ms |
- * | `user_prompt_submit` | 2000 | **每轮按回车都付**。宿主上限 30s（Claude Code 官方默认）远大于可用值；§15.9 典型 60–180ms，本机实测 54ms → 2s 是典型值的 ~10 倍，超了就退化成「本轮没有记忆」 |
+ * | `user_prompt_submit` | 8000 | **每轮按回车都付**。宿主上限 30s（Claude Code 官方默认）；8s 覆盖慢网关与召回压缩，同时为宿主输出和退出保留余量，超了就退化成「本轮没有记忆」 |
  * | `pre_tool_use` | 1000 | 纯本地判断，不发请求；本机实测 29ms。值是实测的 ~30 倍，因为它出现在**每次工具调用**前 |
  * | `post_tool_use` | 2000 | 两次顺序 POST；§17.2 采集写入 5–20ms → 2s 是 100 倍 |
  * | `stop` | 1000 | 主进程只写载荷 + spawn；`stop.test.mjs` 实测 44ms。1s 是 20 倍 |
@@ -76,7 +76,7 @@ export const SESSION_END_BUDGET_MS = 1200;
  */
 export const HOOK_BUDGETS_MS = Object.freeze({
   session_start: 4000,
-  user_prompt_submit: 2000,
+  user_prompt_submit: 8000,
   pre_tool_use: 1000,
   post_tool_use: 2000,
   stop: 1000,

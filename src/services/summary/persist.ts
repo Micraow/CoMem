@@ -64,6 +64,7 @@ export async function persistSummary(
   ports: SummaryPersistPorts,
   directoryUri: Uri,
   summary: DirectorySummary,
+  inputDigest: string,
   snapshotPending: number,
   previous: string | null,
 ): Promise<'changed' | 'unchanged'> {
@@ -87,7 +88,14 @@ export async function persistSummary(
       indexRecord(ports.nodes, directoryUri, summary, children.length, baseline),
       overviewRecord(ports.nodes, directoryUri, summary, children.length),
     ]);
-    consumeFreshness(ports.db, directoryUri.toString(), baseline, snapshotPending, children.length);
+    consumeFreshness(
+      ports.db,
+      directoryUri.toString(),
+      baseline,
+      inputDigest,
+      snapshotPending,
+      children.length,
+    );
   });
 
   // §12.4 的「写时算」：归档子树是 `SessionService` 直接写 `ContentStore` 建出来的，

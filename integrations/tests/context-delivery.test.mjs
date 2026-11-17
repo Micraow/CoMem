@@ -45,3 +45,7 @@ test('监控上报挂起不会阻止已召回内容交给宿主', async () => {
     http: { post: async (path) => path === '/api/v1/context' ? { rendered: 'Fedora' } : new Promise(() => {}) } });
   assert.match(result.context, /Fedora/);
 });
+
+test('普通 Hook 召回默认预算为 8000ms', () => {
+  assert.equal(DEFAULT_CONFIG.recallTimeoutMs, 8000);
+});

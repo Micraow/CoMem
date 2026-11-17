@@ -53,6 +53,7 @@ export function canRetry(
   return (
     isRetryable(ComemError.from(error)) &&
     attempt < runtime.maxAttempts &&
+    options?.retry !== false &&
     options?.abortSignal?.aborted !== true
   );
 }
@@ -101,7 +102,7 @@ export function failCall(
   runtime.logger.error('模型调用失败', {
     model: runtime.modelName,
     attempt,
-    maxAttempts: runtime.maxAttempts,
+    maxAttempts: options?.retry === false ? 1 : runtime.maxAttempts,
     code: failure.code,
     message: failure.message,
     durationMs: Date.now() - startedAt,

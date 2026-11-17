@@ -42,12 +42,10 @@ const VECTOR_CANDIDATE_LIMIT = Number.MAX_SAFE_INTEGER;
 /**
  * 查询嵌入的预算（毫秒），只在接口层给了 `deadlineAt` 时生效。
  *
- * 6000 是**推导值**：一次检索只嵌一条短查询（不是批量回填的 128 条），供应商往返
- * 通常 < 1 秒（§15.9 的检索阶段「向量变体含查询嵌入的网络往返」与整轮 20–100ms
- * 的量级）。6 秒给冷启动与跨地域网关留 6 倍余量，同时让「供应商挂住」在用户可
- * 感知之前退化成 FTS 结果。
+ * 10000 是慢网关与冷启动的交互上限。一次检索只嵌一条短查询（不是批量回填的
+ * 128 条）；超过上限时退化成 FTS 结果，并由总 deadline 继续兜底。
  */
-const QUERY_EMBED_TIMEOUT_MS = 6_000;
+const QUERY_EMBED_TIMEOUT_MS = 10_000;
 
 /** 三臂的执行依赖。`vector` 在 `engine === 'fts5'` 时是 `null`（构造期已保证）。 */
 export interface ArmsDeps {

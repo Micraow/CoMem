@@ -38,7 +38,7 @@ memory:
 
 ## What Hermes gets
 
-- Before a model call, the provider calls `POST /context` with the current prompt, Hermes session ID and current context epoch. Hermes only supplies the completed prompt to background prefetch, so this provider does not cache speculative recall. Recall stays within a 6.5-second server budget and the host's 8-second provider timeout.
+- Before a model call, the provider calls `POST /context` with the current prompt, Hermes session ID and current context epoch. Hermes only supplies the completed prompt to background prefetch, so this provider does not cache speculative recall. Recall stays within a 7.5-second server/request budget and the host's fixed 8-second provider timeout.
 - After a completed, uninterrupted turn, the user and assistant messages are spooled to the profile's `comem-provider/outbox/`, appended with stable IDs through `POST /sessions/{id}/messages`, and committed through `/commit`. CoMem then runs extraction, merge and review normally.
 - A failed write remains in the profile-local outbox and is retried after the next completed turn, up to 10 queued turns per completed exchange. CoMem outage therefore does not block Hermes responses.
 - Each queued turn records the CoMem endpoint, credential fingerprint and authenticated `subject` through `GET /auth/me`. A queued turn is replayed only when all three still match. Changing server, API key or account leaves the old queue untouched and reports the skipped binding in status.

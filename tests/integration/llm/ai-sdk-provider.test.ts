@@ -260,6 +260,32 @@ describe('complete', () => {
     const call = mocks.generateText.mock.calls[0]?.[0] as { abortSignal: AbortSignal };
     expect(call.abortSignal).toBeInstanceOf(AbortSignal);
   });
+
+  it('调用方以 ComemError 取消时保留原始原因', async () => {
+    const { provider } = createProvider();
+    const controller = new AbortController();
+    const timeout = new ComemError('PROVIDER_UNAVAILABLE', '调用预算到点。', {
+      timeout: true,
+      timeoutMs: 25,
+    });
+    mocks.generateText.mockImplementation(
+      ({ abortSignal }: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          abortSignal.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+          controller.abort(timeout);
+        }),
+    );
+
+    const error = await provider
+      .complete(PROMPT, { abortSignal: controller.signal })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBe(timeout);
+  });
 });
 
 describe('completeJson', () => {

@@ -3,7 +3,6 @@
  *
  * L0 是 `.abstract.md` 的正文，L1 是 `.overview.md` 的正文，L2 是原文件。
  * L0 从 L1 正文里提取，两层因此不会互相矛盾（§9.1）。
- *
  * 本文件只有纯函数与接口：生成器（`LlmSummarizer` / `RuleSummarizer`）在
  * `services/summary.ts`，这里只定义 Strategy 的形状，不关心模型怎么调。
  */
@@ -12,10 +11,7 @@ import type { ConversationTextMessage } from './conversation.js';
 import type { NodeKind } from './node.js';
 import type { Uri } from './uri.js';
 
-/**
- * L0 正文预算，单位是 Unicode 码点（架构文档 §9.1 的「256 字符」）。
- * 码点与「字符」在中文、常见 emoji 上一致；不按字节计，字节会把中文预算压成 1/3。
- */
+/** L0 正文预算，单位是 Unicode 码点；不按字节计，避免把中文预算压成 1/3（§9.1）。 */
 export const ABSTRACT_MAX_CHARS = 256;
 
 /** L1 正文预算，单位同 L0（架构文档 §9.1 的「4000 字符」）。 */
@@ -35,13 +31,13 @@ export interface DirectorySummary {
 
 /**
  * 摘要新鲜度（架构文档 §9.3）。
- *
  * `baseline` 是上次生成时 L0 正文的摘要；`null` 表示这个目录从未生成过摘要。
  * `pendingChanges` 是「L0 正文在生成之后又变了多少次」，不是脏标记——同一个文件反复改，
  * 脏标记只算一次，永远到不了阈值（§9.3）。
  */
 export interface SummaryFreshness {
   readonly baseline: string | null;
+  readonly inputDigest: string | null; // 上次生成输入的 digest；NULL = 旧版本未知
   readonly pendingChanges: number;
   readonly totalEntries: number;
 }
