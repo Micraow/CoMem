@@ -33,8 +33,8 @@ export interface PromptDetailPayload extends PromptSummaryPayload {
 /**
  * 提示词编辑器（架构文档 §9.2、§18）。
  *
- * 左边是骨架，右边是可编辑的正文。**模板变量以 `{{name}}` 的形式留在正文里**：
- * 编辑器不把变量展开成预览值，因为用户要改的正是「哪一截放在哪里」。
+ * 左边是骨架，右边是可编辑的正文。**模板变量以 `{{name}}` 的形式留在正文里**；
+ * 「试填变量」把示例值交给服务端渲染当前草稿，正文本身仍保持模板语法。
  *
  * ## 行号与换行
  *
@@ -48,7 +48,7 @@ export interface PromptDetailPayload extends PromptSummaryPayload {
  * 错误信息里带行号。本地再写一份必然与服务端漂移，而两份校验不一致时用户会
  * 看到「本地通过、保存失败」。
  */
-import { RotateCcw, Save, Eye } from 'lucide-vue-next'
+import { Braces, RotateCcw, Save } from 'lucide-vue-next'
 
 const props = defineProps<{
   detail: PromptDetailPayload | null
@@ -57,27 +57,22 @@ const props = defineProps<{
   busy: boolean
   previewText: string | null
   previewLoading: boolean
+  previewError: string | null
 }>()
 
 const emit = defineEmits<{
   save: [body: string]
   reset: []
-  preview: []
+  preview: [body: string, variables: Record<string, string>]
+  'clear-preview': []
   'close-preview': []
 }>()
 
 const draft = ref('')
+const previewOpen = ref(false)
+const sampleValues = ref<Record<string, string>>({})
 const gutter = ref<HTMLElement | null>(null)
 const editor = ref<HTMLTextAreaElement | null>(null)
-
-const previewOpen = computed({
-  get: () => props.previewText !== null || props.previewLoading,
-  set: (open: boolean) => {
-    if (!open) {
-      emit('close-preview')
-    }
-  },
-})
 
 const dirty = computed(() => props.detail !== null && draft.value !== props.detail.body)
 
@@ -91,8 +86,28 @@ watch(
   () => [props.detail?.id, props.detail?.body] as const,
   () => {
     draft.value = props.detail?.body ?? ''
+    sampleValues.value = Object.fromEntries(
+      (props.detail?.variables ?? []).map((variable) => [variable.name, '']),
+    )
+    previewOpen.value = false
   },
   { immediate: true },
+)
+
+watch(previewOpen, (open) => {
+  if (!open) {
+    emit('close-preview')
+  }
+})
+
+watch(
+  sampleValues,
+  () => {
+    if (previewOpen.value) {
+      emit('clear-preview')
+    }
+  },
+  { deep: true },
 )
 
 /** 行号与正文同一个滚动位置；横向滚动只影响正文。 */
@@ -114,6 +129,24 @@ function save(): void {
     return
   }
   emit('save', draft.value)
+}
+
+function sampleInputId(name: string): string {
+  return `prompt-sample-${props.detail?.id ?? 'unknown'}-${name}`
+}
+
+function preview(): void {
+  if (props.detail === null || props.previewLoading) {
+    return
+  }
+  const variables: Record<string, string> = {}
+  for (const variable of props.detail.variables) {
+    const value = sampleValues.value[variable.name] ?? ''
+    if (value.trim() !== '') {
+      variables[variable.name] = value
+    }
+  }
+  emit('preview', draft.value, variables)
 }
 </script>
 
@@ -152,9 +185,14 @@ function save(): void {
             <RotateCcw :size="14" :stroke-width="1.8" />
             恢复默认
           </UiButton>
-          <UiButton variant="secondary" :disabled="props.busy || props.previewLoading" @click="emit('preview')">
-            <Eye :size="14" :stroke-width="1.8" />
-            预览
+          <UiButton
+            v-if="props.detail.variables.length > 0"
+            variant="secondary"
+            :disabled="props.busy"
+            @click="previewOpen = true"
+          >
+            <Braces :size="14" :stroke-width="1.8" />
+            试填变量
           </UiButton>
           <UiButton variant="primary" :disabled="!dirty || props.busy" @click="save">
             <Save :size="14" :stroke-width="1.8" />
@@ -185,9 +223,40 @@ function save(): void {
         />
       </div>
 
-      <UiDialog v-model="previewOpen" title="渲染结果">
-        <p v-if="props.previewLoading" class="body-sm muted">正在渲染…</p>
-        <pre v-else class="preview mono">{{ props.previewText }}</pre>
+      <UiDialog v-model="previewOpen" title="试填变量">
+        <form class="sample-form" @submit.prevent="preview">
+          <div
+            v-for="variable in props.detail.variables"
+            :key="variable.name"
+            class="sample-field"
+          >
+            <label class="sample-field__label" :for="sampleInputId(variable.name)">
+              {{ variable.description }}
+            </label>
+            <UiInput
+              :id="sampleInputId(variable.name)"
+              v-model="sampleValues[variable.name]"
+              :disabled="props.previewLoading"
+            />
+          </div>
+
+          <UiErrorCallout v-if="props.previewError !== null" :message="props.previewError" />
+
+          <div class="rowflex">
+            <span class="spacer" />
+            <UiButton variant="secondary" :disabled="props.previewLoading" @click="previewOpen = false">
+              关闭
+            </UiButton>
+            <UiButton variant="primary" type="submit" :disabled="props.previewLoading">
+              {{ props.previewLoading ? '正在生成…' : '生成示例' }}
+            </UiButton>
+          </div>
+
+          <section v-if="props.previewText !== null" class="sample-result" aria-live="polite">
+            <h3 class="sample-result__title">示例</h3>
+            <pre class="sample-result__text mono">{{ props.previewText }}</pre>
+          </section>
+        </form>
       </UiDialog>
     </template>
   </section>
@@ -299,7 +368,37 @@ function save(): void {
   outline: none;
 }
 
-.preview {
+.sample-form {
+  display: grid;
+  gap: 16px;
+}
+
+.sample-field {
+  display: grid;
+  gap: 6px;
+}
+
+.sample-field__label {
+  font-size: 13px;
+  font-weight: 590;
+  color: var(--label-2);
+}
+
+.sample-result {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 0.5px solid var(--separator);
+}
+
+.sample-result__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 590;
+  color: var(--label-2);
+}
+
+.sample-result__text {
   margin: 0;
   max-height: 60vh;
   overflow: auto;

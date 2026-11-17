@@ -51,12 +51,15 @@ const detailError = ref<string | null>(null)
 const busy = ref(false)
 const previewText = ref<string | null>(null)
 const previewLoading = ref(false)
+const previewError = ref<string | null>(null)
 
 const overridden = computed(() => prompts.value.filter((prompt) => prompt.overridden))
 const usingDefault = computed(() => prompts.value.filter((prompt) => !prompt.overridden))
 
 /** 详情请求的序号：切换选中时丢弃迟到的响应，否则会显示上一条的正文。 */
 let detailToken = 0
+/** 预览请求的序号：关闭、改输入或切换提示词后，迟到响应不能覆盖当前状态。 */
+let previewToken = 0
 
 function pathOf(id: string, suffix = ''): string {
   return `/prompts/${encodeURIComponent(id)}${suffix}`
@@ -65,6 +68,7 @@ function pathOf(id: string, suffix = ''): string {
 async function loadDetail(id: string | null): Promise<void> {
   detailToken += 1
   const token = detailToken
+  clearPreview()
   detail.value = null
   detailError.value = null
 
@@ -126,7 +130,6 @@ function select(id: string): void {
     return
   }
   selectedId.value = id
-  previewText.value = null
   void loadDetail(id)
 }
 
@@ -172,29 +175,42 @@ async function reset(): Promise<void> {
   }
 }
 
-async function preview(): Promise<void> {
+async function preview(body: string, variables: Record<string, string>): Promise<void> {
   const id = selectedId.value
   if (id === null || previewLoading.value) {
     return
   }
 
-  // 先打开对话框再取：慢请求期间界面要有反馈，否则点了「预览」像没反应。
-  previewText.value = ''
+  previewToken += 1
+  const token = previewToken
+  previewText.value = null
+  previewError.value = null
   previewLoading.value = true
   try {
-    const payload = await api.post<PreviewPayload>(pathOf(id, '/preview'))
-    previewText.value = payload.text
+    const payload = await api.post<PreviewPayload>(pathOf(id, '/preview'), { body, variables })
+    if (token === previewToken) {
+      previewText.value = payload.text
+    }
   } catch (caught) {
-    previewText.value = null
-    toast.show('error', forbiddenMessageOf(caught, '需要管理员权限'))
+    if (token === previewToken) {
+      previewError.value = forbiddenMessageOf(caught, '需要管理员权限')
+    }
   } finally {
-    previewLoading.value = false
+    if (token === previewToken) {
+      previewLoading.value = false
+    }
   }
 }
 
-function closePreview(): void {
+function clearPreview(): void {
+  previewToken += 1
   previewText.value = null
+  previewError.value = null
   previewLoading.value = false
+}
+
+function closePreview(): void {
+  clearPreview()
 }
 
 onMounted(() => {
@@ -273,9 +289,11 @@ onMounted(() => {
         :busy="busy"
         :preview-text="previewText"
         :preview-loading="previewLoading"
+        :preview-error="previewError"
         @save="save"
         @reset="reset"
         @preview="preview"
+        @clear-preview="clearPreview"
         @close-preview="closePreview"
       />
     </div>

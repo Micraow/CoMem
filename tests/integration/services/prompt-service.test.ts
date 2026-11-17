@@ -200,6 +200,15 @@ describe('预览', () => {
     service.save('extract-user', '只有 {{pages}}');
     expect(service.preview('extract-user', { pages: 'P' })).toBe('只有 P');
   });
+
+  it('可预览未保存草稿，且不改当前正文', () => {
+    const before = service.get('rewrite-user');
+
+    expect(
+      service.preview('rewrite-user', { query: '代码风格' }, '草稿里的查询：{{query}}'),
+    ).toBe('草稿里的查询：代码风格');
+    expect(service.get('rewrite-user')).toEqual(before);
+  });
 });
 
 describe('进程级渲染器', () => {

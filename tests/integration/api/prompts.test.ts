@@ -322,6 +322,24 @@ describe('POST /prompts/:id/preview', () => {
     expect(okBody<{ text: string }>(response.json()).text).toBe('只有 一句话');
   });
 
+  it('预览未保存草稿，且不会写入覆盖', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/prompts/rewrite-user/preview',
+      payload: {
+        body: '草稿里的查询：{{query}}',
+        variables: { query: '代码风格' },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(okBody<{ text: string }>(response.json()).text).toBe('草稿里的查询：代码风格');
+    expect(vi.mocked(globalThis.fetch)).not.toHaveBeenCalled();
+
+    const detail = await app.inject({ method: 'GET', url: '/api/v1/prompts/rewrite-user' });
+    expect(okBody<Record<string, unknown>>(detail.json())['overridden']).toBe(false);
+  });
+
   it('变量值不是字符串时拒绝', async () => {
     const response = await app.inject({
       method: 'POST',
@@ -330,5 +348,16 @@ describe('POST /prompts/:id/preview', () => {
     });
 
     expect(response.statusCode).toBe(400);
+  });
+
+  it('草稿正文不是字符串时拒绝', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/prompts/rewrite-user/preview',
+      payload: { body: 1 },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorBody(response.json()).details).toMatchObject({ field: 'body' });
   });
 });

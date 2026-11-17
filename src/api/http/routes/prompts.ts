@@ -35,7 +35,12 @@ import {
 import type { PromptDetail, PromptSummary } from '../../../services/prompt-service.js';
 import { ok } from '../envelope.js';
 import { assertSystemAdmin } from '../middleware.js';
-import { requireRecord, requireString, type HttpRouteGroup } from '../server.js';
+import {
+  optionalString,
+  requireRecord,
+  requireString,
+  type HttpRouteGroup,
+} from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
 
@@ -163,7 +168,14 @@ export function createPromptRoutes(services: HttpRouteServices): HttpRouteGroup 
         assertSystemAdmin(request, systemAdmin);
         const id = requirePromptId(request.params.id);
         const body = request.body === undefined ? {} : requireRecord(request.body, 'prompts/:id/preview');
-        return ok<PromptPreviewResponse>({ text: prompts.preview(id, parseVariables(body)) });
+        // `body` 是控制台当前未保存的草稿；省略它时保持旧接口语义，渲染当前生效正文。
+        return ok<PromptPreviewResponse>({
+          text: prompts.preview(
+            id,
+            parseVariables(body),
+            optionalString(body, 'body'),
+          ),
+        });
       });
     },
   };

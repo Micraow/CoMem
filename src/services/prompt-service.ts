@@ -167,13 +167,18 @@ export class PromptService {
    *
    * 预览要能回答「这一截会被替换成什么」，所以占位符里放的是**中文说明**而不是
    * 变量名（AGENTS.md §11：内部标识不进用户可见区域）。
+   * 传入 `body` 时渲染控制台里的未保存草稿；省略时继续使用当前生效正文。
    */
-  preview(id: PromptId, variables: Readonly<Record<string, string>>): string {
+  preview(
+    id: PromptId,
+    variables: Readonly<Record<string, string>>,
+    body?: string,
+  ): string {
     const filled: Record<string, string> = {};
     for (const variable of promptDefinition(id).variables) {
       filled[variable.name] = variables[variable.name] ?? `〔${variable.description}〕`;
     }
-    return this.render(id, filled);
+    return renderPromptBody(id, body ?? this.#bodyOf(id), filled);
   }
 
   #bodyOf(id: PromptId): string {
