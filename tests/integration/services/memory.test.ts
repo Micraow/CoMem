@@ -405,6 +405,29 @@ describe('prefetch（§11.3）', () => {
 
     expect(await memory.prefetch(Uri.parse(SCOPE), experiencesMemoryType, 'q', 5)).toEqual([]);
   });
+
+  it('listActive 返回同类全部生效记录，不依赖查询命中，也不含 pending', async () => {
+    for (const topic of ['alpha', 'beta']) {
+      const result = await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+        topic,
+        content: `${topic} 的结论。`,
+      });
+      await memory.approve(result.uri);
+    }
+    await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'pending',
+      content: '还在复核。',
+    });
+    await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
+      topic: 'different-type',
+      content: '不是经验。',
+    });
+
+    const records = await memory.listActive(Uri.parse(SCOPE), experiencesMemoryType);
+
+    expect(records.map((record) => record.fields['topic'])).toEqual(['alpha', 'beta']);
+    expect(search.calls).toHaveLength(0);
+  });
 });
 
 describe('YAML 转义（formatScalar）', () => {

@@ -133,6 +133,37 @@ export async function listPendingMemories(
 }
 
 /**
+ * 列举某类记忆在 scope 下全部当前有效的记录。
+ *
+ * 经验归纳需要先看到完整目录再决定合并到哪一条；只靠与当前话术命中的 top-N
+ * 预取，模型看不到同目录中未被本轮查询命中的近义 topic，就会持续新建重复项。
+ * 这个入口只用于服务层内部装配，不新增 MCP 工具。
+ */
+export async function listActiveMemories(
+  filesystem: MemoryFileStore,
+  logger: Logger,
+  scopeUri: Uri,
+  schema: MemoryTypeSchema,
+): Promise<readonly MemoryRecord[]> {
+  const records: MemoryRecord[] = [];
+  const visit = async (directory: Uri): Promise<void> => {
+    for (const entry of await listDirectoryOrEmpty(filesystem, directory)) {
+      if (entry.kind === 'directory') {
+        if (!isVersionFile(entry.uri)) await visit(entry.uri);
+        continue;
+      }
+      const record = await readMemoryRecord(filesystem, logger, entry.uri);
+      if (record !== null && record.status === 'active' && record.memoryType === schema.type) {
+        records.push(record);
+      }
+    }
+  };
+
+  await visit(scopeUri.child(...schema.directory.split('/')));
+  return records.sort((left, right) => left.uri.toString().localeCompare(right.uri.toString()));
+}
+
+/**
  * §11.3 的抽取预取：按 schema 目录做一次检索，返回 top-N。
  *
  * 单文件类型（`profile` / `identity` / `soul`，`filename` 里没有占位符）直接读该
