@@ -68,7 +68,9 @@ export async function handlePreCompact(event, deps) {
   const result = await captureSession(event, deps).catch((error) => {
     (deps.warn ?? warn)('提交失败，游标停在原处，等待下一次重投。', {
       code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+      serverCode: typeof error?.serverCode === 'string' ? error.serverCode : null,
       status: typeof error?.status === 'number' ? error.status : null,
+      error: error instanceof Error ? error.message : String(error),
     });
     return { captured: 0, committed: false, bypassed: false };
   });

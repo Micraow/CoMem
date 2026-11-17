@@ -78,6 +78,21 @@ test('POST 不重试：5xx 只发一次', async () => {
   }
 });
 
+test('409 保留服务端的 ALREADY_EXISTS / CONFLICT 区分', async () => {
+  const server = await startServer([fail(409, 'CONFLICT')]);
+  try {
+    const client = createHttpClient({ baseUrl: server.baseUrl });
+    await assert.rejects(() => client.post('/api/v1/sessions',), (error) => {
+      assert.equal(error.code, 'HOOK_CONFLICT');
+      assert.equal(error.serverCode, 'CONFLICT');
+      assert.equal(error.status, 409);
+      return true;
+    });
+  } finally {
+    await server.close();
+  }
+});
+
 test('GET 重试 5xx', async () => {
   const server = await startServer([fail(503), ok('好了')]);
   try {

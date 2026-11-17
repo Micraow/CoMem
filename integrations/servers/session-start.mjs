@@ -7,6 +7,7 @@ import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 import { contextEpoch } from '../lib/context-epoch.mjs';
 import { contextBudget, contextDelivery } from '../lib/context-delivery.mjs';
+import { resolveProjectId, withProjectId } from '../lib/project.mjs';
 
 export { estimateTokens };
 
@@ -17,13 +18,23 @@ export async function handleSessionStart(event, deps) {
   const maxBytes = deps.maxContextBytes ?? DEFAULT_MAX_CONTEXT_BYTES;
   const epoch = event.contextEpoch ?? await contextEpoch(deps.config, event.sessionId, true);
   const delivery = await contextDelivery(deps.config, event.sessionId, epoch);
+  const projectId = await resolveProjectId(event.cwd);
   const background = await deps.http.post('/api/v1/context', {
       sessionId: event.sessionId, maxTokens: deps.config.profileBudgetTokens ?? DEFAULT_PROFILE_BUDGET_TOKENS,
       contextEpoch: epoch,
       previousDeliveryToken: delivery.previousDeliveryToken, budgetMs: contextBudget(deps.http),
       maxBytes: Math.max(0, maxBytes - 64),
+      ...withProjectId(projectId),
     }).then(async (result) => { await delivery.accepted(); return result; })
-      .catch((error) => { warn('读取个人背景失败。', { error: error instanceof Error ? error.message : String(error) }); return null; });
+      .catch((error) => {
+        warn('读取个人背景失败。', {
+          code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+          serverCode: typeof error?.serverCode === 'string' ? error.serverCode : null,
+          status: typeof error?.status === 'number' ? error.status : null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      });
   const blocks = [];
   if (typeof background?.rendered === 'string' && background.rendered !== '') {
     blocks.push({ id: 'profile', text: `<comem-profile>\n${background.rendered}\n</comem-profile>` });

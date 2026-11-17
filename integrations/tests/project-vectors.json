@@ -1,0 +1,46 @@
+{
+  "explicit": [
+    { "input": "team-alpha", "expected": "team-alpha" },
+    { "input": "cafe\u0301", "expected": "café" },
+    { "input": "", "expected": null },
+    { "input": ".", "expected": null },
+    { "input": "..", "expected": null },
+    { "input": "owner/repo", "expected": null },
+    { "input": "bad\\segment", "expected": null },
+    { "input": ".meta.json", "expected": null }
+  ],
+  "remote": [
+    {
+      "input": "git@github.com:Acme/Rocket.git",
+      "identity": "github.com/acme/rocket",
+      "projectId": "remote-github.com-acme-rocket-e72631392f6d110b"
+    },
+    {
+      "input": "ssh://git@github.com:22/acme/rocket.git",
+      "identity": "github.com/acme/rocket",
+      "projectId": "remote-github.com-acme-rocket-e72631392f6d110b"
+    },
+    {
+      "input": "https://build-user:fixture-token@github.com/acme/rocket.git?access_token=fixture-token#readme",
+      "identity": "github.com/acme/rocket",
+      "projectId": "remote-github.com-acme-rocket-e72631392f6d110b"
+    },
+    {
+      "input": "ssh://git@github.com:2222/acme/rocket.git",
+      "identity": "github.com:2222/acme/rocket",
+      "projectId": "remote-github.com-2222-acme-rocket-377cadb378bab217"
+    },
+    { "input": "", "identity": null, "projectId": null },
+    { "input": "not a remote", "identity": null, "projectId": null }
+  ],
+  "root": [
+    {
+      "path": "/srv/acme/repo",
+      "projectId": "root-ea112931de84708a"
+    },
+    {
+      "path": "/srv/other/repo",
+      "projectId": "root-591de66b2522e65c"
+    }
+  ]
+}

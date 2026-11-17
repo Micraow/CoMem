@@ -59,14 +59,12 @@ import { isMainModule } from '../lib/is-main.mjs';
 import { withSessionLock } from '../lib/lock.mjs';
 import { advanceCursor, readCursor } from '../lib/cursor.mjs';
 import { runMain } from '../lib/lifecycle.mjs';
+import { resolveProjectId, withProjectId } from '../lib/project.mjs';
 import { sanitizeCapturedMessages } from '../lib/sanitize.mjs';
 import { captureSource } from '../lib/source.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
-
-/** `POST /sessions` 的 409 表示会话已存在（§19 的 CONFLICT）。 */
-const CONFLICT_STATUS = 409;
 
 /** worker 载荷文件前缀。 */
 const WORKER_PAYLOAD_PREFIX = 'comem-stop-';
@@ -177,6 +175,10 @@ async function reportEmptyCapture(dir, event, transcript, provided) {
     record.reason = 'empty-messages';
   }
 
+  await appendCaptureDiagnostic(dir, record);
+}
+
+async function appendCaptureDiagnostic(dir, record) {
   const file = join(dir, CAPTURE_LOG_FILE);
   const line = `${JSON.stringify(record)}\n`;
   try {
@@ -191,30 +193,52 @@ async function reportEmptyCapture(dir, event, transcript, provided) {
   }
 }
 
+async function reportCaptureFailure(dir, event, error) {
+  await appendCaptureDiagnostic(dir, {
+    level: 'error',
+    component: 'capture',
+    event: event.event,
+    host: typeof event.host === 'string' && event.host !== '' ? event.host : DEFAULT_HOST_NAME,
+    sessionId: event.sessionId,
+    reason: 'capture-failed',
+    code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+    serverCode: typeof error?.serverCode === 'string' ? error.serverCode : null,
+    status: typeof error?.status === 'number' ? error.status : null,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 /**
- * 确保会话存在：**409 是正常路径**，表示会话已存在，复用即可。
+ * 确保会话存在：409 `ALREADY_EXISTS` 是正常复用路径。
  *
  * 服务端的 `POST /sessions` 只创建、不重置。收到 200 说明这一轮刚建出一个空
- * 会话；收到 409 说明它已经在了，消息原样保留。两者都可以继续写消息，但**只有
- * 409 能证明上一轮的消息没被清空**——所以这里不能把 409 当错误，也不能把
- * 409 之外的状态当成「已存在」。
+ * 会话；收到 409 `ALREADY_EXISTS` 说明 ID 与项目绑定都已存在，消息原样保留。
+ * 409 `CONFLICT` 是同一 session ID 已绑定另一项目，必须抛给调用方的诊断路径。
  *
  * 导出给 DSH 原生插件（`integrations/dsh-plugin/lib/index.js`）用：它不走
  * `captureSession` 的游标与 worker，但「先建会话再写消息」这一步与 `Stop` 完全
  * 相同，语义和 409 的处理只能有一份。
  *
- * @param {{ sessionId: string }} event
+ * @param {{ sessionId: string, cwd?: string }} event
  * @param {{ config: Awaited<ReturnType<typeof loadConfig>>, http: ReturnType<typeof createHttpClient> }} deps
  */
 export async function ensureSession(event, deps) {
+  const projectId = await resolveProjectId(event.cwd);
   try {
     await deps.http.post(SESSIONS_PATH, {
       sessionId: event.sessionId,
+      ...withProjectId(projectId),
     });
   } catch (error) {
-    if (error.status !== CONFLICT_STATUS) {
-      throw error;
-    }
+    if (
+      error.status === 409
+      && (
+        error.serverCode === undefined
+        || error.serverCode === 'ALREADY_EXISTS'
+        || error.code === 'ALREADY_EXISTS'
+      )
+    ) return;
+    throw error;
   }
 }
 
@@ -366,18 +390,24 @@ export async function runCaptureWorker(payloadFile, deps) {
   const payload = JSON.parse(await readFile(payloadFile, 'utf8'));
   await sweepWorkerPayloads(deps.config.tmpDir);
   try {
-    const captureStartedAt = process.hrtime.bigint();
-    const result = await captureSession(payload.event, deps);
-    const captureMs = elapsedMs(captureStartedAt);
-    await reportOverhead(
-      {
-        event: payload.event.event,
-        sessionId: payload.event.sessionId,
-        phases: { processStartMs: payload.processStartMs, recallMs: 0, serializeMs: 0, captureMs },
-      },
-      { config: deps.config, http: deps.http },
-    );
-    return result;
+    try {
+      const captureStartedAt = process.hrtime.bigint();
+      const result = await captureSession(payload.event, deps);
+      const captureMs = elapsedMs(captureStartedAt);
+      await reportOverhead(
+        {
+          event: payload.event.event,
+          sessionId: payload.event.sessionId,
+          phases: { processStartMs: payload.processStartMs, recallMs: 0, serializeMs: 0, captureMs },
+        },
+        { config: deps.config, http: deps.http },
+      );
+      return result;
+    } catch (error) {
+      // detached worker 的 stderr 被忽略；冲突不能只留在退出状态里。
+      await reportCaptureFailure(deps.config.tmpDir, payload.event, error);
+      throw error;
+    }
   } finally {
     await unlink(payloadFile).catch(() => {});
   }

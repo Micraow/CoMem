@@ -98,10 +98,13 @@ function comemSessionId(sessionId) {
   return sessionId.startsWith(SESSION_ID_PREFIX) ? sessionId : `${SESSION_ID_PREFIX}${sessionId}`;
 }
 
-/** 会话的工作目录；没有就退回 DSH 进程自己的 cwd。 */
+/**
+ * DSH 0.2.2-rc.1 的持久目录在 `agent.session.header.cwd`。DSH 的 Cordis context
+ * 本身没有 `cwd` 字段；缺目录时保持空串，避免把 GUI 进程的 HOME 误认成项目。
+ */
 function cwdOf(session) {
   const cwd = session?.header?.cwd;
-  return typeof cwd === 'string' && cwd !== '' ? cwd : process.cwd();
+  return typeof cwd === 'string' ? cwd : '';
 }
 
 /** 一条消息里的文本块 → CoMem 的 `parts`。图片、推理、工具调用都不进采集。 */
@@ -180,6 +183,8 @@ function contextMessage(text, form) {
 function errorFields(error) {
   return {
     code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+    serverCode: typeof error?.serverCode === 'string' ? error.serverCode : null,
+    status: typeof error?.status === 'number' ? error.status : null,
     error: error instanceof Error ? error.message : String(error),
   };
 }
@@ -381,7 +386,7 @@ function start(ctx, rawConfig) {
     // 提交没有「用户按回车的延迟」可比；用与 PreCompact 同一个宽上限。
     const http = clientFor(config, config.commitTimeoutMs);
     try {
-      await ensureSession({ sessionId }, { config, http });
+      await ensureSession({ sessionId, cwd: cwdOf(session) }, { config, http });
       await http.post(`${SESSIONS_PATH}/${sessionId}/messages`, { messages });
       await http.post(`${SESSIONS_PATH}/${sessionId}/commit`, {});
       entry.messages = entry.messages.slice(snapshot.length);

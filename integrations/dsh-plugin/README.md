@@ -74,6 +74,12 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 
 ## 实现要点
 
+- **项目目录来自真实的 session header。** DSH 0.2.2-rc.1 的 Cordis `Context` 没有
+  `cwd` 字段；插件读取 `agent.session.header.cwd`。缺失时保持空目录并不回退到
+  `process.cwd()`，避免把 GUI 进程的 HOME 自动识别成项目。`/context` 与建会话请求
+  都由公共 `integrations/lib/project.mjs` 从这个目录解析 `projectId`。显式
+  `.comem/config.json` 非法时 resolver 抛 `PROJECT_CONFIG_INVALID`，接缝记 warn
+  并保留本轮不可提交状态，不会改写成个人会话。
 - **只处理顶层会话。** 子 agent 会话（`session.header.origin === 'subagent'`）不注入、
   不采集；否则每次委派都会把画像再投一遍，子 agent 的对话也会作为独立会话入库。
 - **注入消息的来源 `kind` 是 `comem`。** 下一轮取 prompt 时只认 `source.kind === 'user'`，
@@ -83,6 +89,9 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 - **提交失败不丢消息。** `turn/end` 的 POST 失败时缓冲保留，下一次 `turn/end` 重投；
   服务端按消息 `id` 幂等（DSH 的消息 ID 原样用作 CoMem 消息 ID）。`agent/disposed`
   是最后一次尝试，失败就丢并在日志里留一条 warn。
+- **项目绑定冲突会保留缓冲。** 只有 `POST /sessions` 的 409 `ALREADY_EXISTS` 视为
+  可复用；若同一会话已绑定另一个项目，服务端返回 409 `CONFLICT`，插件记 warn 并
+  保留本轮消息，不会把它们写进错误项目。
 - **异常不外溢。** `agent/created` 监听器抛错会让会话创建失败，`agent/pre-step`
   抛错会让这一轮失败。所有接缝都吞异常并 `ctx.logger.warn`，然后返回底层 decision。
 

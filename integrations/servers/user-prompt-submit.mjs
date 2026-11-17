@@ -8,6 +8,7 @@ import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
 import { contextEpoch } from '../lib/context-epoch.mjs';
 import { contextBudget, contextDelivery } from '../lib/context-delivery.mjs';
+import { resolveProjectId, withProjectId } from '../lib/project.mjs';
 
 const warn = (message, data) => warnToStderr('user-prompt-submit', message, data);
 
@@ -21,16 +22,24 @@ export async function handleUserPromptSubmit(event, deps) {
   try {
     const epoch = event.contextEpoch ?? await contextEpoch(deps.config, event.sessionId);
     delivery = await contextDelivery(deps.config, event.sessionId, epoch);
+    const projectId = await resolveProjectId(event.cwd);
     result = await deps.http.post('/api/v1/context', {
       query, sessionId: event.sessionId, limit: deps.config.recallLimit,
       contextEpoch: epoch, previousDeliveryToken: delivery.previousDeliveryToken, budgetMs: contextBudget(deps.http),
       maxBytes: Math.max(0, (deps.maxContextBytes ?? DEFAULT_MAX_CONTEXT_BYTES) - 64),
+      ...withProjectId(projectId),
     });
     await delivery.accepted();
     if (result?.degradation) (deps.warn ?? warn)('本轮召回已降级。', { reason: result.degradation });
   } catch (error) {
     (deps.warn ?? warn)('检索失败，本轮不注入记忆。', {
       code: error instanceof ComemHookError ? error.code : 'UNKNOWN',
+      serverCode: error instanceof ComemHookError && typeof error.serverCode === 'string'
+        ? error.serverCode
+        : null,
+      status: error instanceof ComemHookError && typeof error.status === 'number'
+        ? error.status
+        : null,
       error: error instanceof Error ? error.message : String(error),
     });
     return undefined;

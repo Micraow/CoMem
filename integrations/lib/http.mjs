@@ -55,12 +55,13 @@ const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 export class ComemHookError extends Error {
   /**
    * @param {string} message
-   * @param {{ code?: string, status?: number, path?: string, cause?: unknown }} [options]
+   * @param {{ code?: string, serverCode?: string, status?: number, path?: string, cause?: unknown }} [options]
    */
   constructor(message, options = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'ComemHookError';
     this.code = options.code ?? 'HOOK_HTTP_ERROR';
+    this.serverCode = options.serverCode;
     this.status = options.status;
     this.path = options.path;
   }
@@ -151,6 +152,7 @@ async function unwrap(response, method, path) {
         : `CoMem 请求失败：${method} ${path} → HTTP ${response.status}`;
     throw new ComemHookError(message, {
       code: response.status === 409 ? 'HOOK_CONFLICT' : 'HOOK_HTTP_ERROR',
+      serverCode: typeof envelope?.error?.code === 'string' ? envelope.error.code : undefined,
       status: response.status,
       path,
     });
@@ -162,7 +164,12 @@ async function unwrap(response, method, path) {
   if (envelope !== undefined && envelope.status === 'error') {
     throw new ComemHookError(
       typeof envelope.error?.message === 'string' ? envelope.error.message : 'CoMem 返回错误',
-      { code: 'HOOK_HTTP_ERROR', status: response.status, path },
+      {
+        code: 'HOOK_HTTP_ERROR',
+        serverCode: typeof envelope.error?.code === 'string' ? envelope.error.code : undefined,
+        status: response.status,
+        path,
+      },
     );
   }
   return payload === undefined ? text : payload;

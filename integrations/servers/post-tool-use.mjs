@@ -34,14 +34,12 @@ import { runMain, warnToStderr } from '../lib/lifecycle.mjs';
 import { sanitizeCapturedText } from '../lib/sanitize.mjs';
 import { captureSource } from '../lib/source.mjs';
 import { elapsedMs, processStartMs, reportOverhead } from '../lib/telemetry.mjs';
+import { ensureSession } from './stop.mjs';
 
 const SESSIONS_PATH = '/api/v1/sessions';
 
 /** 降级诊断：一行 JSON 到 stderr。工具输出与输入都不进日志。 */
 const warn = (message, data) => warnToStderr('post-tool-use', message, data);
-
-/** `POST /sessions` 的 409 表示会话已存在（§19 的 CONFLICT）。 */
-const CONFLICT_STATUS = 409;
 
 /**
  * 一次工具调用对应**一条** `tool` 消息，两种 part 都在里面：`tool_use` 与
@@ -102,19 +100,17 @@ export async function handlePostToolUse(event, deps) {
 
   const captureStartedAt = process.hrtime.bigint();
   try {
-    await deps.http.post(SESSIONS_PATH, {
-      sessionId: event.sessionId,
-    });
+    await ensureSession(event, deps);
   } catch (error) {
-    // 409 = 会话已存在（正常路径）：复用它，消息原样保留，继续追加。
-    // 其它状态说明服务端不可用：这次采集放弃，游标不前进，下一次重投。
-    if (error.status !== CONFLICT_STATUS) {
-      (deps.warn ?? warn)('创建会话失败，本次工具调用不采集。', {
-        code: typeof error.code === 'string' ? error.code : 'UNKNOWN',
-        status: typeof error.status === 'number' ? error.status : null,
-      });
-      return undefined;
-    }
+    // 只有 `ALREADY_EXISTS` 在 ensureSession 里被当作复用。项目绑定冲突是
+    // `CONFLICT`，必须留诊断，不能伪装成会话已存在。
+    (deps.warn ?? warn)('创建会话失败，本次工具调用不采集。', {
+      code: typeof error.code === 'string' ? error.code : 'UNKNOWN',
+      serverCode: typeof error.serverCode === 'string' ? error.serverCode : null,
+      status: typeof error.status === 'number' ? error.status : null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
   }
 
   try {

@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { apply } from '../dsh-plugin/lib/index.js';
 
 test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源，子会话不采集', async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), 'comem-dsh-project-'));
+  await mkdir(join(projectDir, '.comem'), { recursive: true });
+  await writeFile(
+    join(projectDir, '.comem', 'config.json'),
+    JSON.stringify({ version: 1, project: { id: 'dsh-project' } }),
+    'utf8',
+  );
   const requests = [];
   let receivedMessages;
   const received = new Promise((resolve) => { receivedMessages = resolve; });
@@ -23,11 +30,14 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
   const listeners = new Map();
   const agent = { id: 'agent-other-id', session: { id: 'session-one', header: {} }, inject: () => {} };
   try {
+    Object.assign(agent.session.header, { cwd: projectDir });
     apply({ on: (event, listener) => listeners.set(event, listener), logger: { warn: () => {} } }, {
       baseUrl: `http://127.0.0.1:${server.address().port}`, token: '', timeoutMs: 1000, recallTimeoutMs: 6000,
     });
     await listeners.get('agent/created')({ agent, source: 'startup' });
-    assert.equal(requests.find((entry) => entry.path === '/api/v1/context').body.sessionId, 'dsh-session-one');
+    const startContext = requests.find((entry) => entry.path === '/api/v1/context');
+    assert.equal(startContext.body.sessionId, 'dsh-session-one');
+    assert.equal(startContext.body.projectId, 'dsh-project');
     const tool = listeners.get('tools/post-execute');
     const decision = { output: { projection: 'keep' } };
     assert.equal(await tool({ agent, name: 'bash', callId: 'call-one', arguments: { command: 'uname -m' } }, {
@@ -38,7 +48,9 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     const step = { kind: 'enter', messages: [] };
     const recalled = await listeners.get('agent/pre-step')({ agent, messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: '查询已有的设备配置' }] }] }, async () => step);
     assert.equal(recalled.messages.length, 1);
-    assert.ok(requests.find((entry) => entry.body.query === '查询已有的设备配置').body.budgetMs > 4000);
+    const promptContext = requests.find((entry) => entry.body.query === '查询已有的设备配置');
+    assert.ok(promptContext.body.budgetMs > 4000);
+    assert.equal(promptContext.body.projectId, 'dsh-project');
     const afterRecall = requests.length;
     assert.equal(await listeners.get('agent/pre-step')({ agent: child, messages: [{ role: 'user' }] }, async () => step), step);
     assert.ok(afterRecall > count);
@@ -51,8 +63,11 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     assert.equal(body.messages[0].parts[1].output, 'x86_64');
     assert.equal(body.messages[0].source.host, 'dsh');
     assert.equal(body.messages[0].source.machineId.length, 16);
+    const sessionCreate = requests.find((entry) => entry.path === '/api/v1/sessions');
+    assert.equal(sessionCreate.body.projectId, 'dsh-project');
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await rm(projectDir, { recursive: true, force: true });
   }
 });
 
@@ -135,6 +150,65 @@ test('DSH 共享配置无效时停用插件，不写回环默认身份', async (
   } finally {
     if (previousConfigFile === undefined) delete process.env.COMEM_CONFIG_FILE;
     else process.env.COMEM_CONFIG_FILE = previousConfigFile;
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('DSH 显式项目配置无效时 fail-open，且不创建或上报会话', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'comem-dsh-invalid-project-'));
+  await mkdir(join(dir, '.comem'), { recursive: true });
+  await writeFile(
+    join(dir, '.comem', 'config.json'),
+    JSON.stringify({ version: 1, project: { id: 'owner/repo' } }),
+    'utf8',
+  );
+  let requests = 0;
+  const warnings = [];
+  const server = createServer((request, response) => {
+    requests += 1;
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ status: 'ok', result: { rendered: '不应发生' } }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const listeners = new Map();
+  try {
+    apply({
+      on: (event, listener) => listeners.set(event, listener),
+      logger: { warn: (...args) => warnings.push(JSON.stringify(args)) },
+    }, {
+      baseUrl: `http://127.0.0.1:${server.address().port}`,
+      token: '',
+      timeoutMs: 1000,
+      recallTimeoutMs: 6000,
+    });
+    const agent = {
+      session: { id: 'invalid-project', header: { cwd: dir } },
+      inject: () => {},
+    };
+    await listeners.get('agent/created')({ agent, source: 'startup' });
+    await listeners.get('agent/pre-step')(
+      {
+        agent,
+        messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: 'question' }] }],
+      },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+    listeners.get('session/event')(agent.session, {
+      type: 'user/message',
+      time: Date.now(),
+      data: {
+        id: 'message-one',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'question' }],
+      },
+    });
+    listeners.get('session/event')(agent.session, { type: 'turn/end', time: Date.now() });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(requests, 0);
+    assert.ok(warnings.some((message) => message.includes('PROJECT_CONFIG_INVALID')
+      || message.includes('显式项目配置')));
+  } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
