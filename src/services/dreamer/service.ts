@@ -9,7 +9,12 @@ import type { MemoryWriteResult } from '../memory.js';
 import { applyPlans } from './apply.js';
 import { buildExperiencePrompt } from './archive-prompt.js';
 import { userEvidence, type PreferenceEvidence } from './evidence.js';
-import { experienceContext, explicitPreferenceContext, writeExperiences } from './experience.js';
+import {
+  existingExperienceFromRecord,
+  experienceContext,
+  explicitPreferenceContext,
+  writeExperiences,
+} from './experience.js';
 import { collectInventory } from './inventory.js';
 import { consolidationOutputSchema, describeOperations, normalizeOperations, type ConsolidationOutput } from './output.js';
 import { planOperations } from './plan.js';
@@ -34,21 +39,78 @@ export class DreamerService {
     if (!(await archive.canUse(context.scopeUri, context.archiveUri))) return [];
     const messages = stripToolParts(context.messages);
     if (messages.length === 0) return [];
-    const { existing, entities } = await experienceContext(archive.memory, context, (uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri));
+    const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
+    const { catalog, existing, entities } = await experienceContext(archive, context, authorize);
     const currentEvidence = context.scopeUri.scope === 'user' ? userEvidence(context.archiveUri, context.messages) : [];
     const evidence = currentEvidence.length === 0 ? [] : [...currentEvidence, ...await archive.evidence(context.scopeUri, context.archiveUri)];
+    const preferences = await explicitPreferenceContext(archive, context, authorize);
     const base = buildExperiencePrompt({
-      messages, existing, today: new Date().toISOString().slice(0, 10),
+      catalog,
+      messages,
+      existing,
+      preferences,
+      today: new Date().toISOString().slice(0, 10),
       entities: entities.map((record, index) => ({ pageId: index + 1, content: pageContent(record), aliases: record.fields['aliases'] })),
     });
     const explicit = evidence.some(({ session }) => !session.equals(currentEvidence[0]?.session ?? session))
-      ? await explicitPreferenceContext(archive.memory, context, (uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri)) : [];
-    const output = await this.#model(withInferences(base, evidence, explicit));
+      ? preferences : [];
+    let output = await this.#model(withInferences(base, evidence, explicit));
     if (output.action === 'read' || (output.operations?.length ?? 0) > 0) {
       throw new ComemError('INVALID_ARGUMENT', 'Dreamer 归档阶段只接受经验和待复核偏好。');
     }
-    const authorize = (uri: Uri) => archive.canUse(context.scopeUri, uri.parent() ?? uri);
-    const written = await writeExperiences(archive, context, output.experiences ?? [], entities, authorize);
+    const catalogByTopic = new Map(catalog.map((experience) => [experience.topic, experience]));
+    const readableTopics = new Set(existing.map(({ topic }) => topic));
+    const unreadMerges = [...new Set((output.experiences ?? [])
+      .map(({ topic }) => topic)
+      .filter((topic) => catalogByTopic.has(topic) && !readableTopics.has(topic)))];
+    if (unreadMerges.length > 0) {
+      const loaded = [...existing];
+      for (const topic of unreadMerges) {
+        const entry = catalogByTopic.get(topic);
+        if (entry === undefined) continue;
+        const uri = Uri.parse(entry.uri);
+        if (!(await authorize(uri))) continue;
+        const record = await archive.memory.read(uri);
+        if (record === null) continue;
+        loaded.push(existingExperienceFromRecord(record));
+        readableTopics.add(topic);
+      }
+      const retryBase = buildExperiencePrompt({
+        catalog,
+        messages,
+        existing: loaded,
+        preferences,
+        today: new Date().toISOString().slice(0, 10),
+        entities: entities.map((record, index) => ({ pageId: index + 1, content: pageContent(record), aliases: record.fields['aliases'] })),
+      });
+      const retryPrompt = withInferences(retryBase, evidence, explicit);
+      output = await this.#model({
+        ...retryPrompt,
+        messages: [
+          ...retryPrompt.messages,
+          { role: 'assistant', content: JSON.stringify({ experiences: output.experiences ?? [] }) },
+          {
+            role: 'user',
+            content: '上面的候选尝试合并目录中尚未读取正文的经验。现在已补入这些经验的完整候选正文。请重新输出完整 JSON；仍然缺少正文的已有 topic 不得覆盖。',
+          },
+        ],
+      });
+      if (output.action === 'read' || (output.operations?.length ?? 0) > 0) {
+        throw new ComemError('INVALID_ARGUMENT', 'Dreamer 补充候选正文后的结果必须仍然只包含经验和待复核偏好。');
+      }
+    }
+    const safeExperiences = (output.experiences ?? []).filter(({ topic }) => {
+      const existingEntry = catalogByTopic.get(topic);
+      if (existingEntry === undefined || readableTopics.has(topic)) return true;
+      this.#deps.logger.warn('经验合并缺少已有正文，已拒绝覆盖', {
+        archive: context.archiveUri.toString(),
+        uri: existingEntry.uri,
+        topic,
+        status: existingEntry.status,
+      });
+      return false;
+    });
+    const written = await writeExperiences(archive, context, safeExperiences, entities, authorize);
     const inferred = await writeInferences(this.#deps, context.scopeUri, output.inferences ?? [], evidence, authorize, false, context.archiveUri);
     const writes = [...written, ...inferred.writes];
     this.#deps.logger.info('Dreamer 归档整理完成', { archive: context.archiveUri.toString(), written: writes.length });

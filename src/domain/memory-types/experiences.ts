@@ -23,6 +23,12 @@ export const experiencesMemoryType = {
       description: '经验归属的话题，小写短横线，如 monorepo-migration',
     },
     {
+      name: 'category',
+      type: 'string',
+      merge: 'replace',
+      description: '经验所属的稳定领域，如 computer-architecture、tooling、workflow',
+    },
+    {
       name: 'content',
       type: 'string',
       merge: 'patch',

@@ -95,10 +95,13 @@ const EXTRACTED_EVENT = {
 
 /** 本机真实网关的经验归纳结果。`experiences` 默认 `reviewRequired`，写入即 pending。 */
 const DISTILLED_EXPERIENCE = {
+  category: 'workflow',
   topic: 'payment-gateway-retry-design',
-  content:
-    '支付模块重构中确定的重试方案：重试统一放在网关层实现，业务层不再各自实现重试逻辑。\n\n' +
-    '- 网关层超时时间：3 秒\n- 重试次数：2 次\n- 幂等键：由业务层生成并透传，网关重试时复用同一个幂等键。',
+  claim: '支付重试统一放在网关层实现，业务层透传同一个幂等键。',
+  appliesWhen: ['支付模块需要统一重试策略。'],
+  procedure: ['网关设置 3 秒超时和 2 次重试。', '业务层生成并透传幂等键。'],
+  limitations: ['只覆盖本次验证的支付网关配置。'],
+  evidence: ['本次重构后的网关重试复用同一幂等键。'],
 } as const;
 
 /** 对照用例的抽取结果：显式「记住」时期望落到画像。 */

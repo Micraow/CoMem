@@ -21,6 +21,7 @@
 import type { LlmMessage, LlmPrompt } from '../../domain/llm.js';
 
 import { promptRenderer } from '../prompts/registry.js';
+import type { ExperienceCatalogEntry } from './experience.js';
 
 /**
  * 一条已经在盘上的经验。
@@ -30,6 +31,7 @@ import { promptRenderer } from '../prompts/registry.js';
  * 已经被后来的经验换掉了」。
  */
 export interface ExistingExperience {
+  readonly category?: string;
   readonly topic: string;
   readonly content: string;
   readonly validFrom: string | null;
@@ -37,11 +39,18 @@ export interface ExistingExperience {
 }
 
 export interface ExperiencePromptInput {
+  /**
+   * 全部生效经验的最小目录。目录始终完整进入提示词；正文只由下面 `existing`
+   * 提供少量候选，避免模型把“没预取到”误认为“不存在”。
+   */
+  readonly catalog: readonly ExperienceCatalogEntry[];
   readonly entities?: readonly { readonly pageId: number; readonly content: string; readonly aliases: unknown }[];
   /** 会话消息（§10.1 的 part 渲染成文本后的结果）。 */
   readonly messages: readonly LlmMessage[];
   /** 预取到的已有经验（§11.3）。 */
   readonly existing: readonly ExistingExperience[];
+  /** 已生效的明确偏好；经验归纳只能引用它们，不能把同一事实再写成经验。 */
+  readonly preferences: readonly { readonly topic: unknown; readonly content: string }[];
   /**
    * 今天的日期，`YYYY-MM-DD`。
    *
@@ -76,12 +85,34 @@ function renderExistingExperiences(existing: readonly ExistingExperience[]): str
     .map((experience) =>
       [
         `### ${experience.topic}`,
+        ...(experience.category === undefined ? [] : [`分类：${experience.category}`]),
         renderValidity(experience.validFrom, experience.validUntil),
         '正文：',
         experience.content,
       ].join('\n'),
     )
     .join('\n\n');
+}
+
+function renderCatalog(catalog: readonly ExperienceCatalogEntry[]): string {
+  if (catalog.length === 0) {
+    return '（没有已生效经验。）';
+  }
+  return catalog.map((experience) => [
+    `### ${experience.topic}`,
+    ...(experience.category === undefined ? [] : [`分类：${experience.category}`]),
+    `地址：${experience.uri}`,
+    `状态：${experience.status}`,
+    renderValidity(experience.validFrom, experience.validUntil),
+    `摘要：${experience.summary}`,
+  ].join('\n')).join('\n\n');
+}
+
+function renderPreferences(preferences: ExperiencePromptInput['preferences']): string {
+  if (preferences.length === 0) {
+    return '（没有已生效的明确偏好。）';
+  }
+  return preferences.map((preference) => `### ${String(preference.topic)}\n${preference.content}`).join('\n\n');
 }
 
 /** 会话记录。角色用 Markdown 小标题标出，模型能分清谁说的。 */
@@ -103,7 +134,18 @@ export function buildExperiencePrompt(input: ExperiencePromptInput): LlmPrompt {
       {
         role: 'user',
         content: renderer.render('experience-user', {
-          existingExperiences: `${renderExistingExperiences(input.existing)}\n\n实体候选（仅明确属于同一实体时引用）：\n${JSON.stringify(input.entities ?? [])}`,
+          existingExperiences: [
+            '### 全部当前经验目录',
+            '先在这份完整目录中寻找可合并的已有 topic。pending 记录还不能作为检索依据，但同一路径已有正文；看到 pending 时也必须先合并或保留，不能把“未生效”当成不存在。目录没有正文，不能因为候选正文未预取就认为该经验不存在。',
+            renderCatalog(input.catalog),
+            '### 已预取的候选正文',
+            renderExistingExperiences(input.existing),
+            '### 已生效的明确偏好',
+            renderPreferences(input.preferences),
+            '### 实体候选',
+            '仅在明确属于同一实体时引用：',
+            JSON.stringify(input.entities ?? []),
+          ].join('\n\n'),
           messages: renderMessages(input.messages),
         }),
       },

@@ -2315,7 +2315,7 @@ TTL 配错（把 30 天写成 1 天）时归档状态还能改回来，物理删
 
 Dreamer 统一归档整理和手动整理，两种入口使用同一个服务、模型结果协议与记忆写入层。`memory_merge` 仍负责按归档检查点应用抽取补丁；它不负责判断已有记忆是否重复或已被取代。
 
-- **归档整理**：读取本次对话（剔除工具调用及结果）和相关的已生效经验，输出可独立阅读的做法、前提与已验证的坑。同一 topic 更新整条正文，文件仍为 `memories/experiences/{topic}.md`，复核策略沿用 `memory.reviewRequired`。自动整理不执行删除。原来写入归档元数据的 `experience_distill` 在读取时映射成 `dreamer`，旧检查点不会作废。
+- **归档整理**：读取本次归档片段（剔除工具调用及结果）、全部当前经验的最小目录（含 active 与 pending），以及按本次查询预取的少量候选正文。模型按 `category`、`topic`、`claim`、`appliesWhen`、`procedure`、`limitations`、`evidence` 输出结构化契约，服务端再确定性地渲染正文；`claim` 成为 L0 摘要，`category` 写入 frontmatter，其余字段形成 Markdown 正文。字段长度与列表条数上限是控制提示词体积、模型输出成本和复核负担的产品预算，不构成质量保证。同一 topic 更新整条契约；若候选 topic 已在目录中但正文未预取，服务端先定向读取该记录再让模型重试，读取失败时拒绝覆盖并记录告警。文件仍为 `memories/experiences/{topic}.md`，复核策略沿用 `memory.reviewRequired`。自动整理不执行删除。原来写入归档元数据的 `experience_distill` 在读取时映射成 `dreamer`，旧检查点不会作废。
 - **偏好推断**：只在个人作用域使用本次用户原话和最近会话的归档证据。历史取最近 8 个会话的末次归档（每个会话最多 1,500 个文本字符，跳过大于 256 KiB 的历史归档）；这些是控制输入成本的预算，不代表覆盖了全部历史。服务端校验至少两个不同会话、不同的可逐字匹配的原话，并要求自动运行引用本次归档；模型根据反例、纠正与适用条件决定是否提议。推断写入 `memories/preferences/inferred-{topic}.md`，保留引用归档与原话，始终待复核。已存在同 topic 的明确偏好或推断项时不写，不改 `profile.md`；拒绝会阻止同路径被拒绝前的材料重建。词义相近但 topic 不同的冲突目前仍由模型提示与人工复核判断。引用校验验证材料存在，不证明结论正确。
 - **手动整理**：默认不开放，需要 `memory.dreamer.manualConsolidation: true` 和可用 LLM。`POST /api/v1/memories/dreamer` 接收 `{scope, dryRun?}`；默认预览，显式 `dryRun: false` 才写。调用者需要作用域管理权，对目标另查写入或删除权限。模型在有界的 `read` / `finish` 循环内读取可见的生效记忆，然后给出带理由的 add/update/delete 与可选的待复核偏好。默认最多 10 轮，是控制成本的设计上限；没有完成就不写。共享材料不会跨带独立 ACL 的子目录，清单之外的正文不能读；不自动展开组或项目。
 

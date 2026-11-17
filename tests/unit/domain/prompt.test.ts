@@ -358,7 +358,13 @@ describe('画像收敛指令（profileDirective）', () => {
  */
 describe('经验归纳提示词（experience-*）', () => {
   it('没有已有经验与会话时给出明确说明，今天日期进系统提示词', () => {
-    const prompt = buildExperiencePrompt({ messages: [], existing: [], today: '2026-11-10' });
+    const prompt = buildExperiencePrompt({
+      catalog: [],
+      messages: [],
+      existing: [],
+      preferences: [],
+      today: '2026-11-10',
+    });
 
     expect(prompt.system).toContain('归纳');
     expect(prompt.system).toContain('2026-11-10');
@@ -369,9 +375,29 @@ describe('经验归纳提示词（experience-*）', () => {
 
   it('已有经验带 topic、正文与有效期', () => {
     const prompt = buildExperiencePrompt({
+      catalog: [
+        {
+          uri: 'comem://user/alice/memories/experiences/monorepo-migration.md',
+          category: 'workflow',
+          topic: 'monorepo-migration',
+          summary: '迁移前先固定依赖版本。',
+          status: 'active',
+          validFrom: '2026-10-01T00:00:00.000Z',
+          validUntil: null,
+        },
+        {
+          uri: 'comem://user/alice/memories/experiences/only-in-catalog.md',
+          topic: 'only-in-catalog',
+          summary: '只在目录里，没有预取正文。',
+          status: 'pending',
+          validFrom: null,
+          validUntil: null,
+        },
+      ],
       messages: [{ role: 'user', content: '这次迁移踩了依赖版本的坑。' }],
       existing: [
         {
+          category: 'workflow',
           topic: 'monorepo-migration',
           content: '先升级依赖。',
           validFrom: '2026-10-01T00:00:00.000Z',
@@ -384,15 +410,21 @@ describe('经验归纳提示词（experience-*）', () => {
           validUntil: '2026-11-01T00:00:00.000Z',
         },
       ],
+      preferences: [{ topic: 'answer-style', content: '回答先给结论。' }],
       today: '2026-11-10',
     });
 
     const user = prompt.messages[0]?.content ?? '';
     expect(user).toContain('### monorepo-migration');
+    expect(user).toContain('分类：workflow');
     expect(user).toContain('先升级依赖。');
     expect(user).toContain('2026-10-01T00:00:00.000Z 起，仍然有效');
     expect(user).toContain('### legacy-topic');
     expect(user).toContain('至 2026-11-01T00:00:00.000Z');
+    expect(user).toContain('地址：comem://user/alice/memories/experiences/only-in-catalog.md');
+    expect(user).toContain('只在目录里，没有预取正文。');
+    expect(user).toContain('### answer-style');
+    expect(user).toContain('回答先给结论。');
     expect(user).toContain('这次迁移踩了依赖版本的坑。');
   });
 });

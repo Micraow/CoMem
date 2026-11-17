@@ -122,6 +122,7 @@ exports[`内置提示词的渲染快照 > 'extract-system' 1`] = `
 - 写入模式：upsert
 - 字段：
   - topic (string，identity，必填)：经验归属的话题，小写短横线，如 monorepo-migration
+  - category (string，合并策略 replace)：经验所属的稳定领域，如 computer-architecture、tooling、workflow
   - content (string，合并策略 patch)：经验正文：做对了什么、踩过什么坑、下次怎么做得更好
   - updatedAt (string，合并策略 replace)：最后更新时间，ISO 8601 时间串
 

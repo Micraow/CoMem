@@ -46,7 +46,6 @@ import {
 } from './document.js';
 import { readMemoryDocument, type MemoryFileStore, type MemorySearchPort, type MemoryServicePorts } from './ports.js';
 import {
-  listActiveMemories,
   listPendingMemories,
   prefetchMemories,
   readMemoryRecord,
@@ -361,14 +360,6 @@ export class MemoryService {
     options: { readonly limit?: number } = {},
   ): Promise<readonly MemoryRecord[]> {
     return await listPendingMemories(this.#filesystem, this.#logger, scopeUri, options);
-  }
-
-  /** 列举某类记忆的全部 active 记录；供 Dreamer 先看完整目录再选择合并目标。 */
-  async listActive(
-    scopeUri: Uri,
-    schema: MemoryTypeSchema,
-  ): Promise<readonly MemoryRecord[]> {
-    return await listActiveMemories(this.#filesystem, this.#logger, scopeUri, schema);
   }
 
   /** §11.3 的抽取预取：目录检索、单文件直读、只返回 `active`（详见 `query.ts`）。 */

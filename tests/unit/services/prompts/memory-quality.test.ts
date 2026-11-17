@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import { readPromptDefault } from '../../../../src/config/prompt-defaults.js'
+import {
+  experienceSchema,
+  renderExperienceContent,
+} from '../../../../src/services/dreamer/experience.js'
 
 describe('memory prompt quality gates', () => {
   it('extract skips stale imports, explicit non-memory requests and assistant guesses', () => {
@@ -20,8 +24,48 @@ describe('memory prompt quality gates', () => {
     expect(prompt).toContain('不能把猜测写成结论')
     expect(prompt).toContain('较旧的验证结果不能覆盖较新的当前做法')
     expect(prompt).toContain('会改变适用范围的细节')
-    expect(prompt).toContain('第一行直接给出可执行结论')
-    expect(prompt).toContain('不要只写「按以下步骤操作」等提示语')
+    expect(prompt).toContain('`claim` 是一句可直接检索、单独理解的结论')
+    expect(prompt).toContain('用户长期采用的格式、语言、详略、审美或工具选择 → 偏好')
+    expect(prompt).toContain('单次答题结果、一道题答错、一次格式偏差')
+    expect(prompt).toContain('`appliesWhen` 写 1–4 条适用条件')
+  })
+
+  it('structurally validates experience fields and renders claim as the summary line', () => {
+    const experience = experienceSchema.parse({
+      category: 'computer-architecture',
+      topic: 'single-cycle-datapath-critical-path',
+      claim: '判断新增指令的数据通路时，先逐项检查已有组件和新增路径。',
+      appliesWhen: ['在已有单周期数据通路上新增指令。'],
+      procedure: ['列出新增控制信号。', '检查写回与访存路径。', '验证关键路径。'],
+      limitations: [],
+      evidence: ['add3 与 sll 两条例题按该顺序检查通过。'],
+    })
+
+    const content = renderExperienceContent(experience)
+    expect(content.split('\n')[0]).toBe(experience.claim)
+    expect(content).toContain('## 适用条件')
+    expect(content).toContain('## 做法')
+    expect(content).toContain('1. 列出新增控制信号。')
+    expect(content).not.toContain('## 限制')
+    expect(content).toContain('## 证据')
+  })
+
+  it('rejects conclusions without evidence or with invalid routing fields', () => {
+    const base = {
+      category: 'workflow',
+      topic: 'monorepo-migration',
+      claim: '迁移前先固定依赖版本。',
+      appliesWhen: ['仓库需要迁移。'],
+      procedure: ['固定依赖版本。'],
+      limitations: [],
+      evidence: ['本次构建通过。'],
+    }
+
+    expect(experienceSchema.safeParse({ ...base, evidence: [] }).success).toBe(false)
+    expect(experienceSchema.safeParse({ ...base, evidence: ['   '] }).success).toBe(false)
+    expect(experienceSchema.safeParse({ ...base, procedure: undefined }).success).toBe(false)
+    expect(experienceSchema.safeParse({ ...base, category: 'Workflow / Other' }).success).toBe(false)
+    expect(experienceSchema.safeParse({ ...base, claim: '第一行\n第二行' }).success).toBe(false)
   })
 
   it('rewrite keeps history-dependent actions searchable and preserves exact nouns', () => {

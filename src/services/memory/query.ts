@@ -132,18 +132,12 @@ export async function listPendingMemories(
   return records;
 }
 
-/**
- * 列举某类记忆在 scope 下全部当前有效的记录。
- *
- * 经验归纳需要先看到完整目录再决定合并到哪一条；只靠与当前话术命中的 top-N
- * 预取，模型看不到同目录中未被本轮查询命中的近义 topic，就会持续新建重复项。
- * 这个入口只用于服务层内部装配，不新增 MCP 工具。
- */
-export async function listActiveMemories(
+async function listMemories(
   filesystem: MemoryFileStore,
   logger: Logger,
   scopeUri: Uri,
   schema: MemoryTypeSchema,
+  statuses: ReadonlySet<MemoryStatus>,
 ): Promise<readonly MemoryRecord[]> {
   const records: MemoryRecord[] = [];
   const visit = async (directory: Uri): Promise<void> => {
@@ -153,7 +147,7 @@ export async function listActiveMemories(
         continue;
       }
       const record = await readMemoryRecord(filesystem, logger, entry.uri);
-      if (record !== null && record.status === 'active' && record.memoryType === schema.type) {
+      if (record !== null && statuses.has(record.status) && record.memoryType === schema.type) {
         records.push(record);
       }
     }
@@ -161,6 +155,21 @@ export async function listActiveMemories(
 
   await visit(scopeUri.child(...schema.directory.split('/')));
   return records.sort((left, right) => left.uri.toString().localeCompare(right.uri.toString()));
+}
+
+/**
+ * 列举 active 与 pending 记录。
+ *
+ * 经验归纳用它发现“尚未复核但已经存在的同 topic”。只看 active 会漏掉 pending，
+ * 下次模型仍可能新建同路径并覆盖那条待复核正文。
+ */
+export async function listCurrentMemories(
+  filesystem: MemoryFileStore,
+  logger: Logger,
+  scopeUri: Uri,
+  schema: MemoryTypeSchema,
+): Promise<readonly MemoryRecord[]> {
+  return await listMemories(filesystem, logger, scopeUri, schema, new Set(['active', 'pending']));
 }
 
 /**

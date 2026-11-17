@@ -15,7 +15,7 @@
 
 import { recentUserEvidence, sharesScopeAcl } from '../../services/dreamer/evidence.js';
 import { DreamerService } from '../../services/dreamer/service.js';
-import { MemoryService } from '../../services/memory.js';
+import { listCurrentMemories, MemoryService } from '../../services/memory.js';
 import type { MemoryServicePorts } from '../../services/memory.js';
 import { ReconcileService } from '../../services/reconcile.js';
 import {
@@ -118,6 +118,7 @@ export function createMemory(
     maxIterations: config.memory.dreamer.maxIterations,
     archive: {
       memory, links: core.memoryLink, logger,
+      listCurrent: (scope, schema) => listCurrentMemories(rawFilesystem, logger, scope, schema),
       canUse: (scope, directory) => sharesScopeAcl(core.aclFile, scope, directory),
       evidence: (scope, currentArchive) => recentUserEvidence(store, core.aclFile, core.metadata, scope, currentArchive),
     },

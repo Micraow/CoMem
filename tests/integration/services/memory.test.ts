@@ -17,6 +17,7 @@ import type { MemoryTypeSchema } from '../../../src/domain/memory-type.js';
 import type { Logger } from '../../../src/domain/log.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
+  listCurrentMemories,
   MemoryService,
   type MemoryServicePorts,
   type MemoryWriteResult,
@@ -406,26 +407,32 @@ describe('prefetch（§11.3）', () => {
     expect(await memory.prefetch(Uri.parse(SCOPE), experiencesMemoryType, 'q', 5)).toEqual([]);
   });
 
-  it('listActive 返回同类全部生效记录，不依赖查询命中，也不含 pending', async () => {
-    for (const topic of ['alpha', 'beta']) {
-      const result = await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
-        topic,
-        content: `${topic} 的结论。`,
-      });
-      await memory.approve(result.uri);
-    }
+  it('listCurrent 也返回 pending，供 Dreamer 防止同 topic 覆盖', async () => {
+    const active = await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
+      topic: 'active',
+      content: '已生效。',
+    });
+    await memory.approve(active.uri);
     await memory.upsertMemory(Uri.parse(SCOPE), experiencesMemoryType, {
       topic: 'pending',
-      content: '还在复核。',
+      content: '尚未复核。',
     });
     await memory.upsertMemory(Uri.parse(SCOPE), preferencesMemoryType, {
       topic: 'different-type',
       content: '不是经验。',
     });
 
-    const records = await memory.listActive(Uri.parse(SCOPE), experiencesMemoryType);
+    const records = await listCurrentMemories(
+      createRawFilesystem(store),
+      logger,
+      Uri.parse(SCOPE),
+      experiencesMemoryType,
+    );
 
-    expect(records.map((record) => record.fields['topic'])).toEqual(['alpha', 'beta']);
+    expect(records.map(({ fields, status }) => [fields['topic'], status])).toEqual([
+      ['active', 'active'],
+      ['pending', 'pending'],
+    ]);
     expect(search.calls).toHaveLength(0);
   });
 });

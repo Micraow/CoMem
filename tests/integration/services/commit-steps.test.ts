@@ -51,6 +51,7 @@ import {
 import { SummaryInvalidateStep } from '../../../src/services/commit/steps/summary-invalidate.js';
 import { LlmService } from '../../../src/services/llm.js';
 import {
+  listCurrentMemories,
   MemoryService,
   type MemoryRecord,
   type MemoryServicePorts,
@@ -786,6 +787,18 @@ function createDistillStep(
     stat: { stat: async () => null }, search: { glob: async () => [] },
     archive: {
       memory: options.memory ?? memory, links: options.links ?? linkService, logger,
+      listCurrent: (scope, schema) => listCurrentMemories(
+        {
+          read: async (uri) => ({ text: Buffer.from(await store.readBytes(uri)).toString('utf8') }),
+          write: writeSpy,
+          stat: (uri) => store.stat(uri),
+          remove: (uri) => store.remove(uri),
+          list: (uri) => store.list(uri),
+        },
+        logger,
+        scope,
+        schema,
+      ),
       canUse: async () => true, evidence: async () => [],
     },
   });
@@ -1395,10 +1408,20 @@ describe('DreamerStep', () => {
     const record = await memory.read(Uri.parse(`${SCOPE}/memories/entities/laptop.md`));
     const searched: ExperiencePorts['memory'] = {
       upsertMemory: (...args) => memory.upsertMemory(...args),
+      read: (uri) => memory.read(uri),
       prefetch: async () => [record!],
     };
     const provider = new FakeLlmProvider([{ json: { experiences: [
-      { topic: 'monorepo-migration', content: '笔记本上安装时需先关闭 RAID。', entityPages: [1] },
+      {
+        category: 'tooling',
+        topic: 'monorepo-migration',
+        claim: '在启用了 RAID 的笔记本上安装该仓库前，先关闭 RAID。',
+        appliesWhen: ['目标机器启用了 RAID，且安装步骤会访问同一组磁盘。'],
+        procedure: ['关闭 RAID。', '继续安装。'],
+        limitations: [],
+        evidence: ['关闭 RAID 后，本次安装完成。'],
+        entityPages: [1],
+      },
     ] } }]);
     await createDistillStep(provider, { memory: searched }).run(createContext());
     expect((await memory.read(Uri.parse(EXPERIENCE)))?.entityRefs).toEqual([record?.entityId]);
@@ -1410,7 +1433,15 @@ describe('DreamerStep', () => {
       {
         json: {
           experiences: [
-            { topic: 'monorepo-migration', content: '迁移前先固定依赖版本，再改构建脚本。' },
+            {
+              category: 'workflow',
+              topic: 'monorepo-migration',
+              claim: '迁移前先固定依赖版本，再修改构建脚本。',
+              appliesWhen: ['仓库依赖版本尚未锁定。'],
+              procedure: ['固定依赖版本。', '修改构建脚本。', '运行完整构建。'],
+              limitations: ['只覆盖本次验证过的构建环境。'],
+              evidence: ['固定版本后，本次迁移构建通过。'],
+            },
           ],
         },
       },
@@ -1428,11 +1459,16 @@ describe('DreamerStep', () => {
     expect(raw).toContain('memory_type: experiences');
     expect(raw).toContain('status: pending');
     expect(raw).toContain(`sources:\n  - ${ARCHIVE}\n`);
-    expect(raw).toContain('迁移前先固定依赖版本，再改构建脚本。');
+    expect(raw).toContain('category: workflow');
+    expect(raw).toContain('summary: 迁移前先固定依赖版本，再修改构建脚本。');
+    expect(raw).toContain('迁移前先固定依赖版本，再修改构建脚本。');
+    expect(raw).toContain('## 做法');
 
     const record = await memory.read(Uri.parse(EXPERIENCE));
     expect(record?.status).toBe('pending');
-    expect(record?.fields['content']).toBe('迁移前先固定依赖版本，再改构建脚本。');
+    expect(record?.fields['category']).toBe('workflow');
+    expect(record?.fields['content']).toContain('迁移前先固定依赖版本，再修改构建脚本。');
+    expect(record?.fields['content']).toContain('1. 固定依赖版本。');
     expect(record?.sources).toEqual([ARCHIVE]);
 
     // `memory_link` 是 `sources` 的派生读模型：一次写入一条 `derived_from`。
@@ -1466,7 +1502,15 @@ describe('DreamerStep', () => {
       {
         json: {
           experiences: [
-            { topic: 'monorepo-migration', content: '合并后的结论：先固定依赖版本，再升级。' },
+            {
+              category: 'workflow',
+              topic: 'monorepo-migration',
+              claim: '合并后的结论：先固定依赖版本，再升级。',
+              appliesWhen: ['需要迁移或升级尚未锁定版本的仓库。'],
+              procedure: ['固定依赖版本。', '升级依赖。', '运行完整构建。'],
+              limitations: [],
+              evidence: ['本次固定版本后升级成功。'],
+            },
           ],
         },
       },
@@ -1483,7 +1527,7 @@ describe('DreamerStep', () => {
 
     // 写回的是整段新正文，旧结论没有残留（upsert 是字段级合并，`content` 被覆盖）。
     const record = await memory.read(Uri.parse(EXPERIENCE));
-    expect(record?.fields['content']).toBe('合并后的结论：先固定依赖版本，再升级。');
+    expect(record?.fields['content']).toContain('合并后的结论：先固定依赖版本，再升级。');
     // 同一个 topic 还是一个文件、一份来源、一条链接。
     expect(await memory.listPending(Uri.parse(SCOPE))).toHaveLength(1);
     expect(record?.sources).toEqual([ARCHIVE]);
@@ -1492,12 +1536,20 @@ describe('DreamerStep', () => {
 
   it('同一批重放两次不产生第二条经验：URI 由 topic 决定', async () => {
     const output = {
-      json: { experiences: [{ topic: 'monorepo-migration', content: '迁移前先固定依赖版本。' }] },
+      json: { experiences: [{
+        category: 'workflow',
+        topic: 'monorepo-migration',
+        claim: '迁移前先固定依赖版本。',
+        appliesWhen: ['仓库需要迁移。'],
+        procedure: ['固定依赖版本。'],
+        limitations: [],
+        evidence: ['本次迁移成功。'],
+      }] },
     };
 
     await createDistillStep(new FakeLlmProvider([output])).run(createContext());
     const first = await memory.read(Uri.parse(EXPERIENCE));
-    await createDistillStep(new FakeLlmProvider([output])).run(createContext());
+    await createDistillStep(new FakeLlmProvider([output, output])).run(createContext());
 
     const pending = await memory.listPending(Uri.parse(SCOPE));
     expect(pending.map((record) => record.uri.toString())).toEqual([EXPERIENCE]);
@@ -1511,11 +1563,19 @@ describe('DreamerStep', () => {
   it('写出的经验追加进归档清单：重放不会留下同 URI 的两条记录', async () => {
     const archive = createDistillArchive();
     const output = {
-      json: { experiences: [{ topic: 'monorepo-migration', content: '迁移前先固定依赖版本。' }] },
+      json: { experiences: [{
+        category: 'workflow',
+        topic: 'monorepo-migration',
+        claim: '迁移前先固定依赖版本。',
+        appliesWhen: ['仓库需要迁移。'],
+        procedure: ['固定依赖版本。'],
+        limitations: [],
+        evidence: ['本次迁移成功。'],
+      }] },
     };
 
     await createDistillStep(new FakeLlmProvider([output]), { archive }).run(createContext());
-    await createDistillStep(new FakeLlmProvider([output]), { archive }).run(createContext());
+    await createDistillStep(new FakeLlmProvider([output, output]), { archive }).run(createContext());
 
     // 清单按 URI 去重：第二次写入是更新，不再同时留一条新增。
     const diff = archive.diffs.at(-1);
@@ -1539,38 +1599,27 @@ describe('DreamerStep', () => {
     expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual([]);
   });
 
-  it('非法 topic 与空正文记 warn 跳过，其余条目照常写', async () => {
-    const warnSpy = vi.spyOn(logger, 'warn');
-    const provider = new FakeLlmProvider([
-      {
-        json: {
-          experiences: [
-            { topic: '../escape', content: '会写到目录外，必须拒绝。' },
-            { topic: 'empty-content', content: '   ' },
-            { topic: 'good-topic', content: '这一条照常写。' },
-          ],
-        },
-      },
-    ]);
-    const step = createDistillStep(provider);
+  it('结构非法时拒绝整批且不写任何经验', async () => {
+    const invalid = {
+      json: { experiences: [{
+        category: 'workflow',
+        topic: 'monorepo-migration',
+        claim: '迁移前先固定依赖版本。',
+        appliesWhen: ['仓库需要迁移。'],
+        procedure: ['固定依赖版本。'],
+        limitations: [],
+        evidence: [],
+      }] },
+    };
+    const provider = new FakeLlmProvider([invalid, invalid]);
 
-    // 一条坏经验不该让整个归档失败。
-    await expect(step.run(createContext())).resolves.toBeUndefined();
+    await expect(createDistillStep(provider).run(createContext())).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+    });
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      '经验 topic 拼不出合法路径，跳过这一条',
-      expect.objectContaining({ topic: '../escape' }),
-    );
-    expect(warnSpy).toHaveBeenCalledWith(
-      '经验正文为空，跳过这一条',
-      expect.objectContaining({ topic: 'empty-content' }),
-    );
-
-    const pending = await memory.listPending(Uri.parse(SCOPE));
-    expect(pending.map((record) => record.uri.toString())).toEqual([
-      `${SCOPE}/memories/experiences/good-topic.md`,
-    ]);
-    expect(pending[0]?.fields['content']).toBe('这一条照常写。');
+    expect(await memory.listPending(Uri.parse(SCOPE))).toEqual([]);
+    expect(linkService.linksOf(Uri.parse(EXPERIENCE))).toEqual([]);
+    expect(provider.remaining).toBe(0);
   });
 
   it('links 写失败不让归档失败：记忆已落盘', async () => {
@@ -1581,14 +1630,22 @@ describe('DreamerStep', () => {
       },
     };
     const provider = new FakeLlmProvider([
-      { json: { experiences: [{ topic: 'monorepo-migration', content: '照常落盘。' }] } },
+      { json: { experiences: [{
+        category: 'workflow',
+        topic: 'monorepo-migration',
+        claim: '照常落盘。',
+        appliesWhen: ['写入关联边失败时。'],
+        procedure: ['继续写入记忆。'],
+        limitations: [],
+        evidence: ['本次记忆已落盘。'],
+      }] } },
     ]);
 
     await expect(
       createDistillStep(provider, { links }).run(createContext()),
     ).resolves.toBeUndefined();
 
-    expect((await memory.read(Uri.parse(EXPERIENCE)))?.fields['content']).toBe('照常落盘。');
+    expect((await memory.read(Uri.parse(EXPERIENCE)))?.fields['content']).toContain('照常落盘。');
     expect(errorSpy).toHaveBeenCalledWith(
       '记忆关联边写入失败，已忽略：记忆已落盘，可从 sources 重建。',
       expect.objectContaining({ uri: EXPERIENCE }),

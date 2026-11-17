@@ -291,7 +291,7 @@ function createRunner(
           new SummaryInvalidateStep({ summary, logger }),
           new DreamerStep({
             dreamer: new DreamerService({ memory, llm, logger, stat: store, search: { glob: async () => [] },
-              archive: { memory, links: memoryLink, logger, canUse: async () => true, evidence: async () => [] } }),
+              archive: { memory, links: memoryLink, logger, listCurrent: async () => [], canUse: async () => true, evidence: async () => [] } }),
             archive: archiveArtifacts,
             invalidate: (uri) => summary.invalidate(uri),
           }),
