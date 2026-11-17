@@ -16,7 +16,7 @@ test('DSH 用会话 ID 召回与采集，typed 工具事件保留决定与来源
     const body = text === '' ? {} : JSON.parse(text);
     requests.push({ path: request.url, body });
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ status: 'ok', result: request.url === '/api/v1/context' ? { rendered: '背景正文' } : { skills: [] } }));
+    response.end(JSON.stringify({ status: 'ok', result: { rendered: '背景正文' } }));
     if (request.url.endsWith('/messages')) receivedMessages(body);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

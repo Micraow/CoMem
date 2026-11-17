@@ -1,9 +1,10 @@
 /**
  * 捕获侧剥离：把 CoMem 自己注入的块从会话文本里去掉（架构文档 §15.10）。
  *
- * CoMem 往宿主上下文里塞四个块：`<comem-profile>` / `<comem-preferences>` /
- * `<available-skills>`（`SessionStart`）与 `<comem-recall>`
- * （`UserPromptSubmit`）。这些块会**留在会话里**——下一轮 `Stop` 读 transcript
+ * CoMem 当前往宿主上下文里塞 `<comem-profile>`（`SessionStart`）与
+ * `<comem-recall>`（`UserPromptSubmit`）。旧版本还注入过
+ * `<comem-preferences>` 与 `<available-skills>`，历史 transcript 里可能仍有这些块。
+ * 这些块会**留在会话里**——下一轮 `Stop` 读 transcript
  * 时，它们与用户真的说过的话长得一模一样。
  * 原样上报的后果是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取一遍，
  * 跑几轮之后记忆库开始复读自己：**自我污染**。
@@ -43,7 +44,7 @@
  *   epoch 毫秒）被删掉。
  *
  * 这些代价换的是「不自我污染」。剥离规则越保守，复读越严重；越激进，用户手写的
- * 示例越容易被吃。当前取舍是**只认 CoMem 注入的四个块与宿主的
+ * 示例越容易被吃。当前取舍是**只认 CoMem 当前或旧版注入的块与宿主的
  * `<system-reminder>`**，不扩大到「任何 XML 风格的标签」。
  *
  * ## 纯函数
@@ -55,14 +56,12 @@
 /**
  * 会被整体剥离的块标签。
  *
- * 三个 `comem-*` 与 `available-skills` 是 CoMem 自己写的（`servers/session-start.mjs`
- * 的 `renderSkillCatalog`、`servers/user-prompt-submit.mjs`），`system-reminder` 是
- * 宿主写给模型的带外提示。加第五个之前先确认它真的会出现在 transcript 里——多一条
- * 规则就多一类误伤。
+ * `comem-profile` / `comem-recall` 当前仍会注入；`comem-preferences` 与
+ * `available-skills` 仅为旧 transcript 兼容而保留。`system-reminder` 是宿主写给
+ * 模型的带外提示。加新标签之前先确认它真的会出现在 transcript 里。
  *
- * `available-skills` 不带 `comem-` 前缀（它是技能目录块的公开标签），所以**按完整
- * 标签名逐条列**，不能靠前缀匹配兜住。注入侧的转义表（`lib/injection.mjs` 的
- * `INJECTION_TAG_PREFIXES`）必须同步，否则只剥不转义，记忆正文仍能提前关掉目录块。
+ * 旧版 `available-skills` 不带 `comem-` 前缀，所以按完整标签名逐条列。当前注入侧
+ * 已不再生成该块，只有旧 transcript 的捕获清理需要它。
  *
  * @type {readonly string[]}
  */

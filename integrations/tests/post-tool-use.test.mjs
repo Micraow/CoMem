@@ -63,9 +63,8 @@ test('消息 id 由 tool_use_id 派生（重投时稳定）', () => {
  * §15.10 捕获侧剥离：工具输出是另一条把宿主上下文带进记忆库的路。
  *
  * `cat` 一份 transcript、某个 hook 打出原始载荷时，工具输出里的 `<comem-recall>` /
- * `<available-skills>` 不是工具结果，原样上报等于让 CoMem 自己的注入以工具结果的
- * 身份回到记忆库。剥离用 `lib/sanitize.mjs` 的 `sanitizeCapturedText`，与 `Stop`
- * 同一个实现。
+ * 旧版 `<available-skills>` 不是工具结果，原样上报等于让 CoMem 自己的注入以工具
+ * 结果的身份回到记忆库。剥离用 `lib/sanitize.mjs` 的 `sanitizeCapturedText`。
  */
 test('工具输出里的注入块被剥掉，其余内容原样保留', () => {
   const message = toToolMessage(

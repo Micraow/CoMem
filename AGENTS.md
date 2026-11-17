@@ -32,12 +32,12 @@ CoMem 是面向 AI agent 的上下文记忆数据库：给 agent 一个稳定地
 | 内容存储 | 真实文件系统 |
 | 索引 / 任务 / 授权反查 | SQLite + FTS5，检索做成接口 |
 | URI | `comem://`，两个根 `user/{uid}` 与 `group/{gid}`，根下可有 `projects/{pid}` |
-| MCP 工具数 | **16 个，不多不少** |
+| MCP 工具数 | **15 个，不多不少** |
 | 分层 | `domain` ← `services` ← `api`；`domain` 不 import 任何其它层 |
 
 **ACL 不进 MCP。** 一个能给自己授权的 agent 就是提权漏洞。`get_acl` / `set_acl` 只走 Web/HTTP。
 
-**只做 16 个 MCP 工具**：`find` `search` `rule_search` `read` `list` `tree` `grep` `glob` `download` `health` `write` `edit` `remember` `forget` `add_resource` `add_skill`。加第 17 个之前先确认。
+**只做 15 个 MCP 工具**：`find` `search` `rule_search` `read` `list` `tree` `grep` `glob` `download` `health` `write` `edit` `remember` `forget` `add_resource`。加第 16 个之前先确认。
 
 ## 4. 目录
 

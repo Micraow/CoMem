@@ -16,14 +16,14 @@ export function estimateTokens(text) {
 
 export function escapeInjectionText(text) {
   let value = text;
-  for (const prefix of ['comem-', 'available-skills']) {
+  for (const prefix of ['comem-']) {
     value = value.replaceAll(`<${prefix}`, `‹${prefix}`).replaceAll(`</${prefix}`, `‹/${prefix}`);
   }
   return value;
 }
 
 export const DEFAULT_MAX_CONTEXT_BYTES = 9500;
-export const CONTEXT_BLOCK_DROP_ORDER = Object.freeze(['skills', 'recall', 'preferences', 'profile']);
+export const CONTEXT_BLOCK_DROP_ORDER = Object.freeze(['recall', 'preferences', 'profile']);
 
 export function fitContext(blocks, maxBytes) {
   const dropped = [];

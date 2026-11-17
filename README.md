@@ -69,7 +69,7 @@ flowchart LR
 | 💰 **控制上下文成本** | 自动提供有界的个人背景与相关记忆正文，长材料按预算降级到概览或摘要，保留 `comem://` 来源。画像超 1000 字时要求整份重写收敛；节省多少 token 仍取决于实际任务。 |
 | 🎯 **可复现的检索评估** | 仓库评测集上，混合检索 Recall@10 为 **0.904**，关键词检索为 0.315。用 `pnpm eval` 复跑；这些数字衡量检索命中。 |
 | 📂 **记忆就是文件** | 每条记忆是一个有 URI 的 Markdown 文件，目录即作用域。任何编辑器打开、任何工具搜索、`git diff` 看改动。 |
-| 🧩 **16 个 MCP 工具，不多不少** | 刻意克制。工具越多模型越容易选错，越难被信任。 |
+| 🧩 **15 个 MCP 工具，不多不少** | 刻意克制。工具越多模型越容易选错，越难被信任。 |
 | 🏠 **自托管，数据在你手里** | 一个 Docker 镜像、一个 SQLite 文件、一个数据目录。随时备份、随时迁移。 |
 
 > 演示时「看起来能跑」不是标准。标准是**别人按文档部署后能不能用**——所以配置项真的生效，错误真的能定位，已知限制写在文档里而不是留给你踩。
@@ -207,7 +207,6 @@ printf '%s' '新密码' | docker compose exec -T comem node dist/commands/passwo
 | 组空间 | `comem://group/eng/memories/conventions` |
 | 会话 | `comem://user/alice/sessions/sess_7f3a91c2` |
 | 资料 | `comem://user/alice/projects/comem/resources/docs/architecture` |
-| 技能包 | `comem://user/alice/skills/code-review/SKILL` |
 
 URI 先做 Unicode NFC 规范化，再合并重复斜杠、拒绝 `.`/`..`/控制字符/保留名、单段上限 255 字节。**规范化必须唯一**：权限按路径记录，同一个文件有两个路径就有两套权限，其中一套一定是错的。
 </details>

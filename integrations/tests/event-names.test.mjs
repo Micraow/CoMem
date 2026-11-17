@@ -153,7 +153,7 @@ test('每个上报点发出的 event 都在常量表里', async () => {
 
     await handleSessionStart(
       { event: 'session_start', sessionId: 'cc-1', cwd: '/repo', source: 'startup' },
-      { config: { ...base, skillBudgetTokens: 100 }, http, env: {} },
+      { config: base, http, env: {} },
     );
 
     await handleUserPromptSubmit(

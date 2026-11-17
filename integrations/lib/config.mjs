@@ -43,21 +43,12 @@ export const DEFAULT_QUERY_FILTERS = Object.freeze([
 ]);
 
 /**
- * 技能目录的独立 token 预算（架构文档 §15.2）。
- *
- * 400 是经验值，架构文档只规定「技能目录有独立预算」，没给数。取值依据：一次
- * 注入里 profile 与偏好占几百 token，技能目录不该再挤，400 token 约等于 30 条
- * 短描述；放不下时按三档降级（见 `servers/session-start.mjs`）。
- */
-export const DEFAULT_SKILL_BUDGET_TOKENS = 400;
-
-/**
  * 用户画像的注入 token 预算（`<comem-profile>`）。
  *
  * 2000 的来源是**宿主字节上限的倒推**，不是拍的：最严的宿主对 hook 输出只给
  * 9,500 字节（见 `hosts/claude-code.mjs` 的 `MAX_CONTEXT_BYTES`），按最坏情况
- * 4 字节/token（英文：1 字符 1 字节、4 字符/token）是 2,375 token；再留 400 token
- * 给技能目录、留出块标签与空行的余量，取 2,000。中文 2,000 字约 6 KB（3 字节/字、
+ * 4 字节/token（英文：1 字符 1 字节、4 字符/token）是 2,375 token；给块标签与
+ * 空行留出余量，取 2,000。中文 2,000 字约 6 KB（3 字节/字、
  * 1 token/字），与同一个上限相容。
  *
  */
@@ -83,7 +74,6 @@ export const DEFAULT_CONFIG = Object.freeze({
    */
   mcpTimeoutMs: 30000,
   recallLimit: 10,
-  skillBudgetTokens: DEFAULT_SKILL_BUDGET_TOKENS,
   profileBudgetTokens: DEFAULT_PROFILE_BUDGET_TOKENS,
   queryFilters: DEFAULT_QUERY_FILTERS,
 });
@@ -97,7 +87,6 @@ const ENV_OVERRIDES = Object.freeze({
   COMEM_COMMIT_TIMEOUT_MS: 'commitTimeoutMs',
   COMEM_MCP_TIMEOUT_MS: 'mcpTimeoutMs',
   COMEM_RECALL_LIMIT: 'recallLimit',
-  COMEM_SKILL_BUDGET_TOKENS: 'skillBudgetTokens',
   COMEM_PROFILE_BUDGET_TOKENS: 'profileBudgetTokens',
   COMEM_QUERY_FILTERS: 'queryFilters',
 });
@@ -108,7 +97,6 @@ const NUMERIC_KEYS = new Set([
   'commitTimeoutMs',
   'mcpTimeoutMs',
   'recallLimit',
-  'skillBudgetTokens',
   'profileBudgetTokens',
 ]);
 
@@ -254,7 +242,7 @@ export function validateRecallTimeout(value) {
  * @returns {Promise<{
  *   baseUrl: string, token: string, timeoutMs: number, recallTimeoutMs: number,
  *   commitTimeoutMs: number, mcpTimeoutMs: number, recallLimit: number,
- *   skillBudgetTokens: number, profileBudgetTokens: number, queryFilters: readonly string[],
+ *   profileBudgetTokens: number, queryFilters: readonly string[],
  *   configFile: string, tmpDir: string,
  * }>}
  */

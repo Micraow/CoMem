@@ -17,7 +17,7 @@
  * 采集，过滤在抽取侧做——采集侧丢掉就再也找不回来了。
  *
  * **唯一的例外是 CoMem 自己注入的块。** 工具输出可能是 `cat` 出来的 transcript、
- * 某个 hook 的原始输出，或任何含 `<comem-recall>` / `<available-skills>` 的文本。
+ * 某个 hook 的原始输出，或任何含旧版 `<available-skills>` 的文本。
  * 那些块不是「工具结果」，原样落盘等于让 CoMem 自己的注入以工具结果的身份回到
  * 记忆库（与 `Stop` 的自我污染同一条路）。剥离调 `lib/sanitize.mjs` 的
  * `sanitizeCapturedText`——与 `Stop` 是**同一个实现**，不在这里另写一份规则。

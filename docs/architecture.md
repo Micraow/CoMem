@@ -12,7 +12,7 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 
 ## 2. 范围
 
-**做**：`comem://` 虚拟文件系统、项目作用域、三层摘要（L0/L1/L2）、会话提交与后台记忆抽取、补丁合并、摘要增量失效、目录级检索、ACL 与用户组、16 个 MCP 工具、HTTP API、Web 控制台、Hook 插件。
+**做**：`comem://` 虚拟文件系统、项目作用域、三层摘要（L0/L1/L2）、会话提交与后台记忆抽取、补丁合并、摘要增量失效、目录级检索、ACL 与用户组、15 个 MCP 工具、HTTP API、Web 控制台、Hook 插件。
 
 **不做**：多租户（单 account）、加密、计费、多后端存储、OIDC/LDAP、隐私占位符、MCP 联邦、watch、独立向量数据库服务、训练循环、移动端。
 
@@ -31,9 +31,8 @@ CoMem 是面向 AI agent 的上下文记忆数据库。给 agent 一个稳定地
 | 模型提供方 | `config.yaml` 里的 provider 抽象，按 `llm` / `embedding` 等类型区分 |
 | 组空间 | 真实目录树；默认成员可写；owner 恒 rwx |
 | 组记忆来源 | 显式写 + 个人记忆可分享到组；不做「会话归属组」 |
-| 技能 | 包管理（目录 + `SKILL.md` + 附属文件），不做运行时 |
 | 规则 | 带 schema 的记忆子类型，`rule_search` 只做条件召回，不做编译管线 |
-| MCP | 只做 16 个工具 |
+| MCP | 只做 15 个工具 |
 | 控制台 | 十个业务页面（概览、文件树、检索、记忆复核、ACL、用户与组、会话与任务、监控、提示词、工具），多用户部署下多一个登录页（§16） |
 
 ## 4. 分层
@@ -194,7 +193,6 @@ CoMem/
 │   │   │   └── errors.ts             # INVALID_ARGUMENT 的唯一构造
 │   │   ├── acl.ts                    # 授权管理与鉴权入口
 │   │   ├── resource.ts               # 资料导入
-│   │   ├── skill.ts                  # 技能包安装
 │   │   ├── task.ts                   # 任务调度与恢复
 │   │   ├── llm.ts                    # 模型调用薄封装（意图分析 / 抽取 / 摘要）
 │   │   └── commit/                   # 提交管线（Template Method）
@@ -235,7 +233,7 @@ CoMem/
 │   │   └── mcp/
 │   │       ├── registry.ts           # 工具注册表
 │   │       ├── server.ts             # Streamable HTTP 挂载
-│   │       └── tools/                # 16 个工具，一个文件一个
+│   │       └── tools/                # 15 个工具，一个文件一个
 │   │           ├── find.ts
 │   │           └── ...
 │   │
@@ -264,7 +262,7 @@ CoMem/
 │   ├── cli.mjs                       # co-mem install / doctor
 │   ├── servers/  hosts/  lib/        # Hook 入口 / 宿主适配 / 共享骨架
 │   ├── dsh-plugin/                   # DSH 原生插件包（取代脚本 hook 那条路）
-│   ├── skills/                       # 给宿主的 skill 清单
+│   ├── skills/                       # 独立装进宿主的提示词包，不由 CoMem 服务管理
 │   └── tests/                        # node --test
 │
 ├── scripts/                          # 质量闸门与运维脚本
@@ -342,21 +340,19 @@ comem://{scope}/{path}
 
 | 根 | 预置 ACL | 子树 |
 |---|---|---|
-| `comem://user/{uid}/` | `user:{uid} = manage` | `memories/` `resources/` `skills/` `sessions/` `projects/` |
-| `comem://group/{gid}/` | `group:{gid} = write` | `memories/` `resources/` `skills/` `projects/` |
+| `comem://user/{uid}/` | `user:{uid} = manage` | `memories/` `resources/` `sessions/` `projects/` |
+| `comem://group/{gid}/` | `group:{gid} = write` | `memories/` `resources/` `projects/` |
 
 项目是根下面的二级命名空间，结构跟根同构（少 `sessions/` 和 `projects/`）：
 
 ```
 comem://user/alice/projects/comem/
 ├── memories/
-├── resources/
-└── skills/
+└── resources/
 
 comem://group/eng/projects/comem/
 ├── memories/
-├── resources/
-└── skills/
+└── resources/
 ```
 
 `sessions/` 只出现在根下：会话属于个人，一段对话是谁说的不能共享到组，更不能挂到项目上。
@@ -443,11 +439,6 @@ docker run -d \
 │       │       ├── .overview.md
 │       │       └── code-style.md
 │       ├── resources/                   # 跨项目资料
-│       ├── skills/
-│       │   └── code-review/
-│       │       ├── SKILL.md
-│       │       └── scripts/
-│       │           └── check.sh
 │       ├── projects/                    # 项目作用域
 │       │   └── comem/
 │       │       ├── .acl.json
@@ -474,7 +465,6 @@ docker run -d \
 │       │       │       │   └── spec.pdf
 │       │       │       ├── architecture.md   # 规范化文本，带 frontmatter 摘要
 │       │       │       └── spec.md           # 从 spec.pdf 规范化而来
-│       │       └── skills/
 │       └── sessions/
 │           └── sess_7f3a91c2/
 │               ├── messages.jsonl        # 当前消息
@@ -498,9 +488,13 @@ docker run -d \
         ├── memories/
         │   ├── .abstract.md
         │   └── conventions.md
-        ├── resources/
-        └── skills/
+        └── resources/
 ```
+
+**旧版 `skills/` 的兼容口径。** 已有数据根里可能仍有 `skills/`。CoMem 不再预建、
+安装、识别或提供该类目录，也不会删除其中的文件；重建索引时它按普通 `resources`
+路径处理。宿主要分发提示词包时，直接使用仓库 `integrations/skills/` 的独立包，
+由宿主自己的 skills 目录加载。
 
 **归档目录里哪些文件可见。** `archive_NNN/` 下的 `.meta.json`、`.abstract.md`、
 `.overview.md`、`.done`、`memory_diff.json`、`memory_operations.json` 是保留名
@@ -797,7 +791,7 @@ CREATE TABLE node (
   parent_uri     TEXT NOT NULL,
   scope          TEXT NOT NULL,      -- user | group
   kind           TEXT NOT NULL,      -- directory | document
-  context_type   TEXT NOT NULL,      -- memory | resource | skill | session
+  context_type   TEXT NOT NULL,      -- memory | resource | session
   memory_type    TEXT,               -- profile | preferences | entities | ...
   -- 这一行**自己**的层级：'L0' | 'L1' | 'L2'，存字面量不存 0/1/2
   level          TEXT NOT NULL,
@@ -1158,7 +1152,7 @@ LIMIT ?;
 
 **`acl_entry` 是反查索引，不是求权来源。** 求权只读 `node_permission`；`acl_entry` 回答「哪些目录直接写了这个主体」。两者由同一个 `#writeAcl` 一起替换。节点被移动时 `acl_entry` 必须按新 URI 从 `.acl.json` 重建（否则删账号的反查会漏），这条重建在 `IndexObserver.onNodeMoved` 里逐目录执行；没有 `.acl.json` 的节点直接跳过。
 
-**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SkillService` / `SessionService` / `SummaryService` 都直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），物化因此由它们自己在写完之后补，但调用入口分两种：`ResourceService` / `SkillService` / `SessionService` 对写出的 URI（含逐级建出的父目录）调 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」；`SummaryService` 不持有 `Authorizer`，它的依赖是 `acl: Pick<AclService, 'materializeNode'>`，写完摘要后从目标目录逐级向上调 `materializeNode` 直到根（`#materialize`），不做求权。`SessionService` 在每次写 `messages.jsonl`（`create` / `addMessage` / 阶段一步骤 2、4 / 补完中断归档）之后调 `IndexObserver.onNodeWritten`：索引行与逐级物化权限一起补上，归档目录里的「原始对话」本身才可寻址。归档目录（`history/`、`archive_NNN/`）的摘要仍由 `SummaryService` 写索引行与物化权限——阶段一的落盘由 `SessionService` 直接写 `ContentStore`，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
+**写后物化收在服务层，不在每个路由补一次。** `ResourceService` / `SessionService` / `SummaryService` 都直接写 `ContentStore`（批量路径要一次 `index.upsert`，走不了 `FileSystemService` 的观察者），物化因此由它们自己在写完之后补，但调用入口分两种：`ResourceService` / `SessionService` 对写出的 URI（含逐级建出的父目录）调 `authorizer.assert(uri, WRITE)`——`InheritingAuthorizer` 的写路径缺行时先 `materializeNode` 再求权，这一次调用就是「算一遍」；`SummaryService` 不持有 `Authorizer`，它的依赖是 `acl: Pick<AclService, 'materializeNode'>`，写完摘要后从目标目录逐级向上调 `materializeNode` 直到根（`#materialize`），不做求权。`SessionService` 在每次写 `messages.jsonl`（`create` / `addMessage` / 阶段一步骤 2、4 / 补完中断归档）之后调 `IndexObserver.onNodeWritten`：索引行与逐级物化权限一起补上，归档目录里的「原始对话」本身才可寻址。归档目录（`history/`、`archive_NNN/`）的摘要仍由 `SummaryService` 写索引行与物化权限——阶段一的落盘由 `SessionService` 直接写 `ContentStore`，只写索引行不物化权限的话目录对 `list` / `tree` / `glob` 完全不可见（它们是纯 SQL 查询），而 `stat` 一次又全部恢复——「数据没丢，是权限物化漏了」。HTTP 路由与 MCP 工具只保留对**请求目标**（父目录 / 作用域根）的授权检查，不再各自补一个补偿循环：两套实现迟早在一条路径上漂移，而漏掉的那条路径的症状是「写成功了，树里什么都没有」。
 
 ### 8.3 检索接口
 
@@ -1179,7 +1173,7 @@ export interface RetrievalIndex {
 
 | 字段 | 语义 | 下推位置（`retrieval-index.ts`） |
 |---|---|---|
-| `contextTypes` | 上下文类型（memory / resource / skill / session） | `n.context_type IN (...)` |
+| `contextTypes` | 上下文类型（memory / resource / session） | `n.context_type IN (...)` |
 | `levels` | 层级 | `n.level IN (...)` |
 | `memoryTypes` | 记忆类型；`memory_type IS NULL` 的非记忆节点永远不命中 | `n.memory_type IN (...)` |
 | `updatedAfter` / `updatedBefore` | 更新时间**闭区间**（`updated_at >=` / `<=`） | `n.updated_at >= ? / <= ?` |
@@ -1232,14 +1226,14 @@ export interface RetrievalIndex {
 
 **合并规则**：多条 TypedQuery 各跑一次 `find`，按 URI 去重取最高分，`matchedQuery` 记是哪条命中。这样「同一条记忆被两个改写查询命中」不会在结果里出现两次。
 
-**MCP 的 16 个工具全部在 30 秒总上限下。** `ToolRegistry` 的 `bindDeadline` 统一包装全部工具（§13.3）；HTTP 的 `/context`、`/search/find` 与 `/search/search`（含 list/context 两种 mode）也受同一上限约束，到点返回 503 `PROVIDER_UNAVAILABLE`。HTTP 的 grep/glob 不调模型，没有这一层；glob 在 SQL 按权限过滤，服务层再检查可读性，grep 从 glob 取得最多 200 个候选再逐文件匹配。向量和重排失败时按各引擎契约降级并返回原因。
+**MCP 的 15 个工具全部在 30 秒总上限下。** `ToolRegistry` 的 `bindDeadline` 统一包装全部工具（§13.3）；HTTP 的 `/context`、`/search/find` 与 `/search/search`（含 list/context 两种 mode）也受同一上限约束，到点返回 503 `PROVIDER_UNAVAILABLE`。HTTP 的 grep/glob 不调模型，没有这一层；glob 在 SQL 按权限过滤，服务层再检查可读性，grep 从 glob 取得最多 200 个候选再逐文件匹配。向量和重排失败时按各引擎契约降级并返回原因。
 
 **检索默认只看「现在有效」的记忆。** `find` 与 `search` 的命中都在索引侧按
 `valid_from <= now < valid_until` 过滤（NULL 表示该侧无界，§8.1）。`search` 先取一次
 `asOf`，FTS 臂与向量臂的候选集用同一个时刻；向量候选集来自 `SearchService` 内部那次
 `index.glob`，它也带着同一个 `asOf`，否则 kNN 的名额会被同一段正文的旧版本占掉。多条
 TypedQuery 各自跑一次 `find` 后再按 URI 合并，所以**合并后的命中清单**不会重新引入已
-失效的版本。`asOf` 不对外暴露：MCP 的 16 个工具与 HTTP 查询参数都没有这一项，所有入口
+失效的版本。`asOf` 不对外暴露：MCP 的 15 个工具与 HTTP 查询参数都没有这一项，所有入口
 都用「请求到达的时刻」。
 
 **`list` / `tree` / `read` / `download` 是路径面，契约是磁盘；`glob` / `grep` 属于检索面。**
@@ -1309,7 +1303,7 @@ RRF 用于排序，没有通用的「无答案」判定；自动路径移除相�
 | `list` | `{ hits, plan }` | 命中列表 + 查询计划。默认形态，向后兼容 |
 | `context` | `{ items, rendered, dropped, usedTokens }` | 分层投放后的条目（带 `detail` / `tokens`）与渲染文本 |
 
-`POST /search/search` 与 MCP `search` 工具接受同一个字段。**这不是第 17 个 MCP 工具**——`context` 是 `search` 的出参形态，不是新能力（AGENTS.md §3 的「16 个，不多不少」）。
+`POST /search/search` 与 MCP `search` 工具接受同一个字段。`context` 是 `search` 的出参形态，不是新能力。
 
 四步：
 
@@ -1340,10 +1334,10 @@ L0 摘要行与 L1 概览行同时命中时，两条命中携带的 `abstract` �
 
 **4. 配额。** 预设两套（`chat` / `coding`），按类别分配条目数：
 
-| 预设 | memory | resource | skill | session |
-|---|---|---|---|---|
-| `chat` | 5 | 3 | 2 | 2 |
-| `coding` | 3 | 5 | 2 | 2 |
+| 预设 | memory | resource | session |
+|---|---|---|---|
+| `chat` | 5 | 3 | 2 |
+| `coding` | 3 | 5 | 2 |
 
 `session` 一列给 2：会话摘要只用于接上「上一轮聊到哪」，当前轮 + 上一轮就够。
 
@@ -1556,7 +1550,7 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 只有 `contextType = memory` 且状态为 `pending` / `archived` 的文件不进入生成请求，
 也不进入输入 digest；审批把文件索引状态改为 `active` 后，下一次显式重建或正常失效
-重算才会把它带入。archived session / resource / skill 目录不能因为状态名相同而从
+重算才会把它带入。archived session / resource 目录不能因为状态名相同而从
 摘要树中消失。`.history` 版本文件仍由目录存储层提前隐藏，不依赖这条状态过滤。
 
 **直接子目录有自己的 `.acl.json` 时，父目录摘要不读它的 L0。** 文件没有独立 ACL，
@@ -1856,10 +1850,10 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 `ENOENT`。**定期重放**不能省：启动扫描只覆盖上次退出前的记录，一个跑几个月的进程
 如果只在启动时对账，运行期间新产生的失败会沉默到下次重启。调度器本身因四个维护开关全关而不启动时（`session.autoCommit.enabled === false`、`session.expiry.idleTimeoutSeconds === 0`、`memory.ttl.defaultDays === 0`、`memory.ttl.retentionDays === 0`），只有启动那一次重放。
 
-**哪些失败会写日志。** 下面五类失败共用同一条记录实现（`services/reconcile-record.ts`）：
-`add_resource` / `add_skill` 的批量索引写、`IndexObserver` 的单节点索引行、`IndexObserver`
-移动后的目标子树批量写，都写 `op: 'index'`；三条写路径的权限物化失败（资源、技能、
-观察者）都写 `op: 'permission'`。记录只记**能重放的目标**：移动失败记目标 URI（源 URI 在
+**哪些失败会写日志。** 下面四类失败共用同一条记录实现（`services/reconcile-record.ts`）：
+`add_resource` 的批量索引写、`IndexObserver` 的单节点索引行、`IndexObserver`
+移动后的目标子树批量写，都写 `op: 'index'`；写路径的权限物化失败（资源、观察者）
+都写 `op: 'permission'`。记录只记**能重放的目标**：移动失败记目标 URI（源 URI 在
 磁盘上已经不存在，记它只会被当成「目标已删除」移出）；删除路径的权限失败记父目录（被删
 节点自己同理会被移出）。读盘失败、索引**删除**失败与目录型节点的索引行不写记录。
 
@@ -1903,15 +1897,13 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 | 摘要失效标记 | 100 次（每个文件各标一次父目录） | 10 次（按直接父目录去重） |
 | 目录摘要重算 | 可能触发多次 | 结束后统一触发一次 |
 
-批量路径（`ResourceService` 与 `SkillService` 共用 `src/services/write-through.ts`）：
+批量路径（`ResourceService` 使用 `src/services/write-through.ts`）：
 
 1. `invalidateParentSummaries` 先按**直接父目录**去重
 2. 持父目录 `TREE` 锁写全部文件 → 一次 `index.upsert`（内部一个事务）→ `materializeAncestorPermissions` 逐级物化权限
 3. 锁释放后，`invalidateParentSummaries` 对每个直接父目录调一次 `markStale`；再往上的祖先链由 `markStale` 自己传播（§9.3），批量路径不展开
 
-**两个服务的写后钩子只有一份实现。** `add_resource`（资源）与 `add_skill`（技能）都绕开 `FileSystemService` 直接写 `ContentStore`，走同一条三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。第一步的输入不同（资源要处理附件与文本规范化，技能只写字节），后两步的规则完全一样，因此收在两个导出函数里：`invalidateParentSummaries` 与 `materializeAncestorPermissions`。两边都用 `onFailure` 回调：物化失败时往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），重放器据此重算该节点的物化权限。索引批量写失败则两边都会追加 `op: 'index'`：技能装成功、文件在盘上，但 `find` 搜不到时，重放器必须看得见这次失败。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
-
-**索引行从磁盘构造只有一份实现。** `add_skill` 的技能索引记录由 `skillIndexRecord` 从落盘字节构造，重放器的 `context_type === 'skill'` 分支调用同一个函数。技能的可检索摘要是 frontmatter 的 `description`，通用资源规则读的是 `summary`；两边各写一份的话，「重放成功」之后技能的索引行会与原状态不同——重放要恢复的是原本该有的样子。
+**批量资源的写后钩子只有一份实现。** `add_resource` 绕开 `FileSystemService` 直接写 `ContentStore`，走三步：批量写 → 一次 `index.upsert` → 标记直接父目录摘要失效 + 物化写出来的节点与全部祖先的权限。物化失败时往 `_meta/reconcile.log` 追加一条 `permission` 记录（§10.6 的「索引双写补偿」），重放器据此重算该节点的物化权限。索引批量写失败则追加 `op: 'index'`：文件在盘上但 `find` 搜不到时，重放器必须看得见这次失败。`markStale` 必须在目录的 `TREE` 锁释放之后调：`SummaryService` 会拿目标目录的 `EXACT` 锁，与祖先 `TREE` 锁互斥，锁内调用会等到 `CONFLICT`。
 
 **标记摘要失效只能用 `markStale`，不能用 `invalidate`。** 规则与后果见 §9.3。
 
@@ -2269,7 +2261,7 @@ SQL 里不出现字面量列表）。不做配置项：哪些类型承载身份�
 `memory_type` 非空的四类豁免见上；没有类型的行同样不在候选集里，谈不上「豁免」。
 
 **只对 `context_type = 'memory'` 生效。** `memory.ttl` 描述记忆的存活时间，
-`resources` / `skills` 不参与。
+`resources` 不参与。
 
 **两段式。** 第一段是软过期（`status = 'archived'`，写 `archived_at`）；第二段在归档
 后超过 `retentionDays` 时才物理删除。中间隔一个保留期，既让「配错 TTL」（把 30 天
@@ -2447,7 +2439,7 @@ URI。这是当前行为：保留者路径没有崩溃风险，来源字符串�
 `POST /api/v1/memories/dreamer`，body `{ "scope": "...", "dryRun": true }`，
 需要 `manage`。**`dryRun` 默认 `true`**：合并会 `delete`，不传就等于预览，误点的代价
 不可逆。`POST /api/v1/memories/consolidate` 是同一处理器的兼容别名。**不进 MCP**
-（§3：16 个工具，不多不少）。
+（§3：15 个工具，不多不少）。
 
 模型结果协议同时服务归档整理、偏好推断与手动整理：`action`、`experiences`、
 `inferences` 和 `operations` 都是可选字段。手动整理把缺少 `action` / `operations`
@@ -2781,10 +2773,10 @@ HTTP 层仍然只暴露读端点（见下），没有写端点：不开一个「
 `links`）。返回 `{ uri, direction, links: [{ from, to, linkType, weight, matchText,
 description }] }`。
 
-**links 不进 `read` 输出。** `read` 是 16 个 MCP 工具之一，它的返回形状是模型可见的
+**links 不进 `read` 输出。** `read` 是 15 个 MCP 工具之一，它的返回形状是模型可见的
 **契约**；把 links / backlinks 塞进 `read` 会改变每个调用 `read` 的模型的输入，属于
 MCP 契约变更。`links` 不是「读这条记忆的正文」的一部分——它是查询另一张表才能拿到
-的派生关系。所以走独立 HTTP 端点：控制台与运维脚本按需查，MCP 契约不动，仍是 16 个
+的派生关系。所以走独立 HTTP 端点：控制台与运维脚本按需查，MCP 契约不动，仍是 15 个
 工具。
 
 **`sources` 走另一条路：以可选的 `## provenance` 块进 `read`。** 理由不同——`links` 是
@@ -3193,7 +3185,7 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 
 ## 13. MCP 工具契约
 
-16 个，只读 10 个、写 4 个、摄取 2 个。**不含 `get_acl` / `set_acl`**。
+15 个，只读 10 个、写 4 个、摄取 1 个。**不含 `get_acl` / `set_acl`**。
 
 ### 13.1 工具描述怎么写
 
@@ -3205,7 +3197,7 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 
 例如 `find` 的描述不是「执行语义检索」，而是「不确定内容在哪个目录时用这个；如果你已经知道路径，用 `read` 更快」。
 
-### 13.2 16 个工具
+### 13.2 15 个工具
 
 | 工具 | 参数 | 返回格式 |
 |---|---|---|
@@ -3224,7 +3216,6 @@ MCP 工具的描述是给模型看的**使用说明**，不是 API 文档。每�
 | `remember` | `messages[]`（每条可带 `createdAt`）、`sessionId?` | 文本：`taskId`（没有新消息时是 `none`）+ 抽取在后台进行的提示 |
 | `forget` | `uri`、`recursive=false` | 文本：`Deleted: uri` |
 | `add_resource` | `parentUri`、`files[]` | 文本：`created` / `updated` / `skipped` 计数 + 索引状态 |
-| `add_skill` | `parentUri`、`name`、`files[]` | 文本：技能 URI + 文件数。再次安装同名技能时，本次提交的同路径文件被覆盖；上一版存在但本次未提供的文件不会被移除（仍能被 `find` / `grep` 检到） |
 
 **截断标记是正文之后的一行文本，不是返回封套的字段。** `read` / `list` / `tree` 在被截断时于正文之后追加独立一行 `... (truncated)`，三个出口共用 `src/api/mcp/text.ts` 的常量 `TRUNCATED_MARKER`——宿主按这个字符串本身识别截断，措辞只定义一次（`tests/unit/api/truncated-marker.test.ts` 扫描字面量，挡住第四份定义）。`read` 的判据与 HTTP `GET /content/read` 的 `truncated` 字段是同一个公式：`offset + 返回码点数 < 总码点数`，同一份内容在两侧给出同一结论。`list` 只在 `recursive=true` 展开超过深度或节点上限时标记——此前 `tree` 会标记而 `list` 静默截断，调用方会把「前 1000 条」当成全部，得到一个静默的不完整答案。用独立一行而不用 JSON 字段：MCP 返回是纯文本，加字段要改返回封套，宿主和模型必须先解析封套才能读到正文；一行标记只占正文末尾，正文部分向后兼容，不认识标记的调用方照旧按正文处理。
 
@@ -3281,11 +3272,11 @@ interface AddResourceInput {
 
 ### 13.3 工具的时间上限与降级
 
-**每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，16 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「不读模型就不该限时」，而是 30 秒是检索路径的推导值，对不调模型、只查索引与读盘的操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
+**每个 `tools/call` 与 HTTP 检索的两条路由都套一个 30 秒的墙上时钟上限**，常数是 `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`。MCP 侧的包装点是 `ToolRegistry` 构造时的 `bindDeadline`，15 个工具一个不落（包括 `grep` / `glob` / `health` 这些不调模型的）；HTTP 侧是 `api/http/routes/search.ts` 的 `runRetrieval`，只包住 `/search/find` 与 `/search/search`（后者有 `list` / `context` 两种 `mode`）。HTTP 的 `/search/grep` 与 `/search/glob` 不调模型，没有这一层；它们没有上限不是因为「不读模型就不该限时」，而是 30 秒是检索路径的推导值，对不调模型、只查索引与读盘的操作没有意义（已知限制 28）。上限只在 `api/deadline.ts` 定义一次，工具与路由实现不各自计时。**包装在注册表而不是逐工具写，理由是缺口不可见**：少包一个工具就是一条没有上限的路径，而「哪个工具忘了」在 review 里看不出来。`~` 别名展开发生在被包装的 `execute` 内部，所以展开本身也在同一个预算里。
 
 30000 是交互调用的硬上限。意图分析 10000、查询嵌入 10000、重排 15000 是各阶段上限，不是每段都应等满的累计承诺；前序阶段耗时后，`remainingBudget` 会继续收紧后续阶段，最终由接口层在 30 秒到点。三段预算的来源见 `services/retrieval/intent.ts` 的 `REWRITE_TIMEOUT_MS`、`services/retrieval/arms.ts` 的 `QUERY_EMBED_TIMEOUT_MS`、`services/retrieval/rerank.ts` 的 `QUERY_RERANK_TIMEOUT_MS`。Hook 侧是另一套预算（§15.9 的每事件总预算与单请求上限），不复用。
 
-**这一层兜的是「上游预算本身失效」。** 没有它时 16 个工具没有任何工具级上限：`find` / `search` / `rule_search` 会一直等供应商返回，`search` 的最坏等待约 91 秒——意图分析 3 次重试 × 10 秒，查询嵌入与重排各 30 秒（5 路 `find` 并行，嵌入不叠加）。`providers.*.timeoutSeconds` 只校验正数（`src/config/schema.ts` 里都是 `positive()`），写 3600 也合法，因此那种配置下的最坏等待不封顶。宿主看到的现象是 agent 卡住，用户看不出卡在哪一环。
+**这一层兜的是「上游预算本身失效」。** 没有它时 15 个工具没有任何工具级上限：`find` / `search` / `rule_search` 会一直等供应商返回，`search` 的最坏等待约 91 秒——意图分析 3 次重试 × 10 秒，查询嵌入与重排各 30 秒（5 路 `find` 并行，嵌入不叠加）。`providers.*.timeoutSeconds` 只校验正数（`src/config/schema.ts` 里都是 `positive()`），写 3600 也合法，因此那种配置下的最坏等待不封顶。宿主看到的现象是 agent 卡住，用户看不出卡在哪一环。
 
 **到点返回的是失败，不是空结果。** MCP 结果是 `isError: true`，文本以 `TOOL_DEADLINE_EXCEEDED: ` 开头，写明这次调用的上限是多少毫秒、最后进入的上游是哪个、在那个上游上已经等了多少毫秒（`LLM 生成（意图分析）` / `向量嵌入（embedding）` / `重排（rerank）` / `检索索引（SQLite / FTS5）` / `文件系统`）。上游由工具经 `CallDeadline.mark` 上报：`FindOptions.onUpstream` 只覆盖会打网络的三类，`index` / `filesystem` 由工具自己标，`find` / `search` / `rule_search` 都在进入检索前先标 `index`。一次上报都没有时（例如挂在 `readScopes` 的 ACL 求权上，或 `read` 的文件系统调用上），文本写「卡住的位置在本地（索引 / 文件系统 / 锁）」，不把本地故障说成供应商的问题。服务端同时记一条 `warn`（`MCP 工具超过调用上限。`，带 `requestId` / `tool` / `code`），按 `TOOL_DEADLINE_EXCEEDED` 能在 `server.log` 里搜到。
 
@@ -3329,13 +3320,13 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
 | 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`（空 body 兼容审批；编辑审批传 `{content, expectedUpdatedAt}`，§11.6）、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
-| 资源/技能 | `POST /resources`、`POST /resources/temp-upload`、`POST /skills`、`GET /skills` |
+| 资源 | `POST /resources`、`POST /resources/temp-upload` |
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
 | 本地推理 | `GET /inference/local`、`POST /inference/local/start`、`POST /inference/local/stop`。三个都只认系统管理员；启动命令与 pid 管理见 §18.2 |
 | 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验）；`GET /telemetry/llm-calls`（当前认证主体自己的最近模型调用，`limit` 1–100，cursor 分页） |
 | 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`GET /auth/me`、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（§12.7） |
-| MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
+| MCP | `GET /mcp/tools`（15 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
 **`POST /sessions` 只创建，不重置。** 已存在的 `sessionId` 返回 **409**（`ALREADY_EXISTS`），
@@ -3355,7 +3346,7 @@ MCP 挂在 `/mcp`，Streamable HTTP 传输。
 
 ## 15. Agent 集成
 
-16 个 MCP 工具里没有会话相关操作，真实会话靠 **Hook 插件**在宿主侧自动采集。这是独立于服务端的交付物，放在 `integrations/`，装进宿主。
+15 个 MCP 工具里没有会话相关操作，真实会话靠 **Hook 插件**在宿主侧自动采集。这是独立于服务端的交付物，放在 `integrations/`，装进宿主。
 
 独立维护的 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 是 Hermes 的可选展示插件，不属于 CoMem 的 Hook、HTTP 或 MCP 接入。它在 Hermes 聊天记录中消费宿主流事件，渲染 OpenUI Lang；卡片状态保存在宿主浏览器，显式按钮回到原会话。插件不读写 CoMem 记忆，也不改变 CoMem 的接口契约。
 
@@ -3369,7 +3360,7 @@ MCP 工具是模型主动调用的。会话提交不能靠模型「记得调」�
 
 | Hook | 做什么 |
 |---|---|
-| `SessionStart` | 请求 `/context` 的本人背景正文 + `<available-skills>` 技能目录 |
+| `SessionStart` | 请求 `/context` 的本人背景正文 |
 | `UserPromptSubmit` | 请求 `/context`，服务端结合近期对话召回并组装个人及团队记忆 |
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的文件工具调用，指回 MCP 工具。判定全在本地、不发 HTTP，因此**不做开销上报**（预算仍然是 1000ms） |
 | `PostToolUse` | 采集工具调用与结果（作为 `tool` 部分） |
@@ -3443,9 +3434,9 @@ DSH `0.2.2-rc.1` 的 `dsh-mcp-client` 在启动 stdio 子进程前会清洗名�
 
 **工具发现靠描述自解释。** `initialize` → `tools/list` 的 `description` 是 agent 唯一能看到的用法说明，所以 16 条各自必须回答「什么时候用 / 什么时候不用」，`find` / `search` / `rule_search` 三个必须能互相分辨（`find` 是语义召回、`search` 多一次意图重写、`rule_search` 取规则完整正文）。URI 参数的描述统一写上 `~` 别名——agent 不该为了拼一个绝对 URI 去猜 uid。
 
-**提示词与注入格式必须一致。** `<comem-profile>` 交付开局画像与偏好正文，`<comem-recall>` 交付当前问题相关的正文、概览或摘要；内部条目包含 URI、类型与 detail，不显示绝对分数。`<available-skills>` 是技能目录；旧 `<comem-preferences>` 仍在捕获剥离表中。`comem-memory` 要求先使用已交付的内容，缺细节时才 read；`comem-rules` 在动手前取适用规则，两者触发条件不同。
+**提示词与注入格式必须一致。** `<comem-profile>` 交付开局画像与偏好正文，`<comem-recall>` 交付当前问题相关的正文、概览或摘要；内部条目包含 URI、类型与 detail，不显示绝对分数。旧 `<comem-preferences>` 与 `<available-skills>` 仅为历史 transcript 清理而保留在捕获剥离表。`integrations/skills/` 下是独立安装到宿主的提示词包，不由 CoMem 服务端管理。
 
-工具数仍然是 **16 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 16 个，Hook 不经过 MCP，也不新增工具。配置片段、认证、提示词与验证步骤见 `integrations/README.md` 的「MCP 接入」。
+工具数仍然是 **15 个**（§13、`AGENTS.md` §3）：MCP 只暴露这 15 个，Hook 不经过 MCP，也不新增工具。配置片段、认证、提示词与验证步骤见 `integrations/README.md` 的「MCP 接入」。
 
 ### 15.7 支持哪些宿主
 
@@ -3535,7 +3526,7 @@ integrations/
 │   ├── injection.mjs          # 注入侧渲染：转义 / 索引截断 / 字节上限
 │   ├── filter.mjs             # sed 风格查询过滤
 │   └── telemetry.mjs          # 四阶段开销上报
-├── skills/                    # 提示词：装进宿主的技能目录
+├── skills/                    # 独立提示词包：装进宿主的技能目录
 │   ├── comem-memory/SKILL.md  # 召回 + 写入 + 合规
 │   └── comem-rules/SKILL.md   # 动手之前取规则
 └── tests/                     # node:test
@@ -3650,13 +3641,13 @@ v1 每次起进程。如果实测发现进程启动占比过高（> 50%），再
 
 §15.9 保证「注入什么」，这一节保证**注入物不会反过来污染记忆**。三个机制，细节与用例在 `integrations/README.md` 的「注入与捕获的去重」：
 
-1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级（`<comem-recall>` / `<comem-profile>` / `<comem-preferences>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则）、行首时间戳前缀、裸 epoch（只在块剥完之后做）。剥空的消息整条丢弃，游标按剥离后的条数推进。两个宿主适配器不各剥一次——它们只回答「怎么解析」；DSH 插件的 `turn/end` 也调同一个函数。
+1. **捕获侧剥离**（`integrations/lib/sanitize.mjs`）。`Stop` 把会话消息原样上报给 `POST /sessions/{id}/messages`，而会话里**带着 CoMem 自己注入的块**。不剥就是「上一轮注入的记忆」以「用户这轮说的话」的身份被重新抽取，跑几轮之后记忆库开始复读自己。剥离在 `captureSession` 里、**发 HTTP 之前**做一次：块级包括当前 `<comem-recall>` / `<comem-profile>` 与仅为历史兼容的 `<comem-preferences>` / `<available-skills>` / `<system-reminder>`，按「开标签 → 最近的闭标签」剥，不是贪婪正则；随后处理行首时间戳前缀与裸 epoch。剥空的消息整条丢弃，游标按剥离后的条数推进。两个宿主适配器不各剥一次——它们只回答「怎么解析」；DSH 插件的 `turn/end` 也调同一个函数。
 2. **注入侧转义**（`integrations/lib/injection.mjs` 的 `escapeInjectionText`）。记忆正文里的 `<comem-` / `</comem-` 的 `<` 换成 `‹`（U+2039）：正文含 `</comem-recall><comem-recall>` 时，渲染后的块里开标签与闭标签各只有一个，结构没被破坏，内容仍然可读。反斜杠会把转义链引进来，删标签会改变记忆本身。
 3. **服务端跨轮账本**（§8.7）。Hook 只保留每个地址/会话的随机 epoch 文件，DSH 在内存保留 epoch；内容指纹、窗口、会话隔离与并发写都由服务端处理。
 
-**接口出口。** 自动接入走 `POST /context`；主动检索仍走 16 个 MCP 工具与原有 HTTP 检索接口。没有新增 MCP 工具。服务端正文按领域渲染器转义 `<>&`，技能目录继续由 Hook 转义标签前缀。
+**接口出口。** 自动接入走 `POST /context`；主动检索仍走 15 个 MCP 工具与原有 HTTP 检索接口。没有新增 MCP 工具。服务端正文按领域渲染器转义 `<>&`。
 
-**剥离会误伤。** 规则认的是字符串：讨论 CoMem 时贴出的注入块示例、行首日志时间戳、恰好落在 epoch 范围的数字可能被吃掉。`<available-skills>` 与工具输出现已在剥离路径；开局背景由服务端记账。已知限制见 integrations README。
+**剥离会误伤。** 规则认的是字符串：讨论 CoMem 时贴出的注入块示例、行首日志时间戳、恰好落在 epoch 范围的数字可能被吃掉。旧版 `<available-skills>` 仍在历史 transcript 的剥离路径；开局背景由服务端记账。已知限制见 integrations README。
 
 
 ## 16. Web 控制台
@@ -3677,7 +3668,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 | 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
-| 工具 | 16 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
+| 工具 | 15 个 MCP 工具的名字、分组、参数名与说明；读 `GET /mcp/tools`，文本来自注册表而不是界面重写 |
 | 设置 | 表单显示可编辑值；草稿与运行值不同时显示运行值，保存后标记待重启；由环境变量控制的字段只读 |
 
 **一个页面的多个区域各自取数，失败不互相污染。** 每一块数据有自己的端点与权限门槛，一块取不到只影响那一块：其余区域照常渲染，失败的位置显示能说明原因的空态。四处按这条原则实现：
@@ -4253,7 +4244,7 @@ task:
 
 **`telemetry.requestLog.retainDays` / `retainRows` 由后台调度器每轮执行。** 调度器不启动（四个维护开关全关）时，容器构造期裁一次，这是该配置下唯一的裁剪路径。仓储的 `prune` 先数再删，稳态成本约 1 ms（§17.6）。
 
-**`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**四个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0` 且 `memory.ttl.retentionDays === 0`。`memory.ttl.defaultDays` 在清扫时与 `max(node.updated_at, node.last_accessed_at)` 比较（滑动窗口，§11.7），只对 `context_type = 'memory'` 生效——`resources` / `skills` 不会被套上记忆的存活时间。
+**`session.autoCommit.*` / `session.expiry.*` / `memory.ttl.*` 由后台调度器消费（§10.7、§11.7）。** 调度器每 30 秒扫一遍会话。**四个开关全关时不起定时器**：`session.autoCommit.enabled === false` 且 `session.expiry.idleTimeoutSeconds === 0` 且 `memory.ttl.defaultDays === 0` 且 `memory.ttl.retentionDays === 0`。`memory.ttl.defaultDays` 在清扫时与 `max(node.updated_at, node.last_accessed_at)` 比较（滑动窗口，§11.7），只对 `context_type = 'memory'` 生效——资源不会被套上记忆的存活时间。
 
 **检索参数只留 `retrieval.engine` 与 `retrieval.rerank`。** 查询扩展由
 `search` 的意图分析承担（§8.4），没有独立的召回模式配置；需要更细的召回控制时再加配置。
@@ -4502,8 +4493,8 @@ check:reachability → check:shape → build:web → test → test:integrations`
 | P4 | 摘要：生成、失效、降级 | 失效链路测试通过 | ✅ |
 | P5 | 会话与管线：归档、抽取、**预取**、合并、**规则合并**、复核、**并发锁**、**ToolPart** | 提交链路端到端通过 | ✅ |
 | P6 | ACL 与用户组 | 权限链路测试通过 | ✅ |
-| P7 | 摄取：`add_resource`（**批量写入**）、`add_skill`、**索引双写补偿** | 导入 100 文件不退化 | 完成：批量写入与 `add_skill` 已做；双写补偿的写入侧、启动重放、调度器定期重放与日志原子清理都已接线（§10.6） |
-| P8 | MCP 16 工具 | MCP 客户端可连 | ✅ |
+| P7 | 摄取：`add_resource`（**批量写入**）与**索引双写补偿** | 导入 100 文件不退化 | 完成：批量写入；双写补偿的写入侧、启动重放、调度器定期重放与日志原子清理都已接线（§10.6） |
+| P8 | MCP 15 工具 | MCP 客户端可连 | ✅ |
 | P9 | 可观测性：`/metrics`、任务查询 API、请求 ID、请求记录、`error.log`、开销归因、`health` 扩展、监控页 | 能看到「CoMem 让每个请求多花多少毫秒」 | ✅ |
 | P10 | 控制台十个页面 | 完整演示路径 | ✅ |
 | P11 | Hook 插件（Claude Code + Codex）与 DSH 原生插件 | 真实会话自动入库 | ✅ |

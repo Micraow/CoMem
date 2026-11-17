@@ -29,7 +29,7 @@ integrations/
 │   ├── cursor.mjs        # 消息游标
 │   ├── context-epoch.mjs # 每个宿主会话的上下文重置标识
 │   ├── sanitize.mjs      # 捕获侧剥离（去掉自己注入的块）
-│   ├── injection.mjs     # 技能目录转义 / token 估算 / 最终字节上限
+│   ├── injection.mjs     # 注入转义 / token 估算 / 最终字节上限
 │   ├── filter.mjs        # sed 风格查询过滤
 │   └── telemetry.mjs     # 四阶段开销上报
 ├── servers/              # 七个可执行入口
@@ -47,7 +47,7 @@ integrations/
 │   ├── package.json      # main / engines.dsh
 │   ├── lib/index.js      # 宿主事件与工具执行事件的订阅者
 │   └── README.md         # 安装、配置与已知限制
-├── skills/               # 提示词（装进宿主的技能目录）
+├── skills/               # 独立提示词包（装进宿主自己的技能目录）
 │   ├── comem-memory/SKILL.md
 │   └── comem-rules/SKILL.md
 └── tests/                # node:test
@@ -161,7 +161,7 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 
 | 接缝 | 等价于 | 行为 |
 |---|---|---|
-| `agent/created` | `SessionStart` | 调 `handleSessionStart`，把个人背景正文与技能目录 `agent.inject()` |
+| `agent/created` | `SessionStart` | 调 `handleSessionStart`，把个人背景正文 `agent.inject()` |
 | `agent/pre-step` | `UserPromptSubmit` | 先 `await next()`；本步没有用户消息就原样返回；否则调 `handleUserPromptSubmit` 并把块折进 `decision.messages` |
 | `session/event` 的 `turn/end` | `Stop` | 本轮 user / assistant 消息过 `lib/sanitize.mjs` 剥离后 `POST /sessions/{id}/messages` + `/commit` |
 | `tools/post-execute` | `PostToolUse` | 保留原工具 decision，把调用、结果与来源加入采集缓冲 |
@@ -212,7 +212,7 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 
 | Hook | 做什么 | 阻塞还是异步 |
 |---|---|---|
-| `SessionStart` | 注入 profile、偏好、`<available-skills>` 技能目录 | 阻塞（一次读 + 一次列表） |
+| `SessionStart` | 注入 profile 与偏好正文 | 阻塞（一次 `/context` 请求） |
 | `UserPromptSubmit` | 调 `/context`，结合 prompt 与近期对话注入相关记忆 | 阻塞（§15.9 的核心开销） |
 | `PreToolUse` | 拦住把 `comem://` 当本地路径的 `Read` / `Write` / `Edit`，指回 MCP 工具 | 阻塞（纯内存判断；**不发 HTTP，也不上报开销**） |
 | `PostToolUse` | 把工具调用与结果采集为 `tool` 消息 | 阻塞（5–20ms 的采集写入） |
@@ -307,7 +307,7 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 | 通道 | 谁发起 | 负责什么 |
 |---|---|---|
 | Hook | 宿主在固定生命周期点自动调用 | 召回注入（`SessionStart` / `UserPromptSubmit`）、采集（`PostToolUse` / `Stop` / `PreCompact` / `SessionEnd`） |
-| MCP | 模型主动调用 | 16 个工具：`find` / `search` / `read` / `write` / `remember` / `forget` / `add_resource` 等 |
+| MCP | 模型主动调用 | 15 个工具：`find` / `search` / `read` / `write` / `remember` / `forget` / `add_resource` 等 |
 
 两者互补：**只装 Hook** 时，agent 能拿到自动注入的记忆，但不能主动 `remember` /
 `write`；**只配 MCP** 时，agent 能主动读写，但没有任何自动召回与采集。两个都配，
@@ -325,7 +325,7 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 
 `servers/mcp-proxy.mjs` 把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`，再把响应
 写回 stdout。它对 Claude Code、Codex 和 DSH 都可用；统一接入时优先选它，让 Hook
-和 MCP 从同一文件读取账号。两条路走同一个端点、同一套服务端凭据、同一份 16 个工具。
+和 MCP 从同一文件读取账号。两条路走同一个端点、同一套服务端凭据、同一份 15 个工具。
 
 **与宿主无关的最小配置**只有两样——一个 URL，和（跨网络访问时）一个认证头：
 
@@ -506,7 +506,7 @@ Hook，不会把当前 shell 的 Key 复制进 Hook 配置；运行宿主时仍�
 
 1. 服务端：`curl -sS http://127.0.0.1:1933/health` 返回 `{"status":"ok",...}`。
 2. Claude Code：`claude mcp list` 显示 `comem` 已连接；stdin/stdout transport 显示
-   `STDIO`，HTTP transport 显示 URL。会话里 `/mcp` 能看到 16 个工具。
+   `STDIO`，HTTP transport 显示 URL。会话里 `/mcp` 能看到 15 个工具。
 3. DSH：启动日志里 `mcp-client(comem)` 没有连接错误；模型工具列表出现 `mcp__comem__*`。
 4. 让 agent 调一次 `health`：返回内容与 `GET /health` 相同（`status: ok`、`subject`、
    `index.nodes`）。调用失败时错误进服务端日志的「MCP 工具拒绝」/「MCP 工具执行失败」，
@@ -535,7 +535,6 @@ Hook，不会把当前 shell 的 Key 复制进 Hook 配置；运行宿主时仍�
 |---|---|---|---|
 | `<comem-profile>` | `SessionStart` | 个人画像与偏好的正文块，附 URI、类型与投放层级 | 可直接使用；历史默认与当前请求冲突时以当前请求为准 |
 | `<comem-preferences>` | 旧版 `SessionStart` | 旧偏好块 | 升级后仍识别并剥离，当前版本合并到背景块 |
-| `<available-skills>` | `SessionStart` | `- 名字: 描述` | 技能目录，不是记忆 |
 | `<comem-recall>` | `UserPromptSubmit` | 与问题相关的正文块，附 URI、类型与投放层级 | 直接使用已给出的内容，确需更多细节时 `read` |
 
 **`<comem-recall>` 里没有分数。** 分数只在同一次检索的同一引擎内可比（§13.2），写进
@@ -545,18 +544,16 @@ Hook，不会把当前 shell 的 Key 复制进 Hook 配置；运行宿主时仍�
 
 ### 注入预算契约
 
-`SessionStart` 的背景块与技能目录
-都有硬上限。超过宿主上限不是「多一点上下文」，而是**整段被转存成文件、模型只看到
+`SessionStart` 的背景块有硬上限。超过宿主上限不是「多一点上下文」，而是**整段被转存成文件、模型只看到
 预览**——注入静默失效。
 
 | 约束 | 值 | 超了怎么办 |
 |---|---|---|
 | 开局背景 token 预算 | `profileBudgetTokens`，默认 2000，同时受服务端 assembly 上限约束 | 服务端按正文 → 概览 → 摘要降级，最终整条删除 |
 | 普通轮次 token 预算 | 服务端默认 1600，同时受 assembly 上限约束 | 同上，说明文字与标签计入预算 |
-| 技能目录 token 预算 | `skillBudgetTokens`，默认 400 | 全放 → 只名字 → 一行计数 |
-| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 插件 9,500 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能目录 → 召回 → 偏好 → 画像，记一条 `warn` |
+| 宿主字节上限 | Claude Code 9,500 / Codex 9,500 / DSH 插件 9,500 | 按 `CONTEXT_BLOCK_DROP_ORDER` 降级：召回 → 旧偏好 → 画像，记一条 `warn` |
 
-背景正文去掉 frontmatter 后注入。服务端按实际文本检查 token 与字节预算，Hook 为包装标签留 64 字节；技能目录另有自身预算。
+背景正文去掉 frontmatter 后注入。服务端按实际文本检查 token 与字节预算，Hook 为包装标签留 64 字节。
 
 **token 估算按文本自身的 CJK 密度**：`ceil(CJK 码点数 × 1 + 其余码点数 × 0.25)`。
 常用的 `chars / 4` 对中文**低估 6 倍**（1000 个汉字约 1000–1500 token，不是 250），
@@ -564,7 +561,7 @@ Hook，不会把当前 shell 的 Key 复制进 Hook 配置；运行宿主时仍�
 `estimateTokens` 是同一份（Hook 不依赖 `src/`，所以有一份副本；**改一处要改两处**）。
 
 **降级顺序是显式的，从最先丢到最不该丢。** 判据是「丢了之后还能不能拿回来」：
-技能目录是可选能力清单，模型不靠它也能工作；`<comem-recall>` 每轮重新检索，下一轮
+`integrations/skills/` 的提示词包由宿主独立加载；`<comem-recall>` 每轮重新检索，下一轮
 还有机会；个人背景最后删除。顺序定义在
 `integrations/lib/injection.mjs` 的 `CONTEXT_BLOCK_DROP_ORDER`，不靠块的插入位置。
 内容已在服务端裁剪，Hook 只按整块处理宿主的最终字节上限。
@@ -638,7 +635,6 @@ hook 读不到，也不该读。需要嵌套的配置去服务端配。
 | `commitTimeoutMs` | `COMEM_COMMIT_TIMEOUT_MS` | `30000` | `PreCompact` 等提交的超时（§17.2 的 `rewriteTimeoutMs`） |
 | `mcpTimeoutMs` | `COMEM_MCP_TIMEOUT_MS` | `30000` | stdio 代理等 MCP 响应的超时。**不是** `timeoutMs`：MCP 工具不占用户输入延迟，`find` 开重排时 p95 就有 9.35 秒 |
 | `recallLimit` | `COMEM_RECALL_LIMIT` | `10` | `find` 的条数 |
-| `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的独立 token 预算（§15.2） |
 | `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 开局个人背景正文预算，同时受服务端 assembly 总预算与宿主字节上限约束 |
 | `queryFilters` | `COMEM_QUERY_FILTERS`（换行分隔） | §8.8 的五条 | sed 风格正则 |
 
@@ -732,7 +728,6 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 | 用途 | 请求 | 期望响应 |
 |---|---|---|
 | 自动背景 / 召回 | `POST /api/v1/context`，`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}` | `result: {rendered, items, tokensUsed, dropped, degradation, deliveryToken}`；空 query 取开局背景 |
-| 技能目录 | `GET /api/v1/skills` | `result: {skills: [{name, description?}]}` 或 URI 数组 |
 | 建会话 | `POST /api/v1/sessions`，`{sessionId}` | 身份取请求认证；409 已存在时复用 |
 | 写消息 | `POST /api/v1/sessions/{id}/messages`，`{messages: [...]}` | 2xx 后才前进游标 |
 | 提交 | `POST /api/v1/sessions/{id}/commit` | 2xx；**无条件**归档（直接调 `commitPhase1`），与 `session.autoCommit` 无关 |
@@ -760,13 +755,13 @@ tail -n 1 "${COMEM_HOOK_TMPDIR:-${TMPDIR:-/tmp}}/comem-capture.log"
 ## 注入与捕获的去重
 
 上面那四层解决的是「同一条消息别提交两次」。这里解决的是**另一个方向**：CoMem
-往宿主上下文里注入的四个块（`<comem-recall>` / `<comem-profile>` /
-`<comem-preferences>` / `<available-skills>`）会留在会话里，下一轮 `Stop` 读
-transcript 时，它们与用户真的说过的话长得一模一样。原样处理有两个后果：
+往宿主上下文里注入的 `<comem-recall>` / `<comem-profile>` 会留在会话里；旧版本还
+注入过 `<comem-preferences>` / `<available-skills>`，历史 transcript 中可能仍存在。
+下一轮 `Stop` 读 transcript 时，它们与用户真的说过的话长得一模一样。原样处理有两个后果：
 
 - **捕获侧**：上一轮注入的记忆被当成「用户这轮说的话」重新抽取一遍，跑几轮之后
   记忆库开始复读自己；
-- **注入侧**：一条记忆的正文里若含 `</comem-recall>` 或 `</available-skills>`，
+- **注入侧**：一条记忆的正文里若含 `</comem-recall>`，
   模型会把它当成块边界，后面跟着的正文就成了伪造的指令。
 
 三个机制各管一段，代码分别在 `lib/sanitize.mjs`、`lib/injection.mjs` 的
@@ -778,7 +773,7 @@ transcript 时，它们与用户真的说过的话长得一模一样。原样处
 
 | 规则 | 匹配 | 为什么 |
 |---|---|---|
-| 块级 | `<comem-recall>…</comem-recall>`、`<comem-profile>`、`<comem-preferences>`、`<available-skills>`、`<system-reminder>` | 这些是 CoMem 与宿主写给模型看的，不是对话 |
+| 块级 | 当前 `<comem-recall>`、`<comem-profile>`；历史 `<comem-preferences>`、`<available-skills>`；宿主 `<system-reminder>` | 这些是 CoMem 与宿主写给模型看的，不是对话 |
 | 行级 | 行首 `[2024-01-01T00:00:00Z]` | 宿主给消息加的时间戳，进抽取器是纯噪声 |
 | 兜底 | 裸 epoch `\b1[6-9]\d{8}\b`、`\b1[6-9]\d{11}\b` | 同上；**只在整条消息剥完块之后**做，否则会吃掉正常数字 |
 
@@ -797,22 +792,20 @@ transcript 时，它们与用户真的说过的话长得一模一样。原样处
 `sanitizeCapturedMessages`。**不在宿主适配器里各剥一次**：宿主适配器只回答「怎么
 解析」，剥离是「发出去之前」的一件事。
 
-**五个标签按完整名字列，不靠前缀。** `available-skills` 不带 `comem-` 前缀，靠
-`comem-*` 匹配兜不住它；注入侧的转义表（`INJECTION_TAG_PREFIXES`）必须与这里的
-`BLOCK_TAGS` 同步，否则只剥一半（或者只转义一半）。
+**捕获兼容保留旧标签。** `available-skills` 已不再注入，但历史 transcript 里可能
+仍有该块，所以捕获侧继续按完整标签名剥离。当前注入侧只转义 `comem-*` 前缀。
 
 ### 2. 注入侧转义（`lib/injection.mjs` 的 `escapeInjectionText`）
 
-渲染块之前把记忆正文里的注入标签的 `<` 换成 `‹`（U+2039）。`INJECTION_TAG_PREFIXES`
-里有两个前缀：`comem-`（三个 `comem-*` 块）与 `available-skills`（技能目录块）。
-换完仍然可读（`‹/comem-recall>` 像引用了一段标签名），但不再是标签，块的边界
+渲染块之前把记忆正文里的注入标签的 `<` 换成 `‹`（U+2039）。
+`INJECTION_TAG_PREFIXES` 只保留当前使用的 `comem-` 前缀。换完仍然可读（`‹/comem-recall>` 像引用了一段标签名），但不再是标签，块的边界
 只有一个。用例钉住这条性质：正文含 `</comem-recall><comem-recall>` 或
-`</available-skills>` 时，渲染结果里每种开标签与闭标签各只有一个。
+`</comem-profile>` 时，渲染结果里每种开标签与闭标签各只有一个。
 
 为什么不是反斜杠、也不是删掉标签：反斜杠会把「转义链」引进来（Markdown 一层、
 JSON 一层，模型对它是字面量还是转义的判断不稳定）；删掉标签则改变了记忆本身。
 
-**转义覆盖两个前缀，宿主自己的标签不覆盖。** `<system-reminder>` 这类标签留给
+**宿主自己的标签不覆盖。** `<system-reminder>` 这类标签留给
 宿主处理：转义它会让记忆正文里正常的引用变形，而伪造宿主标签的收益远低于伪造
 召回块（模型按 `<comem-recall>` 判断「这是记忆」）。
 
@@ -839,10 +832,8 @@ Hook 的 `lib/context-epoch.mjs` 只保存按服务地址与会话隔离的随�
 
 **已覆盖**（都曾出现在残余清单里，现在两侧各有用例钉住）：
 
-- **`<available-skills>` 两侧都处理。** 捕获侧把它列进 `BLOCK_TAGS`（技能目录以
-  用户消息形式进 transcript 时整段剥掉），注入侧把它列进 `INJECTION_TAG_PREFIXES`
-  （一条记忆作为技能描述时含 `</available-skills>`，渲染出来是
-  `‹/available-skills>`，关不掉目录块）。
+- **旧版 `<available-skills>` 继续在捕获侧兼容。** 它已不再注入，但历史 transcript
+  里可能仍有该块；捕获侧继续从会话中剥掉它，避免旧内容被重新抽取成记忆。
 - **`PostToolUse` 的工具输出也剥离。** `toToolMessage` 调同一个
   `sanitizeCapturedText`。工具输出只由注入块组成时发空串——服务端的
   `requireStringField` 只校验 `typeof === 'string'`，空串是合法值；非字符串原样
@@ -854,7 +845,7 @@ Hook 的 `lib/context-epoch.mjs` 只保存按服务地址与会话隔离的随�
 
 用例在 `tests/sanitize.test.mjs`（纯函数，含 1MB 输入耗时）、
 `tests/post-tool-use.test.mjs`（工具输出剥离与非字符串透传）、
-`tests/session-start.test.mjs`（技能目录的转义）、服务端 `tests/integration/services/recall-ledger.test.ts`、`tests/user-prompt-submit.test.mjs`（自动上下文与重置标识的接入）与
+`tests/session-start.test.mjs`（开局背景）、服务端 `tests/integration/services/recall-ledger.test.ts`、`tests/user-prompt-submit.test.mjs`（自动上下文与重置标识的接入）与
 `tests/stop.test.mjs`（发 HTTP 前剥离）。
 
 ## 故障排查

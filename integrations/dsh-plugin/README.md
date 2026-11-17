@@ -59,7 +59,7 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 默认配置来自 `~/.config/comem/config.yaml`（或 `COMEM_CONFIG_FILE` 指定的文件；
 `COMEM_*` 环境变量优先），与 Hook 和 stdio MCP 代理完全同一套。可放：
 `baseUrl`、`token`、`recallTimeoutMs`、`recallLimit`、`queryFilters`、
-`profileBudgetTokens`、`skillBudgetTokens`、`commitTimeoutMs`、`tmpDir`。
+`profileBudgetTokens`、`commitTimeoutMs`、`tmpDir`。
 `token` 必须写真实值；这个加载器不做 `${ENV}` 插值。身份来自服务端认证，不需要
 重复填写用户 ID。需要和其他 Agent 绑定同一账号时，把同一 API Key 写入共享文件，
 再用 `co-mem doctor --expect-subject user:<id>` 核对。服务端与插件应同步升级以

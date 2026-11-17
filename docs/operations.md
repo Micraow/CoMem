@@ -218,15 +218,13 @@ rm /var/lib/comem/_meta/config.override.yaml
 
 ### Hook 的注入预算
 
-`SessionStart` 往对话里注入三个块（`<comem-profile>` / `<comem-preferences>` /
-`<available-skills>`），各有 token 预算。这几项是 **Hook 插件**的配置（读
+`SessionStart` 往对话里注入个人背景块（`<comem-profile>`）。预算是 **Hook 插件**的配置（读
 `~/.config/comem/config.yaml` 的**顶层**键，不是服务端配置的嵌套段；见
 `integrations/README.md` 的「配置」），环境变量优先：
 
 | 键 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
-| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入预算。注入的是索引（一条一行「摘要 + URI」），超了按 `CONTEXT_BLOCK_DROP_ORDER` 降级：技能清单 → 召回 → 偏好 → 画像 |
-| `skillBudgetTokens` | `COMEM_SKILL_BUDGET_TOKENS` | `400` | 技能目录的预算。三档降级：全放 → 只名字 → 一行计数 |
+| `profileBudgetTokens` | `COMEM_PROFILE_BUDGET_TOKENS` | `2000` | 用户画像的注入预算。超了按 `CONTEXT_BLOCK_DROP_ORDER` 降级：召回 → 旧偏好 → 画像 |
 
 **画像只注入正文。** `profile.md` 的 YAML frontmatter（`memory_type` / `created_at` /
 `uri` / 256 字的 `summary`）在这条路径上被剥掉：前三个字段对模型是噪声，`summary`
@@ -234,7 +232,7 @@ rm /var/lib/comem/_meta/config.override.yaml
 
 **还有一层宿主字节上限。** Claude Code / Codex 在 hook 输出超过约 10,000 字符时
 把整段转存成文件、只把预览放进上下文（9,500 是留余量的取值）。超限时 Hook 按
-`CONTEXT_BLOCK_DROP_ORDER` 丢块（技能目录 → 召回 → 偏好 → 画像），记一条
+`CONTEXT_BLOCK_DROP_ORDER` 丢块（召回 → 旧偏好 → 画像），记一条
 `注入上下文超过宿主字节上限` 的 `warn`——看到它说明这次注入少了块，不是正常状态。
 数字在 `integrations/hosts/*.mjs` 的 `MAX_CONTEXT_BYTES`，**没有独立复测**。
 DSH 插件是进程内注入、不存在宿主输出上限，它仍用默认的 9,500 当保守上限。
@@ -1464,7 +1462,6 @@ $COMEM_DATA_DIR/
 │       ├── .overview.md          # 根的 L1 概览
 │       ├── memories/             # 跨项目记忆：profile / preferences / entities / events / …
 │       ├── resources/            # 跨项目资料
-│       ├── skills/               # 技能包：<name>/SKILL.md + 附属文件
 │       ├── projects/<pid>/       # 项目作用域，结构与根同构（少 sessions/ 与 projects/）
 │       └── sessions/
 │           └── <sessionId>/
@@ -1479,8 +1476,11 @@ $COMEM_DATA_DIR/
 │                       ├── memory_diff.json # 这次归档抽出了哪些记忆操作
 │                       └── .done            # 完成信号，最后写（§10.1）
 └── group/
-    └── <gid>/                    # 组空间：memories / resources / skills / projects
+    └── <gid>/                    # 组空间：memories / resources / projects
 ```
+
+旧版数据根若已有 `skills/`，CoMem 不删除、不识别为独立类型，重建索引时按普通资源处理。
+需要给宿主安装提示词包时，使用 `integrations/skills/` 下的独立包。
 
 **规则**：普通 `ls` 看不到 `.acl.json` / `.abstract.md` / `.overview.md` / `.meta.json` /
 `.done` / `memory_diff.json` / `memory_operations.json`——它们是元数据，不是目录内容。想看内容用 `GET /content/*`，
@@ -2029,8 +2029,7 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 （`node_permission`）里没有这个节点就默认 deny。三种常见情况：
 
 1. **数据根是空的、还没初始化**：启动时会预置 `user/{uid}/` 与 `memories` / `resources` /
-   `sessions` 三个基础目录的权限行（`src/bootstrap/container/access.ts`）。`skills/` 在首次
-   `add_skill` 时创建。没跑到说明启动自检失败。
+   `sessions` 三个基础目录的权限行（`src/bootstrap/container/access.ts`）。没跑到说明启动自检失败。
 2. **请求身份不是这个作用域的用户**：`GET /sessions` 只列当前身份可读的根。用 API Key 或
    session token 代表 `user:bob` 时，`user:local` 的会话列表是 403（权限不足，不是 401）。
    没有凭据且不是回环来源时根本走不到这里——`src/bootstrap/container/api.ts` 的
@@ -2202,20 +2201,17 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
    可以修；整库丢失时权限要另走 ACL 重建（目前没有命令）。参数见「备份与恢复」。
 5. **`reject` 的原因只进日志。** `MemoryService.reject` 删掉文件、把 `reason` 写进 `info`
    日志，不落盘也不进数据库（`src/services/memory/review.ts`）。事后要复盘「为什么拒了」只能翻日志。
-6. **技能目录没有 `description`。** `GET /skills` 只返回 `{uri, name}`。`SKILL.md` 的
-   description 在 frontmatter 里，而 `DocumentFrontmatter` 只建模 `summary` 一个字段，
-   `ContentStore.readText` 不暴露任意键。Hook 注入的 `<available-skills>` 因此只有名字，
-   这是 §15.2 允许的最低一档，不是静默丢失。
-7. **技能文件不设置执行位。** 技能文件按数据存放，`ContentStore` 只写字节，没有 chmod
-   入口；`services/` 不能 `import node:fs`，所以脚本装进去之后不可执行。请求里传
-   `executable` 会被忽略：`SkillFileInput` 只有 `path` 与 `content`，MCP 与 HTTP 两侧都只
-   按这两个键取值，HTTP 路由没有严格 schema，未知键直接丢弃。要补需要给 `ContentStore`
-   加一个 chmod 方法，现在没有。
+6. **旧版 `skills/` 不再有独立语义。** 已有目录和文件保留，但新索引把它们归为普通
+   `resource`；服务端不提供安装、列表或 `skill` 上下文筛选。这样存量内容仍可读、可搜，
+   不再暗示 CoMem 管理技能包。
+7. **宿主提示词包由宿主管理。** `integrations/skills/` 的两份 `SKILL.md` 是独立安装物；
+   CoMem 不读取、不注入其目录，也不提供 `/skills` API。文件执行权限、目录约定与安装位置
+   都遵循宿主自己的 skill 机制。
 8. **`reconcile.log` 里的部分失败无法自动恢复。** 重放已实现：启动时（HTTP 监听之前）与
     调度器每一轮都会重放 `op = index` / `permission`，成功后原子重写日志只保留未解决条目；
-    目标 URI 已删除视为已解决，坏行记 warn 后丢弃。会写记录的写入点是 `add_resource` /
-    `add_skill` 的批量索引、`IndexObserver` 的单文件索引行与移动后的目标子树（都只记文件），
-    以及这三条写路径的权限物化失败（观察者同时覆盖节点自己、祖先目录与删除后的父目录）。
+    目标 URI 已删除视为已解决，坏行记 warn 后丢弃。会写记录的写入点是 `add_resource`
+    的批量索引、`IndexObserver` 的单文件索引行与移动后的目标子树（都只记文件），
+    以及写路径的权限物化失败（观察者同时覆盖节点自己、祖先目录与删除后的父目录）。
     仍然修不了的是：
 
     - `write` / `attachment` 的失败记录：日志里没有正文或原始字节，只能重新提交导入；
@@ -2350,7 +2346,7 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
     文档与控制台按「未实现」表述；要落地得先让请求带上会话标识、补齐阶段计时，再定
     P50 的样本窗口（架构文档 §17.5）。
 
-28. **30 秒总上限只覆盖 MCP 的 16 个工具与 HTTP 检索的两条路由（三条调用路径）。** 常量是
+28. **30 秒总上限只覆盖 MCP 的 15 个工具与 HTTP 检索的两条路由（三条调用路径）。** 常量是
     `src/api/deadline.ts` 的 `API_CALL_DEADLINE_MS = 30_000`，两侧共用；到点后 MCP
     返回 `isError` 文本 `TOOL_DEADLINE_EXCEEDED: …`，HTTP 返回 503
     `PROVIDER_UNAVAILABLE`（`details.reason = 'deadline_exceeded'`，架构文档 §13.3）。
