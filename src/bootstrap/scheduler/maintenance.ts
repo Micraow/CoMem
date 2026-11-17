@@ -20,6 +20,11 @@ type TtlSweepPorts = Pick<SchedulerOptions, 'ttl' | 'ttlSweepBatchSize' | 'logge
 type StagedSweepPorts = Pick<SchedulerOptions, 'staged' | 'logger'>;
 /** 请求记录裁剪的输入。 */
 type RequestLogPrunePorts = Pick<SchedulerOptions, 'requestLog' | 'requestLogRetention' | 'logger'>;
+/** LLM 调用记录裁剪的输入。 */
+type LlmCallPrunePorts = Pick<
+  SchedulerOptions,
+  'llmCallLog' | 'requestLogRetention' | 'logger'
+>;
 /** 对账重放的输入。 */
 type ReconcilePorts = Pick<SchedulerOptions, 'reconcile' | 'logger'>;
 /** 轮次摘要的输入。 */
@@ -77,6 +82,24 @@ export function pruneRequestLog(ports: RequestLogPrunePorts, now: Date): number 
   }
 }
 
+export function pruneLlmCallLog(ports: LlmCallPrunePorts, now: Date): number {
+  if (ports.llmCallLog === undefined) {
+    return 0;
+  }
+  try {
+    return ports.llmCallLog.prune({
+      retainDays: ports.requestLogRetention.retainDays,
+      retainRows: ports.requestLogRetention.retainRows,
+      now,
+    });
+  } catch (error) {
+    ports.logger.error('模型调用记录裁剪失败，下一轮重试。', {
+      error: errorMessage(error),
+    });
+    return 0;
+  }
+}
+
 /**
  * 对账重放。失败只记 error，下一轮再试。
  *
@@ -109,6 +132,7 @@ export function logRound(ports: RoundLogPorts, result: SchedulerTickResult): voi
     ttlPurged: result.ttlPurged,
     stagedSwept: result.stagedSwept,
     requestLogPruned: result.requestLogPruned,
+    llmCallsPruned: result.llmCallsPruned,
     reconcileResolved: result.reconcileResolved,
     reconcileFailed: result.reconcileFailed,
     reconcileRemaining: result.reconcileRemaining,
@@ -120,6 +144,7 @@ export function logRound(ports: RoundLogPorts, result: SchedulerTickResult): voi
       result.ttlPurged +
       result.stagedSwept +
       result.requestLogPruned +
+      result.llmCallsPruned +
       result.reconcileResolved +
       result.reconcileFailed ===
     0

@@ -20,6 +20,7 @@ import type {
 } from './contracts.js';
 import { DEFAULT_REQUEST_LOG_POLICY, type RequestLogPolicy } from './contracts.js';
 import type { ObservabilityServiceDeps } from './deps.js';
+import { runWithLlmCallContext, setLlmCallContext } from './call-context.js';
 import { healthSnapshot, type MemoryHealth } from './health.js';
 import {
   createHookOverheadState,
@@ -73,7 +74,12 @@ export class ObservabilityService {
 
   /** 在一个请求作用域里执行。见 `timing.ts` 的 `runInRequestScope`。 */
   withRequestScope<T>(fn: () => Promise<T>): Promise<T> {
-    return runInRequestScope(this.#timing, fn);
+    return runWithLlmCallContext({}, () => runInRequestScope(this.#timing, fn));
+  }
+
+  /** 身份与请求 ID 就绪后补齐当前作用域，供 LLM 调用记录关联。 */
+  setRequestContext(requestId: string, subject: string | null): void {
+    setLlmCallContext({ requestId, subject });
   }
 
   /** 给一个阶段计时。见 `timing.ts` 的 `timePhase`。 */

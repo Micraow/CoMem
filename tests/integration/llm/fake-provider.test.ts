@@ -67,7 +67,11 @@ describe('FakeLlmProvider', () => {
     const schema = z.object({ ok: z.boolean() });
     const provider = new FakeLlmProvider([{ json: { ok: true } }]);
 
-    await expect(provider.completeJson(PROMPT, schema)).resolves.toEqual({ ok: true });
+    await expect(provider.completeJson(PROMPT, schema)).resolves.toEqual({
+      value: { ok: true },
+      usage: { promptTokens: 0, completionTokens: 0 },
+      finishReason: 'stop',
+    });
   });
 
   it('completeJson 的 json 缺失或不合 schema 时抛 INVALID_ARGUMENT', async () => {

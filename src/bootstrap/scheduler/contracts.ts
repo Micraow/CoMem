@@ -61,6 +61,15 @@ export interface RequestLogPrunePort {
   }): number;
 }
 
+/** LLM 调用记录裁剪端口；沿用同一保留窗口，避免两套含义接近的配置漂移。 */
+export interface LlmCallPrunePort {
+  prune(options: {
+    readonly retainDays: number;
+    readonly retainRows: number;
+    readonly now: Date;
+  }): number;
+}
+
 /** `telemetry.requestLog.retainDays` / `retainRows`（§17.6、§18）。 */
 export interface RequestLogRetention {
   readonly retainDays: number;
@@ -108,6 +117,8 @@ export interface SchedulerOptions {
   readonly memories: PendingMemoryPort;
   /** `request_log` 的裁剪路径（§17.6）；与 TTL 清扫同样每轮调用。 */
   readonly requestLog: RequestLogPrunePort;
+  /** `llm_call_log` 的裁剪路径；未注入的单元测试不裁剪这张表。 */
+  readonly llmCallLog?: LlmCallPrunePort;
   /** `telemetry.requestLog.retainDays` / `retainRows`；保留窗口沿用配置，不新增。 */
   readonly requestLogRetention: RequestLogRetention;
   readonly expiry: SchedulerExpiry;
@@ -135,6 +146,8 @@ export interface SchedulerTickResult {
   readonly stagedSwept: number;
   /** 这一轮从 `request_log` 删掉的行数（超保留天数 + 超保留行数） */
   readonly requestLogPruned: number;
+  /** 这一轮从 `llm_call_log` 删掉的行数。 */
+  readonly llmCallsPruned: number;
   /** 这一轮对账重放成功（或目标已不存在）的记录数 */
   readonly reconcileResolved: number;
   /** 这一轮重放失败的记录数，仍留在 `reconcile.log` */

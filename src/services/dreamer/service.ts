@@ -92,7 +92,9 @@ export class DreamerService {
   }
 
   async #model(prompt: LlmPrompt): Promise<ConsolidationOutput> {
-    const output = await this.#deps.llm.generateJson(prompt, consolidationOutputSchema);
+    const output = await this.#deps.llm.generateJson(prompt, consolidationOutputSchema, {
+      purpose: 'dreamer',
+    });
     if (output.action === undefined && output.experiences === undefined && output.inferences === undefined) {
       throw new ComemError('INVALID_ARGUMENT', 'Dreamer 模型没有返回可识别的操作。');
     }

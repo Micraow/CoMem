@@ -78,7 +78,12 @@ export function describeLlmProviderConformance(subject: LlmConformanceSubject): 
         .createJson()
         .completeJson(CONFORMANCE_PROMPT, CONFORMANCE_SCHEMA);
 
-      expect(value).toEqual({ ok: true });
+      expect(value.value).toEqual({ ok: true });
+      expect(value.usage).toEqual({
+        promptTokens: expect.any(Number),
+        completionTokens: expect.any(Number),
+      });
+      expect(FINISH_REASONS).toContain(value.finishReason);
     });
 
     it('completeJson 输出不符合 schema 时抛 INVALID_ARGUMENT', async () => {

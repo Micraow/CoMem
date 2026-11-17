@@ -22,7 +22,7 @@ hermes memory status
 
 Choose **CoMem** in the provider list. The same provider configuration is available in Hermes's memory-provider panel. `hermes memory setup comem` activates CoMem with the default local address, but does not prompt for remote or custom settings.
 
-The default API address is `http://127.0.0.1:1933/api/v1`. For a loopback CoMem server with `auth.trustLoopback: true`, no credential is required. For a remote or container endpoint, run the interactive setup and enter a CoMem API key when prompted. Hermes stores the key as `COMEM_TOKEN` in the profile's `.env`.
+The default API address is `http://127.0.0.1:1933/api/v1`. For a loopback CoMem server with `auth.trustLoopback: true`, no credential is required, but the provider then acts as the server's configured `server.subject` (`user:local` by default). Sign in to the CoMem console with that same account, or give both the provider and MCP server an API key for the account you use in the console. For a remote or container endpoint, run the interactive setup and enter a CoMem API key when prompted. Hermes stores the key as `COMEM_TOKEN` in the profile's `.env`.
 
 The equivalent non-secret configuration is:
 
@@ -49,8 +49,10 @@ The provider strips Hermes's `<memory-context>` fence and CoMem recall fences be
 
 ## Status and limits
 
-`hermes memory status` shows the endpoint, authentication mode, pending local writes, and the last transport error. Provider failures are logged and fail open.
+`hermes memory status` shows the endpoint, authentication mode, the last authenticated subject, pending local writes, and the last transport error. Provider failures are logged and fail open.
 
-The provider needs Hermes v0.23.1 or a compatible `MemoryProvider` ABI. It targets CoMem's HTTP envelope and identity semantics; changing either API requires updating this adapter. `hermes memory status` checks configuration, not network reachability. After setup, send a new prompt and verify recall in Hermes and the archived messages in CoMem's **Sessions** page.
+The provider needs Hermes v0.23.1 or a compatible v0.23.x `MemoryProvider` ABI; v0.23.2 is verified. It targets CoMem's HTTP envelope and identity semantics; changing either API requires updating this adapter. `hermes memory status` checks configuration, not network reachability. After setup, compare the reported `subject` with the current space in the CoMem console, send a new prompt, and verify the archived messages in **Sessions**.
+
+A completed archive leaves `messageCount` at zero when no live messages are retained; `lastCommitAt` is the evidence that submission succeeded. Task-list visibility differs by deployment and completion state, so do not infer a capture failure solely from an empty Tasks tab.
 
 Provider state stays under `$HERMES_HOME/comem-provider/`. Deleting that directory discards queued local writes while leaving native Hermes memory and remote CoMem data intact.

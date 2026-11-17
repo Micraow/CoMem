@@ -31,7 +31,7 @@ import type { ZodType } from 'zod';
 
 import type { MemoryOperationsFile, SkippedMemoryOperation } from '../../../domain/archive.js';
 import { ComemError } from '../../../domain/errors.js';
-import type { LlmPrompt } from '../../../domain/llm.js';
+import type { LlmOptions, LlmPrompt } from '../../../domain/llm.js';
 import type { Logger } from '../../../domain/log.js';
 import { memoryContentOf } from '../../../domain/memory-type.js';
 import type { MemoryTypeSchema } from '../../../domain/memory-type.js';
@@ -75,7 +75,7 @@ export interface MemoryExtractStepDeps {
     ): Promise<readonly MemoryRecord[]>;
   };
   readonly llm: {
-    generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
+    generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<T>;
   };
   /**
    * 写/读 `archive_NNN/memory_operations.json`（保留名，必须按归档目录定位）。
@@ -443,7 +443,7 @@ export class MemoryExtractStep extends CommitStep {
       today: localDate(new Date()),
     });
 
-    const output = messages.length === 0 ? { operations: [] } : await this.#llm.generateJson(prompt, extractOutputSchema);
+    const output = messages.length === 0 ? { operations: [] } : await this.#llm.generateJson(prompt, extractOutputSchema, { purpose: 'memory_extract' });
     const resolved = resolveOperations(output, context.scopeUri, pages);
     const result = { ...resolved, structures: await reuseEntityIdentities(resolved.structures ?? [], this.#memory.read?.bind(this.#memory)) };
 

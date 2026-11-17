@@ -31,6 +31,15 @@ export interface LlmOptions {
   readonly maxTokens?: number;
   readonly temperature?: number;
   /**
+   * 这次调用回答的问题。调用日志按它分组；供应商适配器忽略该字段。
+   *
+   * 生产调用点必须显式给出。`unspecified` 只用于兼容没有用途信息的历史测试和
+   * 一次性脚本，不用于新增功能。
+   */
+  readonly purpose?: LlmCallPurpose;
+  /** 已存在的会话 ID，只用于把调用记录关联回会话；没有时省略。 */
+  readonly sessionId?: string;
+  /**
    * 单次调用超时，毫秒。**只能是上限**：适配器取
    * `min(配置的 timeoutSeconds * 1000, timeoutMs)`，内部预算不能放宽用户配置的
    * `providers.llm.*.timeoutSeconds`。省略时用配置值。
@@ -52,6 +61,47 @@ export interface LlmResult {
   readonly finishReason: 'stop' | 'length' | 'refusal';
 }
 
+export interface LlmJsonResult<T> {
+  readonly value: T;
+  readonly usage: LlmUsage;
+  readonly finishReason: 'stop' | 'length' | 'refusal';
+}
+
+export type LlmCallPurpose =
+  | 'query_rewrite'
+  | 'recall_compression'
+  | 'directory_summary'
+  | 'archive_summary'
+  | 'working_memory'
+  | 'memory_extract'
+  | 'dreamer'
+  | 'config_probe'
+  | 'unspecified';
+
+export type LlmCallKind = 'text' | 'json';
+
+export type LlmCallStatus = 'success' | 'error';
+
+/** 一次逻辑调用（包括重试）的持久化诊断记录。正文、prompt 与原始错误不进入这里。 */
+export interface LlmCallRecord {
+  readonly id: string;
+  readonly requestId: string | null;
+  readonly sessionId: string | null;
+  readonly subject: string | null;
+  readonly purpose: LlmCallPurpose;
+  readonly kind: LlmCallKind;
+  readonly model: string;
+  readonly status: LlmCallStatus;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+  readonly promptTokens: number | null;
+  readonly completionTokens: number | null;
+  readonly costUsd: number | null;
+  readonly errorCode: string | null;
+  readonly attempts: number;
+}
+
 export interface LlmProvider {
   complete(prompt: LlmPrompt, options?: LlmOptions): Promise<LlmResult>;
 
@@ -59,5 +109,9 @@ export interface LlmProvider {
    * 结构化输出：`schema` 由适配器翻译成厂商的 JSON Schema 或 function calling，
    * 返回值已经过 zod 校验。
    */
-  completeJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<T>;
+  completeJson<T>(
+    prompt: LlmPrompt,
+    schema: ZodType<T>,
+    options?: LlmOptions,
+  ): Promise<LlmJsonResult<T>>;
 }

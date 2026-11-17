@@ -28,10 +28,19 @@ export async function compressRecall(
   const controller = new AbortController();
   options.onUpstream?.('llm');
   try {
+    const sessionContext = options.sessionId === undefined
+      ? {}
+      : { sessionId: options.sessionId };
     const output = await withBudget(llm.generateJson({
       system: SYSTEM,
       messages: [{ role: 'user', content: JSON.stringify({ query, recentContext, memories: sources.map(({ uri, text }, source) => ({ source, uri, text })) }) }],
-    }, digestSchema, { maxTokens, timeoutMs, abortSignal: controller.signal }), timeoutMs,
+    }, digestSchema, {
+      purpose: 'recall_compression',
+      ...sessionContext,
+      maxTokens,
+      timeoutMs,
+      abortSignal: controller.signal,
+    }), timeoutMs,
     () => budgetExceeded('召回压缩（LLM）', timeoutMs));
     const seen = new Set<number>();
     return output.items.map(({ source, text: raw }) => {

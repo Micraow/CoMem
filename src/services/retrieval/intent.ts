@@ -125,7 +125,12 @@ export class IntentStage {
     timer?.unref();
 
     try {
+      const sessionContext = options.sessionId === undefined
+        ? {}
+        : { sessionId: options.sessionId };
       const call = this.#llm.generateJson(prompt, REWRITE_SCHEMA, {
+        purpose: 'query_rewrite',
+        ...sessionContext,
         timeoutMs: budget ?? REWRITE_TIMEOUT_MS,
         ...(budget === null ? { } : { abortSignal: controller.signal }),
       });

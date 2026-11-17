@@ -152,7 +152,10 @@ describe('POST /config/test：LLM', () => {
 
     expect(result['ok']).toBe(true);
     expect(String(result['detail'])).toContain('gpt-4o-mini');
-    expect(generate).toHaveBeenCalledWith(expect.anything(), { maxTokens: 1 });
+    expect(generate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ maxTokens: 1, purpose: 'config_probe' }),
+    );
   });
 
   it('PROVIDER_UNAVAILABLE 时 ok:false', async () => {

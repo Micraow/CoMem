@@ -21,9 +21,14 @@
 import type { AclEffect, AclLevel, AclMode } from '~/utils/aclLabels'
 import type { FsEntryKind } from '~/utils/fsLabels'
 import type { HealthStatus } from '~/utils/healthLabels'
+import type {
+  LlmCallKind,
+  LlmCallPurpose,
+  LlmCallStatus,
+} from '~/utils/modelRequestLabels'
 import type { NodeStatus } from '~/utils/nodeStatus'
 import type { RetrievalEngine } from '~/utils/searchLabels'
-import type { ClaimableTaskStatus, TaskType } from '~/utils/taskLabels'
+import type { TaskStatus, TaskType } from '~/utils/taskLabels'
 import type { McpToolKind } from '~/utils/toolLabels'
 import type { Ref } from 'vue'
 
@@ -414,6 +419,37 @@ export interface HealthPayload {
   readonly version: string
 }
 
+/**
+ * `GET /telemetry/llm-calls` 的一条模型调用。
+ *
+ * token 与成本为 `null` 表示供应商没有返回 usage、或没有配置计价；`0` 是真实的
+ * 零用量。错误响应只保留稳定错误码，不返回 prompt、模型输出或供应商原始正文。
+ */
+export interface LlmCallPayload {
+  readonly id: string
+  readonly purpose: LlmCallPurpose
+  readonly kind: LlmCallKind
+  readonly model: string
+  readonly status: LlmCallStatus
+  readonly startedAt: string
+  readonly endedAt: string
+  readonly durationMs: number
+  readonly promptTokens: number | null
+  readonly completionTokens: number | null
+  readonly totalTokens: number | null
+  readonly costUsd: number | null
+  readonly attempts: number
+  readonly errorCode: string | null
+  readonly sessionId: string | null
+  readonly requestId: string | null
+}
+
+/** `GET /telemetry/llm-calls`。`nextCursor` 原样传给下一页请求。 */
+export interface LlmCallListPayload {
+  readonly items: readonly LlmCallPayload[]
+  readonly nextCursor: string | null
+}
+
 /** `GET /content/abstract` 与 `/content/overview` 的公共形状。 */
 export interface SummaryLayerPayload {
   readonly uri: string
@@ -476,15 +512,12 @@ export interface AclPayload {
  * `createdAt` / `leaseUntil` / `error`。响应里还有 `payload` / `stepsDone`，
  * 控制台不读，不声明（`src/api/http/routes/tasks.ts` 的 `TaskRecord` 是完整形状）。
  *
- * `type` / `status` 用取值联合而不是 `string`：这个端点只列可认领的任务，状态是
- * `ClaimableTaskStatus` 子集。写成 `string` 时标签映射只能靠 `?? 原值` 兜底，
- * 一个新增的状态会以英文原值出现在界面上（`utils/taskLabels.ts` 的映射是穷举的，
- * 加成员就会编译失败）。
+ * `type` / `status` 使用穷举联合，recent 视图包含全部任务状态。
  */
 export interface TaskPayload {
   readonly id: string
   readonly type: TaskType
-  readonly status: ClaimableTaskStatus
+  readonly status: TaskStatus
   readonly attempts: number
   readonly leaseUntil: string | null
   readonly error: string | null

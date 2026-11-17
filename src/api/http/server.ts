@@ -251,7 +251,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Fast
   // 顺序即执行顺序（见 `middleware.ts` 文件头）。
   app.addHook('onRequest', createObservabilityMiddleware(options.observability));
   app.addHook('onRequest', createRequestIdMiddleware());
-  app.addHook('onRequest', createIdentityMiddleware(options.resolveIdentity));
+  app.addHook('onRequest', createIdentityMiddleware(options.resolveIdentity, options.observability));
 
   app.addHook('onResponse', async (request, reply) => {
     const context = tryRequestContext(request);

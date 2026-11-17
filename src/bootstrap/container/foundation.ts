@@ -27,6 +27,7 @@ import { FileLogger } from '../../adapters/log/file.js';
 import { openDatabase, runMigrations } from '../../adapters/sqlite/database.js';
 import { EmbeddingRepository } from '../../adapters/sqlite/embedding-repository.js';
 import { GroupRepository } from '../../adapters/sqlite/group-repository.js';
+import { LlmCallRepository } from '../../adapters/sqlite/llm-call-repository.js';
 import { MemoryLinkRepository } from '../../adapters/sqlite/memory-link-repository.js';
 import { MemoryStructureIndex } from '../../adapters/sqlite/memory-structure.js';
 import { NodeRepository } from '../../adapters/sqlite/node-repository.js';
@@ -71,6 +72,7 @@ export interface Foundation {
   readonly groupRepository: GroupRepository;
   readonly taskRepository: TaskRepository;
   readonly requestLog: RequestLogRepository;
+  readonly llmCallLog: LlmCallRepository;
   readonly prompts: PromptService;
   readonly embeddings: EmbeddingRepository;
   readonly vectors: SqliteVectorIndex;
@@ -121,6 +123,11 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
   const groupRepository = new GroupRepository({ db, logger });
   const taskRepository = new TaskRepository({ db, logger });
   const requestLog = new RequestLogRepository({ db, logger });
+  const llmCallLog = new LlmCallRepository({
+    db,
+    logger,
+    enabled: config.telemetry.requestLog.enabled,
+  });
   // 提示词覆盖（§18）。构造期就把全部覆盖读进内存并校验——一条引用了不存在
   // 变量的覆盖会让每一次模型调用失败，而失败只出现在后台任务里。
   const prompts = new PromptService({ overrides: new PromptRepository({ db }) });
@@ -156,6 +163,7 @@ export function createFoundation(options: CreateContainerOptions): Foundation {
     groupRepository,
     taskRepository,
     requestLog,
+    llmCallLog,
     prompts,
     embeddings,
     vectors,

@@ -572,7 +572,7 @@ class ProviderTests(unittest.TestCase):
         self.assertNotEqual(self.provider._epoch, before)
         self.assertTrue(self.provider._epoch.startswith("rewound-"))
 
-    def test_status_reports_pending_writes_before_initialize(self) -> None:
+    def test_status_reports_pending_writes_and_subject_before_initialize(self) -> None:
         home = tempfile.TemporaryDirectory()
         try:
             outbox = Path(home.name) / "comem-provider" / "outbox"
@@ -584,10 +584,43 @@ class ProviderTests(unittest.TestCase):
             provider = self.module.CoMemMemoryProvider(
                 {"base_url": self.api.base_url, "token": "test-token"}
             )
+            (outbox.parent / "binding.json").write_text(
+                json.dumps(
+                    {
+                        "transport": provider._settings.binding_id,
+                        "subject": "user:demo",
+                    }
+                ),
+                encoding="utf-8",
+            )
             with patch.dict(os.environ, {"HERMES_HOME": home.name}):
                 status = provider.get_status_config({})
             self.assertEqual(status["pending_writes"], 1)
+            self.assertEqual(status["subject"], "user:demo")
             self.assertEqual(status["last_error"], "recall: offline")
+        finally:
+            home.cleanup()
+
+    def test_status_omits_subject_bound_to_old_credentials(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        try:
+            state_dir = Path(home.name) / "comem-provider"
+            state_dir.mkdir(parents=True)
+            (state_dir / "binding.json").write_text(
+                json.dumps(
+                    {
+                        "transport": "old-transport",
+                        "subject": "user:old",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            provider = self.module.CoMemMemoryProvider(
+                {"base_url": self.api.base_url, "token": "new-test-token"}
+            )
+            with patch.dict(os.environ, {"HERMES_HOME": home.name}):
+                status = provider.get_status_config({})
+            self.assertNotIn("subject", status)
         finally:
             home.cleanup()
 

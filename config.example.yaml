@@ -192,10 +192,10 @@ telemetry:
     enabled: true
     includeAccountLabel: false   # 单账号部署没必要，开了会放大基数
   requestLog:
-    enabled: true
-    retainDays: 7
-    retainRows: 100000
-    sampleRate: 1.0          # 1.0 = 全量；错误请求永远全量记录
+    enabled: true            # HTTP 请求与 LLM 调用诊断记录
+    retainDays: 7            # 两张表共用保留窗口
+    retainRows: 100000       # 两张表各自保留的最大行数
+    sampleRate: 1.0          # 只用于 HTTP；LLM 调用不采样
   hookOverhead:
     enabled: true            # Hook 上报阻塞开销，控制台「监控」页用
   hotness:

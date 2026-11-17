@@ -65,6 +65,7 @@ export function createModels(core: Foundation): Models {
     logger,
     pricing: llmConfig.pricing,
     model: llmConfig.model,
+    callLog: core.llmCallLog,
   });
 
   // ── 嵌入 ──

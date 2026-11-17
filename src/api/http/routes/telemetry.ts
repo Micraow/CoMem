@@ -19,7 +19,13 @@ import { invalidArgument } from '../../../domain/errors.js';
 import type { HookOverheadReport } from '../../../services/observability.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
-import { optionalString, requireRecord, requireString, type HttpRouteGroup } from '../server.js';
+import {
+  optionalQueryInteger,
+  optionalString,
+  requireRecord,
+  requireString,
+  type HttpRouteGroup,
+} from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
 
@@ -60,7 +66,7 @@ interface HookOverheadResponse {
 }
 
 export function createTelemetryRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { observability } = services;
+  const { observability, llm } = services;
 
   return {
     prefix: '/telemetry',
@@ -71,6 +77,21 @@ export function createTelemetryRoutes(services: HttpRouteServices): HttpRouteGro
         const report = parseReport(body);
         await observability.recordHookOverhead(report);
         return ok<HookOverheadResponse>({ recorded: true, event: report.event, sessionId: report.sessionId });
+      });
+
+      app.get<{ Querystring: unknown }>('/llm-calls', async (request) => {
+        const identity = requestContextOf(request);
+        const query = requireRecord(request.query, 'telemetry/llm-calls');
+        const limit = optionalQueryInteger(query, 'limit', 50, { min: 1, max: 100 });
+        const cursor = optionalString(query, 'cursor');
+        if (cursor === '') {
+          throw invalidArgument('cursor 必须是非空字符串或省略。', { field: 'cursor' });
+        }
+        return ok(
+          cursor === undefined
+            ? llm.listCalls({ subject: identity.subject, limit })
+            : llm.listCalls({ subject: identity.subject, limit, cursor }),
+        );
       });
     },
   };

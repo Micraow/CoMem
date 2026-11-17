@@ -102,7 +102,11 @@ const aiSdkSubject: LlmConformanceSubject = {
     return chatProvider();
   },
   createJson: () => {
-    mocks.generateObject.mockResolvedValue({ object: { ok: true } });
+    mocks.generateObject.mockResolvedValue({
+      object: { ok: true },
+      usage: { inputTokens: 3, outputTokens: 2 },
+      finishReason: 'stop',
+    });
     return chatProvider();
   },
   failUnknown: () => {

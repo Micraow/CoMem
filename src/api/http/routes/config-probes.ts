@@ -63,7 +63,7 @@ async function probeLlm(services: ConfigProbeServices & Pick<HttpRouteServices, 
         system: '你是连接测试探针。只回复一个词。',
         messages: [{ role: 'user', content: 'ping' }],
       },
-      { maxTokens: 1 },
+      { maxTokens: 1, purpose: 'config_probe' },
     );
     return { ok: true, latencyMs: elapsedMs(startedAt), detail: `模型 ${model} 可用。` };
   } catch (error) {

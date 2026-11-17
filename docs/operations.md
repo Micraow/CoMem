@@ -116,10 +116,10 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `logging.file` | `""` | 填路径则在 stdout 之外**额外**写一份 `error` 及以上级别的日志。10MB 轮转到 `<path>.1`（§17.8） |
 | `telemetry.metrics.enabled` | `true` | 关掉时 `GET /metrics` 返回 404 并说明「指标已关闭」（空文本会被抓成「指标全为 0」） |
 | `telemetry.metrics.includeAccountLabel` | `false` | 单账号部署没必要，开了会放大标签基数 |
-| `telemetry.requestLog.enabled` | `true` | 是否写 `request_log` 表。这张表**只写不读**，没有查询端点，只能用 `sqlite3` 查（架构文档 §17.6） |
-| `telemetry.requestLog.retainDays` | `7` | 请求记录保留天数。调度器每轮裁剪；调度器不启动时只在构造期执行一次 |
-| `telemetry.requestLog.retainRows` | `100000` | 请求记录保留行数。同上 |
-| `telemetry.requestLog.sampleRate` | `1.0` | 采样率。**错误请求永远全量记录** |
+| `telemetry.requestLog.enabled` | `true` | 是否写 HTTP `request_log` 与 LLM `llm_call_log`。HTTP 表仍无读取端点；LLM 表通过 `GET /api/v1/telemetry/llm-calls` 按认证主体查询 |
+| `telemetry.requestLog.retainDays` | `7` | 两张诊断表的保留天数。调度器每轮裁剪；调度器不启动时只在构造期执行一次 |
+| `telemetry.requestLog.retainRows` | `100000` | 两张诊断表各自保留的最大行数。同上 |
+| `telemetry.requestLog.sampleRate` | `1.0` | HTTP 请求采样率；LLM 调用记录不采样。**错误 HTTP 请求永远全量记录** |
 | `telemetry.hookOverhead.enabled` | `true` | 关掉时 Hook 阻塞开销直接丢弃，不累加指标 |
 | `telemetry.hotness.weight` | `0` | 热度对最终排序的影响：`finalScore = score × (1 + weight × hotness)`（§17.5）。`0` = 不算热度、不参与排序。**记访问与是否参与排序是两件事**：无论 `weight` 是几，检索命中与按 URI 读取都会写 `node.access_count` / `last_accessed_at`（TTL 的滑动窗口读后者）；`weight` 非 0 只是让 `find` 多查一次访问统计并把它算进排序 |
 | `telemetry.hotness.halfLifeHours` | `168` | 热度半衰期（一周，§17.5）。调小让热度掉得更快 |
@@ -1730,9 +1730,27 @@ v1 实际输出的全部指标（`src/services/observability.ts` 的 `renderMetr
 
 `/health` 与 `/metrics` 同时挂在根路径与 `/api/v1` 下，两处都能抓（§17.1）。
 
+### 模型调用明细
+
+`GET /api/v1/telemetry/llm-calls?limit=50&cursor=<opaque>` 必须认证，普通用户只能读取
+自己的记录。默认 50 条，最大 100；按开始时间倒序，`result.nextCursor` 为下一页游标。
+
+每条记录包含用途、模型、开始/结束时间、总耗时、输入/输出/合计 token、单价可用时的成本、
+成功或错误码、尝试次数及已有的 `requestId` / `sessionId`。不保存 prompt、模型输出、密钥
+或供应商原始错误。供应商未返回 usage 或未配置单价时对应字段为 `null`；`0` 只表示供应商
+明确报告 0。记录覆盖内部重试：只有每次尝试都有 usage 时，token / 成本才汇总；任一次未知
+就整行为 `null`，`attempts` 单独告诉用户实际尝试了几次。不能把末次 token 当成整个逻辑
+调用的总量。完整契约见 `local/notes/hermes-monitor-audit/contract-response.md`。
+
+记录写入 SQLite，重启不丢；保留窗口沿用 `telemetry.requestLog.retainDays` /
+`retainRows`。`telemetry.requestLog.enabled=false` 时停止新增，但查询仍能读取裁剪前已有的
+记录。后端只记录当前主体；Hermes 回环身份与控制台登录身份不同的情况下，两者会看到不同的
+空列表，这不表示 Hermes 未接入。
+
 ### 统计端点
 
-只有 `GET /health` 与 `GET /metrics`。`/stats/memories` 与 `/stats/sessions/{id}` 都没有实现，
+聚合端点只有 `GET /health` 与 `GET /metrics`；另有按主体隔离的模型调用明细端点。
+`/stats/memories` 与 `/stats/sessions/{id}` 都没有实现，
 `src/api/http/routes/` 里也没有 `stats.ts`：分类分布、冷热分桶、最老记忆年龄、单会话耗时
 都需要全表或跨表聚合，没有调用方。全库规模看 `/health` 的 `index.totalNodes`，记忆健康度
 看它的 `memory` 段（§17.5、架构文档 §17.9）；要按类型 / 冷热自己查库，用 `sqlite3` 直接查
@@ -2303,16 +2321,17 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
     `docker build --target test -t comem:test-suite .` 构建出的镜像跑（它的 `test`
     阶段会自己先跑一遍 `pnpm lint && pnpm test && pnpm test:integrations`）。
 
-26. **模型用量没有 `purpose` 维度，成本累计是下界。** `/metrics` 只有
-    `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`（没配
-    `providers.llm.default.pricing` 时这条序列根本不存在，另输出
-    `comem_llm_pricing_configured 0` 说明原因），数据源是
-    `LlmService` 的一份进程级累加器：`LlmService` 没有 `purpose` 概念，调用方不传用途，
-    重启即清零。`comem_llm_calls_total`、`comem_llm_duration_seconds`、
-    `comem_llm_errors_total` 也没有实现（§17.4）。另外 `generateJson` 只累加调用次数，
-    不累加 token 与成本——`LlmProvider.completeJson` 的返回值不含 usage——而记忆抽取、
-    记忆合并与查询改写走的都是这条路径，所以成本累计低于实际。要按用途归因，得先让
-    每次调用带用途标签。
+26. **Prometheus 仍是进程级总量，逐次诊断改由 SQLite 记录。** `/metrics` 的
+    `comem_llm_tokens_total{kind}` 与无标签 `comem_llm_cost_usd_total` 来自
+    `LlmService` 的进程级累加器，进程重启清零，也不按 `purpose`、模型或主体拆分；
+    `comem_llm_calls_total`、`comem_llm_duration_seconds`、
+    `comem_llm_errors_total` 仍未实现。需要用途、耗时、尝试次数和单次 token / 成本时，
+    查询已认证主体自己的 `GET /api/v1/telemetry/llm-calls`；数据来自持久化的
+    `llm_call_log`，`generate` 与 `generateJson` 都记录供应商实际返回的 usage。
+    发生重试时只有每次尝试都有 usage 才汇总；任一次缺失就整行 token / `costUsd` 为
+    `null`，`attempts` 仍告诉用户实际尝试数。供应商没有返回 usage、或未配置 pricing 时，
+    相应字段为 `null`，不会用 0 冒充已知值。`/metrics` 的进程级累加器不会补记缺少结果对象的
+    失败尝试，仍是下界。该端点按主体隔离，不能代替跨用户或跨机器的进程级聚合。
 
 27. **`GET /api/v1/stats/sessions/{id}` 未实现。** `src/api/http/routes/` 里没有 `stats.ts`，
     也没有 `/stats/memories`；单会话的归档次数、消息数、抽取计数、召回 / 提交 P50 与

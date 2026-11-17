@@ -266,11 +266,17 @@ describe('completeJson', () => {
   it('把 schema 传给 generateObject 并返回 object', async () => {
     const { provider } = createProvider();
     const schema = z.object({ ok: z.boolean() });
-    mocks.generateObject.mockResolvedValue({ object: { ok: true } });
+    mocks.generateObject.mockResolvedValue({
+      object: { ok: true },
+      usage: { inputTokens: 2, outputTokens: 1 },
+      finishReason: 'stop',
+    });
 
     const value = await provider.completeJson(PROMPT, schema);
 
-    expect(value).toEqual({ ok: true });
+    expect(value.value).toEqual({ ok: true });
+    expect(value.usage).toEqual({ promptTokens: 2, completionTokens: 1 });
+    expect(value.finishReason).toBe('stop');
     expect(mocks.generateObject).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
@@ -314,5 +320,9 @@ describe('completeJson', () => {
     expect(error).toBeInstanceOf(ComemError);
     expect((error as ComemError).code).toBe('PROVIDER_UNAVAILABLE');
     expect((error as ComemError).details?.['truncated']).toBe(true);
+    expect((error as ComemError).details?.['usage']).toEqual({
+      promptTokens: 1,
+      completionTokens: 1,
+    });
   });
 });

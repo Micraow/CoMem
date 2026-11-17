@@ -10,7 +10,7 @@ import type { ZodType } from 'zod';
 
 import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { ConsolidationOperation } from '../../domain/consolidation.js';
-import type { LlmPrompt } from '../../domain/llm.js';
+import type { LlmOptions, LlmPrompt } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
 import type { MemoryTypeSchema } from '../../domain/memory-type.js';
 import type { Uri } from '../../domain/uri.js';
@@ -55,7 +55,7 @@ export interface DreamerServiceDeps {
    * 用 provider 会把这三件事悄悄丢掉。
    */
   readonly llm: {
-    generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>): Promise<T>;
+    generateJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<T>;
   };
   readonly logger: Logger;
   /** 最大轮次。默认 10，限制模型调用次数。 */

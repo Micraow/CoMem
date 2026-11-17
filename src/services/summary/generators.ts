@@ -21,6 +21,7 @@ import type { Uri } from '../../domain/uri.js';
 
 import type { LlmService } from '../llm.js';
 import { buildSummaryPrompt } from '../prompts/summarize.js';
+import { runWithResourceCallContext } from '../observability/call-context.js';
 
 /**
  * 首句终止符：中英文句号、叹号、问号与换行（§9.2 的「各自摘要首句」）。
@@ -84,7 +85,10 @@ export class LlmSummarizer implements SummaryGenerator {
       abstractMaxChars: this.#options.abstractMaxChars,
       overviewMaxChars: this.#options.overviewMaxChars,
     });
-    const result = await this.#llm.generate(prompt);
+    const result = await runWithResourceCallContext(
+      input.uri,
+      () => this.#llm.generate(prompt, { purpose: 'directory_summary' }),
+    );
     return {
       abstract: extractAbstract(result.text),
       overview: result.text,

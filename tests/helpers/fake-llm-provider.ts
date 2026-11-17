@@ -11,7 +11,14 @@
 import type { ZodType } from 'zod';
 
 import { ComemError } from '../../src/domain/errors.js';
-import type { LlmOptions, LlmPrompt, LlmProvider, LlmResult, LlmUsage } from '../../src/domain/llm.js';
+import type {
+  LlmJsonResult,
+  LlmOptions,
+  LlmPrompt,
+  LlmProvider,
+  LlmResult,
+  LlmUsage,
+} from '../../src/domain/llm.js';
 
 export interface FakeResponse {
   readonly text?: string;
@@ -51,7 +58,11 @@ export class FakeLlmProvider implements LlmProvider {
     };
   }
 
-  async completeJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<T> {
+  async completeJson<T>(
+    prompt: LlmPrompt,
+    schema: ZodType<T>,
+    options?: LlmOptions,
+  ): Promise<LlmJsonResult<T>> {
     const response = await this.next(prompt, options);
     if (response.json === undefined) {
       // 与真实适配器一致：没有可解析的 JSON 就是解析失败（INVALID_ARGUMENT），
@@ -64,7 +75,14 @@ export class FakeLlmProvider implements LlmProvider {
         issues: parsed.error.issues.length,
       });
     }
-    return parsed.data;
+    return {
+      value: parsed.data,
+      usage: {
+        promptTokens: response.usage?.promptTokens ?? 0,
+        completionTokens: response.usage?.completionTokens ?? 0,
+      },
+      finishReason: response.finishReason ?? 'stop',
+    };
   }
 
   /** 调用记录，测试断言用。 */

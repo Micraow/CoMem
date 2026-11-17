@@ -38,8 +38,8 @@ import type { ArchiveTaskPayload, CommitStepName } from '../domain/archive.js';
 import type { Logger } from '../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 import { Uri } from '../domain/uri.js';
-
 import type { CommitPipeline } from '../services/commit/pipeline.js';
+import { runWithCommitCallContext } from '../services/observability/call-context.js';
 import type { TaskService } from '../services/task.js';
 
 /** 轮询间隔：1 秒。经验值，来源未知——架构文档没给。 */
@@ -222,7 +222,7 @@ export class CommitRunner {
             void context.markStepDone(step);
           }
         });
-        await pipeline.run(archiveUri, scopeUri);
+        await runWithCommitCallContext(payload.sessionUri, scopeUri, () => pipeline.run(archiveUri, scopeUri));
       })
       .catch((error: unknown) => {
         // `TaskService.run` 自己会捕获并写失败状态；走到这里是它崩了（认领后行消失

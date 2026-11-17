@@ -97,6 +97,17 @@ it('捕获→归档→抽取→合并→embedding→新会话召回→纠正→�
   await services.session.ensure(root, 'old-session', principals);
   await append('old-session', 'old-one', '我的 ThinkBook 主力电脑使用 Arch Linux。');
   await commit('old-session');
+  const backgroundCalls = services.llm.listCalls({ subject: 'user:local', limit: 100 }).items;
+  expect(backgroundCalls).toContainEqual(
+    expect.objectContaining({
+      purpose: 'memory_extract',
+      sessionId: 'old-session',
+      requestId: null,
+      status: 'success',
+      promptTokens: 1,
+      completionTokens: 1,
+    }),
+  );
   expect((await services.memory.read(Uri.parse(personalUri)))?.sources).toHaveLength(1);
   await services.session.ensure(root, 'new-session', principals);
   await append('new-session', 'new-one', '正在讨论 Linux 电脑上的安装方式。');

@@ -215,14 +215,12 @@ export function createRequestIdMiddleware(): RequestIdMiddleware {
  * 固定身份），这里只负责把结果落到请求上下文。来源地址必须一起传下去：回环信任靠
  * 它判定，而不是靠请求头。
  */
-export function createIdentityMiddleware(resolve: IdentityResolver): IdentityMiddleware {
+export function createIdentityMiddleware(resolve: IdentityResolver, observability?: Pick<ObservabilityService, 'setRequestContext'>): IdentityMiddleware {
   return async (request) => {
     if (PUBLIC_PATHS.has(pathnameOf(request))) {
       return;
     }
-    const identity = await resolve(normalizeHeaders(request.headers), {
-      remoteAddress: request.socket.remoteAddress,
-    });
+    const identity = await resolve(normalizeHeaders(request.headers), { remoteAddress: request.socket.remoteAddress });
     const context = requestContexts.get(request);
     if (context === undefined) {
       // 请求 ID 中间件没跑：装配顺序错了。抛 INTERNAL 而不是静默丢身份。
@@ -230,6 +228,7 @@ export function createIdentityMiddleware(resolve: IdentityResolver): IdentityMid
     }
     context.subject = identity.subject;
     context.principals = identity.principals;
+    observability?.setRequestContext(context.requestId, identity.subject);
   };
 }
 

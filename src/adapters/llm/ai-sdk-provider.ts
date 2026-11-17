@@ -27,10 +27,9 @@ import {
   type ModelMessage,
 } from 'ai';
 import type { ZodType } from 'zod';
-
 import { ComemError } from '../../domain/errors.js';
 import type {
-  LlmMessage,
+  LlmJsonResult, LlmMessage,
   LlmOptions,
   LlmPrompt,
   LlmProvider,
@@ -44,7 +43,6 @@ import {
   mapProviderError,
   type ProviderErrorMapOptions,
 } from './provider-error-mapping.js';
-
 export interface AiSdkProviderOptions {
   /** 对应 `config.providers.llm.default`（§18）。 */
   readonly type: 'openai-compatible' | 'anthropic';
@@ -60,7 +58,6 @@ export interface AiSdkProviderOptions {
   };
   readonly logger: Logger;
 }
-
 /**
  * 契约里的 `finishReason` 只有三个值（`domain/llm.ts`）。
  *
@@ -81,7 +78,6 @@ function mapFinishReason(reason: string, logger: Logger, model: string): LlmResu
       return 'stop';
   }
 }
-
 /**
  * AI SDK 的 usage 字段名在不同版本 / provider 之间不一致：v4 起是
  * `inputTokens` / `outputTokens`，更早的版本与部分兼容实现仍是
@@ -122,24 +118,28 @@ function isJsonGenerationFailure(error: unknown): boolean {
   );
 }
 
-/**
- * 结构化输出失败 → 领域失败；不认识的形态返回 `undefined`，交给共享映射按状态码
- * 处理。这是三家适配器里唯一的「真正的差异」：只有生成链路有 `generateObject`。
- */
+function jsonUsageDetails(error: unknown): Record<string, unknown> {
+  return NoObjectGeneratedError.isInstance(error) && error.usage !== undefined
+    ? { usage: readUsage(error.usage) }
+    : {};
+}
+
+/** 结构化输出失败 → 领域失败；不认识的形态交给共享映射按状态码处理。 */
 function classifyJsonGenerationFailure(error: unknown): ComemError | undefined {
-  if (!isJsonGenerationFailure(error)) {
-    return undefined;
-  }
+  const usageDetails = jsonUsageDetails(error);
+  if (!isJsonGenerationFailure(error)) return undefined;
   if (NoObjectGeneratedError.isInstance(error) && error.finishReason === 'length') {
     return new ComemError(
       'PROVIDER_UNAVAILABLE',
       '模型输出被截断，结构化结果不完整。请调大 maxTokens 后重试。',
-      { truncated: true, finishReason: error.finishReason },
+      { truncated: true, finishReason: error.finishReason, ...usageDetails },
     );
   }
-  return new ComemError('INVALID_ARGUMENT', '模型输出不是合法的结构化数据，无法按 schema 解析。', {
-    cause: error instanceof Error ? error.name : typeof error,
-  });
+  return new ComemError(
+    'INVALID_ARGUMENT',
+    '模型输出不是合法的结构化数据，无法按 schema 解析。',
+    { cause: error instanceof Error ? error.name : typeof error, ...usageDetails },
+  );
 }
 
 /**
@@ -225,7 +225,7 @@ export class AiSdkLlmProvider implements LlmProvider {
     };
   }
 
-  async completeJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<T> {
+  async completeJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<LlmJsonResult<T>> {
     const result = await this.run(
       (abortSignal) =>
         generateObject({
@@ -240,7 +240,7 @@ export class AiSdkLlmProvider implements LlmProvider {
         }),
       options,
     );
-    return result.object;
+    return { value: result.object, usage: readUsage(result.usage), finishReason: mapFinishReason(result.finishReason, this.logger, this.modelId) };
   }
 
   /**

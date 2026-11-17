@@ -16,7 +16,7 @@ pnpm --dir web install --frozen-lockfile
 
 ## 1. 启动隔离的 CoMem
 
-首次试用控制台，可以用默认规则和独立数据根运行，无需模型凭据。后端用 `1934`，控制台用 `3082`：
+首次试用控制台，可以用默认规则和独立数据根运行，无需模型凭据。下面的隔离示例后端用 `1934`，控制台用 `3082`；主线本地开发的默认端口是 `1933` 和 `3081`：
 
 ```sh
 COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/hermes-smoke/data
@@ -24,13 +24,13 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/hermes-sm
 
 联调记忆提炼时，从 [配置模板](../config.example.yaml) 创建 `./local/hermes-smoke/config.yaml`，填写自己的模型配置。将 `--config ./local/hermes-smoke/config.yaml` 附在同一条命令末尾。`--data-dir` 让本次联调使用独立索引，避免读取其它版本创建的数据库。
 
-`pnpm dev` 会把控制台代理指向实际配置的后端端口。打开 `http://127.0.0.1:3082/setup` 初始化账号。回环监听且保留默认 `auth.trustLoopback: true` 时，`/setup` 不要求初始化令牌；非回环请求或关闭回环信任时，使用启动日志里的一次性初始化令牌。
+`pnpm dev` 会把控制台代理指向实际配置的后端端口。打开 `http://127.0.0.1:3082/setup` 初始化账号。回环监听且保留默认 `auth.trustLoopback: true` 时，`/setup` 不要求初始化令牌；非回环请求或关闭回环信任时，使用启动日志里的一次性初始化令牌。控制台、Provider 和 MCP 必须使用同一组端口和同一个数据根；例如不要用 `3082` 查看指向 `1933` 的 Provider。
 
 记录 Hermes 主机能访问的**后端**服务地址，例如 `http://127.0.0.1:1934`。如果关闭回环信任，登录控制台后从右上角「我的账户」进入 **API Keys**，为同一个隔离账号创建凭据。
 
 ## 2. 连接自动记忆
 
-使用官方 Hermes Agent v0.23.1。以下命令只写工作树内的隔离 Hermes 配置：
+使用官方 Hermes Agent v0.23.1 或兼容的 v0.23.x（v0.23.2 已验证）。以下命令只写工作树内的隔离 Hermes 配置：
 
 ```sh
 export HERMES_HOME="$PWD/local/hermes-smoke/hermes"
@@ -40,9 +40,9 @@ hermes memory setup
 hermes memory status
 ```
 
-在 `hermes memory setup` 中选择 **CoMem**，填入上面的隔离 CoMem 地址；认证开启时填写同一账号的 API Key。Hermes 会把密钥保存到隔离配置目录的 `.env`，变量名是 `COMEM_TOKEN`。不要读取、复制或展示现有配置里的密钥。非敏感配置也可按 [Memory Provider 说明](../integrations/hermes-memory/README.md) 手动写入。
+在 `hermes memory setup` 中选择 **CoMem**，填入上面的隔离 CoMem 地址；认证开启时填写同一账号的 API Key。Hermes 会把密钥保存到隔离配置目录的 `.env`，变量名是 `COMEM_TOKEN`。不要读取、复制或展示现有配置里的密钥。非敏感配置也可按 [Memory Provider 说明](../integrations/hermes-memory/README.md) 手动写入。无 API Key 的回环连接会以 `server.subject`（默认 `user:local`）写入；此时控制台也必须登录这个账号。
 
-启动这个隔离配置的 Hermes 网关并打开新会话，告诉它一条值得长期保留的偏好，例如「我的每周读书笔记标题固定用『纸舟』」。然后在 CoMem 控制台检查会话到达、归档和记忆复核；再在 Hermes 新开会话，问「我通常给每周读书笔记起什么标题？」。配置状态、会话归档和实际召回是三项不同的检查。
+启动这个隔离配置的 Hermes 网关并打开新会话，告诉它一条值得长期保留的偏好，例如「我的每周读书笔记标题固定用『纸舟』」。然后在 CoMem 控制台检查会话到达、归档和记忆复核；再在 Hermes 新开会话，问「我通常给每周读书笔记起什么标题？」。配置状态、会话归档和实际召回是三项不同的检查。归档完成后 live `messageCount` 可以是 0，`lastCommitAt` 才是提交成功的证据；不能用任务列表是否为空单独判断采集失败。
 
 ## 3. 在 CoMem 控制台完成接入设置
 
@@ -69,6 +69,7 @@ OpenUI 是独立维护的可选展示插件，不随 CoMem 仓库安装，也不
 | 看到的现象 | 下一步 |
 |---|---|
 | `hermes memory status` 没有 CoMem | 检查隔离配置的 `plugins/comem`，重新运行 `hermes memory setup` 并选择 CoMem。 |
-| Hermes 有回复，但 CoMem 看不到会话 | 在回复完成后刷新「会话与任务」；确认隔离服务地址、API Key 和当前主体一致，并在 `hermes memory status` 检查传输错误与本地积压。 |
+| Hermes 有回复，但 CoMem 看不到会话 | 确认浏览器中的后端端口与 Provider `endpoint` 是同一实例；运行 `hermes memory status`，比较其中的 `subject` 与控制台当前空间。无 API Key 的回环连接通常写入 `user:local`，登录其他账号的人看不到这些数据。 |
+| 会话、任务和 `sessions/` 文件树都为空 | 先看 `hermes memory status` 的 `subject` 是否等于控制台账号，再看 `pending_writes` 和 `last_error`；任务视图是否保留完成项取决于部署版本，不能用任务列表为空单独判断采集失败。 |
 | 有归档，但还搜不到记忆 | 确认隔离配置里的生成模型可用，等待后台处理，再检查「记忆复核」里的待确认条目。 |
 | Webapp 没有卡片 | 检查当前 Hermes Webapp 是否加载了 `hermes-openui`，再从 Hermes 会话明确发起 `/hermes-openui:openui` 请求。 |

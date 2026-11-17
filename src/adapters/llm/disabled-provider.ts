@@ -16,7 +16,7 @@
  */
 
 import { ComemError } from '../../domain/errors.js';
-import type { LlmProvider, LlmResult } from '../../domain/llm.js';
+import type { LlmJsonResult, LlmProvider, LlmResult } from '../../domain/llm.js';
 
 /** 关闭模型时调用方的错误消息。两个方法共用，避免同一件事有两种说法。 */
 const DISABLED_MESSAGE =
@@ -37,7 +37,7 @@ export class DisabledLlmProvider implements LlmProvider {
     return disabled();
   }
 
-  async completeJson<T>(): Promise<T> {
+  async completeJson<T>(): Promise<LlmJsonResult<T>> {
     return disabled();
   }
 }

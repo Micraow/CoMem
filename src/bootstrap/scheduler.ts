@@ -60,6 +60,7 @@
 export { DEFAULT_INTERVAL_MS } from './scheduler/constants.js';
 export type {
   PendingMemoryPort,
+  LlmCallPrunePort,
   ReconcilePort,
   ReconcileReplayResult,
   RequestLogPrunePort,

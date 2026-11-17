@@ -39,7 +39,7 @@ function createBackgroundLoops(
   retrieval: Retrieval,
   memoryStack: MemoryStack,
 ): BackgroundLoops {
-  const { config, logger, dataDir, nodes, requestLog } = core;
+  const { config, logger, dataDir, nodes, requestLog, llmCallLog } = core;
   const { filesystem, session } = retrieval;
   const { memory, principals, resource, reconcile } = memoryStack;
 
@@ -65,6 +65,7 @@ function createBackgroundLoops(
     memories: { read: (uri) => memory.read(uri) },
     // 每轮都裁一次（§17.6）：没超期也没超行数时只做一次查找与一次 `COUNT(*)`。
     requestLog,
+    llmCallLog,
     requestLogRetention: {
       retainDays: config.telemetry.requestLog.retainDays,
       retainRows: config.telemetry.requestLog.retainRows,
@@ -110,6 +111,11 @@ function createBackgroundLoops(
     logger.info('调度器未启动：自动提交、会话过期、记忆 TTL 自动归档、归档物理删除全部关闭。', {});
     // 调度器不启动时，启动清理是 `request_log` 唯一的裁剪路径：删掉它表会无限长。
     requestLog.prune({
+      retainDays: config.telemetry.requestLog.retainDays,
+      retainRows: config.telemetry.requestLog.retainRows,
+      now: new Date(),
+    });
+    llmCallLog.prune({
       retainDays: config.telemetry.requestLog.retainDays,
       retainRows: config.telemetry.requestLog.retainRows,
       now: new Date(),

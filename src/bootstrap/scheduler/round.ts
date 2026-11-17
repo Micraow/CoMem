@@ -11,7 +11,14 @@
  */
 
 import type { SchedulerOptions, SchedulerTickResult } from './contracts.js';
-import { logRound, pruneRequestLog, replayReconcile, sweepStaged, sweepTtl } from './maintenance.js';
+import {
+  logRound,
+  pruneLlmCallLog,
+  pruneRequestLog,
+  replayReconcile,
+  sweepStaged,
+  sweepTtl,
+} from './maintenance.js';
 import { processSessionSafely } from './session-round.js';
 import { discoverSessionUris } from './session-scan.js';
 
@@ -26,6 +33,7 @@ export const SKIPPED_RESULT: SchedulerTickResult = Object.freeze({
   ttlPurged: 0,
   stagedSwept: 0,
   requestLogPruned: 0,
+  llmCallsPruned: 0,
   reconcileResolved: 0,
   reconcileFailed: 0,
   reconcileRemaining: 0,
@@ -53,6 +61,7 @@ export async function runRound(options: SchedulerOptions, clock: () => Date): Pr
   const { archived: ttlArchived, purged: ttlPurged } = await sweepTtl(options);
   const stagedSwept = await sweepStaged(options);
   const requestLogPruned = pruneRequestLog(options, now);
+  const llmCallsPruned = pruneLlmCallLog(options, now);
   const reconcile = await replayReconcile(options);
 
   const result: SchedulerTickResult = {
@@ -65,6 +74,7 @@ export async function runRound(options: SchedulerOptions, clock: () => Date): Pr
     ttlPurged,
     stagedSwept,
     requestLogPruned,
+    llmCallsPruned,
     reconcileResolved: reconcile.resolved,
     reconcileFailed: reconcile.failed,
     reconcileRemaining: reconcile.remaining,

@@ -220,42 +220,58 @@ const VISIBLE_METRICS: readonly { readonly name: string; readonly label: string 
 /**
  * 监控（架构文档 §17.10；控制台十个页面里的第十页）。
  *
- * 四块对应 §17 的四个问题：开销归因（§17.2）、吞吐与用量（§17.3 / §17.4）、
- * 记忆健康度（§17.5）、请求记录（§17.6）。
+ * 模型调用明细来自 `GET /telemetry/llm-calls`；`/metrics` 继续只提供聚合运行时
+ * 指标，`/health` 提供服务和记忆队列快照。三块独立加载、独立报错。
  *
- * ## 请求记录为什么只有一句说明
- *
- * §17.6 把每个请求写进 SQLite 的 `request_log`，但**服务端没有暴露查询端点**：
- * `src/api/http/routes/` 里没有 `GET /stats/requests`。控制台不能凭空造一份请求
- * 明细，也不能拿聚合值冒充逐条记录。这里只说明「看不到」，并列出 `/metrics` 里
- * 真有的聚合项——运维至少知道该去 `curl /metrics` 看什么。
+ * Hermes 捕获状态来自现有 `/sessions`：只认可已有提交时间的 `hermes-*` 会话；
+ * 归档只能证明写入成功，不能证明召回内容被模型采用。
  *
  * ## 数据源为什么不统一
  *
  * `/health` 是封套 JSON，`/metrics` 是 Prometheus 文本，两者形状不同、口径也不同
  * （§17.1 的「两套」是有意的）。这里各取所需，不做合并：合并会造出第三套口径。
  */
-import { AlertTriangle, RefreshCw } from 'lucide-vue-next'
+import { RefreshCw } from 'lucide-vue-next'
 
+import type { SessionListPayload } from '~/components/domain/SessionList.vue'
 import type { MonitorUsage } from '~/components/domain/MetricsChart.vue'
 import type { HookEventBreakdown } from '~/components/domain/PhaseBreakdown.vue'
 import {
+  ApiClientError,
   errorMessageOf,
+  forbiddenMessageOf,
   useApi,
+  useScopeRoot,
   type HealthPayload,
+  type LlmCallListPayload,
 } from '~/composables/useApi'
+import { consoleIdentityState } from '~/composables/consoleIdentity'
 import { healthBadgeOf } from '~/utils/healthLabels'
 
 useHead({ title: '监控 · CoMem 控制台' })
 
+const LLM_CALL_PAGE_SIZE = 50
+
 const api = useApi()
 const config = useRuntimeConfig()
+const scopeRoot = useScopeRoot()
+const identityState = consoleIdentityState()
+const currentSubject =
+  identityState.status === 'ready' ? identityState.identity.subject : null
 
 const health = ref<HealthPayload | null>(null)
+const healthError = ref<string | null>(null)
 const metricsText = ref<string | null>(null)
+const metricsError = ref<string | null>(null)
+const sessions = ref<SessionListPayload['sessions'] | null>(null)
+const sessionsError = ref<string | null>(null)
+const calls = ref<LlmCallListPayload['items']>([])
+const nextCursor = ref<string | null>(null)
+const callsError = ref<string | null>(null)
 
 const loading = ref(false)
-const error = ref<string | null>(null)
+const callsLoading = ref(false)
+const callsLoadingMore = ref(false)
 
 const series = computed<PrometheusSeries>(() =>
   metricsText.value === null ? {} : parsePrometheus(metricsText.value),
@@ -278,10 +294,9 @@ const hookEvents = computed<readonly HookEventBreakdown[]>(() => hookBreakdownOf
  */
 const asyncOverheadMs = computed<number | null>(() => {
   const samples = series.value['comem_hook_async_seconds'] ?? []
-  if (samples.length === 0) {
-    return null
-  }
-  return Math.max(...samples.map((sample) => sample.value)) * MILLISECONDS_PER_SECOND
+  return samples.length === 0
+    ? null
+    : Math.max(...samples.map((sample) => sample.value)) * MILLISECONDS_PER_SECOND
 })
 
 const availableMetrics = computed<readonly string[]>(() =>
@@ -294,12 +309,6 @@ const healthBadge = computed(() =>
   health.value === null ? null : healthBadgeOf(health.value),
 )
 
-/**
- * 取 Prometheus 文本。
- *
- * 用 `$fetch` 而不是 `useApi()`：后者负责解封套，而 `/metrics` 没有封套。走同一个
- * base 路径，避免控制台里出现第二个「后端地址」常量。
- */
 async function fetchMetricsText(): Promise<string> {
   const base = String(config.public.apiBase).replace(/\/+$/, '')
   return await $fetch<string>(`${base}/metrics`, {
@@ -309,34 +318,103 @@ async function fetchMetricsText(): Promise<string> {
   })
 }
 
-async function load(): Promise<void> {
-  loading.value = true
-  error.value = null
-
-  const failures: string[] = []
-
-  const [healthResult, metricsResult] = await Promise.allSettled([
-    api.get<HealthPayload>('/health'),
-    fetchMetricsText(),
-  ])
-
-  if (healthResult.status === 'fulfilled') {
-    health.value = healthResult.value
-  } else {
+async function loadHealth(): Promise<void> {
+  healthError.value = null
+  try {
+    health.value = await api.get<HealthPayload>('/health')
+  } catch (caught) {
     health.value = null
-    failures.push(`健康度：${errorMessageOf(healthResult.reason)}`)
+    healthError.value = errorMessageOf(caught)
   }
+}
 
-  if (metricsResult.status === 'fulfilled') {
-    metricsText.value = metricsResult.value
-  } else {
+async function loadMetrics(): Promise<void> {
+  metricsError.value = null
+  try {
+    metricsText.value = await fetchMetricsText()
+  } catch (caught) {
     metricsText.value = null
-    failures.push(`指标：${errorMessageOf(metricsResult.reason)}`)
+    metricsError.value = errorMessageOf(caught)
   }
+}
 
-  error.value = failures.length === 0 ? null : failures.join(' ')
+async function loadSessions(): Promise<void> {
+  sessionsError.value = null
+  if (scopeRoot.value === '') {
+    sessions.value = []
+    return
+  }
+  try {
+    const payload = await api.get<SessionListPayload>('/sessions', {
+      scopeUri: scopeRoot.value,
+    })
+    sessions.value = payload.sessions
+  } catch (caught) {
+    sessions.value = null
+    sessionsError.value = errorMessageOf(caught)
+  }
+}
+
+function callsErrorMessage(caught: unknown): string {
+  if (caught instanceof ApiClientError && caught.statusCode === 404) {
+    return '模型调用记录接口不可用，请确认后端已经更新并重启。'
+  }
+  return forbiddenMessageOf(caught, '没有权限查看模型调用记录。')
+}
+
+async function loadCalls(reset: boolean): Promise<void> {
+  if (reset) {
+    callsLoading.value = true
+  } else {
+    callsLoadingMore.value = true
+  }
+  callsError.value = null
+
+  try {
+    const queryParams: Record<string, unknown> = { limit: LLM_CALL_PAGE_SIZE }
+    if (!reset && nextCursor.value !== null) {
+      queryParams['cursor'] = nextCursor.value
+    }
+    const payload = await api.get<LlmCallListPayload>('/telemetry/llm-calls', queryParams)
+    const source = reset ? [] : calls.value
+    const seen = new Set(source.map((item) => item.id))
+    calls.value = [
+      ...source,
+      ...payload.items.filter((item) => !seen.has(item.id)),
+    ]
+    nextCursor.value = payload.nextCursor
+  } catch (caught) {
+    callsError.value = callsErrorMessage(caught)
+  } finally {
+    callsLoading.value = false
+    callsLoadingMore.value = false
+  }
+}
+
+async function load(): Promise<void> {
+  if (loading.value || callsLoading.value || callsLoadingMore.value) {
+    return
+  }
+  loading.value = true
+  await Promise.allSettled([
+    loadHealth(),
+    loadMetrics(),
+    loadSessions(),
+    loadCalls(true),
+  ])
   loading.value = false
 }
+
+function loadMore(): void {
+  if (nextCursor.value === null || callsLoading.value || callsLoadingMore.value) {
+    return
+  }
+  void loadCalls(false)
+}
+
+watch(scopeRoot, () => {
+  void loadSessions()
+})
 
 onMounted(load)
 </script>
@@ -363,11 +441,51 @@ onMounted(load)
         </template>
       </DomainPageHeader>
 
-      <UiErrorCallout v-if="error !== null" class="mb-24" :message="error" />
+      <section class="section">
+        <DomainHermesCaptureStatus
+          :sessions="sessions"
+          :loading="loading"
+          :error="sessionsError"
+          :current-subject="currentSubject"
+        />
+      </section>
+
+      <section class="section">
+        <UiCard title="模型调用记录" panel flush>
+          <template #head>
+            <span class="caption">当前账号 · 每次模型请求 · 新的在前</span>
+          </template>
+          <DomainModelRequestTable
+            :items="calls"
+            :loading="callsLoading"
+            :loading-more="callsLoadingMore"
+            :error="callsError"
+            :next-cursor="nextCursor"
+            @more="loadMore"
+          />
+        </UiCard>
+      </section>
 
       <section class="section">
         <h2 class="section__title">记忆健康度</h2>
-        <DomainHealthCards :health="health" :loading="loading" />
+        <UiErrorCallout v-if="healthError !== null" class="mb-16" :message="healthError" />
+        <DomainHealthCards v-else :health="health" :loading="loading" />
+      </section>
+
+      <section class="section">
+        <UiCard title="吞吐与用量" panel>
+          <template #head>
+            <span class="caption">HTTP 请求与模型调用分开统计</span>
+          </template>
+          <div v-if="loading && metricsText === null" class="stack-10" aria-busy="true">
+            <UiSkeleton width="64%" height="10px" />
+            <UiSkeleton width="48%" height="10px" />
+          </div>
+          <DomainMetricsChart v-else-if="metricsText !== null" :usage="usage" />
+          <p v-else class="unavailable">
+            {{ metricsError ?? '指标没有取到，无法展示吞吐与用量。' }}
+          </p>
+        </UiCard>
       </section>
 
       <section class="section">
@@ -385,43 +503,27 @@ onMounted(load)
             :events="hookEvents"
             :async-ms="asyncOverheadMs"
           />
-          <p v-else class="unavailable">指标没有取到，无法展示开销归因。</p>
+          <p v-else class="unavailable">
+            {{ metricsError ?? '指标没有取到，无法展示开销归因。' }}
+          </p>
         </UiCard>
       </section>
 
       <section class="section">
-        <UiCard title="吞吐与用量" panel>
+        <UiCard title="运行指标" panel>
           <template #head>
-            <span class="caption">进程启动以来的累加值</span>
+            <span class="caption">Prometheus 聚合快照</span>
           </template>
-          <div v-if="loading && metricsText === null" class="stack-10" aria-busy="true">
-            <UiSkeleton width="64%" height="10px" />
-            <UiSkeleton width="48%" height="10px" />
-          </div>
-          <DomainMetricsChart v-else-if="metricsText !== null" :usage="usage" />
-          <p v-else class="unavailable">指标没有取到，无法展示吞吐与用量。</p>
-        </UiCard>
-      </section>
-
-      <section class="section">
-        <UiCard title="最近的请求" panel>
-          <UiCallout tone="info" class="mb-16">
-            <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-            <div>请求明细还没有查询端点。</div>
-          </UiCallout>
-
-          <p class="requests__lead">指标里的聚合项：</p>
-
-          <ul v-if="availableMetrics.length > 0" class="requests__list">
+          <ul v-if="availableMetrics.length > 0" class="metric-list">
             <li v-for="label in availableMetrics" :key="label">{{ label }}</li>
           </ul>
-          <p v-else class="requests__lead faint">
-            {{ metricsText === null ? '指标没有取到。' : '还没有任何指标被记录。' }}
+          <p v-else class="unavailable">
+            {{ metricsText === null ? (metricsError ?? '指标没有取到。') : '还没有任何指标被记录。' }}
           </p>
 
           <template #foot>
             <details class="tech">
-              <summary>技术详情</summary>
+              <summary>原始文本</summary>
               <pre v-if="metricsText !== null" class="tech__raw">{{ metricsText }}</pre>
               <p v-else class="tech__raw">还没有取到指标文本。</p>
             </details>
@@ -460,27 +562,29 @@ onMounted(load)
   text-transform: uppercase;
 }
 
-.requests__lead {
-  font-size: 14px;
-  line-height: 1.55;
-  color: var(--label-2);
-}
-
 .unavailable {
   font-size: 14px;
   line-height: 1.55;
   color: var(--label-3);
 }
 
-.requests__list {
+.metric-list {
   display: grid;
-  gap: 6px;
-  margin-top: 10px;
-  padding-left: 18px;
-  list-style: disc;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 18px;
   font-size: 14px;
   line-height: 1.5;
   color: var(--label-2);
+}
+
+.metric-list li::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin: 0 8px 2px 0;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .tech {

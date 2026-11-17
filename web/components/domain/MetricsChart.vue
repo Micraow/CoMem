@@ -58,7 +58,7 @@ interface UsageCard {
   readonly prose?: boolean
 }
 
-const cards = computed<readonly UsageCard[]>(() => {
+const httpCards = computed<readonly UsageCard[]>(() => {
   const usage = props.usage
   if (usage === null) {
     return []
@@ -81,6 +81,16 @@ const cards = computed<readonly UsageCard[]>(() => {
       sub: '进程启动以来',
     })
   }
+  return result
+})
+
+const modelCards = computed<readonly UsageCard[]>(() => {
+  const usage = props.usage
+  if (usage === null) {
+    return []
+  }
+
+  const result: UsageCard[] = []
   if (usage.costUsd !== null) {
     result.push({
       key: 'cost',
@@ -115,7 +125,9 @@ const tokenData = computed<readonly { label: string; value: number }[]>(() => {
   return data
 })
 
-const isEmpty = computed(() => cards.value.length === 0 && tokenData.value.length === 0)
+const hasHttp = computed(() => httpCards.value.length > 0)
+const hasModel = computed(() => modelCards.value.length > 0 || tokenData.value.length > 0)
+const isEmpty = computed(() => !hasHttp.value && !hasModel.value)
 </script>
 
 <template>
@@ -124,25 +136,63 @@ const isEmpty = computed(() => cards.value.length === 0 && tokenData.value.lengt
   </UiEmpty>
 
   <div v-else class="usage">
-    <div v-if="cards.length > 0" class="usage__cards">
-      <div v-for="card in cards" :key="card.key" class="stat">
-        <span class="stat__v" :class="card.prose ? 'stat__v--prose' : ''">{{ card.value }}</span>
-        <span class="stat__k">{{ card.label }}</span>
-        <span v-if="card.sub !== null" class="stat__sub">{{ card.sub }}</span>
+    <section v-if="hasHttp" class="usage__group" aria-labelledby="http-usage-title">
+      <header class="usage__group-head">
+        <h3 id="http-usage-title" class="usage__title">HTTP 请求</h3>
+        <span class="usage__note">进程启动以来服务收到的请求，包含非模型接口</span>
+      </header>
+      <div class="usage__cards">
+        <div v-for="card in httpCards" :key="card.key" class="stat">
+          <span class="stat__v">{{ card.value }}</span>
+          <span class="stat__k">{{ card.label }}</span>
+          <span v-if="card.sub !== null" class="stat__sub">{{ card.sub }}</span>
+        </div>
       </div>
-    </div>
+    </section>
 
-    <div v-if="tokenData.length > 0" class="usage__tokens">
-      <h3 class="usage__title">模型 Token 累计</h3>
-      <UiChart :data="tokenData" unit=" token" />
-    </div>
+    <section v-if="hasModel" class="usage__group" aria-labelledby="model-usage-title">
+      <header class="usage__group-head">
+        <h3 id="model-usage-title" class="usage__title">模型调用</h3>
+        <span class="usage__note">进程启动以来的 Token 与成本，只统计模型服务消费</span>
+      </header>
+      <div v-if="modelCards.length > 0" class="usage__cards">
+        <div v-for="card in modelCards" :key="card.key" class="stat">
+          <span class="stat__v" :class="card.prose ? 'stat__v--prose' : ''">{{ card.value }}</span>
+          <span class="stat__k">{{ card.label }}</span>
+          <span v-if="card.sub !== null" class="stat__sub">{{ card.sub }}</span>
+        </div>
+      </div>
+      <div v-if="tokenData.length > 0" class="usage__tokens">
+        <h4 class="usage__subtitle">Token 累计</h4>
+        <UiChart :data="tokenData" unit=" token" />
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
 .usage {
   display: grid;
-  gap: 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px 24px;
+}
+
+.usage__group {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.usage__group + .usage__group {
+  padding-left: 24px;
+  border-left: 0.5px solid var(--separator);
+}
+
+.usage__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .usage__cards {
@@ -176,7 +226,32 @@ const isEmpty = computed(() => cards.value.length === 0 && tokenData.value.lengt
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: var(--label-3);
+  color: var(--label-2);
   text-transform: uppercase;
+}
+
+.usage__subtitle {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--label-3);
+}
+
+.usage__note {
+  font-size: 13px;
+  color: var(--label-3);
+}
+
+@media (max-width: 820px) {
+  .usage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .usage__group + .usage__group {
+    padding-left: 0;
+    padding-top: 20px;
+    border-left: 0;
+    border-top: 0.5px solid var(--separator);
+  }
 }
 </style>

@@ -128,6 +128,7 @@ export class ArchiveSummaryStep extends CommitStep {
         messages: context.messages,
         previousOverview: context.latestArchiveOverview,
       }),
+      { purpose: 'working_memory' },
     );
     const overview = result.text;
     if (overview.trim() === '') {

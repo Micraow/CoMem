@@ -325,6 +325,23 @@ class CoMemMemoryProvider(MemoryProvider):
             return "Set COMEM_TOKEN for a non-loopback CoMem endpoint."
         return self._last_error
 
+    @staticmethod
+    def _read_binding(state_dir: Path | None) -> dict[str, Any]:
+        if state_dir is None:
+            return {}
+        try:
+            binding = json.loads((state_dir / "binding.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return binding if isinstance(binding, dict) else {}
+
+    def _bound_subject(self, state_dir: Path | None) -> str:
+        binding = self._read_binding(state_dir)
+        subject = binding.get("subject")
+        if binding.get("transport") != self._settings.binding_id:
+            return ""
+        return subject if isinstance(subject, str) else ""
+
     def initialize(self, session_id: str, **kwargs) -> None:
         home = Path(kwargs.get("hermes_home") or Path.home() / ".hermes")
         self._state_dir = home / "comem-provider"
@@ -335,19 +352,7 @@ class CoMemMemoryProvider(MemoryProvider):
         except OSError as error:
             self._outbox_dir = None
             self._record_failure("state directory", error)
-        if self._state_dir is not None:
-            try:
-                binding = json.loads(
-                    (self._state_dir / "binding.json").read_text(encoding="utf-8")
-                )
-                if (
-                    isinstance(binding, dict)
-                    and binding.get("transport") == self._settings.binding_id
-                    and isinstance(binding.get("subject"), str)
-                ):
-                    self._known_subject = binding["subject"]
-            except (OSError, json.JSONDecodeError):
-                pass
+        self._known_subject = self._bound_subject(self._state_dir)
         self._session_id = session_id
         self._agent_context = str(kwargs.get("agent_context") or "primary")
         self._cwd = str(kwargs.get("cwd") or "")
@@ -426,12 +431,15 @@ class CoMemMemoryProvider(MemoryProvider):
             authentication = "loopback trust"
         else:
             authentication = "not configured (remote endpoint requires an API key)"
+        subject = self._known_subject or self._bound_subject(state_dir)
         result = {
             "endpoint": self._settings.base_url,
             "authentication": authentication,
             "recall_max_tokens": self._settings.max_tokens,
             "pending_writes": pending,
         }
+        if subject:
+            result["subject"] = subject
         if last_error:
             result["last_error"] = last_error
         return result

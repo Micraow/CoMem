@@ -1003,6 +1003,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 | 0007 | `0007_node_validity.sql` | `node.valid_from` / `node.valid_until`：记忆的有效区间，NULL = 无界（§11.11） |
 | 0008 | `0008_bootstrap_admin.sql` | 首个管理员引导令牌 |
 | 0009 | `0009_memory_structure.sql` | `memory_entity` / `memory_alias` / `memory_entity_ref` 与旧链接逐起点迁移标记 |
+| 0010 | `0010_llm_call_log.sql` | `llm_call_log`：按认证主体查询的逐次 LLM 用途、模型、token、耗时与结果（§17.4） |
 
 **为什么只有一个文件。** 早期是 18 个增量迁移，其中 0016–0018 是「修前面迁移 bug」的
 补丁（`session_epoch`、身份表外键、组 owner 外键）。项目没有存量用户、不需要从 0001
@@ -1020,7 +1021,7 @@ CREATE INDEX idx_api_key_user ON api_key(user_id);
 - `node`（含摘要新鲜度三列、`access_count` / `last_accessed_at`）及其索引、
   `node_fts`（FTS5）。`expires_at` 已由 0005 删除（§11.7 的滑动窗口改为清扫时现算）
 - `node_permission`（含 `effect`）/ `acl_entry`
-- `task` / `request_log`
+- `task` / `request_log`；`llm_call_log` 由 0010 新建
 - `embedding_model` / `embedding_cache`
 - `ingest_cursor` / `prompt_override`
 
@@ -3264,7 +3265,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 用户与组 | `GET /admin/users`、`POST /admin/users`、`PATCH /admin/users/{id}`、`DELETE /admin/users/{id}`、`POST /admin/users/{id}/password`、`GET /admin/users/{id}/api-keys`、`POST /admin/users/{id}/api-keys`、`DELETE /admin/api-keys/{keyId}`、`GET /admin/groups`、`POST /admin/groups`、`PATCH /admin/groups/{id}`、`DELETE /admin/groups/{id}`、`POST /admin/groups/{id}/owner`、`GET /admin/groups/{id}/members`、`POST /admin/groups/{id}/members`、`DELETE /admin/groups/{id}/members/{userId}`。授权口径见 §12.4 |
 | 提示词 | `GET /prompts`、`GET /prompts/{id}`（任何已认证身份）；`PUT /prompts/{id}`、`DELETE /prompts/{id}`、`POST /prompts/{id}/preview`（系统管理员） |
 | 本地推理 | `GET /inference/local`、`POST /inference/local/start`、`POST /inference/local/stop`。三个都只认系统管理员；启动命令与 pid 管理见 §18.2 |
-| 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验） |
+| 遥测 | `POST /telemetry/hook`（Hook 上报阻塞开销，只做身份校验）；`GET /telemetry/llm-calls`（当前认证主体自己的最近模型调用，`limit` 1–100，cursor 分页） |
 | 认证 | `GET /bootstrap`（恒定 200，见上）、`POST /bootstrap/admin`（仅 `needsSetup` 时可用；非回环请求要一次性初始化令牌）、`GET /auth/me`、`POST /auth/login`、`POST /auth/logout`、`POST /auth/password`（§12.7） |
 | MCP | `GET /mcp/tools`（16 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
@@ -3413,7 +3414,7 @@ DSH 这种没有 hook 面的宿主走自己的插件包，不塞进 `hosts/`。
 
 **这条限制只约束 Hook，不约束 MCP。** MCP 走标准传输（§15.6），任何支持 Streamable HTTP 或本地 stdio 的宿主都能接——那两条是协议，不是适配器。加宿主只需要在文档里补一段配置片段，`src/` 一行都不用改。
 
-**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP。可选展示插件 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 在独立仓库维护并单独安装。见[快速上手](hermes-quickstart.md)。
+**Hermes 用独立 Memory Provider。** `integrations/hermes-memory/` 按官方 v0.23.1 Provider 接口加载，v0.23.2 已对真实网关验证。每轮用当前请求调用 `POST /api/v1/context`，完成的用户和助手文本经 `/sessions`、`/messages` 和 `/commit` 进入原有归档管线。召回和写入用同一 `hermes-` 会话地址；回放队列保存在当前 Hermes 配置目录，核对服务地址、凭据指纹和账号后才重投。Provider 状态显示最近认证返回的 `subject`，凭据或服务地址变化后不展示旧绑定；控制台必须以同一主体登录，否则写入成功的数据在另一主体的会话、任务和文件树里不可见。该集成保留宿主的原生记忆文件；显式导入仍通过 MCP。可选展示插件 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 在独立仓库维护并单独安装。见[快速上手](hermes-quickstart.md)。
 
 ### 15.8 目录
 
@@ -3592,7 +3593,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 | 记忆复核 | 待确认列表优先显示更新与推断偏好；详情展示正文、真实的版本差异及来源；逐条更新通过 / 拒绝的结果 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 系统管理员入口；用户列表显示服务器判定的角色，组成员列表区分所有者和成员。管理员可以为其他用户设置或重置密码；查看或管理节点读写权限使用「权限管理」 |
-| 会话与任务 | 会话列表、归档列表、任务状态；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
+| 会话与任务 | 会话列表、归档列表、最近 100 条任务（包含运行中、完成与失败）；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
 | 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
@@ -3646,6 +3647,8 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 **为什么不该给控制台加 `NUXT_PUBLIC_SUBJECT`。** 那只是把登录身份换成第二处配置：
 运维改 `server.subject` 时还要记得改控制台，而控制台的真实身份来自登录响应。
 
+**任务历史与待处理队列分开查询。** `GET /tasks` 默认保留可认领队列契约，概览继续使用它；会话页传 `view=recent`，按更新时间倒序列出全部状态，`status` 过滤在 `limit` 之前执行（上限 1000，默认 100）。已完成任务保留可见，运行中或排队中继续轮询。任务接口仍只允许系统管理员；不从任务 payload 推断授权。
+
 ### 16.1 视觉方向：Apple
 
 已定。参考 `docs/design/variants/apple/`（5 页 + `app.css`），实现时按它落 Nuxt 组件。
@@ -3667,8 +3670,6 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 **界面文案原则**：不把提示词抄到 UI 上。开发期内部术语（page_id、digest、summary_pending）不进用户可见区域，用「基线」「待刷新」这类词。
 
 **头像只显示当前登录用户的首字母。** 主体名是内部标识，`user:alice` → `A`；没有主体时显示 `?`。唯一出现部署身份的地方是 `/setup` 的默认用户名——那一次它就是要创建的那个账号（本机 `curl` 与 hook 插件以它发请求，控制台建同一个 ID 才不会出现「两个都是我的账号」的分裂）。表单占位符写真实输入约束（如邮箱格式 `name@example.com`、用户 ID 的字符集），不写示例人名。
-
-**请求明细没有查询端点。** `request_log` 只落 SQLite，`src/api/http/routes/` 里没有 `GET /stats/requests`；监控页只列 `/metrics` 里的聚合项，不伪造逐条记录。要按路由、状态码、用户筛选，得先加一个查询端点。
 
 **界面上不存在的元素，都是刻意删掉的。** 下面这些位置读起来像「漏了」，实际是取舍，不要按「应该有」补回去：
 
@@ -3790,7 +3791,7 @@ comem_hook_async_seconds{phase}                 # 后台部分耗时，phase = a
 
 ### 17.4 模型用量与成本
 
-**当前 `/metrics` 的模型指标是进程级总量，不带 `purpose` / `provider` / `model` 标签**：
+**Prometheus 的模型指标仍是进程级总量，不带 `purpose` / `provider` / `model` 标签**：
 
 ```
 comem_llm_tokens_total{kind="prompt"|"completion"}   # 进程启动以来的累计
@@ -3798,11 +3799,36 @@ comem_llm_cost_usd_total                              # 无标签；只在配了
 comem_llm_pricing_configured                          # 0 = 没配单价，成本不可计算
 ```
 
-数据源是 `LlmService` 的进程级累加器（`LlmCallStats`：`calls` / `promptTokens` / `completionTokens` / `costUsd` / `truncated` / `failed`），`ObservabilityService.modelUsage()` 原样返回这份快照。**`LlmService` 没有 `purpose` 概念**：调用方不传用途，累加器只有一份，进程重启清零。
+数据源是 `LlmService` 的进程级累加器（`LlmCallStats`：`calls` / `promptTokens` / `completionTokens` / `costUsd` / `truncated` / `failed`）。它继续服务 Prometheus 的低基数总量，进程重启清零。
 
-**`purpose` 维度未实现。** 设计目标是按 `summary`（目录摘要）/ `extract`（记忆抽取）/ `intent`（意图分析）/ `working_memory` 分开，回答「钱花在哪」；这需要每次调用带用途、累加器按用途分桶、`/metrics` 按标签输出。`comem_llm_calls_total`、`comem_llm_duration_seconds`、`comem_llm_errors_total` 同样没有实现。**不要照上面这段名字写 Prometheus 查询**——实际输出见 `docs/operations.md`「`/metrics`」。
+**逐次调用的用途与时间线在 `llm_call_log`。** `generate` 与 `generateJson` 都接受
+`purpose`；生产调用点使用 `query_rewrite` / `recall_compression` /
+`directory_summary` / `archive_summary` / `working_memory` / `memory_extract` /
+`dreamer` / `config_probe`。一行表示一次**逻辑调用**（覆盖内部重试），记录模型、开始/结束
+时间、总耗时、尝试次数、成功/稳定错误码、prompt/completion token 与单价可用时的美元成本。
+不记录 prompt、system message、模型输出正文、API Key 或供应商原始错误。记录写入失败只记
+`warn`，不能让业务模型调用失败。
 
-**token 与成本有缺口。** 结构化输出（`completeJson`）只累加 `calls`，不累加 token 与成本：`LlmProvider.completeJson` 的返回值不含 usage，写 0 会被读成「这次调用没花钱」，所以留空。记忆抽取、记忆合并与查询改写走的都是这条路径，因此成本累计是下界。没配 `providers.llm.default.pricing` 时 `costUsd` 为 `null`，`/metrics` **不输出 `comem_llm_cost_usd_total` 这条样本**——序列不存在就是「算不出来」，不需要哨兵值；同时输出 `comem_llm_pricing_configured 0`，抓取端不用猜「成本序列为什么不见了」。配了单价才是 0 起步的累加值：只有「有序列且为 0」才表示真花了 0 美元。
+**结构化输出现在也有精确 usage。** `LlmProvider.completeJson` 返回对象时同时返回
+`usage` 与 `finishReason`，因此记忆抽取、查询改写等 JSON 调用的 token 与成本不再漏记。
+AI SDK 的结构化解析异常也带回了供应商 usage。一次逻辑调用发生重试时，只有**每次尝试**
+都报告 usage，记录才把各次 token 相加；任一次缺少 usage 时整行的 token 与成本都是 `null`，
+不能把末次部分值冒充整个逻辑调用的总量。`attempts` 始终记录实际供应商尝试数，界面必须
+与 token 一起展示。供应商明确报告 0 时才写 `0`。没配 pricing 时 `costUsd` 为 `null`。
+`/metrics` 的进程级累加器仍只累计拿到结果对象的尝试，因此是下界；未配单价时不输出
+`comem_llm_cost_usd_total` 样本并输出 `comem_llm_pricing_configured 0`。
+
+**查询端点按认证主体隔离。** `GET /api/v1/telemetry/llm-calls?limit=50&cursor=...`
+只查询 `subject = requestContext.subject`，普通用户可读自己的记录；客户端不能指定主体，
+记录主体为 `NULL` 的后台孤立调用不会出现在该端点。排序为 `started_at DESC, id DESC`，
+游标绑定最后一条的 `(startedAt, id)`。默认 50、最大 100。HTTP 内发起的调用通过
+`AsyncLocalStorage` 关联 `requestId`；已有会话参数时关联 `sessionId`。后台归档从会话 URI
+补 owner subject 与 `sessionId`，目录摘要至少补 owner subject。异步目录摘要没有请求上下文，
+所以 `requestId` 为 `null`。
+
+**保留沿用 `telemetry.requestLog`。** `telemetry.requestLog.enabled` 关闭后停止写新的
+HTTP 请求与 LLM 调用记录；`retainDays` / `retainRows` 同时裁剪两张表。调度器每轮各调用一次
+`prune`，调度器关闭时启动期各裁一次。查询端点仍可读取尚未被裁掉的旧记录。
 
 ### 17.5 记忆健康度与热度
 
@@ -3864,6 +3890,11 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 
 **采样**：默认全量。高频写入场景可开采样（`telemetry.requestLog.sampleRate`），但**错误请求永远全量记录**。
 
+**LLM 调用记录不采样。** `llm_call_log` 默认按逻辑调用全量写入，因为采样会让
+“最近一次为什么慢/为什么失败”在最需要时缺失。它的体积由时间与行数上限控制；运维关闭
+`telemetry.requestLog.enabled` 时两张诊断表都停止新增。`sampleRate` 只作用于 HTTP
+`request_log`，不作用于 LLM 调用。
+
 ### 17.7 请求 ID 贯穿
 
 每个 HTTP 请求和每个后台任务都有 `requestId`（从 `X-Request-Id` 读，没有就生成）。它进 `AsyncLocalStorage`，然后：
@@ -3921,22 +3952,27 @@ comem_llm_pricing_configured                          # 0 = 没配单价，成�
 
 ### 17.10 控制台「监控」页
 
-控制台「监控」页（§16），四块，数据源是 `GET /health` 与 `GET /metrics`：
+控制台「监控」页（§16），数据源是 `GET /health`、`GET /metrics` 与
+`GET /telemetry/llm-calls`：
 
 | 区块 | 内容 |
 |---|---|
 | 记忆健康度 | `GET /health` 的四张卡（索引节点数、待处理任务、待复核条数与其最老一条的年龄、摘要降级目录数）。待复核数与最老年龄都读 `health.memory.*`，不再预取 `/memories/pending` 在前端重算 |
 | 开销归因 | 每个 Hook 事件**最近一轮**的四阶段阻塞耗时；后台异步耗时另起一行，**按阶段不按事件** |
 | 吞吐与用量 | 进程启动以来的请求数、平均耗时、prompt / completion token、成本累计（未配单价时卡片显示「未配置单价，成本不可计算」而不是 `$0`） |
-| 最近的请求 | 没有查询端点，只列出 `/metrics` 里实际存在的聚合项，原始文本放在折叠区 |
+| 最近的模型调用 | 当前认证主体自己的最近记录：用途、模型、开始时间、耗时、输入/输出/合计 token、成本、状态、错误码、`requestId` 与 `sessionId`；cursor 继续加载更早记录 |
 
 **只有「最近一次」，没有历史分布。** `recordHookOverhead` 把每次上报按事件覆盖进 `Map`（`comem_hook_overhead_seconds` 是 gauge，不是直方图），所以这一页给不出 P50/P95，也不给阶段饼图历史。历史分布要靠 Prometheus 按抓取间隔自己算，见 `src/services/observability.ts` 的同名注释。
 
 **吞吐只有平均值。** `comem_http_request_duration_seconds` 是 summary 形态（`_sum` / `_count`），平均耗时 = `_sum / _count`；P95 需要直方图桶，v1 没有桶边界也就不报分位数。**没有 TPS 曲线与错误率**：`comem_http_requests_total` / `comem_http_requests_per_second` / `comem_http_inflight_requests` / `comem_http_ttfb_seconds` 都没有实现（清单见 `docs/operations.md`「`/metrics`」）。
 
-**没有按 purpose 分的模型用量。** `/metrics` 只有 `comem_llm_tokens_total{kind}` 与无标签的 `comem_llm_cost_usd_total`（§17.4；后者在没配单价时整条不存在，另有 `comem_llm_pricing_configured 0` 说明原因），所以「吞吐与用量」一栏只能给进程级总量。
+**模型调用明细按主体隔离。** 普通用户看自己的逐次调用，不提供管理员跨用户列表；这与
+`/metrics` 的进程级累计分开。页面不能拿累计数反推明细，也不能把空 `items` 解释成
+“Hermes 未接入”：Hermes 可能以另一个回环主体写入记录。完整字段和限制见
+`local/notes/hermes-monitor-audit/contract-response.md`。
 
-**请求明细没有查询端点。** `request_log` 只落 SQLite，`src/api/http/routes/` 里没有 `GET /stats/requests`；这一块只说明「看不到」并列出真实存在的指标名，不拿聚合值冒充逐条记录。要按路由、状态码、用户筛选，得先加一个查询端点。
+**HTTP 请求明细仍没有查询端点。** `request_log` 只落 SQLite；本次新增的是
+`llm_call_log` 读取面，不把 HTTP 行、任务行或模型调用混成一张“最近请求”。
 
 **不画不存在的指标。** 每张卡片由数据是否存在决定：一张 TTFB 恒为 0 的图会让人以为「首字节很快」，而实际是「没测」。
 
