@@ -127,12 +127,15 @@ export async function createAccess(
   });
 
   /**
-   * 预置用户命名空间：`comem://user/{uid}/` 的根行 + 四个上下文目录。
+   * 预置用户命名空间：`comem://user/{uid}/` 的根行 + 三个基础上下文目录。
    *
    * 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：`list` /
    * `tree` / `GET /sessions` 都走 `filterReadable`，它是纯 SQL 查询，物化表里没有
    * 根行就一条都返回不了。写路径上 `InheritingAuthorizer` 会顺手补，但只读路径
    * 不会——一个刚装好、还没写过东西的实例，控制台是空的。
+   *
+   * `skills/` 是可选的外部能力包目录，只在第一次 `add_skill` 时创建；预先建一个空目录
+   * 会让用户误以为 CoMem 在这个账号里管理技能。
    *
    * `POST /admin/users` 也要调它（通过 `IdentityService.ensureUserNamespace`）：
    * 新建的账号第一次登录时，会话页必须是空列表而不是 403。
@@ -140,14 +143,14 @@ export async function createAccess(
   async function ensureUserNamespace(userId: string): Promise<void> {
     const userRoot = Uri.parse(`comem://user/${userId}`);
     await acl.materializeNode(userRoot);
-    for (const name of ['memories', 'resources', 'skills', 'sessions']) {
+    for (const name of ['memories', 'resources', 'sessions']) {
       const directory = userRoot.child(name);
       await store.mkdir(directory, { recursive: true });
       await acl.materializeNode(directory);
     }
   }
 
-  // §12.6 根预置 + §6.5 的四个上下文目录。见 `ensureUserNamespace` 的注释。
+  // §12.6 根预置 + §6.5 的三个基础上下文目录。见 `ensureUserNamespace` 的注释。
   //
   // 幂等：行已存在就是覆盖成同样的值。
   await userNamespace.ensure(boundPrincipal.id);

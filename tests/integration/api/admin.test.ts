@@ -582,9 +582,9 @@ describe('删除账号的授权清理', () => {
 
     const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/users' }));
     const bob = (listed['users'] as Record<string, unknown>[]).find((row) => row['id'] === 'bob');
-    // 新账号只该拿到自己的命名空间（根 + 四个上下文目录各一行），alice 根下的
+    // 新账号只该拿到自己的命名空间（根 + 三个基础目录各一行），alice 根下的
     // 那条 `write` 授权必须消失。
-    expect(bob?.['permissionCount']).toBe(5);
+    expect(bob?.['permissionCount']).toBe(4);
     const aliceRootUri = aliceRoot.toString();
     expect(
       countRows(

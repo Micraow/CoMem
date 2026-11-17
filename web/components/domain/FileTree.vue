@@ -54,6 +54,25 @@ const scrollArea = ref<HTMLElement | null>(null)
 const createOpen = ref(false)
 
 /**
+ * 旧账号可能已有启动时预建的空 `skills/`。它只代表从未安装过技能，不应占据导航；
+ * 过滤只认当前 scope 根的直接子目录且 `size === 0`，有技能包时正常显示。
+ * `size` 来自 `/fs/ls` 的直接可见子项数，过滤不额外请求，权限或网络错误仍走上方错误态。
+ */
+const visibleRows = computed(() => {
+  const root = (state.value?.root ?? scopeRoot.value).replace(/\/+$/u, '')
+  const emptySkillsUri = `${root}/skills`
+  return rows.value.filter(
+    (node) =>
+      !(
+        node.depth === 0 &&
+        node.kind === 'directory' &&
+        node.size === 0 &&
+        node.uri.replace(/\/+$/u, '') === emptySkillsUri
+      ),
+  )
+})
+
+/**
  * 新建成功后：重拉当前根 → 展开到新节点 → 选中它。
  *
  * 顺序不能换。`refresh()` 会把展开状态清空；先选中再刷新，新文件会因为父目录没展开
@@ -155,7 +174,7 @@ watch([() => props.selected, state], () => {
       </UiErrorRetry>
 
       <UiEmpty
-        v-else-if="rows.length === 0"
+        v-else-if="visibleRows.length === 0"
         v-slot="{ size }"
         :title="filter.trim() === '' ? '这个命名空间还没有内容' : '已展开的路径里没有匹配项'"
       >
@@ -164,7 +183,7 @@ watch([() => props.selected, state], () => {
 
       <div v-else class="tree" role="tree" aria-label="命名空间目录树">
         <div
-          v-for="node in rows"
+          v-for="node in visibleRows"
           :key="node.uri"
           class="trow"
           :class="{
