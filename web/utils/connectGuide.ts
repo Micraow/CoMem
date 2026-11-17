@@ -17,10 +17,12 @@
  * `integrations/lib/config.mjs` 改了地址或字段名时，本文件要跟着改；
  * `tests/unit/web/connect-guide.test.ts` 直接读那两个文件做对拍，改漏会失败。
  *
- * Codex 的 TOML 形状来自 `codex mcp add <name> --url <url>` 写出的
- * `~/.codex/config.toml`（`[mcp_servers.<name>]` + `url`），不是从仓库文档
- * 复制的——文档没有 Codex 的 MCP 片段。DSH 的 YAML 形状来自
- * `integrations/README.md` 的「DSH」一节。
+ * 默认接入方式：
+ *
+ * - Claude Code、Codex、DSH 启动仓库内的 stdio 代理，共用共享 `config.yaml`；
+ * - Hermes 使用自身 profile 配置，并在 MCP 头中引用 `COMEM_TOKEN`。
+ *
+ * 默认片段都不写入明文密钥。
  */
 
 import { formatMonthDayTime } from './format'
@@ -52,6 +54,13 @@ export const DEFAULT_SERVER_BASE_URL = 'http://127.0.0.1:1933'
 
 /** MCP 端点路径（`docs/architecture.md` §15.6）。 */
 export const MCP_ENDPOINT_PATH = '/mcp'
+
+/** 输入框尚未填写时的占位仓库路径；真实片段始终使用输入值。 */
+export const DEFAULT_REPO_ROOT = '/绝对路径/CoMem'
+
+/** Hook、stdio MCP 代理和 doctor 共用的非宿主专属配置路径表达式。 */
+export const SHARED_CONFIG_PATH =
+  '${COMEM_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/comem/config.yaml}'
 
 /**
  * 从控制台实际使用的 API 地址推导服务地址。
@@ -110,9 +119,19 @@ export interface McpSnippet {
   readonly text: string
 }
 
-export const HERMES_KEY_NAME = 'Hermes'
+export const CONNECT_TOKEN_ENV = 'COMEM_TOKEN'
 
-export const HERMES_TOKEN_ENV = 'COMEM_TOKEN'
+/** API Key 名称跟随当前宿主，后续可在“我的账户”按用途撤销。 */
+export const CONNECT_KEY_NAMES = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  dsh: 'DSH',
+  hermes: 'Hermes',
+} satisfies Record<ConnectHost, string>
+
+export function apiKeyNameForHost(host: ConnectHost): string {
+  return CONNECT_KEY_NAMES[host]
+}
 
 /** 当前网页登录主体 → API Key 端点使用的用户 ID。 */
 export function userIdFromSubject(subject: string): string | null {
@@ -133,19 +152,58 @@ function mcpEndpointOf(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/u, '')}${MCP_ENDPOINT_PATH}`
 }
 
+function normalizedRepoRoot(repoRoot: string): string {
+  return (repoRoot.trim() || DEFAULT_REPO_ROOT).replace(/\/+$/u, '')
+}
+
+function proxyPathFor(repoRoot: string): string {
+  return `${normalizedRepoRoot(repoRoot)}/integrations/servers/mcp-proxy.mjs`
+}
+
+function cliPathFor(repoRoot: string): string {
+  return `${normalizedRepoRoot(repoRoot)}/integrations/cli.mjs`
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`
+}
+
+export function sharedConfigSetupCommand(): string {
+  return [
+    'config_file="${COMEM_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/comem/config.yaml}"',
+    'config_dir="$(dirname "$config_file")"',
+    'install -d -m 700 "$config_dir"',
+    'test -e "$config_file" || install -m 600 /dev/null "$config_file"',
+    'chmod 600 "$config_file"',
+    '"${EDITOR:-vi}" "$config_file"',
+    '',
+  ].join('\n')
+}
+
+/** 共享配置中的非密钥地址与待替换 Key；不接收或嵌入动态生成的密钥。 */
+export function sharedConfigSnippet(
+  baseUrl: string = DEFAULT_SERVER_BASE_URL,
+): McpSnippet {
+  return {
+    format: 'YAML',
+    text: `baseUrl: ${baseUrl.replace(/\/+$/u, '')}\ntoken: '<本页生成的 Key>'\n`,
+  }
+}
+
 /**
  * 按宿主实际使用的配置格式生成 MCP 片段。
  *
- * 三个宿主的字段名来自各自宿主的配置格式，不是 CoMem 自造的：
- * Claude Code 认 `mcpServers.<name>.{type,url}`（`type` 不能省，否则会被当成
- * stdio 服务器跳过）；Codex 认 `[mcp_servers.<name>]` 表的 `url`；DSH 的
- * `dsh-mcp-client` 认 `serverName` / `transport` / `url`。
+ * Claude Code、Codex 和 DSH 默认启动同一份 stdio 代理；代理从共享
+ * `config.yaml` 读取地址和 Key，所以 GUI 进程无需继承终端环境。
+ * Hermes 使用自己的 provider / MCP 配置，继续引用 profile 中的 `COMEM_TOKEN`。
  */
 export function mcpSnippetFor(
   host: ConnectHost,
   baseUrl: string = DEFAULT_SERVER_BASE_URL,
+  repoRoot: string = DEFAULT_REPO_ROOT,
 ): McpSnippet {
   const url = mcpEndpointOf(baseUrl)
+  const proxyPath = proxyPathFor(repoRoot)
 
   if (host === 'claude-code') {
     return {
@@ -154,8 +212,9 @@ export function mcpSnippetFor(
         {
           mcpServers: {
             [MCP_SERVER_NAME]: {
-              type: 'http',
-              url,
+              type: 'stdio',
+              command: 'node',
+              args: [proxyPath],
             },
           },
         },
@@ -168,7 +227,7 @@ export function mcpSnippetFor(
   if (host === 'codex') {
     return {
       format: 'TOML',
-      text: `[mcp_servers.${MCP_SERVER_NAME}]\nurl = "${url}"\n`,
+      text: `[mcp_servers.${MCP_SERVER_NAME}]\ncommand = "node"\nargs = [${JSON.stringify(proxyPath)}]\n`,
     }
   }
 
@@ -177,7 +236,7 @@ export function mcpSnippetFor(
       format: 'YAML',
       // Hermes 0.23.2 的运行时直接用 headers 建立 HTTP transport；auth 只在值为 oauth 时
       // 触发 OAuth。header 是本机 Hermes 配置界面保存 Bearer 配置时使用的显式模式标记。
-      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n    auth: header\n    headers:\n      Authorization: "Bearer \${${HERMES_TOKEN_ENV}}"\n    tools:\n      include: [health, find, read, remember]\n`,
+      text: `mcp_servers:\n  comem:\n    url: ${JSON.stringify(url)}\n    auth: header\n    headers:\n      Authorization: "Bearer \${${CONNECT_TOKEN_ENV}}"\n    tools:\n      include: [health, find, read, remember]\n`,
     }
   }
 
@@ -188,8 +247,10 @@ export function mcpSnippetFor(
       "  name: '@deepseek-ai/dsh-mcp-client'",
       '  config:',
       `    serverName: ${MCP_SERVER_NAME}`,
-      '    transport: streamable-http',
-      `    url: ${url}`,
+      '    transport: stdio',
+      '    command: node',
+      '    args:',
+      `      - ${JSON.stringify(proxyPath)}`,
       '',
     ].join('\n'),
   }
@@ -211,7 +272,10 @@ export interface HookInstall {
  * hook 面，写 `~/.dsh/settings.json` 一个读者都没有。页面因此不给这条会失败的
  * 命令，改为说明需要先装桥插件。
  */
-export function hookInstallFor(host: ConnectHost): HookInstall {
+export function hookInstallFor(
+  host: ConnectHost,
+  repoRoot: string = DEFAULT_REPO_ROOT,
+): HookInstall {
   if (host === 'hermes') {
     return {
       available: false,
@@ -229,8 +293,62 @@ export function hookInstallFor(host: ConnectHost): HookInstall {
 
   return {
     available: true,
-    command: `node integrations/cli.mjs install --host ${host}`,
+    command: `node ${shellQuote(cliPathFor(repoRoot))} install --host ${host}`,
     note: null,
+  }
+}
+
+export interface AutomaticSetup {
+  readonly title: string
+  readonly detail: string
+  readonly command: string | null
+  readonly commandLabel: string | null
+  readonly config: McpSnippet | null
+  readonly configLabel: string | null
+  readonly docLabel: string
+}
+
+/** 当前宿主自动召回 / 采集的安装步骤。命令和配置都不写入密钥明文。 */
+export function automaticSetupFor(
+  host: ConnectHost,
+  repoRoot: string = DEFAULT_REPO_ROOT,
+): AutomaticSetup {
+  if (host === 'hermes') {
+    return {
+      title: '自动记忆',
+      detail: `运行设置向导并选择 CoMem，在同一个 profile 中设置 ${CONNECT_TOKEN_ENV}。`,
+      command: 'hermes memory setup',
+      commandLabel: 'Hermes 接入设置',
+      config: null,
+      configLabel: null,
+      docLabel: '安装和配置记忆插件',
+    }
+  }
+
+  if (host === 'dsh') {
+    return {
+      title: '自动召回与采集',
+      detail:
+        '先把 YOUR_PROFILE 替换为实际 profile 名；空配置会读取共享配置，GUI 无需终端环境变量。',
+      command: `dsh plugin --profile YOUR_PROFILE add ${shellQuote(`link:${normalizedRepoRoot(repoRoot)}/integrations/dsh-plugin`)}`,
+      commandLabel: '在仓库根目录安装 DSH 插件',
+      config: {
+        format: 'YAML',
+        text: '- insert:\n    - id: comem\n      name: comem-dsh-plugin\n      config: {}\n',
+      },
+      configLabel: 'DSH 插件配置（cordis.patch.yml）',
+      docLabel: '查看 DSH 接入步骤',
+    }
+  }
+
+  return {
+    title: '自动召回与采集',
+    detail: '安装器只写 Hook，不复制密钥；Hook 读取共享配置，GUI 无需终端环境变量。',
+    command: hookInstallFor(host, repoRoot).command,
+    commandLabel: '在仓库根目录安装自动采集',
+    config: null,
+    configLabel: null,
+    docLabel: `查看 ${CONNECT_HOST_LABELS[host]} 接入步骤`,
   }
 }
 
@@ -239,41 +357,55 @@ export interface TrustStep {
   readonly detail: string
 }
 
+/** Hook 安装器的身份自检命令；预期主体只从当前登录身份传入。 */
+export function doctorCommandFor(
+  host: ConnectHost,
+  currentSubject: string,
+  repoRoot: string = DEFAULT_REPO_ROOT,
+): string | null {
+  if (host !== 'claude-code' && host !== 'codex') {
+    return null
+  }
+  const userId = userIdFromSubject(currentSubject)
+  if (userId === null || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(userId)) {
+    return null
+  }
+  return `COMEM_CONFIG_FILE="${SHARED_CONFIG_PATH}" node ${shellQuote(cliPathFor(repoRoot))} doctor --expect-subject ${currentSubject}`
+}
+
 /**
  * 信任步骤。
  *
  * Codex 的 Hook 必须先在 `/hooks` 里逐条信任；Claude Code 的 Hook 不需要这一步，
  * 但项目级 `.mcp.json` 里的 MCP 服务器首次连接要批准。两条事实不同，不合并成一句
- * 「两个宿主都要信任 Hook」。
+ * 「两个宿主都要信任 Hook」。doctor 的预期主体来自当前登录身份，不进入 Key 片段。
  */
 export function trustStepFor(host: ConnectHost): TrustStep {
   if (host === 'claude-code') {
     return {
       title: '确认 MCP 服务器',
-      detail:
-        '项目级 .mcp.json 第一次连接时，宿主会提示批准；也可以在 /mcp 里确认。Hook 写在个人设置里，不需要逐条信任。',
+      detail: '批准 MCP 服务器后，在会话里调用 health；再运行上方 doctor 命令确认账号。',
     }
   }
 
   if (host === 'codex') {
     return {
       title: '在 /hooks 里信任 Hook',
-      detail:
-        '打开 /hooks 逐条信任 integrations/servers/*.mjs。不信任时 MCP 工具仍可用，但自动召回与采集不生效。',
+      detail: '逐条信任 Hook 后，调用 health；再运行上方 doctor 命令确认账号。',
     }
   }
 
   if (host === 'hermes') {
     return {
       title: '检查并开启新会话',
-      detail: `运行 hermes memory status 确认当前记忆服务为 CoMem。重启 Hermes 网关，确认自动记忆与 MCP 都读取同一个 ${HERMES_TOKEN_ENV}。`,
+      detail: `运行 hermes memory status，确认 subject 是当前登录账号。自动记忆与 MCP 都读取同一个 ${CONNECT_TOKEN_ENV}。`,
     }
   }
 
   return {
     title: '先装桥插件',
     detail:
-      'DSH 的 Hook 由插件提供：按「DSH」一节把 @deepseek-ai/dsh-hooks-claude-code 或 @deepseek-ai/dsh-hooks-codex 挂进 profile，再用生成的 hooks 文件验证。文档标注这条路径未端到端验证。',
+      '启动 DSH 后调用 MCP health，确认 subject 是当前登录账号；--dump-config 只能证明插件配置可加载。',
   }
 }
 
@@ -312,7 +444,7 @@ export function firstMemoryCall(): McpRememberCall {
 
 /** 可直接粘贴执行的 curl 命令；`-d` 的请求体就是上面的工具调用。 */
 export function firstMemoryCurl(baseUrl: string = DEFAULT_SERVER_BASE_URL): string {
-  return `curl -sS ${mcpEndpointOf(baseUrl)} \\\n  -H 'content-type: application/json' \\\n  -H 'accept: application/json, text/event-stream' \\\n  -d '${JSON.stringify(firstMemoryCall())}'\n`
+  return `curl -sS ${mcpEndpointOf(baseUrl)} \\\n  -H "authorization: Bearer \${${CONNECT_TOKEN_ENV}}" \\\n  -H 'content-type: application/json' \\\n  -H 'accept: application/json, text/event-stream' \\\n  -d '${JSON.stringify(firstMemoryCall())}'\n`
 }
 
 export type VerificationTone = 'ok' | 'warn' | 'fail' | 'idle'
@@ -333,12 +465,13 @@ export interface VerificationSession {
 }
 
 export interface VerificationInput {
+  /** 部分宿主状态组件只需要账号级检查；该字段不参与宿主判定。 */
   readonly host?: ConnectHost
   readonly health: VerificationHealth | null
   readonly healthError: string | null
   readonly sessions: readonly VerificationSession[] | null
   readonly sessionsError: string | null
-  /** 当前网页登录主体；Hermes 验证只陈述这个账号自己的归档。 */
+  /** 当前网页登录主体；会话列表必须来自这个账号的个人根。 */
   readonly currentSubject?: string | null
 }
 
@@ -383,13 +516,9 @@ function latestActivityOf(sessions: readonly VerificationSession[]): string | nu
  * 并把本机命令放在 `hint` 里，不声称「已推进」。
  */
 export function deriveVerification(input: VerificationInput): VerificationResult {
-  const hermes = input.host === 'hermes'
-  const sessionLabel = hermes ? '当前账号归档' : '最近会话'
+  const sessionLabel = '当前账号会话'
   const currentAccount = input.currentSubject?.trim() || '当前账号'
-  const observedSessions = hermes
-    ? input.sessions?.filter((session) =>
-      session.id?.startsWith('hermes-') && session.lastCommitAt !== null) ?? null
-    : input.sessions
+  const observedSessions = input.sessions
   // `/health` 返回 200 就说明服务端可达；健康状态放在 detail 里单独说，不再把
   // 「可达」与「降级」挤进同一个徽章（规则摘要 / 未配置模型都会让 status 是
   // degraded，那是合法配置，不是连不上）。
@@ -427,9 +556,7 @@ export function deriveVerification(input: VerificationInput): VerificationResult
       key: 'sessions',
       label: sessionLabel,
       tone: 'warn',
-      detail: hermes
-        ? `${currentAccount} 还没有已归档的 Hermes 会话。请在 Hermes 发送一条消息。`
-        : '还没有采集到会话',
+      detail: `${currentAccount} 还没有归档会话`,
       hint: null,
     }
   } else {
@@ -440,20 +567,9 @@ export function deriveVerification(input: VerificationInput): VerificationResult
       tone: 'ok',
       detail:
         latest === null
-          ? hermes
-            ? `${currentAccount} 有 ${String(observedSessions.length)} 个已归档的 Hermes 会话`
-            : `已收到 ${String(observedSessions.length)} 个会话`
-          : hermes
-            ? `${currentAccount} 有 ${String(observedSessions.length)} 个已归档的 Hermes 会话 · 最近 ${formatMonthDayTime(latest)}`
-            : `已收到 ${String(observedSessions.length)} 个会话 · 最近 ${formatMonthDayTime(latest)}`,
+          ? `${currentAccount} 有 ${String(observedSessions.length)} 个归档会话`
+          : `${currentAccount} 有 ${String(observedSessions.length)} 个归档会话 · 最近 ${formatMonthDayTime(latest)}`,
       hint: null,
-    }
-  }
-
-  if (hermes) {
-    return {
-      checks: [server, sessions],
-      allGreen: server.tone === 'ok' && sessions.tone === 'ok',
     }
   }
 

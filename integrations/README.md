@@ -57,11 +57,48 @@ integrations/
 
 **Hermes 用户：** 从 [Hermes 快速上手](../docs/hermes-quickstart.md) 开始。Hermes 通过独立 Memory Provider 自动接入；主动查找、历史导入用 MCP。网页显示界面由独立仓库的可选 [Hermes OpenUI](https://github.com/Micraow/hermes-openui/blob/main/README.md) 提供。
 
+### 统一连接与账号
+
+Claude Code Hook、Codex Hook、DSH 原生插件和本仓库的 MCP stdio 代理共用同一份
+连接配置。先创建配置文件，再安装宿主：
+
+```bash
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/comem"
+install -d -m 700 "$config_dir"
+test -e "$config_dir/config.yaml" || install -m 600 /dev/null "$config_dir/config.yaml"
+"${EDITOR:-vi}" "$config_dir/config.yaml"
+chmod 600 "$config_dir/config.yaml"
+```
+
+文件内容使用现有扁平配置格式，并放入真实值：
+
+```yaml
+baseUrl: http://127.0.0.1:1933
+token: 'comem_替换为同名账号的_API_Key'
+```
+
+`COMEM_BASE_URL` 和 `COMEM_TOKEN` 环境变量仍优先于文件。配置加载器不做
+`${COMEM_TOKEN}` 插值；把变量表达式写进 `token` 会被当成字面 token。桌面/GUI
+启动的宿主通常不继承终端里临时 `export` 的变量，因此统一接入以文件为准。token
+属于密钥，`co-mem` 不接受 `--token`、`--api-key` 或 `--header` 参数；错误信息
+不会回显参数值。已有自定义路径时设置 `COMEM_CONFIG_FILE`；接入页生成的配置准备与
+`doctor` 命令会优先沿用这个变量。
+
+配置完成后，用非密钥的主体参数核对当前身份：
+
+```bash
+co-mem doctor --expect-subject user:alice
+```
+
+`--expect-subject` 只与 `GET /api/v1/auth/me` 的返回值比较，不会作为身份头发给
+服务端。未给该参数时，`doctor` 仍会显示实际主体，并明确区分“显式凭据”和“无 token
+的回环信任”。
+
 ```bash
 node integrations/cli.mjs install --host claude-code
 # 也可以先 link，再用 bin 名：pnpm --dir integrations link
 co-mem install --host claude-code
-co-mem doctor
+co-mem doctor --expect-subject user:alice
 co-mem uninstall --host claude-code
 ```
 
@@ -71,7 +108,8 @@ co-mem uninstall --host claude-code
 
 `install` 把七个 hook 写进宿主的 settings（默认 `~/.claude/settings.json`，可用
 `--settings` 指定），改之前先备份成 `<settings>.bak`。`uninstall` 只删按脚本路径
-匹配到的、我们自己加的条目，别人的 hook 一个不动。
+匹配到的、我们自己加的条目，别人的 hook 一个不动。Hook 命令只含脚本绝对路径和
+`--host`，不展开或写入 token。
 
 **能用 `install` 装的是两个宿主**，`--host` 取 `claude-code` / `codex`。DSH 用原生
 插件接入（`integrations/dsh-plugin/`），不走 `install`：
@@ -111,10 +149,7 @@ dsh plugin --profile web add "link:$PWD/integrations/dsh-plugin"
 - insert:
     - id: comem
       name: comem-dsh-plugin
-      config:
-        baseUrl: http://127.0.0.1:1933
-        token: ''            # 非回环时必须给
-        timeoutMs: 5000
+      config: {}
 ```
 
 ```bash
@@ -136,6 +171,8 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 **已知限制**（细节见 `integrations/dsh-plugin/README.md`）：压缩前不能拦截；没有
 真正的 `SessionEnd`，进程被强杀时最后半轮会丢；采集缓冲只在内存里，DSH 重启即丢。子 agent
 会话（`header.origin === 'subagent'`）不注入、不采集。
+共享配置文件存在但无效时，DSH 插件停用注入与采集并记录 warn，不会退回默认地址写入
+回环身份。
 
 ### Codex
 
@@ -162,12 +199,12 @@ Codex 的 `PreToolUse` 没有 `Read` 工具，文件编辑走 `apply_patch`（ma
 `Edit` / `Write`），命令走 `Bash`；`co-mem install` 为 Codex 写的 matcher 是
 `apply_patch|Edit|Write|Read`，`apply_patch` 的 `comem://` 路径从补丁命令里提取。
 
-`doctor` 检查四项，每项输出「通过 / 失败 + 一句怎么修」：
+`doctor` 检查五项，每项输出「通过 / 失败 + 一句怎么修」：
 
 | 检查 | 失败时怎么修 |
 |---|---|
 | 服务端可达 | 启动服务端；`COMEM_BASE_URL` 或配置里的 `baseUrl` 指对地址 |
-| 请求身份 | 检查服务地址和当前用户凭据，`GET /auth/me` 应返回本人身份 |
+| 请求身份 | 检查服务地址和当前用户凭据；需要严格绑定时运行 `co-mem doctor --expect-subject user:<id>` |
 | hook 脚本 | 重新运行 `co-mem install` |
 | 游标文件可写 | 检查 `COMEM_HOOK_TMPDIR` 目录权限 |
 
@@ -281,14 +318,14 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 
 ### 两条路
 
-| 宿主 | 用哪条 | 配置里写什么 |
+| 场景 | 用哪条 | 配置里写什么 |
 |---|---|---|
-| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL |
-| 只支持本地 stdio 服务器（只给 `command` + `args` 配置位） | **stdio 代理** | `command: node` + `args: [integrations/servers/mcp-proxy.mjs]` |
+| 统一账号与共享 `config.yaml` | **stdio 代理** | `command: node` + `args: [integrations/servers/mcp-proxy.mjs]` |
+| 宿主自己的安全变量机制已经管理认证头 | **HTTP 直连** | 一个 URL；跨网络时再加认证头 |
 
-判据只有一个：**宿主能不能填一个 URL**。能就直连——少一个常驻进程、少一份配置。不能
-就起代理：`servers/mcp-proxy.mjs` 把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`，再把
-响应写回 stdout。两条路走同一个端点、同一套凭据、同一份 16 个工具。
+`servers/mcp-proxy.mjs` 把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`，再把响应
+写回 stdout。它对 Claude Code、Codex 和 DSH 都可用；统一接入时优先选它，让 Hook
+和 MCP 从同一文件读取账号。两条路走同一个端点、同一套服务端凭据、同一份 16 个工具。
 
 **与宿主无关的最小配置**只有两样——一个 URL，和（跨网络访问时）一个认证头：
 
@@ -299,8 +336,9 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 **访问本机服务端时 `headers` 整段可以省掉**：`auth.trustLoopback` 默认打开，来源是回环
 地址、`Host` 也指向本机的请求被认证成 `server.subject`（`~/.config/comem/config.yaml`
 里的 `server.subject`，默认 `user:local`）。这就是本机进程的信任模型——能连上本机端口的
-人本来就能读这个数据根，与 `~/.ssh` 同级。下面两节是两个具体宿主的写法；其它宿主按它的
-文档把这两样映射过去即可。
+人本来就能读这个数据根，与 `~/.ssh` 同级。下面四节分别给出各宿主的认证字段；需要固定为
+控制台当前账号时，优先把 API Key 写入共享 `config.yaml` 并走 stdio 代理。终端环境
+变量只适合可以确认继承环境的启动方式，不应假定 GUI 进程也会收到。
 
 #### stdio 代理
 
@@ -322,7 +360,7 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 | 环境变量 | 说明 |
 |---|---|
 | `COMEM_BASE_URL` | 服务端地址；代理拼成 `<baseUrl>/mcp` |
-| `COMEM_TOKEN` | `Authorization: Bearer` 的值；`baseUrl` 是回环地址时留空（走回环信任），经 nginx 等非回环地址访问时必须填 |
+| `COMEM_TOKEN` | `Authorization: Bearer` 的值；环境变量优先，GUI 宿主建议把值写入共享配置的 `token` |
 | `COMEM_MCP_TIMEOUT_MS` | 等 MCP 响应的超时，默认 `30000`。**别照 hook 的 5 秒配**：`find` 开了重排时 p95 就有 9.35 秒 |
 | `COMEM_DEBUG` | `1` 时把转发日志写到 **stderr**（stdout 只走协议） |
 
@@ -332,26 +370,32 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
 
 ### Claude Code
 
-项目根目录的 `.mcp.json`（可提交，团队共享）或 `~/.claude.json`（个人）：
+stdio 代理会让宿主配置不出现密钥；代理从环境变量与共享配置读取同一把 Key：
 
 ```json
 {
   "mcpServers": {
     "comem": {
-      "type": "http",
-      "url": "http://127.0.0.1:1933/mcp"
+      "type": "stdio",
+      "command": "node",
+      "args": ["/绝对路径/CoMem/integrations/servers/mcp-proxy.mjs"]
     }
   }
 }
 ```
 
-`type` **不能省**：Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器
-并跳过，报告 `MCP server "comem" has a "url" but no "type"`。`"streamable-http"` 是
-`"http"` 的别名，两种写法都认。
+等价 CLI：
 
-**跨网络访问**（Docker 经 nginx、远程开发机）要带 API Key：容器绑 `0.0.0.0`，回环
-信任被关掉，来源不是回环地址。`${VAR}` 会在 Claude Code 读取配置时展开，key 不用写进
-仓库：
+```bash
+claude mcp add --scope user comem -- node /绝对路径/CoMem/integrations/servers/mcp-proxy.mjs
+```
+
+HTTP 直连的 `type` **不能省**：Claude Code 把「只有 `url`、没有 `type`」的条目
+当成 stdio 服务器并跳过。`"streamable-http"` 是 `"http"` 的别名。
+
+`${VAR}` 会在 Claude Code 读取配置时展开。即使是本机连接，也建议显式引用当前账号的
+Key，避免 `server.subject` 与控制台账号不同。使用这条路径前必须确认 Claude Code
+进程拥有该变量；项目根目录 `.mcp.json` 或个人 `~/.claude.json` 写法如下：
 
 ```json
 {
@@ -360,40 +404,80 @@ Hook 和 MCP 是两条独立的通道，**装完 Hook 不等于接上了 MCP 工
       "type": "http",
       "url": "http://127.0.0.1:1933/mcp",
       "headers": {
-        "Authorization": "Bearer ${COMEM_API_KEY}"
+        "Authorization": "Bearer ${COMEM_TOKEN}"
       }
     }
   }
 }
 ```
 
-等价的 CLI 写法：
+这条 HTTP 配置应直接写入受保护的 Claude 配置文件。不要用
+`claude mcp add --header "Authorization: Bearer …"` 传真实 Key：展开后的 header 会进入
+子进程 argv，可能被进程列表读到。统一账号路径应使用上面的 stdio `claude mcp add`
+命令，或手动编辑配置后重启 Claude Code。
+
+### Codex
+
+Codex 的 HTTP MCP 配置可用 `bearer_token_env_var` 从环境变量读取 Bearer token。
+这条路径同样要求 Codex 进程拥有该变量：
+
+```toml
+[mcp_servers.comem]
+url = "http://127.0.0.1:1933/mcp"
+bearer_token_env_var = "COMEM_TOKEN"
+```
+
+无密钥的 stdio 配置仍可使用，代理会读取共享文件：
 
 ```bash
-export COMEM_API_KEY=comem_...
-claude mcp add --transport http comem http://127.0.0.1:1933/mcp \
-  --header "Authorization: Bearer $COMEM_API_KEY"
+codex mcp add comem -- node /绝对路径/CoMem/integrations/servers/mcp-proxy.mjs
 ```
+
+两种写法都不会把 token 明文复制到 Codex 配置。Hook 的安装与信任仍是上面的独立步骤。
 
 ### DSH
 
-编辑 `$DSH_HOME/profiles/<name>/cordis.patch.yml`，加一个 `dsh-mcp-client` 条目
-（插件本身用 `dsh plugin --profile <name> add @deepseek-ai/dsh-mcp-client` 装进 profile）：
+DSH `0.2.2-rc.1` 的 `@deepseek-ai/dsh-mcp-client` 已随 DSH 安装提供。统一账号
+优先用 stdio 代理；代理读取共享 `config.yaml`，插件配置里没有密钥：
 
 ```yaml
-- id: mcp-comem
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: comem
-    transport: streamable-http
-    url: http://127.0.0.1:1933/mcp
-    # 跨网络访问时才有意义；访问本机服务端时可以整段删掉（回环信任）
-    headers:
-      Authorization: !!js '`Bearer ${process.env.COMEM_API_KEY}`'
+- insert:
+    - id: mcp-comem
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: comem
+        transport: stdio
+        command: node
+        args:
+          - /绝对路径/CoMem/integrations/servers/mcp-proxy.mjs
+```
+
+DSH 的 stdio transport 会清洗父进程里名称含 `TOKEN` 的环境变量，因此 GUI 场景
+不要让代理只依赖继承来的 `COMEM_TOKEN`。需要显式覆盖环境时可以在插件条目里传值，
+但仍要先保证启动 DSH 的进程拥有该变量：
+
+```yaml
+      config:
+        env:
+          COMEM_TOKEN: !!js process.env.COMEM_TOKEN
 ```
 
 `serverName` 决定模型看到的工具前缀：`mcp__comem__find`、`mcp__comem__health`。
-`transport` 是必填字段，没有「默认 stdio」这回事。
+`transport` 是必填字段，没有「默认 stdio」这回事。可选 HTTP 直连不会读取共享
+`config.yaml` 的 token；`dsh-mcp-client` 把 `headers` 交给 Streamable HTTP transport，
+因此认证必须显式写成当前版本支持的 `!!js` 表达式：
+
+```yaml
+- insert:
+    - id: mcp-comem
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: comem
+        transport: streamable-http
+        url: http://127.0.0.1:1933/mcp
+        headers:
+          Authorization: !!js '`Bearer ${process.env.COMEM_TOKEN}`'
+```
 
 ### 认证
 
@@ -413,16 +497,16 @@ curl -sS http://127.0.0.1:1933/api/v1/admin/users/alice/api-keys \
   -d '{"name":"claude-code"}'
 ```
 
-Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的 `Authorization` 是同一套凭据：一个服务端、
-一套认证。**凭据会同时出现在 Hook 配置和宿主 MCP 配置里**；想让换 key 只改一处，
-两边都引用同一个环境变量（Claude Code 用 `${COMEM_API_KEY}`，DSH 用
-`process.env.COMEM_API_KEY`）。不要提交进仓库。
+Hook 的 `token`（`COMEM_TOKEN`）和 MCP 的认证是同一套服务端凭据。安装器只写宿主
+Hook，不会把当前 shell 的 Key 复制进 Hook 配置；运行宿主时仍须提供 `COMEM_TOKEN`，
+或让 Hook 读取共享 `config.yaml`。HTTP 直连的认证头属于宿主配置，必须使用该宿主
+支持的环境变量引用，不能把明文提交进仓库。
 
 ### 验证
 
 1. 服务端：`curl -sS http://127.0.0.1:1933/health` 返回 `{"status":"ok",...}`。
-2. Claude Code：`claude mcp list` 显示 `comem: http://127.0.0.1:1933/mcp (HTTP) - ✔ Connected`；
-   会话里 `/mcp` 能看到 16 个工具。
+2. Claude Code：`claude mcp list` 显示 `comem` 已连接；stdin/stdout transport 显示
+   `STDIO`，HTTP transport 显示 URL。会话里 `/mcp` 能看到 16 个工具。
 3. DSH：启动日志里 `mcp-client(comem)` 没有连接错误；模型工具列表出现 `mcp__comem__*`。
 4. 让 agent 调一次 `health`：返回内容与 `GET /health` 相同（`status: ok`、`subject`、
    `index.nodes`）。调用失败时错误进服务端日志的「MCP 工具拒绝」/「MCP 工具执行失败」，

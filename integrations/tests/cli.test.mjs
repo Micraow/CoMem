@@ -1,12 +1,12 @@
 /**
  * `co-mem` 安装与自检（架构文档 §15.8）。
  *
- * 三个不变量：安装前备份、`uninstall` 只删我们加的条目、`doctor` 的四项检查各自
+ * 三个不变量：安装前备份、`uninstall` 只删我们加的条目、`doctor` 的五项检查各自
  * 能报失败并给出修法。
  */
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,10 +31,20 @@ async function withTempDir(fn) {
   }
 }
 
-async function startServer() {
+async function startServer(options = {}) {
+  const serverSubject = options.serverSubject ?? 'user:alice';
+  const requestSubject = options.requestSubject ?? serverSubject;
   const server = createServer((request, response) => {
+    const path = request.url?.split('?')[0] ?? '/';
+    const result = path === '/api/v1/auth/me'
+      ? { subject: requestSubject, principals: [requestSubject], isAdmin: false }
+      : {
+          status: 'ok',
+          subject: serverSubject,
+          retrieval: { configured: true, engine: 'hybrid' },
+        };
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ status: 'ok', result: { status: 'ok', subject: 'user:alice', retrieval: { configured: true, engine: 'hybrid' } } }));
+    response.end(JSON.stringify({ status: 'ok', result }));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
@@ -159,7 +169,7 @@ test('install 保留 matcher group 里别人的条目', async () => {
   });
 });
 
-test('doctor 四项全部通过', async () => {
+test('doctor 五项全部通过', async () => {
   const server = await startServer();
   await withTempDir(async (dir) => {
     const configFile = join(dir, 'config.yaml');
@@ -218,7 +228,82 @@ test('doctor 从认证结果获得身份，不要求重复填写 userId', async 
     });
     const configCheck = checks.find((check) => check.name === '请求身份');
     assert.equal(configCheck.passed, true);
-    assert.equal(configCheck.hint, 'user:alice');
+    assert.match(configCheck.hint, /^user:alice/);
+  });
+  await server.close();
+});
+
+test('doctor --expect-subject 与实际主体一致时通过', async () => {
+  const server = await startServer();
+  await withTempDir(async (dir) => {
+    const configFile = join(dir, 'config.yaml');
+    await writeFile(configFile, 'baseUrl: http://127.0.0.1:1933\n', 'utf8');
+    const checks = await doctor({
+      env: {
+        COMEM_BASE_URL: server.baseUrl,
+        COMEM_CONFIG_FILE: configFile,
+        COMEM_HOOK_TMPDIR: dir,
+      },
+      root: ROOT,
+      expectedSubject: 'user:alice',
+    });
+    const identity = checks.find((check) => check.name === '请求身份');
+    assert.equal(identity.passed, true);
+    assert.match(identity.hint, /^user:alice/);
+  });
+  await server.close();
+});
+
+test('doctor --expect-subject 不一致时失败并指出共享配置', async () => {
+  const server = await startServer({ serverSubject: 'user:alice', requestSubject: 'user:bob' });
+  await withTempDir(async (dir) => {
+    const configFile = join(dir, 'config.yaml');
+    await writeFile(configFile, "token: 'comem_bob'\n", 'utf8');
+    const checks = await doctor({
+      env: {
+        COMEM_BASE_URL: server.baseUrl,
+        COMEM_CONFIG_FILE: configFile,
+        COMEM_HOOK_TMPDIR: dir,
+      },
+      root: ROOT,
+      expectedSubject: 'user:alice',
+    });
+    const identity = checks.find((check) => check.name === '请求身份');
+    assert.equal(identity.passed, false);
+    assert.match(identity.hint, /实际 user:bob，期望 user:alice/);
+    assert.match(identity.hint, /config\.yaml/);
+    assert.doesNotMatch(identity.hint, /comem_bob/);
+  });
+  await server.close();
+});
+
+test('CLI doctor --expect-subject 把主体不一致变成非零退出码', async () => {
+  const server = await startServer({ serverSubject: 'user:alice', requestSubject: 'user:bob' });
+  await withTempDir(async (dir) => {
+    const configFile = join(dir, 'config.yaml');
+    await writeFile(configFile, "token: 'comem_bob'\n", 'utf8');
+    const child = spawn(
+      process.execPath,
+      [join(ROOT, 'cli.mjs'), 'doctor', '--expect-subject', 'user:alice'],
+      {
+        env: {
+          ...process.env,
+          COMEM_BASE_URL: server.baseUrl,
+          COMEM_CONFIG_FILE: configFile,
+          COMEM_HOOK_TMPDIR: dir,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    assert.equal(code, 1);
+    assert.match(stdout, /实际 user:bob，期望 user:alice/);
+    assert.doesNotMatch(stdout, /comem_bob/);
+    assert.equal(stderr, '');
   });
   await server.close();
 });
@@ -341,4 +426,56 @@ test('CLI：--host 缺值时失败，不退回到默认宿主', () => {
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '', '失败时 stdout 不能出现「已安装」');
   assert.match(result.stderr, /--host 缺值/);
+});
+
+test('CLI：--expect-subject 缺值时失败', () => {
+  const result = spawnSync(
+    process.execPath,
+    [join(ROOT, 'cli.mjs'), 'doctor', '--expect-subject'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /--expect-subject 缺值/);
+});
+
+test('doctor 拒绝不合法的 --expect-subject，不发网络请求', async () => {
+  let called = false;
+  await assert.rejects(
+    () => doctor({
+      expectedSubject: `user:${'a'.repeat(65)}`,
+      fetchImpl: async () => {
+        called = true;
+        throw new Error('不应发请求');
+      },
+    }),
+    /最长 64 个字符/,
+  );
+  assert.equal(called, false);
+});
+
+test('CLI 拒绝凭据参数，且错误信息不回显密钥', async () => {
+  await withTempDir(async (dir) => {
+    const settingsPath = join(dir, 'hooks.json');
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(ROOT, 'cli.mjs'),
+        'install',
+        '--host',
+        'codex',
+        '--settings',
+        settingsPath,
+        '--token',
+        'comem_should_never_print',
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /不接受 --token/);
+    assert.match(result.stderr, /COMEM_TOKEN/);
+    assert.doesNotMatch(result.stderr, /comem_should_never_print/);
+    await assert.rejects(() => access(settingsPath), { code: 'ENOENT' });
+  });
 });

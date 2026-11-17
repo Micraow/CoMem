@@ -4,7 +4,7 @@
  *
  * ```bash
  * co-mem install --host claude-code [--settings ~/.claude/settings.json]
- * co-mem doctor
+ * co-mem doctor [--expect-subject user:<id>]
  * co-mem uninstall --host claude-code
  * ```
  *
@@ -129,6 +129,19 @@ const HOST_MATCHERS = Object.freeze({
  * hook，删错一个就破坏用户已有的自动化。
  */
 const SCRIPT_MARKER = 'integrations/servers';
+
+/** 与非密钥 CLI 参数 `--expect-subject` 共用的用户主体格式。 */
+const EXPECTED_SUBJECT_PATTERN = /^user:[a-z0-9][a-z0-9._-]{0,63}$/;
+
+function validateExpectedSubject(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!EXPECTED_SUBJECT_PATTERN.test(value)) {
+    throw new Error('--expect-subject 必须是 user:<id>，id 使用小写字母或数字开头，最长 64 个字符。');
+  }
+  return value;
+}
 
 export function isCoMemHook(hook) {
   return (
@@ -347,17 +360,25 @@ export async function uninstall(options = {}) {
  *
  * 依赖可注入：测试不碰真实 home 目录、不连真实服务端。
  *
- * @param {{ env?: NodeJS.ProcessEnv, root?: string, fetchImpl?: typeof fetch }} [options]
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   root?: string,
+ *   fetchImpl?: typeof fetch,
+ *   expectedSubject?: string,
+ * }} [options]
  * @returns {Promise<{ name: string, passed: boolean, hint: string }[]>}
  */
 export async function doctor(options = {}) {
   const env = options.env ?? process.env;
   const root = options.root ?? ROOT;
   const checks = [];
+  const expectedSubject = validateExpectedSubject(options.expectedSubject);
+  let loadedConfig;
 
   // 1. 服务端可达。
   try {
     const config = await loadConfig({ env });
+    loadedConfig = config;
     // 2s 是自检的等待上限（经验值）：doctor 是人工触发的，服务端在跑就秒回，
     // 等满默认的 5s 只会让人以为命令卡住了。
     const http = createHttpClient({ ...config, timeoutMs: 2000, fetchImpl: options.fetchImpl });
@@ -373,10 +394,27 @@ export async function doctor(options = {}) {
   }
 
   try {
-    const config = await loadConfig({ env });
+    const config = loadedConfig ?? await loadConfig({ env });
     const http = createHttpClient({ ...config, timeoutMs: 2000, fetchImpl: options.fetchImpl });
     const identity = await http.get('/api/v1/auth/me');
-    checks.push({ name: '请求身份', passed: typeof identity?.subject === 'string', hint: identity?.subject ?? '服务端未返回身份。' });
+    const actualSubject = typeof identity?.subject === 'string' ? identity.subject : '';
+    if (actualSubject === '') {
+      checks.push({ name: '请求身份', passed: false, hint: '服务端未返回身份。' });
+    } else if (expectedSubject !== undefined && actualSubject !== expectedSubject) {
+      checks.push({
+        name: '请求身份',
+        passed: false,
+        hint: `实际 ${actualSubject}，期望 ${expectedSubject}。检查 ${config.configFile} 的 token 或 COMEM_TOKEN 是否属于该账号；不要把 token 放进命令行。`,
+      });
+    } else if (config.token !== '') {
+      checks.push({ name: '请求身份', passed: true, hint: `${actualSubject}（显式凭据）` });
+    } else {
+      checks.push({
+        name: '请求身份',
+        passed: true,
+        hint: `${actualSubject}（无 token，使用回环信任；需要统一账号时把 token 写入 ${config.configFile} 或设置 COMEM_TOKEN）`,
+      });
+    }
   } catch (error) {
     checks.push({
       name: '请求身份',
@@ -448,8 +486,11 @@ function requiredFlag(argv, name) {
   }
   const value = flag(argv, name);
   if (value === undefined) {
+    const usage = name === 'expect-subject'
+      ? 'co-mem doctor --expect-subject user:<id>'
+      : `co-mem <install|uninstall> --${name} ${name === 'host' ? '<claude-code|codex>' : '<path>'}`;
     throw new Error(
-      `--${name} 缺值。用法：co-mem <install|uninstall> --host <claude-code|codex> [--settings <path>]`,
+      `--${name} 缺值。用法：${usage}`,
     );
   }
   return value;
@@ -457,12 +498,32 @@ function requiredFlag(argv, name) {
 
 const USAGE = `用法：
   co-mem install --host <claude-code|codex> [--settings <path>]
-  co-mem doctor
+  co-mem doctor [--expect-subject user:<id>]
   co-mem uninstall --host <claude-code|codex> [--settings <path>]
 
---host dsh 不走 install：DSH 用原生插件接入，见 integrations/dsh-plugin/README.md。`;
+--host dsh 不走 install：DSH 用原生插件接入，见 integrations/dsh-plugin/README.md。
+凭据只从 COMEM_TOKEN 或共享 config.yaml 读取；CLI 不接受 token 参数。`;
+
+const CREDENTIAL_FLAGS = Object.freeze(['token', 'api-key', 'authorization', 'header', 'bearer']);
+
+/**
+ * 凭据参数会留在 shell history 和进程列表。CLI 明确拒绝，而不是静默忽略后让
+ * 用户以为已经配置成功。
+ */
+function rejectCredentialFlags(argv) {
+  for (const argument of argv) {
+    for (const name of CREDENTIAL_FLAGS) {
+      if (argument === `--${name}` || argument.startsWith(`--${name}=`)) {
+        throw new Error(
+          `不接受 --${name}：凭据会泄漏到 shell history 或进程列表。请把 token 写入共享 config.yaml，或通过 COMEM_TOKEN 环境变量传入。`,
+        );
+      }
+    }
+  }
+}
 
 async function main(argv) {
+  rejectCredentialFlags(argv);
   const command = argv[0];
   if (command === 'install') {
     const result = await install({
@@ -492,7 +553,7 @@ async function main(argv) {
   }
 
   if (command === 'doctor') {
-    const checks = await doctor();
+    const checks = await doctor({ expectedSubject: requiredFlag(argv, 'expect-subject') });
     let failed = 0;
     for (const check of checks) {
       process.stdout.write(`${check.passed ? '通过' : '失败'}  ${check.name}  ${check.hint}\n`);

@@ -105,7 +105,13 @@ test('文件覆盖默认值，环境变量覆盖文件', async () => {
     const file = join(dir, 'config.yaml');
     await writeFile(
       file,
-      ['baseUrl: http://file:1111', 'userId: from-file', 'queryFilters:', "  - 's|a|b|'"].join('\n'),
+      [
+        'baseUrl: http://file:1111',
+        "token: 'comem_from_file'",
+        'userId: from-file',
+        'queryFilters:',
+        "  - 's|a|b|'",
+      ].join('\n'),
       'utf8',
     );
 
@@ -113,15 +119,44 @@ test('文件覆盖默认值，环境变量覆盖文件', async () => {
       env: {
         COMEM_CONFIG_FILE: file,
         COMEM_BASE_URL: 'http://env:2222',
+        COMEM_TOKEN: 'comem_from_env',
         COMEM_TIMEOUT_MS: '1000',
         COMEM_HOOK_TMPDIR: join(dir, 'tmp'),
       },
     });
     assert.equal(config.baseUrl, 'http://env:2222');
+    assert.equal(config.token, 'comem_from_env');
     assert.equal(config.userId, 'from-file');
     assert.equal(config.timeoutMs, 1000);
     assert.deepEqual(config.queryFilters, ['s|a|b|']);
     assert.equal(config.tmpDir, join(dir, 'tmp'));
+  });
+});
+
+test('空 COMEM_TOKEN 不覆盖配置文件里的 token', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'config.yaml');
+    await writeFile(file, "token: 'comem_from_file'\n", 'utf8');
+    const config = await loadConfig({
+      env: { COMEM_CONFIG_FILE: file, COMEM_TOKEN: '' },
+    });
+    assert.equal(config.token, 'comem_from_file');
+  });
+});
+
+test('token 不做环境变量文本插值', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'config.yaml');
+    await writeFile(file, "token: '${COMEM_TOKEN}'\n", 'utf8');
+    const config = await loadConfig({
+      env: { COMEM_CONFIG_FILE: file, COMEM_TOKEN: 'comem_from_env' },
+    });
+    assert.equal(config.token, 'comem_from_env', '环境变量仍优先，但文件值本身不是插值表达式');
+
+    const fileOnly = await loadConfig({
+      env: { COMEM_CONFIG_FILE: file },
+    });
+    assert.equal(fileOnly.token, '${COMEM_TOKEN}');
   });
 });
 

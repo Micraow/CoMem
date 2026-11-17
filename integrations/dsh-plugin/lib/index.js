@@ -34,23 +34,15 @@
  *
  * ## 配置
  *
- * ```yaml
- * - insert:
- *     - id: comem
- *       name: comem-dsh-plugin
- *       config:
- *         baseUrl: http://127.0.0.1:1933   # 必填
- *         token: ''                        # 非回环时必须给
- *         timeoutMs: 5000
- * ```
+ * 默认连接参数来自 Hook 共用的 `~/.config/comem/config.yaml` 或 `COMEM_*` 环境变量。
+ * `cordis.patch.yml` 只负责挂载插件；需要覆盖时才写 `baseUrl` / `token`。
  *
- * `baseUrl` 缺失时 `apply` 记一条 warn 并**不注册任何监听器**：插件加载失败会让
- * DSH 起不来，这条路径不允许抛错。
+ * 插件初始化失败会让 DSH 起不来，因此 `apply` 把所有异常收敛成 warn。
  */
 
 import { randomUUID } from 'node:crypto';
 
-import { DEFAULT_CONFIG, loadConfig, resolveTempDir, validateRecallTimeout } from '../../lib/config.mjs';
+import { loadConfig, validateRecallTimeout } from '../../lib/config.mjs';
 import { createHttpClient } from '../../lib/http.mjs';
 import { DEFAULT_MAX_CONTEXT_BYTES } from '../../lib/injection.mjs';
 import { budgetForEvent, createDeadline, HOOK_BUDGETS_MS } from '../../lib/lifecycle.mjs';
@@ -217,17 +209,12 @@ export function apply(ctx, rawConfig) {
  * @param {{ baseUrl?: string, token?: string, timeoutMs?: number, recallTimeoutMs?: number }} rawConfig
  */
 function start(ctx, rawConfig) {
-  const baseUrl = typeof rawConfig.baseUrl === 'string' ? rawConfig.baseUrl.trim() : '';
-  if (baseUrl === '') {
-    ctx.logger.warn(
-      'comem: 缺少 config.baseUrl，插件不注入、不采集。在 cordis.patch.yml 的 comem 条目里配置它（默认 http://127.0.0.1:1933）。',
-    );
-    return;
+  // 只有显式给了的键才覆盖：其它键不写时沿用配置文件与环境变量，写了（包括
+  // 空串）就以这里为准。DSH patch 不写连接字段时完全复用 Hook / MCP 的共享配置。
+  const overrides = {};
+  if (typeof rawConfig.baseUrl === 'string' && rawConfig.baseUrl.trim() !== '') {
+    overrides.baseUrl = rawConfig.baseUrl.trim();
   }
-
-  // 只有显式给了的键才覆盖：其它键不写时沿用配置文件与环境变量，
-  // 写了（包括空串）就以这里为准。`baseUrl` 必填，永远覆盖。
-  const overrides = { baseUrl };
   if (typeof rawConfig.token === 'string') {
     overrides.token = rawConfig.token;
   }
@@ -237,12 +224,11 @@ function start(ctx, rawConfig) {
   if (rawConfig.recallTimeoutMs !== undefined) {
     overrides.recallTimeoutMs = validateRecallTimeout(rawConfig.recallTimeoutMs);
   }
-  const fallbackConfig = { ...DEFAULT_CONFIG, ...overrides, tmpDir: resolveTempDir() };
   const settings = loadConfig()
     .then((loaded) => ({ ...loaded, ...overrides }))
     .catch((error) => {
-      ctx.logger.warn('comem: 读取 CoMem 配置文件失败，改用默认值。%o', errorFields(error));
-      return fallbackConfig;
+      ctx.logger.warn('comem: 读取 CoMem 配置文件失败，插件停用以免使用错误身份。%o', errorFields(error));
+      return null;
     });
 
   /** 沿用宿主 Hook 的事件预算。 */
@@ -256,6 +242,9 @@ function start(ctx, rawConfig) {
 
   async function injectSessionStart(agent, source) {
     const config = await settings;
+    if (config === null) {
+      return;
+    }
     const event = {
       event: 'session_start',
       sessionId: comemSessionId(agent.session.id),
@@ -297,6 +286,10 @@ function start(ctx, rawConfig) {
       if (prompt === '') {
         return decision;
       }
+      const config = await settings;
+      if (config === null) {
+        return decision;
+      }
       const event = {
         event: 'user_prompt_submit',
         sessionId: comemSessionId(agent.session.id),
@@ -304,7 +297,6 @@ function start(ctx, rawConfig) {
         prompt,
         contextEpoch: epochOf(agent.session.id),
       };
-      const config = await settings;
       const result = await handleUserPromptSubmit(event, {
         config,
         http: clientFor({ ...config, timeoutMs: config.recallTimeoutMs }, budgetForEvent(event, config.recallTimeoutMs)),
@@ -341,6 +333,9 @@ function start(ctx, rawConfig) {
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next();
     try {
+      if (await settings === null) {
+        return decision;
+      }
       const session = exec.agent?.session;
       if (session !== undefined && !isSubagentSession(session)) {
         bufferOf(session).messages.push(toToolMessage({
@@ -367,6 +362,10 @@ function start(ctx, rawConfig) {
       return;
     }
     const snapshot = entry.messages.slice();
+    const config = await settings;
+    if (config === null) {
+      return;
+    }
     const messages = sanitizeCapturedMessages(snapshot).map((message) => ({
       ...message, source: message.source ?? captureSource({ host: 'dsh', cwd: cwdOf(session) }),
     }));
@@ -378,7 +377,6 @@ function start(ctx, rawConfig) {
       }
       return;
     }
-    const config = await settings;
     const sessionId = comemSessionId(session.id);
     // 提交没有「用户按回车的延迟」可比；用与 PreCompact 同一个宽上限。
     const http = clientFor(config, config.commitTimeoutMs);

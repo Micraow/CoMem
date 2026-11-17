@@ -11,8 +11,14 @@
  */
 
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { createMcpProxy, parseSseMessages } from '../servers/mcp-proxy.mjs';
 
@@ -256,6 +262,77 @@ test('stdout 只走协议：任何输入下每一行都是合法 JSON-RPC', asyn
   // 日志确实走了 stderr（否则上面那条断言只是「没打开 debug」）。
   assert.match(stderr(), /"stage":"notification_failed"/);
   assert.ok(!stdout().includes('"stage"'), '日志漏到了 stdout');
+});
+
+test('直接启动的 stdio 代理从共享 config.yaml 读取 baseUrl 和 token', { timeout: 5000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'comem-mcp-proxy-'));
+  let authorization;
+  const server = createServer(async (request, response) => {
+    authorization = request.headers.authorization;
+    request.resume();
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        protocolVersion: '2025-06-18',
+        capabilities: Object.create(null),
+        serverInfo: { name: 'comem', version: '0.1.0' },
+      },
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const childEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith('COMEM_')) {
+      childEnv[key] = value;
+    }
+  }
+  const configFile = join(dir, 'config.yaml');
+  await writeFile(
+    configFile,
+    `baseUrl: http://127.0.0.1:${server.address().port}\ntoken: 'comem_from_file'\n`,
+    'utf8',
+  );
+  childEnv.COMEM_CONFIG_FILE = configFile;
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL('../servers/mcp-proxy.mjs', import.meta.url))],
+    { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  try {
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: Object.create(null),
+        clientInfo: Object.create(null),
+      },
+    })}\n`);
+    const line = await new Promise((resolve, reject) => {
+      let buffer = '';
+      const timer = setTimeout(() => reject(new Error('stdio 代理没有返回 initialize 响应')), 2000);
+      child.stdout.setEncoding('utf8').on('data', (chunk) => {
+        buffer += chunk;
+        const newline = buffer.indexOf('\n');
+        if (newline >= 0) {
+          clearTimeout(timer);
+          resolve(buffer.slice(0, newline));
+        }
+      });
+    });
+    assert.equal(JSON.parse(line).id, 1);
+    assert.equal(authorization, 'Bearer comem_from_file');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      await new Promise((resolve) => child.on('exit', resolve));
+    }
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('SSE 响应体按 data 行拆成多条消息', () => {

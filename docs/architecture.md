@@ -3354,16 +3354,24 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 
 服务端在 `/mcp` 暴露 **Streamable HTTP**，运行在无状态模式（`sessionIdGenerator: undefined`，不返回 `Mcp-Session-Id`，每个请求独立）。
 
-**接入与宿主无关，两条路按「宿主能不能填一个 URL」选。**
+**接入与宿主无关，两条路按部署约束选。** 需要让 Hook、DSH 原生插件和 MCP 共用
+`~/.config/comem/config.yaml` 中的账号时，用 stdio 代理；宿主自己的安全变量机制
+已经管理认证头时，可以 HTTP 直连。
 
-| 宿主 | 走哪条 | 配置里写什么 |
+| 场景 | 走哪条 | 配置里写什么 |
 |---|---|---|
-| 支持 Streamable HTTP（Claude Code、DSH 等） | **HTTP 直连** | 一个 URL；跨网络访问时再一个 `Authorization` 头 |
-| 只支持本地 stdio 服务器 | **stdio 代理**（`integrations/servers/mcp-proxy.mjs`） | `command: node` + `args: [<仓库>/integrations/servers/mcp-proxy.mjs]` |
+| 统一账号与共享客户端配置 | **stdio 代理**（`integrations/servers/mcp-proxy.mjs`） | `command: node` + `args: [<仓库>/integrations/servers/mcp-proxy.mjs]` |
+| 宿主明确管理 HTTP 认证头 | **HTTP 直连** | 一个 URL；需要时再一个 `Authorization` 头 |
 
-最小配置只有两样：`url`（`http://127.0.0.1:1933/mcp`）与可选认证头。**`type` / `transport` 不能省**——Claude Code 把「只有 `url`、没有 `type`」的条目当成 stdio 服务器并跳过（报 `has a "url" but no "type"`），DSH 的 `transport` 是必填字段。
+**`type` / `transport` 不能省**——Claude Code 把「只有 `url`、没有 `type`」的条目
+当成 stdio 服务器并跳过（报 `has a "url" but no "type"`），DSH 的 `transport` 是
+必填字段，取值 `stdio` 或 `streamable-http`。
 
-认证走请求头（§12.7）：带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。唯一的例外是回环信任——来源是回环地址、又没有带凭据的请求被认证成 `server.subject`，本机的 `curl` 与 hook 插件因此不必存凭据。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。**凭据的三种传法**：直连时写进宿主的 MCP 配置（用宿主自己的变量展开，如 `${COMEM_API_KEY}`）；用代理时由代理读 `COMEM_TOKEN` / 配置文件，宿主配置里不出现密钥；只认 `--header` 的宿主用命令行参数（`claude mcp add --header "Authorization: Bearer …"`）。
+认证走请求头（§12.7）：带 `Authorization: Bearer <API Key 或 session token>`，缺失或非法一律 401 `UNAUTHENTICATED`。唯一的例外是回环信任——来源是回环地址、又没有带凭据的请求被认证成 `server.subject`，本机的 `curl` 与 hook 插件因此不必存凭据。API Key 从 `POST /api/v1/admin/users/{id}/api-keys` 签发，明文只出现一次。**统一账号优先由 Hook、DSH 原生插件和 stdio 代理共享同一份扁平客户端配置的 `baseUrl` / `token`。** 该配置不做 `${ENV}` 插值，GUI 宿主也不保证继承终端环境。HTTP 直连只能使用该宿主自己的安全变量机制：Claude Code `${COMEM_TOKEN}`、Codex `bearer_token_env_var = "COMEM_TOKEN"`、DSH `!!js process.env.COMEM_TOKEN`，使用前必须证明对应进程确实拥有变量。Hermes Memory Provider 使用自己的 `memory.comem` 配置或 Hermes profile 的 `.env`；要统一账号，需要填入同一 API Key，而不是假定它读取 CoMem 的共享文件。
+
+DSH `0.2.2-rc.1` 的 `dsh-mcp-client` 在启动 stdio 子进程前会清洗名称含
+`TOKEN` 的父环境变量。因此 DSH GUI 场景应让代理读取共享文件，或用该条目的 `env`
+显式传入值；只依赖在终端导出的 `COMEM_TOKEN` 不足以证明 GUI 进程会收到它。
 
 **为什么还是做 stdio 代理。** 早先的判断是「Claude Code 和 DSH 都原生支持 Streamable HTTP，代理是多余的常驻进程」。**这个判断把「我验证过的两个宿主」当成了「所有宿主」**：MCP 规范里 `stdio` 是一等公民，只支持本地 stdio 服务器的宿主不会因为另外两个支持 HTTP 就不再存在。代理约 200 行，不引依赖、不重写认证——它复用 hook 的配置链（`integrations/lib/config.mjs`），把 stdin 的每一行 JSON-RPC 转发到 `POST /mcp`。**服务端无状态省掉了三块**：没有 `Mcp-Session-Id` 可缓存、没有 `DELETE` 可发、没有会话过期要重放 `initialize`。这是它比通用代理短的那部分。
 
@@ -3404,6 +3412,10 @@ Hook 负责「自动注入 + 采集」，MCP 负责「agent 主动调用」，�
 `injection.mjs` / `sanitize.mjs` / `http.mjs` / `lifecycle.mjs`。
 `hosts/dsh.mjs` 已删除——它假设的载荷形状、`transcriptPath` 与工具名都不存在，
 永远不会被调用。`install --host dsh` 在写第一个字节之前失败并指向插件。
+DSH patch 的 `config` 可以为空；插件从共享 `~/.config/comem/config.yaml` 或
+`COMEM_*` 环境变量加载 `baseUrl` / `token`，只有 patch 显式写出的字段才覆盖。
+显式 `token: ''` 会清空共享 token，因此统一接入的示例省略该字段。配置文件不存在
+时使用既有默认值；文件存在但解析失败时插件停用注入与采集，不退回默认身份写数据。
 
 Codex 与 Claude Code 的载荷字段同形（`session_id` / `transcript_path` / `cwd` /
 `hook_event_name`，信封是 `hookSpecificOutput.additionalContext` 与

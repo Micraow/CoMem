@@ -4,7 +4,8 @@
  *
  * 页面按「选宿主 → 验证 → 第一条记忆」组织。三件事分别对应三条独立的通道：
  * MCP 配置决定 agent 能不能主动读写，Hook 安装决定会话会不会被自动召回与采集，
- * 验证区读 `GET /health` 与 `GET /sessions` 判断前两件事有没有真的生效。
+ * 验证区读 `GET /health` 与个人根 `GET /sessions`；它只证明服务端和账号数据可读，
+ * 宿主自己的 doctor / status 才用于核对该宿主实际认证的 subject。
  *
  * **片段不在页面里手写。** 宿主格式、服务地址与安装命令都在
  * `utils/connectGuide.ts` 里生成，并由 `tests/unit/web/connect-guide.test.ts`
@@ -21,21 +22,26 @@ import { consoleIdentityState } from '~/composables/consoleIdentity'
 import { useToast } from '~/composables/useToast'
 import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 import {
-  HERMES_KEY_NAME,
-  HERMES_TOKEN_ENV,
+  CONNECT_TOKEN_ENV,
   CONNECT_HOSTS,
   CONNECT_HOST_LABELS,
+  DEFAULT_REPO_ROOT,
   DEFAULT_SERVER_BASE_URL,
   FIRST_MEMORY_TEXT,
   HERMES_OPENUI_DOC,
   HOST_CONFIG_LOCATION,
   HOST_DOC_LINK,
+  SHARED_CONFIG_PATH,
+  apiKeyNameForHost,
+  automaticSetupFor,
   deriveVerification,
+  doctorCommandFor,
   firstMemoryCurl,
-  hookInstallFor,
   mcpSnippetFor,
   apiKeysPathForSubject,
   serverBaseUrlFromApiBase,
+  sharedConfigSetupCommand,
+  sharedConfigSnippet,
   trustStepFor,
   type ConnectHost,
   type VerificationTone,
@@ -74,13 +80,15 @@ const HOST_TABS = CONNECT_HOSTS.map((host) => ({
 
 const api = useApi()
 const toast = useToast()
-const scopeRoot = useScopeRoot()
 const runtimeConfig = useRuntimeConfig()
 const route = useRoute()
 const identityState = consoleIdentityState()
 const identity = identityState.status === 'ready' ? identityState.identity : null
 const currentSubject = computed(() => identity?.subject ?? '')
 const apiKeysPath = computed(() => apiKeysPathForSubject(currentSubject.value))
+const personalScope = computed(
+  () => identity?.scopes.find((scope) => scope.startsWith('comem://user/')) ?? '',
+)
 const consoleOrigin = typeof window === 'undefined' ? '' : window.location.origin
 
 /**
@@ -104,9 +112,11 @@ function initialServerBaseUrl(): string {
 }
 
 const serverBaseUrl = useState<string>('comem-mcp-server-base-url', initialServerBaseUrl)
+const repoRoot = useState<string>('comem-integrations-repo-root', () => DEFAULT_REPO_ROOT)
 
 const host = ref<ConnectHost>(route.query.host === 'hermes' ? 'hermes' : 'claude-code')
 const isHermes = computed(() => host.value === 'hermes')
+const keyName = computed(() => apiKeyNameForHost(host.value))
 const health = ref<HealthPayload | null>(null)
 const healthError = ref<string | null>(null)
 const sessions = ref<SessionListPayload['sessions'] | null>(null)
@@ -114,17 +124,29 @@ const sessionsError = ref<string | null>(null)
 const loading = ref(false)
 const generatingKey = ref(false)
 const keyError = ref<string | null>(null)
-const generatedKey = ref<{ readonly key: string } | null>(null)
+const generatedKey = ref<{
+  readonly key: string
+  readonly host: ConnectHost
+  readonly subject: string
+} | null>(null)
 let keyRequestVersion = 0
 
 /** 空输入时退回文档里的默认地址，片段里不出现 `/mcp` 这种没有主机的地址。 */
 const effectiveServerBaseUrl = computed(
   () => serverBaseUrl.value.trim() || DEFAULT_SERVER_BASE_URL,
 )
+const effectiveRepoRoot = computed(() => repoRoot.value.trim() || DEFAULT_REPO_ROOT)
 
-const snippet = computed(() => mcpSnippetFor(host.value, effectiveServerBaseUrl.value))
-const hook = computed(() => hookInstallFor(host.value))
+const snippet = computed(() =>
+  mcpSnippetFor(host.value, effectiveServerBaseUrl.value, effectiveRepoRoot.value),
+)
+const automatic = computed(() => automaticSetupFor(host.value, effectiveRepoRoot.value))
 const trust = computed(() => trustStepFor(host.value))
+const doctor = computed(() =>
+  doctorCommandFor(host.value, currentSubject.value, effectiveRepoRoot.value),
+)
+const sharedConfig = computed(() => sharedConfigSnippet(effectiveServerBaseUrl.value))
+const sharedConfigSetup = sharedConfigSetupCommand()
 const configLocation = computed(() => HOST_CONFIG_LOCATION[host.value])
 const docLink = computed(() => HOST_DOC_LINK[host.value])
 const memoryCurl = computed(() => firstMemoryCurl(effectiveServerBaseUrl.value))
@@ -134,7 +156,6 @@ const memoryExtractSkipped = computed(() => health.value?.memoryExtract.skipped 
 
 const verification = computed(() =>
   deriveVerification({
-    host: host.value,
     health: health.value,
     healthError: healthError.value,
     sessions: sessions.value,
@@ -143,31 +164,39 @@ const verification = computed(() =>
   }),
 )
 
-async function generateHermesKey(): Promise<void> {
+function resetCredentialState(): void {
+  keyRequestVersion += 1
+  generatingKey.value = false
+  keyError.value = null
+  generatedKey.value = null
+}
+
+async function generateConnectKey(): Promise<void> {
   if (apiKeysPath.value === null || generatingKey.value || generatedKey.value !== null) {
     return
   }
   const requestVersion = ++keyRequestVersion
   const requestSubject = currentSubject.value
   const requestPath = apiKeysPath.value
+  const requestHost = host.value
   generatingKey.value = true
   keyError.value = null
   try {
     const result = await api.post<{ readonly key: string }>(requestPath, {
-      name: HERMES_KEY_NAME,
+      name: apiKeyNameForHost(requestHost),
     })
-    // 切换宿主不会取消已经发出的请求；只让当前 Hermes 页面处理它的结果。
+    // 切换宿主或账号会作废在途请求；旧响应不能进入新标签的组件状态。
     if (
       requestVersion !== keyRequestVersion ||
-      !isHermes.value ||
+      host.value !== requestHost ||
       currentSubject.value !== requestSubject
     ) {
       return
     }
-    generatedKey.value = result
-    toast.show('success', `已为 ${currentSubject.value} 生成 Hermes 接入 Key`)
+    generatedKey.value = { ...result, host: requestHost, subject: requestSubject }
+    toast.show('success', `已为 ${requestSubject} 生成 ${apiKeyNameForHost(requestHost)} 接入 Key`)
   } catch (caught) {
-    if (requestVersion === keyRequestVersion && isHermes.value) {
+    if (requestVersion === keyRequestVersion && host.value === requestHost) {
       keyError.value = errorMessageOf(caught)
     }
   } finally {
@@ -177,7 +206,7 @@ async function generateHermesKey(): Promise<void> {
   }
 }
 
-async function copyHermesToken(): Promise<void> {
+async function copyConnectToken(): Promise<void> {
   const key = generatedKey.value?.key
   if (key === undefined) {
     return
@@ -186,7 +215,7 @@ async function copyHermesToken(): Promise<void> {
     toast.show('error', CLIPBOARD_DENIED_MESSAGE)
     return
   }
-  toast.show('success', `已复制 ${HERMES_TOKEN_ENV}`)
+  toast.show('success', '已复制接入 Key')
 }
 
 async function loadHealth(): Promise<void> {
@@ -201,7 +230,7 @@ async function loadHealth(): Promise<void> {
 
 async function loadSessions(): Promise<void> {
   sessionsError.value = null
-  const targetScope = isHermes.value ? (identity?.scopes[0] ?? scopeRoot.value) : scopeRoot.value
+  const targetScope = personalScope.value
   if (targetScope === '') {
     sessions.value = []
     return
@@ -229,30 +258,22 @@ async function check(): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void check()
-})
-
-// 切作用域后会话列表不同；健康检查是进程级的，但一起重取的成本可以忽略。
-watch(scopeRoot, () => {
-  void check()
-})
-
 watch(host, () => {
+  resetCredentialState()
   void check()
 })
 
-watch(isHermes, (active) => {
-  if (!active) {
-    keyRequestVersion += 1
-    generatingKey.value = false
-    generatedKey.value = null
-    keyError.value = null
-  }
+watch(currentSubject, () => {
+  resetCredentialState()
+  void check()
 })
 
 onBeforeUnmount(() => {
   keyRequestVersion += 1
+})
+
+onMounted(() => {
+  void check()
 })
 </script>
 
@@ -287,54 +308,48 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <p v-if="health !== null" class="loopback-consequence body-sm">
-            <template v-if="health.subject !== currentSubject">
-              <code>{{ health.subject }}</code> 是回环信任的兜底身份。只有 Hermes 没有读取
-              <code>{{ HERMES_TOKEN_ENV }}</code> 时，回环请求才会写入这个账号；使用本页生成的 Key
-              时，MCP 与自动记忆使用 <code>{{ currentSubject }}</code>。
-            </template>
-            <template v-else>
-              即使 Hermes 没有读取 <code>{{ HERMES_TOKEN_ENV }}</code>，回环请求也使用当前登录账号。
-            </template>
+            <code>{{ health.subject }}</code> 是未携带凭据的回环请求兜底身份。
+            宿主读取接入 Key 后，MCP 与自动召回都使用当前登录账号
+            <code>{{ currentSubject }}</code>。
           </p>
 
           <div class="connect-host">
-            <section v-if="isHermes" class="connect-block">
-              <h3 class="headline">自动记忆</h3>
-              <p class="body-sm">安装 CoMem 的 Hermes 记忆插件。它会在每轮对话中召回相关记忆，并在答完后归档这一轮。</p>
-              <DomainCodeBlock
-                code="hermes memory setup"
-                label="安装后在 Hermes 主机上运行"
-                copy-label="复制记忆插件设置命令"
-              />
-              <p class="body-sm">
-                <a :href="docLink" target="_blank" rel="noreferrer">安装和配置记忆插件</a>
-              </p>
-            </section>
-
-            <section v-if="isHermes" class="connect-block">
+            <section class="connect-block">
               <div class="connect-block__head">
-                <h3 class="headline">接入凭据</h3>
-                <span class="caption">{{ HERMES_TOKEN_ENV }} · {{ currentSubject || '当前账号未识别' }}</span>
+                <h3 class="headline">账号凭据</h3>
+                <span class="caption">
+                  {{ isHermes ? CONNECT_TOKEN_ENV : '共享配置' }} ·
+                  {{ currentSubject || '当前账号未识别' }}
+                </span>
               </div>
               <UiButton
                 variant="secondary"
                 :disabled="apiKeysPath === null || generatingKey || generatedKey !== null"
-                @click="generateHermesKey"
+                @click="generateConnectKey"
               >
                 <KeyRound :size="14" :stroke-width="1.5" />
-                {{ generatingKey ? '生成中…' : generatedKey === null ? '生成 Hermes 接入 Key' : '本页已生成' }}
+                {{
+                  generatingKey
+                    ? '生成中…'
+                    : generatedKey === null
+                      ? `生成 ${keyName} 接入 Key`
+                      : '本页已生成'
+                }}
               </UiButton>
               <UiErrorCallout v-if="keyError !== null" :message="keyError" />
               <div v-if="generatedKey !== null" class="generated-key" role="status">
                 <p>完整 Key 只显示这一次，刷新或离开页面后不再显示。</p>
                 <code>{{ generatedKey.key }}</code>
-                <UiButton variant="secondary" size="sm" @click="copyHermesToken">
+                <UiButton variant="secondary" size="sm" @click="copyConnectToken">
                   <Copy :size="14" :stroke-width="1.5" />
-                  复制 {{ HERMES_TOKEN_ENV }}
+                  复制接入 Key
                 </UiButton>
               </div>
-              <p class="body-sm">
-                自动记忆插件与 MCP 配置共用这个 {{ HERMES_TOKEN_ENV }}。
+              <p v-if="isHermes" class="body-sm">
+                Hermes 设置向导会把 Key 写入当前 profile 的 {{ CONNECT_TOKEN_ENV }}。
+              </p>
+              <p v-else class="body-sm">
+                把 Key 写入下面的共享配置。Hook 和 MCP 代理读取同一文件，GUI 无需继承终端环境。
               </p>
               <p class="body-sm credential-manage">
                 <NuxtLink to="/account">在“我的账户”中管理或撤销 API Key</NuxtLink>
@@ -342,10 +357,7 @@ onBeforeUnmount(() => {
             </section>
 
             <section class="connect-block">
-              <div class="connect-block__head">
-                <h3 class="headline">{{ isHermes ? '主动查找与导入（MCP）' : 'MCP 配置' }}</h3>
-                <span class="caption">写入 {{ configLocation }}</span>
-              </div>
+              <h3 class="headline">运行路径</h3>
               <label class="connect-address" for="mcp-server-address">
                 <span class="connect-address__label">Agent 访问地址</span>
                 <UiInput
@@ -355,35 +367,84 @@ onBeforeUnmount(() => {
                   placeholder="http://127.0.0.1:1933"
                 />
               </label>
+              <label v-if="!isHermes" class="connect-address" for="integrations-repo-root">
+                <span class="connect-address__label">CoMem 仓库绝对路径</span>
+                <UiInput
+                  id="integrations-repo-root"
+                  v-model="repoRoot"
+                  type="text"
+                  placeholder="/absolute/path/to/CoMem"
+                />
+              </label>
               <div class="address-pair">
                 <span>本网页 <code>{{ consoleOrigin }}</code></span>
                 <span>Agent <code>{{ effectiveServerBaseUrl }}</code></span>
+              </div>
+            </section>
+
+            <section v-if="!isHermes" class="connect-block">
+              <div class="connect-block__head">
+                <h3 class="headline">共享连接配置</h3>
+                <span class="caption"><code>{{ SHARED_CONFIG_PATH }}</code></span>
+              </div>
+              <p class="body-sm">
+                先创建权限为 0600 的配置文件，再把下面两项合并进去。Key 只保存在本机文件中。
+              </p>
+              <DomainCodeBlock
+                :code="sharedConfigSetup"
+                label="创建并打开共享配置"
+                copy-label="复制配置准备命令"
+              />
+              <DomainCodeBlock
+                :code="sharedConfig.text"
+                label="共享配置内容"
+                copy-label="复制共享配置"
+              />
+            </section>
+
+            <section class="connect-block">
+              <div class="connect-block__head">
+                <h3 class="headline">{{ automatic.title }}</h3>
+                <a :href="docLink" target="_blank" rel="noreferrer">{{ automatic.docLabel }}</a>
+              </div>
+              <p class="body-sm">{{ automatic.detail }}</p>
+              <DomainCodeBlock
+                v-if="automatic.command !== null"
+                :code="automatic.command"
+                :label="automatic.commandLabel ?? '安装命令'"
+                copy-label="复制安装命令"
+              />
+              <DomainCodeBlock
+                v-if="automatic.config !== null"
+                :code="automatic.config.text"
+                :label="automatic.configLabel ?? `插件配置（${automatic.config.format}）`"
+                copy-label="复制插件配置"
+              />
+              <DomainCodeBlock
+                v-if="doctor !== null"
+                :code="doctor"
+                label="核对 Hook 使用的账号"
+                copy-label="复制身份检查命令"
+              />
+            </section>
+
+            <section class="connect-block">
+              <div class="connect-block__head">
+                <h3 class="headline">MCP 配置</h3>
+                <span class="caption">写入 {{ configLocation }}</span>
               </div>
               <DomainCodeBlock
                 :code="snippet.text"
                 :label="`MCP 配置（${snippet.format}）`"
                 copy-label="复制 MCP 配置"
               />
-            </section>
-
-            <section v-if="!isHermes" class="connect-block">
-              <div class="connect-block__head">
-                <h3 class="headline">安装自动采集</h3>
-                <span class="caption">在仓库根目录执行</span>
-              </div>
-              <DomainCodeBlock
-                v-if="hook.available && hook.command !== null"
-                :code="hook.command"
-                label="自动采集安装"
-                copy-label="复制自动采集安装命令"
-              />
-              <UiCallout v-else tone="warn">
-                <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
-                <div>
-                  {{ hook.note }}
-                  <a :href="docLink" target="_blank" rel="noreferrer">查看 DSH 接入步骤</a>
-                </div>
-              </UiCallout>
+              <p v-if="isHermes" class="body-sm">
+                Hermes 的 MCP 配置与 Memory Provider 使用当前 profile 中的
+                <code>{{ CONNECT_TOKEN_ENV }}</code>。
+              </p>
+              <p v-else class="body-sm">
+                MCP 代理读取共享配置；更新 Key 或地址后只需重启宿主，不需要改这段配置。
+              </p>
             </section>
 
             <UiCallout tone="info">
@@ -404,11 +465,11 @@ onBeforeUnmount(() => {
           </div>
         </UiCard>
 
-        <UiCard title="② 验证接入" panel>
-          <p v-if="isHermes" class="body-sm">
-            当前账号：<code>{{ currentSubject || '未识别' }}</code>
+        <UiCard title="② 检查服务与账号数据" panel>
+          <p class="body-sm">
+            当前账号：<code>{{ currentSubject || '未识别' }}</code>。
+            这里只检查服务端与个人根下的归档，不能代替宿主 doctor / status 的身份核对。
           </p>
-          <p v-else class="body-sm">要验证召回，请在新会话中问一个已经存过的约定。</p>
 
           <ul class="connect-checks">
             <li v-for="item in verification.checks" :key="item.key" class="connect-check">
@@ -434,10 +495,10 @@ onBeforeUnmount(() => {
               当前未配置模型，会话会被归档但不会产生新的记忆；
               见下方说明。
             </div>
-            <div v-else-if="isHermes">
-              当前账号已收到归档。归档只证明写入成功，不证明召回内容被模型使用。
+            <div v-else>
+              服务和当前账号归档已可读。请按上方步骤确认宿主实际认证的 subject；
+              归档与召回是否生效仍以新会话结果为准。
             </div>
-            <div v-else>CoMem 已收到会话。请到「会话与任务」检查刚才那一轮。</div>
           </UiCallout>
         </UiCard>
 
@@ -448,7 +509,12 @@ onBeforeUnmount(() => {
           <p v-else class="body-sm">
             告诉 Agent：记住「{{ FIRST_MEMORY_TEXT }}」。等价的一次 MCP 调用：
           </p>
-          <DomainCodeBlock v-if="!isHermes" :code="memoryCurl" label="MCP 调用（curl）" copy-label="复制调用命令" />
+          <DomainCodeBlock
+            v-if="!isHermes"
+            :code="memoryCurl"
+            label="开发者临时调用（当前 shell 需设置 COMEM_TOKEN）"
+            copy-label="复制调用命令"
+          />
 
           <UiCallout v-if="memoryExtractSkipped" tone="warn" class="mt-16">
             <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>

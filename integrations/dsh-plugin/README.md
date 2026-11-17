@@ -46,23 +46,27 @@ dsh --profile web --dump-config | grep -A6 'id: comem'
 - insert:
     - id: comem
       name: comem-dsh-plugin
-      config:
-        baseUrl: http://127.0.0.1:1933
-        token: ''            # 非回环时必须给
-        timeoutMs: 5000
+      config: {}
 ```
 
 | 键 | 必填 | 默认 | 说明 |
 |---|---|---|---|
-| `baseUrl` | **是** | — | CoMem 服务端地址。缺失时插件只记一条 warn，**不注册任何监听器**（不让插件加载失败把 DSH 拖挂） |
+| `baseUrl` | 否 | 共享配置或 `http://127.0.0.1:1933` | 显式覆盖共享 `config.yaml` / `COMEM_BASE_URL` |
 | `token` | 否 | 配置文件里的值 | `Authorization: Bearer`。显式写空串会覆盖配置文件 / 环境变量里的 token |
 | `timeoutMs` | 否 | `5000` | 普通请求的单次 HTTP 超时；每轮召回使用独立总预算 |
 | `recallTimeoutMs` | 否 | `2000` | 每轮召回总预算（1000–29000ms）。不填时读客户端配置文件或环境变量 |
 
-其余配置继续读 `~/.config/comem/config.yaml`（或 `COMEM_*` 环境变量），与 hook
-完全同一套：`recallTimeoutMs`（默认 2000ms，每轮自动召回总预算）、`recallLimit`、`queryFilters`、
+默认配置来自 `~/.config/comem/config.yaml`（或 `COMEM_CONFIG_FILE` 指定的文件；
+`COMEM_*` 环境变量优先），与 Hook 和 stdio MCP 代理完全同一套。可放：
+`baseUrl`、`token`、`recallTimeoutMs`、`recallLimit`、`queryFilters`、
 `profileBudgetTokens`、`skillBudgetTokens`、`commitTimeoutMs`、`tmpDir`。
-身份来自服务端认证，不需要重复填写用户 ID。服务端与插件应同步升级以支持 `/context`。
+`token` 必须写真实值；这个加载器不做 `${ENV}` 插值。身份来自服务端认证，不需要
+重复填写用户 ID。需要和其他 Agent 绑定同一账号时，把同一 API Key 写入共享文件，
+再用 `co-mem doctor --expect-subject user:<id>` 核对。服务端与插件应同步升级以
+支持 `/context`。
+
+配置文件不存在时使用默认值；文件存在但解析失败时，插件只记录一条 warn 并停用
+注入与采集，不会退回默认地址写入别的身份。
 
 总预算沿用 hook 的那张表（`integrations/lib/lifecycle.mjs` 的 `HOOK_BUDGETS_MS`）：
 开局注入最多 4s，每轮召回最多 2s，提交用 `commitTimeoutMs`（默认 30s）。区别是

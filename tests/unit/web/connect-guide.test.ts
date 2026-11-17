@@ -19,23 +19,30 @@ import { parse as parseYaml } from 'yaml';
 import {
   CONNECT_HOSTS,
   CONNECT_HOST_LABELS,
+  CONNECT_KEY_NAMES,
+  CONNECT_TOKEN_ENV,
   CURSOR_INSPECT_COMMAND,
+  DEFAULT_REPO_ROOT,
   DEFAULT_SERVER_BASE_URL,
   DOC_LINKS,
-  HERMES_KEY_NAME,
-  HERMES_TOKEN_ENV,
   HERMES_OPENUI_DOC,
   HOST_CONFIG_LOCATION,
   HOST_DOC_LINK,
   MCP_ENDPOINT_PATH,
   MCP_SERVER_NAME,
+  SHARED_CONFIG_PATH,
   apiKeysPathForSubject,
+  apiKeyNameForHost,
+  automaticSetupFor,
   deriveVerification,
+  doctorCommandFor,
   firstMemoryCall,
   firstMemoryCurl,
   hookInstallFor,
   isFreshInstall,
   mcpSnippetFor,
+  sharedConfigSetupCommand,
+  sharedConfigSnippet,
   trustStepFor,
   userIdFromSubject,
 } from '../../../web/utils/connectGuide.js';
@@ -94,18 +101,19 @@ describe('宿主清单', () => {
 });
 
 describe('MCP 配置片段', () => {
-  it('服务地址与端点路径跟仓库里的来源一致', () => {
+  it('共享配置服务地址与端点路径跟仓库里的来源一致', () => {
     expect(CONFIG_SOURCE).toContain(DEFAULT_SERVER_BASE_URL);
     expect(README).toContain(`${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`);
-    for (const host of CONNECT_HOSTS) {
-      expect(mcpSnippetFor(host).text).toContain(
-        `${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`,
-      );
-    }
+    expect(SHARED_CONFIG_PATH).toContain('${XDG_CONFIG_HOME:-$HOME/.config}/comem');
+    expect(sharedConfigSnippet().text).toContain(DEFAULT_SERVER_BASE_URL);
+    expect(mcpSnippetFor('hermes').text).toContain(
+      `${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`,
+    );
   });
 
-  it('Claude Code 给 JSON，type 不能省', () => {
-    const snippet = mcpSnippetFor('claude-code');
+  it('Claude Code 默认用 JSON 启动仓库内 stdio 代理', () => {
+    const repoRoot = '/srv/CoMem with space';
+    const snippet = mcpSnippetFor('claude-code', DEFAULT_SERVER_BASE_URL, repoRoot);
     expect(snippet.format).toBe('JSON');
 
     const parsed: unknown = JSON.parse(snippet.text);
@@ -114,22 +122,27 @@ describe('MCP 配置片段', () => {
       throw new Error('Claude Code 片段不是 mcpServers 对象');
     }
     expect(parsed['mcpServers'][MCP_SERVER_NAME]).toEqual({
-      type: 'http',
-      url: `${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`,
+      type: 'stdio',
+      command: 'node',
+      args: ['/srv/CoMem with space/integrations/servers/mcp-proxy.mjs'],
     });
-    expect(README).toContain('"type": "http"');
+    expect(README).toContain('"type": "stdio"');
   });
 
-  it('Codex 给 TOML，表名与 url 字段和 codex mcp add 写出的配置一致', () => {
-    const snippet = mcpSnippetFor('codex');
+  it('Codex 默认用 TOML 启动仓库内 stdio 代理', () => {
+    const repoRoot = '/srv/CoMem';
+    const snippet = mcpSnippetFor('codex', DEFAULT_SERVER_BASE_URL, repoRoot);
     expect(snippet.format).toBe('TOML');
     expect(snippet.text).toContain(`[mcp_servers.${MCP_SERVER_NAME}]`);
-    expect(snippet.text).toContain(`url = "${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}"`);
+    expect(snippet.text).toContain('command = "node"');
+    expect(snippet.text).toContain('"/srv/CoMem/integrations/servers/mcp-proxy.mjs"');
+    expect(snippet.text).not.toContain('bearer_token_env_var');
     expect(README).toContain('~/.codex/config.toml');
   });
 
-  it('DSH 给可解析的 YAML，transport 是必填字段', () => {
-    const snippet = mcpSnippetFor('dsh');
+  it('DSH 默认用 YAML 启动同一份 stdio 代理', () => {
+    const repoRoot = '/srv/CoMem';
+    const snippet = mcpSnippetFor('dsh', DEFAULT_SERVER_BASE_URL, repoRoot);
     expect(snippet.format).toBe('YAML');
 
     const parsed: unknown = parseYaml(snippet.text);
@@ -142,11 +155,14 @@ describe('MCP 配置片段', () => {
       name: '@deepseek-ai/dsh-mcp-client',
       config: {
         serverName: MCP_SERVER_NAME,
-        transport: 'streamable-http',
-        url: `${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`,
+        transport: 'stdio',
+        command: 'node',
+        args: ['/srv/CoMem/integrations/servers/mcp-proxy.mjs'],
       },
     });
-    expect(README).toContain('transport: streamable-http');
+    expect(README).toContain('transport: stdio');
+    expect(README).toContain(`process.env.${CONNECT_TOKEN_ENV}`);
+    expect(README).toContain('Authorization: !!js');
   });
 
   it('Hermes 的 Docker 配置只引用当前 profile 的 API Key 环境变量', () => {
@@ -163,11 +179,37 @@ describe('MCP 配置片段', () => {
     });
   });
 
-  it('Hermes 接入 Key 名称与 COMEM_TOKEN 共用一份常量', () => {
-    expect(HERMES_KEY_NAME).toBe('Hermes');
-    expect(HERMES_TOKEN_ENV).toBe('COMEM_TOKEN');
-    expect(mcpSnippetFor('hermes').text).toContain(`\${${HERMES_TOKEN_ENV}}`);
+  it('Hermes 配置引用统一 COMEM_TOKEN', () => {
+    expect(CONNECT_TOKEN_ENV).toBe('COMEM_TOKEN');
+    expect(mcpSnippetFor('hermes').text).toContain(`\${${CONNECT_TOKEN_ENV}}`);
     expect(mcpSnippetFor('hermes').text).toContain('auth: header');
+  });
+
+  it('默认片段共享代理，Hermes 保持自己的 profile 凭据', () => {
+    const proxyPath = `${DEFAULT_REPO_ROOT}/integrations/servers/mcp-proxy.mjs`;
+    for (const host of ['claude-code', 'codex', 'dsh'] as const) {
+      const text = mcpSnippetFor(host).text;
+      expect(text).toContain(proxyPath);
+      expect(text).not.toContain(CONNECT_TOKEN_ENV);
+      expect(text).not.toMatch(/\bcomem_[a-z0-9]/iu);
+    }
+    expect(mcpSnippetFor('hermes').text).toContain(CONNECT_TOKEN_ENV);
+    expect(mcpSnippetFor('hermes').text).not.toMatch(/\bcomem_[a-z0-9]/u);
+  });
+
+  it('共享配置片段只包含地址和待替换占位符，不插入动态 Key', () => {
+    const setup = sharedConfigSetupCommand();
+    expect(setup).toContain('config_file="${COMEM_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}');
+    expect(setup).toContain('install -d -m 700');
+    expect(setup).toContain('install -m 600 /dev/null');
+    expect(setup).toContain('chmod 600');
+    expect(setup).toContain('"${EDITOR:-vi}"');
+
+    const snippet = sharedConfigSnippet('http://127.0.0.1:18080/');
+    expect(snippet).toEqual({
+      format: 'YAML',
+      text: "baseUrl: http://127.0.0.1:18080\ntoken: '<本页生成的 Key>'\n",
+    });
   });
 });
 
@@ -179,13 +221,31 @@ describe('当前账号 API Key', () => {
     expect(apiKeysPathForSubject('group:eng')).toBeNull();
   });
 
-  it('页面仅由显式按钮生成 Hermes Key，不使用可选复选框', () => {
+  it('Key 名称按所选宿主设置', () => {
+    expect(CONNECT_KEY_NAMES).toEqual({
+      'claude-code': 'Claude Code',
+      codex: 'Codex',
+      dsh: 'DSH',
+      hermes: 'Hermes',
+    });
+    for (const host of CONNECT_HOSTS) {
+      expect(apiKeyNameForHost(host)).toBe(CONNECT_HOST_LABELS[host]);
+    }
+  });
+
+  it('四个宿主共用显式生成按钮，Key 只保留在组件状态', () => {
     expect(CONNECT_PAGE).toContain('consoleIdentityState');
-    expect(CONNECT_PAGE).toContain('generateHermesKey');
-    expect(CONNECT_PAGE).toContain('生成 Hermes 接入 Key');
+    expect(CONNECT_PAGE).toContain('generateConnectKey');
+    expect(CONNECT_PAGE).toContain('生成 ${keyName} 接入 Key');
+    expect(CONNECT_PAGE).toContain('apiKeyNameForHost(requestHost)');
+    expect(CONNECT_PAGE).toContain('trustStepFor(host.value)');
+    expect(CONNECT_PAGE).toContain(
+      'doctorCommandFor(host.value, currentSubject.value, effectiveRepoRoot.value)',
+    );
     expect(CONNECT_PAGE).toContain('完整 Key 只显示这一次');
-    expect(CONNECT_PAGE).not.toContain('hermesUseApiKey');
-    expect(CONNECT_PAGE).not.toMatch(/onMounted\([^)]*generateHermesKey/u);
+    expect(CONNECT_PAGE).not.toContain('localStorage');
+    expect(CONNECT_PAGE).not.toContain('sessionStorage');
+    expect(CONNECT_PAGE).not.toMatch(/onMounted\([^)]*generateConnectKey/u);
   });
 
   it('页面明确区分控制台来源与 Agent 后端地址', () => {
@@ -198,29 +258,41 @@ describe('当前账号 API Key', () => {
     expect(CONNECT_PAGE).toContain('当前登录');
     expect(CONNECT_PAGE).toContain('接入 Key 所有者');
     expect(CONNECT_PAGE).toContain('免凭据连接会写入');
-    expect(CONNECT_PAGE).toContain('只有 Hermes 没有读取');
+    expect(CONNECT_PAGE).toContain('未携带凭据的回环请求兜底身份');
+    expect(CONNECT_PAGE).toContain('共享连接配置');
+    expect(CONNECT_PAGE).toContain('integrations-repo-root');
+    expect(CONNECT_PAGE).toContain('GUI 无需继承终端环境');
     expect(CONNECT_PAGE).toContain('to="/account"');
     expect(CONNECT_PAGE).not.toContain('服务绑定');
     expect(CONNECT_PAGE).not.toContain('is-mismatch');
   });
 
-  it('宿主切换时使仍在途的 Key 请求失效', () => {
+  it('宿主或账号切换会清空 Key 并使在途请求失效', () => {
     expect(CONNECT_PAGE).toContain('keyRequestVersion');
     expect(CONNECT_PAGE).toMatch(/requestVersion !== keyRequestVersion/u);
-    expect(CONNECT_PAGE).toMatch(/watch\(isHermes,[\s\S]*keyRequestVersion \+= 1/u);
+    expect(CONNECT_PAGE).toMatch(/host\.value !== requestHost/u);
+    expect(CONNECT_PAGE).toMatch(/watch\(host,[\s\S]*resetCredentialState/u);
+    expect(CONNECT_PAGE).toMatch(/watch\(currentSubject,[\s\S]*resetCredentialState/u);
+  });
+
+  it('会话检查只读当前账号个人根，不跟随团队作用域', () => {
+    expect(CONNECT_PAGE).toContain("scope.startsWith('comem://user/')");
+    expect(CONNECT_PAGE).toContain('const targetScope = personalScope.value');
+    expect(CONNECT_PAGE).not.toContain("startsWith('hermes-')");
+    expect(CONNECT_PAGE).not.toContain('scopeRoot');
   });
 });
 
 describe('自动采集安装', () => {
-  it('Claude Code / Codex 给出可执行的 --host 命令', () => {
-    expect(hookInstallFor('claude-code')).toEqual({
+  it('Claude Code / Codex 给出使用仓库绝对路径的 --host 命令', () => {
+    expect(hookInstallFor('claude-code', '/srv/CoMem')).toEqual({
       available: true,
-      command: 'node integrations/cli.mjs install --host claude-code',
+      command: "node '/srv/CoMem/integrations/cli.mjs' install --host claude-code",
       note: null,
     });
-    expect(hookInstallFor('codex')).toEqual({
+    expect(hookInstallFor('codex', '/srv/CoMem')).toEqual({
       available: true,
-      command: 'node integrations/cli.mjs install --host codex',
+      command: "node '/srv/CoMem/integrations/cli.mjs' install --host codex",
       note: null,
     });
   });
@@ -232,14 +304,71 @@ describe('自动采集安装', () => {
     expect(hook.note).toContain('插件');
     expect(HOST_DOC_LINK.dsh).toBe(DOC_LINKS.dsh);
   });
+
+  it('Claude Code 与 Codex 安装命令固定到输入的仓库路径', () => {
+    for (const host of ['claude-code', 'codex'] as const) {
+      const setup = automaticSetupFor(host, '/srv/CoMem');
+      expect(setup.command).toContain("'/srv/CoMem/integrations/cli.mjs'");
+      expect(setup.command).toContain(`--host ${host}`);
+      expect(setup.detail).toContain('共享配置');
+      expect(setup.detail).toContain('GUI 无需终端环境变量');
+    }
+  });
+
+  it('DSH 原生插件保持空配置，沿用只读共享配置', () => {
+    const setup = automaticSetupFor('dsh', '/srv/CoMem');
+    expect(setup.command).toContain("'link:/srv/CoMem/integrations/dsh-plugin'");
+    expect(setup.command).toContain('--profile YOUR_PROFILE');
+    expect(setup.detail).toContain('YOUR_PROFILE');
+    const config = parseYaml(setup.config?.text ?? '');
+    expect(config).toMatchObject([
+      {
+        insert: [{ id: 'comem', name: 'comem-dsh-plugin' }],
+      },
+    ]);
+    expect((config as Array<{ insert: Array<{ config: unknown }> }>)[0]?.insert[0]?.config).toEqual(
+      {},
+    );
+    expect(setup.config?.text).not.toContain('baseUrl:');
+    expect(setup.config?.text).not.toContain('token:');
+    expect(setup.detail).toContain('共享配置');
+    expect(setup.detail).toContain('GUI 无需终端环境变量');
+  });
+
+  it('Hermes 设置向导明确使用同一个配置文件环境变量', () => {
+    const setup = automaticSetupFor('hermes');
+    expect(setup.command).toBe('hermes memory setup');
+    expect(setup.detail).toContain(CONNECT_TOKEN_ENV);
+    expect(setup.detail).toContain('profile');
+  });
 });
 
 describe('信任步骤', () => {
-  it('Codex 去 /hooks 逐条信任，Claude Code 批准项目级 MCP 服务器', () => {
-    expect(trustStepFor('codex').detail).toContain('/hooks');
-    expect(trustStepFor('codex').detail).toContain('integrations/servers');
-    expect(trustStepFor('claude-code').detail).toContain('.mcp.json');
-    expect(trustStepFor('dsh').detail).toContain('插件');
+  it('四个宿主都要求用 health 的 subject 核对当前账号', () => {
+    expect(trustStepFor('codex').title).toContain('/hooks');
+    expect(trustStepFor('codex').detail).toContain('health');
+    expect(trustStepFor('claude-code').detail).toContain('确认账号');
+    expect(trustStepFor('dsh').detail).toContain('health');
+    expect(trustStepFor('hermes').detail).toContain('hermes memory status');
+  });
+
+  it('Hook 身份自检使用当前账号，不在命令中出现凭据', () => {
+    expect(doctorCommandFor('claude-code', 'user:pengbo', '/srv/CoMem')).toBe(
+      `COMEM_CONFIG_FILE="${SHARED_CONFIG_PATH}" node '/srv/CoMem/integrations/cli.mjs' doctor --expect-subject user:pengbo`,
+    );
+    expect(doctorCommandFor('codex', 'user:pengbo', '/srv/CoMem')).toContain(
+      '--expect-subject user:pengbo',
+    );
+    expect(doctorCommandFor('codex', 'user:INVALID')).toBeNull();
+    expect(doctorCommandFor('dsh', 'user:pengbo')).toBeNull();
+    expect(trustStepFor('codex').detail).toContain('上方 doctor 命令');
+    expect(trustStepFor('codex').detail).not.toContain('--expect-subject');
+  });
+
+  it('仓库路径中的单引号经过 shell 安全转义', () => {
+    expect(hookInstallFor('codex', "/srv/CoMem's").command).toBe(
+      `node '/srv/CoMem'"'"'s/integrations/cli.mjs' install --host codex`,
+    );
   });
 });
 
@@ -257,6 +386,7 @@ describe('第一条记忆', () => {
     const curl = firstMemoryCurl();
     expect(curl).toContain('curl -sS');
     expect(curl).toContain(`${DEFAULT_SERVER_BASE_URL}${MCP_ENDPOINT_PATH}`);
+    expect(curl).toContain(`authorization: Bearer \${${CONNECT_TOKEN_ENV}}`);
     expect(curl).toContain("accept: application/json, text/event-stream");
 
     const payload = /-d '([^']+)'/u.exec(curl)?.[1];
@@ -319,28 +449,32 @@ describe('验证三态', () => {
     expect(result.allGreen).toBe(false);
   });
 
-  it('Hermes 只认可 Hermes 会话，已有导入不能冒充自动采集', () => {
-    const input = {
-      host: 'hermes',
+  it('无宿主来源的会话只陈述当前账号数据，不冒充某个宿主已接通', () => {
+    const missing = deriveVerification({
       health: HEALTH,
       healthError: null,
       sessionsError: null,
       currentSubject: 'user:pengbo',
-      sessions: [{ ...COMMITTED_SESSION, id: 'import-already-present' }],
-    } as const;
-    const missing = deriveVerification(input);
-    expect(missing.checks.map((check) => check.key)).toEqual(['server', 'sessions']);
-    expect(missing.checks[1]?.label).toBe('当前账号归档');
+      sessions: [],
+    });
+    expect(missing.checks.map((check) => check.key)).toEqual(['server', 'sessions', 'cursor']);
+    expect(missing.checks[1]?.label).toBe('当前账号会话');
     expect(missing.checks[1]?.detail).toContain('user:pengbo');
-    expect(missing.checks[1]?.detail).toContain('还没有已归档');
+    expect(missing.checks[1]?.detail).toContain('还没有归档');
     expect(missing.checks[1]?.tone).toBe('warn');
     expect(missing.allGreen).toBe(false);
     const observed = deriveVerification({
-      ...input, sessions: [...input.sessions, { ...COMMITTED_SESSION, id: 'hermes-auto' }],
+      health: HEALTH,
+      healthError: null,
+      sessionsError: null,
+      currentSubject: 'user:pengbo',
+      sessions: [{ ...COMMITTED_SESSION, id: 'unknown-origin' }],
     });
     expect(observed.allGreen).toBe(true);
+    expect(observed.checks[1]?.label).toBe('当前账号会话');
     expect(observed.checks[1]?.detail).toContain('user:pengbo');
-    expect(observed.checks[1]?.detail).toContain('已归档的 Hermes 会话');
+    expect(observed.checks[1]?.detail).toContain('1 个归档会话');
+    expect(JSON.stringify(observed)).not.toContain('Hermes');
   });
 });
 
