@@ -193,7 +193,7 @@ async function createUser(
   if (password !== undefined) {
     await identity.setPassword(id, password);
   }
-  // 新账号的根与四个上下文目录要立刻预置：不预置的话，第一次登录看到的是 403
+  // 新账号的根与三个上下文目录要立刻预置：不预置的话，第一次登录看到的是 403
   // 而不是空列表（`ensureUserNamespace` 的注释）。
   await identity.ensureUserNamespace(id);
   return { user: { ...user, hasPassword: password !== undefined } };

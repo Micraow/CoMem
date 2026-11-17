@@ -148,7 +148,7 @@ export function createBootstrapRoutes(services: BootstrapRouteServices): HttpRou
         const created = identity.getUser(userId) === null;
         if (created) {
           identity.createUser({ id: userId, displayName });
-          // 新账号的根与四个上下文目录要立刻预置，否则第一次登录看到的是 403
+          // 新账号的根与三个上下文目录要立刻预置，否则第一次登录看到的是 403
           // 而不是空列表（`ensureUserNamespace` 的注释）。
           await identity.ensureUserNamespace(userId);
         }

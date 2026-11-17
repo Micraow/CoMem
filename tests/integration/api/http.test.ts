@@ -731,9 +731,20 @@ describe('检索 mode = context', () => {
     // （含分数）必须逐字相同。降级本身由上面的 `expectIntentAnalysisDegraded`
     // 显式钉住——不依赖本机能不能连上模型。
     const plan = result['plan'] as Record<string, unknown>;
+    const hits = result['hits'] as Record<string, unknown>[];
+    const score = hits[0]?.['score'];
     expectIntentAnalysisDegraded(plan);
+    expect(hits).toHaveLength(1);
+    expect(typeof score).toBe('number');
+    expect(Number.isFinite(score)).toBe(true);
+    expect(score).toBeGreaterThanOrEqual(0);
+    expect(score).toBeLessThanOrEqual(1);
     expect({
       ...result,
+      // BM25 depends on the indexed corpus size, so this shape snapshot must not
+      // pin an implementation-specific score. The fixture above still checks
+      // that the score is a finite value in the retrieval-score range.
+      hits: hits.map((hit) => ({ ...hit, score: '<finite score>' })),
       plan: {
         ...plan,
         elapsedMs: 0,
