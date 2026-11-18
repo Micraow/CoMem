@@ -360,11 +360,14 @@ describe('startVectorBackfill', () => {
     const reader = await start(vectorConfig());
     container = reader;
     const warn = vi.spyOn(reader.logger, 'warn');
+    const info = vi.spyOn(reader.logger, 'info');
 
     const handle = startVectorBackfill(reader);
     await expect(handle.done).resolves.toBeUndefined();
 
-    expect(warn).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('存量向量回填仍有失败，缺失项未写入。',
+      expect.objectContaining({ embedded: 0, failed: expect.any(Number) }));
+    expect(info.mock.calls.map(([message]) => message)).not.toContain('存量向量回填完成。');
     expect(hasDocumentsMissingVectors(reader.db, MODEL)).toBe(true);
   });
 

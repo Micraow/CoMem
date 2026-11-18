@@ -22,6 +22,7 @@ import type { Logger } from '../../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import { OPENAI_DEFAULT_BASE_URL } from './provider-defaults.js';
 import { assertValidVector } from '../../domain/embedding.js';
+import { embedBatchWithContextFallback } from './embedding-batch.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -162,11 +163,9 @@ export class AiSdkEmbeddingProvider implements EmbeddingProvider {
       const batch = texts.slice(start, start + this.maxBatchSize);
       const result = await this.run(
         (abortSignal) =>
-          embedMany({
+          embedBatchWithContextFallback({
             model: this.embeddingModel,
-            values: [...batch],
-            // 重试在上层；SDK 的默认重试（2 次）会绕过「认证失败不重试」的判断。
-            maxRetries: 0,
+            texts: batch,
             abortSignal,
           }),
         options,

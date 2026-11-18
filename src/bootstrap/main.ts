@@ -202,9 +202,7 @@ export function startVectorBackfill(container: Container): VectorBackfillHandle 
  * 1. `EmbeddingService` 已经有熔断（连续 5 次失败后短路 30 秒）。供应商真挂了，
  *    继续下一批只是让每个批次立即降级，不会猛打请求；停下来反而让「恢复之后要
  *    重启一次才继续补」变成新的运维动作。
- * 2. 证书 / 坏文件这类单节点故障是终局的：一旦「第一个失败就停」，一个读不出来的
- *    文件会让它后面所有记忆永远没有向量，而每次启动都从它开始从头失败。
- * 3. 进度是批级的、幂等的：下一次启动重新查一遍，只补还没补上的那些。
+ * 2. 单个坏文件不阻塞后续节点；下次启动只补仍缺失的节点。
  *
  * `fts5` 部署与未配置嵌入时一次都不查库：没有 `node_embedding` 表的库查它会报
  * no such table（与 `warnIfVectorsMissing` 同一约定）。
@@ -254,12 +252,14 @@ async function backfillMissingVectors(container: Container, signal: AbortSignal)
     },
   });
 
-  logger.info(result.aborted ? '存量向量回填已中止（进程正在退出）。' : '存量向量回填完成。', {
+  const counts = {
     embedded: result.embeddedUris.length,
     skipped: result.skipped,
     failed: result.failedUris.length,
-    aborted: result.aborted,
-  });
+  };
+  if (result.aborted) logger.info('存量向量回填已中止（进程正在退出）。', counts);
+  else if (counts.failed > 0) logger.warn('存量向量回填仍有失败，缺失项未写入。', counts);
+  else logger.info('存量向量回填完成。', counts);
 }
 
 /**

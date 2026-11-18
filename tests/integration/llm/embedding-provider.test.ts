@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { APICallError } from 'ai';
 
 import { ComemError } from '../../../src/domain/errors.js';
 import type { Logger } from '../../../src/domain/log.js';
@@ -69,6 +70,16 @@ function echoVectors(): void {
   mocks.embedMany.mockImplementation(({ values }: { values: string[] }) =>
     Promise.resolve(embedResult(values.map(() => [1, 0, 0]), values.length)),
   );
+}
+
+function apiCallError(statusCode: number, message: string): APICallError {
+  return new APICallError({
+    message,
+    url: 'https://example.test/v1/embeddings',
+    requestBodyValues: {},
+    statusCode,
+    responseBody: JSON.stringify({ error: { message } }),
+  });
 }
 
 beforeEach(() => {
@@ -156,6 +167,123 @@ describe('embed', () => {
 
     // 嵌入只有输入 token，promptTokens 与 totalTokens 是同一个数。
     expect(result.usage).toEqual({ promptTokens: 30, totalTokens: 30 });
+  });
+
+  it('413 只拆分失败的批次，并保持向量顺序与成功调用的 usage', async () => {
+    const provider = createProvider({ maxBatchSize: 4 });
+    mocks.embedMany.mockImplementation(({ values }: { values: string[] }) => {
+      if (values.length === 4) {
+        return Promise.reject(apiCallError(413, 'Payload too large'));
+      }
+      return Promise.resolve(
+        embedResult(
+          values.map((text) => [text.charCodeAt(0), 0, 0]),
+          values.length,
+        ),
+      );
+    });
+
+    const result = await provider.embed(['a', 'b', 'c', 'd']);
+
+    expect(
+      mocks.embedMany.mock.calls.map(
+        (call) => (call[0] as { values: string[] }).values,
+      ),
+    ).toEqual([
+      ['a', 'b', 'c', 'd'],
+      ['a', 'b'],
+      ['c', 'd'],
+    ]);
+    expect(result.vectors.map((vector) => vector[0])).toEqual([97, 98, 99, 100]);
+    expect(result.usage).toEqual({ promptTokens: 4, totalTokens: 4 });
+  });
+
+  it.each([400, 422])('识别出的单条 %s context-limit 按码点缩短前缀后重试', async (status) => {
+    const provider = createProvider();
+    mocks.embedMany
+      .mockRejectedValueOnce(apiCallError(status, 'Max context reached: 60000 tokens'))
+      .mockRejectedValueOnce(apiCallError(status, 'Sequence too long: 30003 > 8192'))
+      .mockResolvedValueOnce(embedResult([[1, 0, 0]], 2));
+
+    const result = await provider.embed(['甲😀乙丙丁']);
+
+    expect(
+      mocks.embedMany.mock.calls.map(
+        (call) => (call[0] as { values: string[] }).values,
+      ),
+    ).toEqual([['甲😀乙丙丁'], ['甲😀'], ['甲']]);
+    expect(result).toEqual({
+      vectors: [[1, 0, 0]],
+      usage: { promptTokens: 2, totalTokens: 2 },
+    });
+  });
+
+  it('单条持续超限时缩到 1 后停止，所有尝试共用单批 abortSignal', async () => {
+    const provider = createProvider();
+    mocks.embedMany.mockRejectedValue(
+      apiCallError(400, 'maximum context length exceeded'),
+    );
+
+    const error = await provider
+      .embed(['甲乙丙丁戊己庚'])
+      .catch((caught: unknown) => caught);
+
+    const calls = mocks.embedMany.mock.calls.map(
+      (call) => call[0] as { values: string[]; abortSignal: AbortSignal },
+    );
+    expect(calls.map((call) => call.values)).toEqual([
+      ['甲乙丙丁戊己庚'],
+      ['甲乙丙'],
+      ['甲'],
+    ]);
+    expect(calls[1]?.abortSignal).toBe(calls[0]?.abortSignal);
+    expect(calls[2]?.abortSignal).toBe(calls[0]?.abortSignal);
+    expect(error).toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('普通 400 不拆分也不重试', async () => {
+    const provider = createProvider({ maxBatchSize: 4 });
+    mocks.embedMany.mockRejectedValue(
+      apiCallError(400, 'Invalid request body'),
+    );
+
+    const error = await provider.embed(['a', 'b']).catch((caught: unknown) => caught);
+
+    expect(mocks.embedMany).toHaveBeenCalledTimes(1);
+    expect(error).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { statusCode: 400 },
+    });
+  });
+
+  it('仅提到 context window 但没有超限的 400 不重试', async () => {
+    const provider = createProvider();
+    mocks.embedMany.mockRejectedValue(
+      apiCallError(400, 'This model supports a 60000 token context window'),
+    );
+
+    const error = await provider.embed(['a']).catch((caught: unknown) => caught);
+
+    expect(mocks.embedMany).toHaveBeenCalledTimes(1);
+    expect(error).toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('拆分后的每个请求都校验向量数量，不能靠另一支补齐', async () => {
+    const provider = createProvider({ maxBatchSize: 4 });
+    mocks.embedMany.mockImplementation(({ values }: { values: string[] }) => {
+      if (values.length === 4) {
+        return Promise.reject(apiCallError(413, 'Payload too large'));
+      }
+      return Promise.resolve(embedResult([[1, 0, 0]], 1));
+    });
+
+    const error = await provider.embed(['a', 'b', 'c', 'd']).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      details: { expected: 2, actual: 1 },
+    });
+    expect(mocks.embedMany).toHaveBeenCalledTimes(2);
   });
 
   it('透传 abortSignal 给 SDK', async () => {
