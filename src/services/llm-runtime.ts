@@ -39,7 +39,7 @@ export interface LlmUsageTally {
 const MAX_RETRY_DELAY_MS = 8_000;
 const JITTER_FLOOR = 0.5;
 
-export function sleep(durationMs: number): Promise<void> {
+function sleep(durationMs: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, durationMs);
   });
@@ -59,7 +59,7 @@ export function canRetry(
   );
 }
 
-export function retryDelay(runtime: LlmRuntimeState, attempt: number): number {
+function retryDelay(runtime: LlmRuntimeState, attempt: number): number {
   const exponential = Math.min(
     runtime.retryBaseDelayMs * 2 ** (attempt - 1),
     MAX_RETRY_DELAY_MS,
@@ -67,7 +67,7 @@ export function retryDelay(runtime: LlmRuntimeState, attempt: number): number {
   return exponential * (JITTER_FLOOR + Math.random() * (1 - JITTER_FLOOR));
 }
 
-export function logRetry(
+function logRetry(
   runtime: LlmRuntimeState,
   error: ComemError,
   attempt: number,
@@ -83,7 +83,7 @@ export function logRetry(
   });
 }
 
-export function failCall(
+function failCall(
   runtime: LlmRuntimeState,
   error: unknown,
   attempt: number,
@@ -111,7 +111,7 @@ export function failCall(
   return failure;
 }
 
-export function recordUsage(
+function recordUsage(
   runtime: LlmRuntimeState,
   usage: LlmUsage,
   kind: 'text' | 'json',
@@ -136,12 +136,12 @@ export function recordUsage(
   });
 }
 
-export function addAttemptUsage(tally: LlmUsageTally, usage: LlmUsage): void {
+function addAttemptUsage(tally: LlmUsageTally, usage: LlmUsage): void {
   tally.promptTokens += usage.promptTokens;
   tally.completionTokens += usage.completionTokens;
 }
 
-export function addFailedAttemptUsage(tally: LlmUsageTally, error: unknown): void {
+function addFailedAttemptUsage(tally: LlmUsageTally, error: unknown): void {
   const details = ComemError.from(error).details?.['usage'];
   if (typeof details !== 'object' || details === null || Array.isArray(details)) {
     tally.complete = false;
@@ -164,7 +164,7 @@ export function addFailedAttemptUsage(tally: LlmUsageTally, error: unknown): voi
   addAttemptUsage(tally, { promptTokens, completionTokens });
 }
 
-export function talliedUsage(tally: LlmUsageTally): LlmUsage | null {
+function talliedUsage(tally: LlmUsageTally): LlmUsage | null {
   return tally.complete
     ? { promptTokens: tally.promptTokens, completionTokens: tally.completionTokens }
     : null;
