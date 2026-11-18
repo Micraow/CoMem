@@ -8,6 +8,7 @@
 import { Bot, ChevronDown } from 'lucide-vue-next'
 
 import type { LlmCallPayload } from '~/composables/useApi'
+import { fileRouteOf } from '~/utils/fileRoute'
 import { formatDateTimeWithSeconds, formatMilliseconds, formatMonthDayTime } from '~/utils/format'
 import {
   LLM_CALL_STATUS_VARIANT,
@@ -48,6 +49,15 @@ function associationOf(item: LlmCallPayload): string {
     parts.push(`请求 ${item.requestId}`)
   }
   return parts.length === 0 ? '无关联' : parts.join(' · ')
+}
+
+function failureLabel(item: LlmCallPayload): string {
+  if (item.errorReason === 'timeout') return item.purpose === 'recall_compression' ? '压缩超时' : '模型超时'
+  if (item.errorReason === 'cancelled') return '请求已取消'
+  if (item.errorReason === 'truncated') return '输出被截断'
+  if (item.errorReason === 'invalid_output') return '输出格式不符'
+  if (item.errorReason?.startsWith('upstream_http_')) return `供应商 HTTP ${item.errorReason.slice(14)}`
+  return item.errorCode ?? ''
 }
 </script>
 
@@ -101,6 +111,9 @@ function associationOf(item: LlmCallPayload): string {
             <span class="association faint" :title="associationOf(item)">
               {{ associationOf(item) }}
             </span>
+            <NuxtLink v-if="item.targetUri" :to="fileRouteOf(item.targetUri)" :title="item.targetUri">
+              {{ item.targetUri.split('/').at(-1) }}
+            </NuxtLink>
           </td>
           <td data-label="耗时" class="num mono">{{ formatMilliseconds(item.durationMs) }}</td>
           <td data-label="输入 token" class="num mono">{{ tokenText(item.promptTokens) }}</td>
@@ -115,9 +128,9 @@ function associationOf(item: LlmCallPayload): string {
               {{ llmCallStatusLabel(item.status) }}
             </UiBadge>
             <span v-if="item.errorCode !== null" class="status-note mono" :title="item.errorCode">
-              {{ item.errorCode }}
+              {{ failureLabel(item) }}
             </span>
-            <span v-else-if="item.attempts > 1" class="status-note">{{ item.attempts }} 次尝试</span>
+            <span v-if="item.attempts > 1" class="status-note">{{ item.attempts }} 次尝试</span>
           </td>
         </tr>
       </tbody>

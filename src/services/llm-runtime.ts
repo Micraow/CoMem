@@ -185,6 +185,18 @@ export interface LlmCallAttempt<T> {
   isParseFailure?(failure: ComemError): boolean;
 }
 
+function errorReason(failure: ComemError, options: LlmOptions | undefined): string {
+  if (typeof failure.details?.['timeoutMs'] === 'number') return 'timeout';
+  if (options?.abortSignal?.aborted === true) {
+    const reason: unknown = options.abortSignal.reason;
+    return reason instanceof ComemError && reason.details?.['timeout'] === true ? 'timeout' : 'cancelled';
+  }
+  if (failure.details?.['truncated'] === true) return 'truncated';
+  const status = failure.details?.['statusCode'];
+  if (typeof status === 'number') return `upstream_http_${status}`;
+  return failure.details?.['cause'] !== undefined && failure.code === 'INVALID_ARGUMENT' ? 'invalid_output' : 'unknown';
+}
+
 export async function executeCall<T>(
   runtime: LlmRuntimeState,
   options: LlmOptions | undefined,
@@ -213,6 +225,7 @@ export async function executeCall<T>(
       persist(runtime, callStartedAt, callStartedMonotonic, call, options, attempt, usageTally, {
         status: 'error',
         errorCode: mapped.code,
+        errorReason: errorReason(mapped, options),
       });
       throw mapped;
     }
@@ -227,6 +240,7 @@ export async function executeCall<T>(
       persist(runtime, callStartedAt, callStartedMonotonic, call, options, attempt, usageTally, {
         status: 'error',
         errorCode: failure.code,
+        errorReason: errorReason(failure, options),
       });
       throw failure;
     }
@@ -247,15 +261,14 @@ function persist<T>(
   options: LlmOptions | undefined,
   attempts: number,
   usageTally: LlmUsageTally,
-  outcome: { status: 'success' | 'error'; errorCode: string | null },
+  outcome: { status: 'success' | 'error'; errorCode: string | null; errorReason?: string },
 ): void {
   persistLlmCall(runtime, {
     startedAt,
     durationMs: performance.now() - startedMonotonic,
     kind: call.kind,
     options,
-    status: outcome.status,
-    errorCode: outcome.errorCode,
+    ...outcome,
     attempts,
     usage: talliedUsage(usageTally),
   });

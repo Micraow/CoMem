@@ -378,7 +378,7 @@ describe('ArchiveSummaryStep', () => {
       }),
     );
 
-    expect(regenerate).toHaveBeenCalledTimes(1);
+    expect(regenerate).not.toHaveBeenCalled();
     expect(generate).toHaveBeenCalledTimes(1);
     const prompt = generate.mock.calls[0]?.[0];
     expect(prompt?.messages[0]?.content).toContain('# 上次');

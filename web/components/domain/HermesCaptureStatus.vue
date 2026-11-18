@@ -63,6 +63,8 @@ const archivedSessions = computed(() =>
     ),
 )
 const latestArchived = computed(() => archivedSessions.value[0] ?? null)
+const showActivity = ref(false)
+const sessionScope = computed(() => latestArchived.value?.uri.split('/').slice(0, 4).join('/') ?? '')
 
 const detail = computed(() =>
   check.value.tone === 'warn' && hermesSessions.value !== null
@@ -96,10 +98,14 @@ const detail = computed(() =>
           </time>
         </span>
         <NuxtLink :to="fileRouteOf(latestArchived.uri)">打开会话</NuxtLink>
+        <button type="button" class="capture__link" :aria-expanded="showActivity" @click="showActivity = !showActivity">
+          {{ showActivity ? '收起记忆结果' : '查看记忆结果' }}
+        </button>
       </p>
     </div>
     <NuxtLink to="/connect?host=hermes" class="capture__link">检查接入</NuxtLink>
   </section>
+  <DomainSessionActivity v-if="showActivity && latestArchived" :session-id="latestArchived.id" :scope="sessionScope" />
 </template>
 
 <style scoped>

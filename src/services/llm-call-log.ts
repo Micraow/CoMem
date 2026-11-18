@@ -22,6 +22,8 @@ export type LlmCallLogPort = Pick<LlmCallRepository, 'insert' | 'list'>;
 
 export interface LlmCallPageItem {
   readonly id: string;
+  readonly targetUri: string | null;
+  readonly errorReason: string | null;
   readonly requestId: string | null;
   readonly sessionId: string | null;
   readonly purpose: LlmCallPurpose;
@@ -66,6 +68,7 @@ export interface PersistLlmCallInput {
   readonly errorCode: string | null;
   readonly attempts: number;
   readonly usage: LlmUsage | null;
+  readonly errorReason?: string;
 }
 
 export function listLlmCalls(
@@ -113,6 +116,7 @@ export function persistLlmCall(
     requestId: context.requestId,
     sessionId: input.options?.sessionId ?? context.sessionId,
     subject: context.subject,
+    targetUri: context.targetUri ?? null,
     purpose: input.options?.purpose ?? 'unspecified',
     kind: input.kind,
     model: ports.modelName,
@@ -127,6 +131,7 @@ export function persistLlmCall(
         ? null
         : llmCostUsd(ports.pricing, promptTokens, completionTokens),
     errorCode: input.errorCode,
+    errorReason: input.errorReason ?? null,
     attempts: input.attempts,
   };
   try {
@@ -173,6 +178,8 @@ function toPageItem(record: LlmCallRecord): LlmCallPageItem {
   return {
     id: record.id,
     requestId: record.requestId,
+    targetUri: record.targetUri ?? null,
+    errorReason: record.errorReason ?? null,
     sessionId: record.sessionId,
     purpose: record.purpose,
     kind: record.kind,

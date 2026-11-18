@@ -16,6 +16,7 @@ import type { Identity, IdentityHeaders, IdentityRequest } from '../../api/http/
 import { createHttpRouteGroups } from '../../api/http/routes/index.js';
 import type { HttpRouteGroup } from '../../api/http/server.js';
 import type { ToolRegistry } from '../../api/mcp/registry.js';
+import { createArchiveArtifacts } from '../archive-ports.js';
 import { McpHttpServer } from '../../api/mcp/server.js';
 import { createToolRegistry } from '../../api/mcp/tools/index.js';
 import { USER_WILDCARD, parsePrincipal } from '../../domain/acl.js';
@@ -131,6 +132,9 @@ export function createApi(
     summary,
     index,
     session,
+    readArchiveDiff: (uri) => createArchiveArtifacts(uri, {
+      dataDir: config.dataDir, store: core.store, metadata: core.metadata, logger,
+    }).readMemoryDiff(uri),
     tasks: task,
     taskStore: taskRepository,
     memory,

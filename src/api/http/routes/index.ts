@@ -12,6 +12,8 @@
 import type { ToolRegistry } from '../../mcp/registry.js';
 import type { ComemConfig, ConfigSnapshot } from '../../../config/index.js';
 import type { RetrievalIndex } from '../../../domain/retrieval.js';
+import type { MemoryDiff } from '../../../domain/archive.js';
+import type { Uri } from '../../../domain/uri.js';
 import type { AuthService } from '../../../services/auth.js';
 import type { AclService } from '../../../services/acl.js';
 import type { Authorizer } from '../../../services/authorizer.js';
@@ -94,6 +96,7 @@ export interface HttpRouteServices {
    */
   readonly index: RetrievalIndex;
   readonly session: SessionService;
+  readonly readArchiveDiff: (uri: Uri) => Promise<MemoryDiff | null>;
   readonly tasks: TaskService;
   /** 任务行的只读查询端口；由 bootstrap 注入 `TaskRepository`。 */
   readonly taskStore: TaskQueryStore;

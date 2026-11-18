@@ -380,7 +380,7 @@ describe('regenerate', () => {
     expect(rendered).not.toContain('comem://user/alice/memories/private.md');
     expect(rendered).not.toContain('https://private.example/image.png');
     expect(rendered).not.toContain('tool-role metadata');
-    expect(provider.calls[0]?.options).toMatchObject({ purpose: 'directory_summary' });
+    expect(provider.calls[0]?.options).toMatchObject({ purpose: 'archive_summary' });
   });
 
   it('规则生成器保留用户意图、最终回复和归档文件名，并保持显式 degraded', async () => {

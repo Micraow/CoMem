@@ -893,6 +893,12 @@ describe('会话与任务', () => {
     );
     expect(typeof committed['taskId']).toBe('string');
 
+    const activity = resultOf(await inject({ method: 'GET', url: `/api/v1/sessions/${sessionId}/activity` }));
+    expect(activity).toEqual({
+      acknowledged: 0,
+      items: [{ uri: committed['archiveUri'], status: 'pending', changes: null, skippedSteps: [], nextStep: 'archive_summary' }],
+    });
+
     const tasks = resultOf(await inject({ method: 'GET', url: '/api/v1/tasks' }));
     const taskId = String(committed['taskId']);
     expect((tasks['tasks'] as Record<string, unknown>[]).map((task) => task['id'])).toContain(

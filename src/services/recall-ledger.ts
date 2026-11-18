@@ -30,7 +30,7 @@ import { ComemError } from '../domain/errors.js';
 import { isRecord } from '../domain/guards.js';
 import type { Logger } from '../domain/log.js';
 import type { ContextDetail } from '../domain/render.js';
-import type { Uri } from '../domain/uri.js';
+import { Uri } from '../domain/uri.js';
 
 export interface RecallEntry {
   readonly uri: string;
@@ -254,6 +254,13 @@ export class RecallLedger {
       });
       return emptyLedger();
     }
+  }
+
+  async acknowledgedCount(sessionUri: Uri, readable: (uris: readonly Uri[]) => Promise<ReadonlySet<string>>): Promise<number> {
+    const { entries } = await this.#load(scopeKeyOf(sessionUri));
+    const matching = entries.filter((entry) => entry.sessionId === sessionUri.name);
+    const allowed = await readable(matching.map((entry) => Uri.parse(entry.uri)));
+    return matching.filter((entry) => allowed.has(entry.uri)).length;
   }
 
   /** 写账本。原子性由 `LedgerStore` 实现保证。 */

@@ -427,6 +427,8 @@ export interface HealthPayload {
  */
 export interface LlmCallPayload {
   readonly id: string
+  readonly targetUri: string | null
+  readonly errorReason: string | null
   readonly purpose: LlmCallPurpose
   readonly kind: LlmCallKind
   readonly model: string

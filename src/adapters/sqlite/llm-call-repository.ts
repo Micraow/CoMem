@@ -56,6 +56,8 @@ const COLUMN_NAMES = [
   'cost_usd',
   'error_code',
   'attempts',
+  'target_uri',
+  'error_reason',
 ] as const;
 
 const COLUMNS = COLUMN_NAMES.join(', ');
@@ -80,6 +82,8 @@ function rowToRecord(row: Record<string, unknown>): LlmCallRecord {
     costUsd: typeof row['cost_usd'] === 'number' ? Number(row['cost_usd']) : null,
     errorCode: typeof row['error_code'] === 'string' ? row['error_code'] : null,
     attempts: Number(row['attempts']),
+    targetUri: typeof row['target_uri'] === 'string' ? row['target_uri'] : null,
+    errorReason: typeof row['error_reason'] === 'string' ? row['error_reason'] : null,
   };
 }
 
@@ -121,6 +125,8 @@ export class LlmCallRepository {
           record.costUsd,
           record.errorCode,
           record.attempts,
+          record.targetUri ?? null,
+          record.errorReason ?? null,
         );
     });
   }

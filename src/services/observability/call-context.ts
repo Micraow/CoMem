@@ -14,6 +14,7 @@ export interface LlmCallContext {
   requestId: string | null;
   subject: string | null;
   sessionId: string | null;
+  targetUri?: string | null;
 }
 
 const storage = new AsyncLocalStorage<LlmCallContext>();
@@ -27,6 +28,7 @@ export function runWithLlmCallContext<T>(
       requestId: context.requestId ?? null,
       subject: context.subject ?? null,
       sessionId: context.sessionId ?? null,
+      targetUri: context.targetUri ?? null,
     },
     fn,
   );
@@ -55,13 +57,14 @@ export function currentLlmCallContext(): Readonly<LlmCallContext> {
 
 export function runWithCommitCallContext<T>(
   sessionUri: string,
-  scopeUri: Uri,
+  archiveUri: Uri,
   fn: () => Promise<T>,
 ): Promise<T> {
   return runWithLlmCallContext(
     {
-      subject: `${scopeUri.scope}:${scopeUri.rootId}`,
+      subject: `${archiveUri.scope}:${archiveUri.rootId}`,
       sessionId: Uri.parse(sessionUri).name,
+      targetUri: archiveUri.toString(),
     },
     fn,
   );
@@ -74,6 +77,7 @@ export function runWithResourceCallContext<T>(uri: Uri, fn: () => Promise<T>): P
       requestId: current.requestId,
       subject: current.subject ?? `${uri.scope}:${uri.rootId}`,
       sessionId: current.sessionId,
+      targetUri: uri.toString(),
     },
     fn,
   );

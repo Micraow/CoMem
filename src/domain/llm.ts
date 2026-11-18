@@ -92,6 +92,8 @@ export type LlmCallStatus = 'success' | 'error';
 /** 一次逻辑调用（包括重试）的持久化诊断记录。正文、prompt 与原始错误不进入这里。 */
 export interface LlmCallRecord {
   readonly id: string;
+  readonly targetUri?: string | null;
+  readonly errorReason?: string | null;
   readonly requestId: string | null;
   readonly sessionId: string | null;
   readonly subject: string | null;

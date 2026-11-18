@@ -7,16 +7,7 @@
  *
  * ## 工作记忆（§10.5）
  *
- * `memory.workingMemory.enabled` 为真时，除了目录摘要，还要维护一份 6 段结构化
- * 工作记忆，写在归档目录的 `.overview.md`。它的作用是「让下一次提交的抽取知道上次
- * 聊到哪了」——没有它，每次提交都是孤立的一次抽取，判断不了「这个偏好是延续还是
- * 改变」。
- *
- * v1 默认关闭：它要多一次 LLM 调用，只在长会话场景有价值（§18 的
- * `memory.workingMemory.enabled`）。关闭时这一步就是一次普通的目录摘要重建。
- *
- * 开启时工作记忆**替换**归档目录的 L1，L0 从它提取（§9.1 的两层不矛盾）——所以
- * 先重建目录摘要、再覆盖，而不是二选一：目录摘要为空的归档在控制台上看起来像坏数据。
+ * 开启工作记忆时直接生成结构化 L1，L0 从中提取。关闭时生成普通归档摘要。
  */
 
 import { ComemError } from '../../../domain/errors.js';
@@ -109,13 +100,8 @@ export class ArchiveSummaryStep extends CommitStep {
   }
 
   async run(context: StepContext): Promise<void> {
-    const recomputed = await this.#summary.regenerate(context.archiveUri);
-    this.#logger.debug('归档摘要已生成', {
-      archive: context.archiveUri.toString(),
-      directories: recomputed.length,
-    });
-
     if (!this.#workingMemory.enabled) {
+      await this.#summary.regenerate(context.archiveUri);
       return;
     }
 

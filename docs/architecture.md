@@ -1767,7 +1767,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 | 步骤 | 产物 | 位置 | 可恢复性 |
 |---|---|---|---|
-| `archive_summary` | 归档目录的 `.abstract.md` / `.overview.md`（开启工作记忆时） | 盘 | 跳过即恢复：产物本来就在盘上 |
+| `archive_summary` | 归档目录的 `.abstract.md` / `.overview.md` | 盘 | 跳过即恢复：产物本来就在盘上 |
 | `memory_extract` | 抽取出的操作列表 | `archive_NNN/memory_operations.json` | `rehydrate` 读回 `state` |
 | `memory_merge` | 真正写过 / 删过的文件集合 | `archive_NNN/memory_diff.json` | `rehydrate` 从 diff 推出 `written` / `deleted` |
 | `summary_invalidate` | 无（副作用是摘要的待刷新计数 `node.summary_pending`） | — | 跳过即正确；重跑会重复累加脏计数 |
@@ -1814,7 +1814,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 再在事务里同步更新 L0、L1 的 `node` 与 `node_fts` 行。它不能绕过摘要服务只改文件，
 否则控制台看到工作记忆，检索仍会命中替换前的普通摘要。
 
-**默认关闭**（`memory.workingMemory.enabled = false`）。开它会多一次 LLM 调用，只在长会话场景有价值。**开启就必须有可用的 LLM**：工作记忆没有规则生成器，`providers.llm.default.type: disabled` 时 `loadConfig` 抛 `INVALID_ARGUMENT`（与 `ingest` 的降级不同——导入的阶段一有独立产物，工作记忆没有）。
+**默认关闭**（`memory.workingMemory.enabled = false`）。开启后只生成工作记忆作为归档概览，关闭后只生成普通归档摘要。**开启就必须有可用的 LLM**：工作记忆没有规则生成器，`providers.llm.default.type: disabled` 时 `loadConfig` 抛 `INVALID_ARGUMENT`（与 `ingest` 的降级不同——导入的阶段一有独立产物，工作记忆没有）。
 
 ### 10.6 并发与一致性
 
@@ -3360,7 +3360,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 文件系统 | `GET /fs/ls`、`/fs/tree`、`/fs/stat`；`POST /fs/mkdir`、`/fs/mv`、`/fs/cp`；`DELETE /fs` |
 | 内容 | `GET /content/read`、`/content/abstract`、`/content/overview`、`/content/download`；`POST /content/write`、`/content/edit` |
 | 检索 | `POST /search/find`、`/search/search`、`/search/grep`、`/search/glob`。前两个（`/search/search` 的 `mode=context` 也走同一个包装）受 30 秒总上限约束，到点返回 503 `PROVIDER_UNAVAILABLE`（§13.3）；`grep` / `glob` 不调模型，没有这一层 |
-| 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}` |
+| 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}`、`/sessions/{id}/activity` |
 | 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
 | 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`（空 body 兼容审批；编辑审批传 `{content, expectedUpdatedAt}`，§11.6）、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
@@ -3940,6 +3940,8 @@ AI SDK 的结构化解析异常也带回了供应商 usage。一次逻辑调用�
 `AsyncLocalStorage` 关联 `requestId`；已有会话参数时关联 `sessionId`。后台归档从会话 URI
 补 owner subject 与 `sessionId`，目录摘要至少补 owner subject。异步目录摘要没有请求上下文，
 所以 `requestId` 为 `null`。
+
+归档调用和目录摘要携带目标 URI。模型失败原因只保存超时、取消、截断、输出格式或上游 HTTP 状态等诊断字段。`GET /sessions/{id}/activity` 按会话及归档的读权限返回最近归档的实际新增、更新、删除和跳过数、任务状态与下一步，同时按当前 ACL 统计会话近期账本中的宿主确认条目。任务状态与记忆写入结果分别显示。账本只保留近期确认，回执无法证明模型采用了内容。
 
 **保留沿用 `telemetry.requestLog`。** `telemetry.requestLog.enabled` 关闭后停止写新的
 HTTP 请求与 LLM 调用记录；`retainDays` / `retainRows` 同时裁剪两张表。调度器每轮各调用一次

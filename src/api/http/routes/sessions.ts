@@ -27,6 +27,7 @@ import {
 
 import type { HttpRouteServices } from './index.js';
 import { parseMessage, scopeFrom, scopeOfSubject, sessionUriOf } from './sessions-request.js';
+import { registerSessionActivity } from './session-activity.js';
 
 /** §12.1：read = 1、write = 3。 */
 const READ = 1;
@@ -169,6 +170,7 @@ export function createSessionRoutes(services: HttpRouteServices): HttpRouteGroup
   return {
     prefix: '/sessions',
     register(app: FastifyInstance): void {
+      registerSessionActivity(app, services);
       app.post<{ Body: unknown }>('/', async (request) => {
         const body = requireRecord(request.body, 'sessions/create');
         const context = requestContextOf(request);

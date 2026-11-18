@@ -22,6 +22,7 @@ import type { Uri } from '../../domain/uri.js';
 import type { LlmService } from '../llm.js';
 import { buildSummaryPrompt } from '../prompts/summarize.js';
 import { runWithResourceCallContext } from '../observability/call-context.js';
+import { isArchiveRoot } from './dialogue.js';
 
 /**
  * 首句终止符：中英文句号、叹号、问号与换行（§9.2 的「各自摘要首句」）。
@@ -108,7 +109,7 @@ export class LlmSummarizer implements SummaryGenerator {
     });
     const result = await runWithResourceCallContext(
       input.uri,
-      () => this.#llm.generate(prompt, { purpose: 'directory_summary' }),
+      () => this.#llm.generate(prompt, { purpose: isArchiveRoot(input.uri) ? 'archive_summary' : 'directory_summary' }),
     );
     return {
       abstract: extractAbstract(result.text),

@@ -239,7 +239,7 @@ export class CommitRunner {
         });
         await runWithCommitCallContext(
           payload.sessionUri,
-          scopeUri,
+          archiveUri,
           () => pipeline.run(archiveUri, scopeUri, projectScopeUri),
         );
       })
