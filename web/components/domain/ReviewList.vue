@@ -14,7 +14,7 @@ export type { PendingListPayload, PendingMemoryPayload }
 /**
  * 待复核队列（记忆复核页的左侧）。
  *
- * 标题取记忆自己的身份字段，不把文件名或 URI 当内容。多选用原生 checkbox；
+ * 标题取记忆自己的身份字段。复选框与修饰键共用同一批量选择；
  * 批处理期间锁定队列操作，并在底部显示真实完成数。
  */
 import { ClipboardCheck } from 'lucide-vue-next'
@@ -35,8 +35,10 @@ const props = defineProps<{
 
 const operationBusy = computed(() => props.operationBusy === true)
 const batchProgress = computed(() => props.batchProgress ?? null)
+const selectionDisabled = computed(() => operationBusy.value || props.loading)
 
 const checked = defineModel<readonly string[]>('checked', { required: true })
+let anchorUri: string | null = null
 
 const emit = defineEmits<{
   select: [uri: string]
@@ -52,12 +54,43 @@ function isChecked(uri: string): boolean {
 }
 
 function toggle(uri: string): void {
-  if (operationBusy.value) {
-    return
-  }
+  anchorUri = uri
   checked.value = isChecked(uri)
     ? checked.value.filter((item) => item !== uri)
     : [...checked.value, uri]
+}
+
+function selectRange(uri: string): void {
+  const uris = props.memories.map((memory) => memory.uri)
+  const end = uris.indexOf(uri)
+  if (end < 0) return
+  const previous = uris.findIndex((item) => item === anchorUri)
+  const preview = uris.findIndex((item) => item === props.selectedUri)
+  const start = previous >= 0 ? previous : preview >= 0 ? preview : end
+  anchorUri = uris[start] ?? uri
+  const range = uris.slice(Math.min(start, end), Math.max(start, end) + 1)
+  checked.value = [...new Set([...checked.value, ...range])]
+}
+
+function clickRow(uri: string, event: MouseEvent): void {
+  if (selectionDisabled.value) return
+  if (event.shiftKey) selectRange(uri)
+  else if (event.ctrlKey || event.metaKey) toggle(uri)
+  else {
+    anchorUri = uri
+    emit('select', uri)
+  }
+}
+
+function clickCheckbox(uri: string, event: MouseEvent): void {
+  if (selectionDisabled.value) return
+  if (!event.shiftKey) {
+    toggle(uri)
+    return
+  }
+  selectRange(uri)
+  // Native activation can uncheck the endpoint before dispatching click.
+  if (event.currentTarget instanceof HTMLInputElement) event.currentTarget.checked = true
 }
 
 const hasChecked = computed(() => checked.value.length > 0)
@@ -108,23 +141,23 @@ const hasChecked = computed(() => checked.value.length > 0)
           v-for="memory in props.memories"
           :key="memory.uri"
           class="rrow"
-          :class="{ 'is-selected': memory.uri === props.selectedUri }"
+          :class="{ 'is-selected': memory.uri === props.selectedUri, 'is-checked': isChecked(memory.uri) }"
         >
           <input
             type="checkbox"
             class="rrow__check"
             :checked="isChecked(memory.uri)"
-            :disabled="operationBusy"
+            :disabled="selectionDisabled"
             :aria-label="`选择 ${memoryReviewTitleOf(memory)}`"
-            @change="toggle(memory.uri)"
+            @click="clickCheckbox(memory.uri, $event)"
           >
           <button
             type="button"
             class="rrow__main"
             :title="memory.uri"
             :aria-current="memory.uri === props.selectedUri ? 'true' : undefined"
-            :disabled="operationBusy"
-            @click="emit('select', memory.uri)"
+            :disabled="selectionDisabled"
+            @click="clickRow(memory.uri, $event)"
           >
             <span class="rrow__title">{{ memoryReviewTitleOf(memory) }}</span>
             <span class="rrow__meta">
@@ -226,6 +259,10 @@ const hasChecked = computed(() => checked.value.length > 0)
   box-shadow: var(--shadow-card), var(--inset-hair);
 }
 
+.rrow.is-checked {
+  background: var(--accent-tint);
+}
+
 .rrow--skeleton {
   display: grid;
   gap: 9px;
@@ -255,6 +292,7 @@ const hasChecked = computed(() => checked.value.length > 0)
   background: transparent;
   text-align: left;
   cursor: pointer;
+  user-select: none;
   color: inherit;
   font: inherit;
 }

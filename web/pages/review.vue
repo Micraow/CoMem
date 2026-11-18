@@ -408,6 +408,7 @@ watch(scopeRoot, () => {
 
     <div class="split">
       <DomainReviewList
+        :key="scopeRoot"
         v-model:checked="checked"
         :memories="memories ?? []"
         :loading="loading"
