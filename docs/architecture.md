@@ -3373,6 +3373,8 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | MCP | `GET /mcp/tools`（15 个工具的只读清单，控制台的「工具」页读它；工具说明的真相在 `api/mcp/registry.ts`） |
 | 运维 | `GET /health`、`GET /metrics` |
 
+**`POST /fs/cp` 只创建新目标。** 目标文件或目录已存在时返回 **409**（`ALREADY_EXISTS`），不覆盖文件、也不合并目录；文件的目标检查与创建写入在同一 `EXACT` 路径锁内，目录使用 `TREE` 锁内的排他创建。`POST /content/write` 的 `mode=create` 复用同一文件创建原语，并发创建同一路径只有一个成功。
+
 **`POST /sessions` 只创建，不重置。** 已存在的 `sessionId` 返回 **409**（`ALREADY_EXISTS`），
 `messages.jsonl` 原样保留；「已存在就复用」是服务层 `SessionService.ensure` 的语义，不是路由的。
 判据是 `.meta.json` 是否存在（与 `GET /sessions/{id}` 相同），且检查与写入持 `TREE` 锁，

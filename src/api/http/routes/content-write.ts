@@ -47,12 +47,7 @@ export function createContentWriteRoutes(services: HttpRouteServices): HttpRoute
             return ok<ContentWriteResponse>({ uri: uri.toString(), created: result.created, size: result.stat.size });
           }
           case 'create': {
-            if ((await filesystem.stat(uri, principals)) !== null) {
-              throw new ComemError('ALREADY_EXISTS', `目标已存在：${uri.toString()}`, {
-                uri: uri.toString(),
-              });
-            }
-            const result = await filesystem.write(uri, content, principals);
+            const result = await filesystem.create(uri, content, principals);
             return ok<ContentWriteResponse>({ uri: uri.toString(), created: result.created, size: result.stat.size });
           }
           default: {

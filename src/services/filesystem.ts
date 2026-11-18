@@ -1,37 +1,8 @@
 /**
  * 文件系统服务（架构文档 §5、§10.6、§12.4）。
  *
- * P2 的验收对象：`read` / `write` / `list` / `tree` / `edit` / `mkdir` / `remove` /
- * `move` 八个入口，每个都先求权、再拿路径锁、最后才碰 `ContentStore`。
- *
- * 为什么求权在锁外：权限判定是纯读，先拒绝掉无权请求比先排队再拒绝便宜；为什么锁
- * 在存储外：`edit` 是「读正文 → 应用补丁 → 写回」，中间被别的写者插进来就是丢更新。
- *
- * 锁模式（§10.6 的表格）：
- *
- * | 方法 | 模式 | 理由 |
- * |---|---|---|
- * | `write` / `edit` | `EXACT` | 只涉及单路径 |
- * | `mkdir` / `remove` | `TREE` | 涉及整棵子树 |
- * | `move` | `TREE`（源与目标各一把） | 两端都要独占 |
- * | `read` / `readBytes` / `stat` / `list` / `tree` | **不拿锁** | 读快照，见下 |
- *
- * ## 为什么只读操作不拿锁
- *
- * 路径锁是**写者之间**的互斥（§10.6）：它的存在是为了让「读正文 → 应用补丁 →
- * 写回」不被插进来。只读操作不参与这个不变量，所以不该排队。
- *
- * 内容写入本身就是原子的（`ContentStore.writeText`：同目录临时文件 → `fsync` →
- * `rename`），任何时刻被读到的都是完整的旧版本或完整的新版本。锁对读**不提供**
- * 额外的一致性，只提供阻塞：后台摘要重建在持有根目录锁的那 9.4 秒里调了一次模型，
- * 这段时间内 `GET /fs/tree` 会一直等到 `acquire` 超时再返回 409——读请求被一个与
- * 它无关的 LLM 调用打断，是纯粹的可用性损失。
- *
- * 代价是遍历期间子树可能被并发删除。这不是错误：节点真的没了，正确的回答是
- * 「它不存在」，而不是把它当成服务端故障。所以 `tree` 把**后代**目录的
- * `NOT_FOUND` 当成「这棵子树已经消失」跳过（根不存在仍然抛 `NOT_FOUND`），
- * `ContentStore.list` 跳过读到一半消失的子项。读到的是**快照**，不是加锁的一致
- * 视图——区别在于「可能少几个刚被删掉的条目」，不在于「可能读到写了一半的文件」。
+ * 写路径先求权再加锁：write/create/edit 用 EXACT，mkdir/remove 用 TREE，
+ * move 同时持两把 TREE。读路径不拿锁；原子写入保证只会读到完整旧版或新版。
  */
 
 import type {
@@ -53,15 +24,10 @@ import { assertNotVersionTarget } from './version-directory.js';
 import type { ForgetBarriers } from '../adapters/fs/forget-barriers.js';
 import { updateMovedMemory } from './memory/moved.js';
 
-/**
- * `tree` 的默认深度。来源：架构文档 §13.2 的 `tree` 工具契约 `levelLimit=3`。
- */
+/** `tree` 默认深度；来源 §13.2 的 `levelLimit=3`。 */
 const DEFAULT_TREE_DEPTH = 3;
 
-/**
- * `tree` 的默认节点上限。来源：架构文档 §8.1 举的例子就是「`tree` 一个 1000
- * 节点的目录」，再深用户也读不完，截断比返回十万条更有用。
- */
+/** `tree` 默认节点上限；来源 §8.1 的 1000 节点示例。 */
 const DEFAULT_TREE_LIMIT = 1000;
 
 /** 补丁失败原因的中文说明，只用于错误消息。 */
@@ -294,7 +260,7 @@ export class FileSystemService {
     uri: Uri,
     text: string,
     principals: readonly string[],
-    options: WriteTextOptions = {},
+    options: WriteTextOptions & { readonly createOnly?: boolean } = {},
   ): Promise<WriteResult> {
     assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
@@ -303,12 +269,27 @@ export class FileSystemService {
       'exact',
       async () => {
         const created = !(await this.#store.exists(uri));
+        if (options.createOnly === true && !created) {
+          throw new ComemError('ALREADY_EXISTS', `目标已存在：${uri.toString()}`, {
+            uri: uri.toString(),
+          });
+        }
         const stat = await this.#store.writeText(uri, text, options);
         await this.#notifyWritten(uri, 'file');
         return { uri, stat, created };
       },
       { createParentDirectory: true },
     );
+  }
+
+  /** 只创建新文件；已存在时在同一个 `EXACT` 锁内返回 409。 */
+  async create(
+    uri: Uri,
+    text: string,
+    principals: readonly string[],
+    options: WriteTextOptions = {},
+  ): Promise<WriteResult> {
+    return this.write(uri, text, principals, { ...options, createOnly: true });
   }
 
   /**
@@ -361,14 +342,28 @@ export class FileSystemService {
     });
   }
 
-  /** 建目录，父目录不存在时一并建（`recursive`），已存在不报错。 */
-  async mkdir(uri: Uri, principals: readonly string[]): Promise<void> {
+  /** 建目录，父目录不存在时一并建；`exclusive` 时目标已存在则报错。 */
+  async mkdir(
+    uri: Uri,
+    principals: readonly string[],
+    options: { readonly exclusive?: boolean } = {},
+  ): Promise<void> {
     assertNotVersionTarget(uri);
     await this.#authorizer.assert(uri, WRITE_LEVEL, principals);
-    await this.#locks.withLock(uri, 'tree', async () => {
-      await this.#store.mkdir(uri, { recursive: true });
-      await this.#notifyWritten(uri, 'directory');
-    });
+    await this.#locks.withLock(
+      uri,
+      'tree',
+      async () => {
+        if (options.exclusive === true && await this.#store.exists(uri)) {
+          throw new ComemError('ALREADY_EXISTS', `目标已存在：${uri.toString()}`, {
+            uri: uri.toString(),
+          });
+        }
+        await this.#store.mkdir(uri, { recursive: true });
+        await this.#notifyWritten(uri, 'directory');
+      },
+      { createParentDirectory: true },
+    );
   }
 
   /** 删除。不存在的路径返回 `{ removedFiles: 0 }`，不报错。 */

@@ -139,7 +139,7 @@ async function copyNode(
   }
 
   if (stat.kind === 'directory') {
-    await services.filesystem.mkdir(to, principals);
+    await services.filesystem.mkdir(to, principals, { exclusive: true });
     for (const child of await services.filesystem.list(from, principals)) {
       await copyNode(services, child.uri, to.child(child.uri.name), principals);
     }
@@ -147,7 +147,7 @@ async function copyNode(
   }
 
   const document = await services.filesystem.read(from, principals);
-  await services.filesystem.write(
+  await services.filesystem.create(
     to,
     document.text,
     principals,

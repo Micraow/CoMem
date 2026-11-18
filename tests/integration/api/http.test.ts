@@ -481,6 +481,72 @@ describe('文件系统与内容', () => {
     expect(resultOf(removed)['removedFiles']).toBeGreaterThan(0);
   });
 
+  it('cp 遇到已存在的文件或目录时拒绝复制并保留目标', async () => {
+    const sourceFile = Uri.parse(`${ROOT}/memories/source.md`);
+    const targetFile = Uri.parse(`${ROOT}/memories/target.md`);
+    await container.services.filesystem.write(sourceFile, 'source text', AUTH_PRINCIPALS);
+    await container.services.filesystem.write(targetFile, 'target text', AUTH_PRINCIPALS);
+
+    const fileCopy = await inject({
+      method: 'POST',
+      url: '/api/v1/fs/cp',
+      payload: { from: sourceFile.toString(), to: targetFile.toString() },
+    });
+    expect(fileCopy.statusCode).toBe(409);
+    expect(errorOf(fileCopy)['code']).toBe('ALREADY_EXISTS');
+    expect(
+      (await container.services.filesystem.read(targetFile, AUTH_PRINCIPALS)).text,
+    ).toBe('target text');
+
+    const sourceDirectory = Uri.parse(`${ROOT}/memories/source-directory`);
+    const targetDirectory = Uri.parse(`${ROOT}/memories/target-directory`);
+    await container.services.filesystem.mkdir(sourceDirectory, AUTH_PRINCIPALS);
+    await container.services.filesystem.mkdir(targetDirectory, AUTH_PRINCIPALS);
+    await container.services.filesystem.write(
+      sourceDirectory.child('from-source.md'),
+      'source child',
+      AUTH_PRINCIPALS,
+    );
+    const freshTarget = Uri.parse(`${ROOT}/memories/fresh-directory`);
+    expect(
+      (await inject({
+        method: 'POST',
+        url: '/api/v1/fs/cp',
+        payload: { from: sourceDirectory.toString(), to: freshTarget.toString() },
+      })).statusCode,
+    ).toBe(200);
+    const freshChild = freshTarget.child('from-source.md');
+    await container.services.filesystem.write(freshChild, 'destination text', AUTH_PRINCIPALS);
+    expect(
+      (await inject({
+        method: 'POST',
+        url: '/api/v1/fs/cp',
+        payload: { from: sourceDirectory.toString(), to: freshTarget.toString() },
+      })).statusCode,
+    ).toBe(409);
+    expect((await container.services.filesystem.read(freshChild, AUTH_PRINCIPALS)).text).toBe(
+      'destination text',
+    );
+
+    const kept = targetDirectory.child('kept.md');
+    await container.services.filesystem.write(kept, 'kept text', AUTH_PRINCIPALS);
+
+    const directoryCopy = await inject({
+      method: 'POST',
+      url: '/api/v1/fs/cp',
+      payload: { from: sourceDirectory.toString(), to: targetDirectory.toString() },
+    });
+    expect(directoryCopy.statusCode).toBe(409);
+    expect(errorOf(directoryCopy)['code']).toBe('ALREADY_EXISTS');
+    expect((await container.services.filesystem.read(kept, AUTH_PRINCIPALS)).text).toBe(
+      'kept text',
+    );
+    expect(
+      (await container.services.filesystem.list(targetDirectory, AUTH_PRINCIPALS))
+        .map((entry) => entry.uri.name),
+    ).toEqual(['kept.md']);
+  });
+
   it('content/read 的 truncated 按实际是否截断计算', async () => {
     const file = `${ROOT}/truncation.md`;
     await inject({
@@ -528,6 +594,14 @@ describe('文件系统与内容', () => {
     });
     expect(response.statusCode).toBe(409);
     expect(errorOf(response)['code']).toBe('ALREADY_EXISTS');
+
+    const racedUri = `${ROOT}/raced.md`;
+    const raced = await Promise.all(['first', 'second'].map((content) => inject({
+      method: 'POST',
+      url: '/api/v1/content/write',
+      payload: { uri: racedUri, content, mode: 'create' },
+    })));
+    expect(raced.map((item) => item.statusCode).sort()).toEqual([200, 409]);
   });
 
   it('content/abstract 与 overview 返回目录摘要', async () => {
