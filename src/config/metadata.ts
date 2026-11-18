@@ -12,6 +12,7 @@
 
 import type { ConfigSnapshot, ConfigSource } from './index.js';
 import { collectLeaves, envNameFor, getPath } from './merge.js';
+import { changedConfigLeaves } from './override.js';
 
 export type ConfigGroup =
   | 'llm'
@@ -34,6 +35,7 @@ export interface ConfigLeafView {
   /** 密钥类与不可暴露项为 `null`。 */
   readonly value: unknown;
   readonly source: ConfigSource;
+  readonly pending?: { readonly value: unknown };
   readonly secret: boolean;
   /** 仅密钥类有意义：值非空即已设置。 */
   readonly configured: boolean;
@@ -126,7 +128,9 @@ function editableReason(path: string, secret: boolean): string | null {
 export function describeConfig(
   snapshot: ConfigSnapshot,
   overrideWritable: boolean,
+  saved = snapshot.config,
 ): ConfigView {
+  const pending = new Set(changedConfigLeaves(snapshot, saved).map(({ path }) => path.join('.')));
   const items = collectLeaves(snapshot.defaults).map((leaf): ConfigLeafView => {
     const path = leaf.path.join('.');
     const secret = SECRET_PATHS.has(path);
@@ -136,6 +140,7 @@ export function describeConfig(
     return {
       path,
       value: secret || hidden ? null : raw,
+      ...(reason === null && pending.has(path) ? { pending: { value: secret ? null : getPath(saved, leaf.path) } } : {}),
       source: snapshot.sources.get(path) ?? 'default',
       secret,
       configured: secret && typeof raw === 'string' && raw !== '',

@@ -49,13 +49,13 @@ export interface LoadConfigOptions {
 /** 每个叶子实际生效的来源。 */
 export type ConfigSource = 'default' | 'file' | 'override' | 'env';
 
-/** 一次加载的完整快照：生效值 + 四层输入（配置端点只读消费）。 */
+/** 四层启动输入，以及当前生效值与来源。 */
 export interface ConfigSnapshot {
   readonly config: ComemConfig;
   readonly configPath: string;
   readonly overridePath: string;
   /** 点分路径 → 来源。 */
-  readonly sources: ReadonlyMap<string, ConfigSource>;
+  readonly sources: Map<string, ConfigSource>;
   readonly defaults: ConfigRecord;
   readonly fileConfig: ConfigRecord;
   readonly overrideConfig: ConfigRecord;

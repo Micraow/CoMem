@@ -17,7 +17,7 @@ import { AiSdkLlmProvider } from '../../adapters/llm/ai-sdk-provider.js';
 import { DisabledLlmProvider } from '../../adapters/llm/disabled-provider.js';
 import { HttpRerankProvider } from '../../adapters/llm/rerank-provider.js';
 import { EmbeddingCacheRepository } from '../../adapters/sqlite/embedding-cache.js';
-import { EmbeddingService } from '../../services/embedding.js';
+import { EmbeddingService, type EmbeddingServiceDeps } from '../../services/embedding.js';
 import { LlmService } from '../../services/llm.js';
 import type { Foundation } from './foundation.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
@@ -47,21 +47,8 @@ export function createModels(core: Foundation): Models {
       { baseUrl: llmConfig.baseUrl },
     );
   }
-  const llmProvider =
-    !llmConfigured(config) || llmConfig.type === 'disabled'
-      ? new DisabledLlmProvider()
-      : new AiSdkLlmProvider({
-          type: llmConfig.type,
-          ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
-          model: llmConfig.model,
-          apiKey: llmConfig.apiKey,
-          maxTokens: llmConfig.maxTokens,
-          timeoutSeconds: llmConfig.timeoutSeconds,
-          pricing: llmConfig.pricing,
-          logger,
-        });
   const llm = new LlmService({
-    provider: llmProvider,
+    provider: llmConfigured(config) ? createLlmProvider(llmConfig, logger) : new DisabledLlmProvider(),
     logger,
     pricing: llmConfig.pricing,
     model: llmConfig.model,
@@ -70,21 +57,8 @@ export function createModels(core: Foundation): Models {
 
   // ── 嵌入 ──
   const embeddingConfig = config.providers.embedding;
-  const embeddingProvider =
-    embeddingConfig.type === 'disabled'
-      ? null
-      : new AiSdkEmbeddingProvider({
-          type: embeddingConfig.type,
-          ...(embeddingConfig.baseUrl === '' ? {} : { baseUrl: embeddingConfig.baseUrl }),
-          model: embeddingConfig.model,
-          apiKey: embeddingConfig.apiKey,
-          dimension: embeddingConfig.dimension,
-          maxBatchSize: embeddingConfig.maxBatchSize,
-          timeoutSeconds: embeddingConfig.timeoutSeconds,
-          logger,
-        });
   const embedding = new EmbeddingService({
-    provider: embeddingProvider,
+    provider: createEmbeddingProvider(embeddingConfig, logger),
     logger,
     // 缓存按 `(model, content_digest)` 去重，与「配了哪个引擎」无关：`reindex`
     // 回填、检索查询、写路径都该共享同一份结果。关掉只对「每次都要新向量」的
@@ -96,11 +70,7 @@ export function createModels(core: Foundation): Models {
           maxEntries: embeddingConfig.cache.maxEntries,
         })
       : null,
-    config: {
-      dimension: embeddingConfig.dimension,
-      maxBatchSize: embeddingConfig.maxBatchSize,
-      timeoutMs: embeddingConfig.timeoutSeconds * MILLISECONDS_PER_SECOND,
-    },
+    config: embeddingRuntimeOptions(embeddingConfig),
   });
   // 启动期就把向量表建好、把维度与配置对齐：等到第一次写入才发现维度不一致，
   // 那时错误已经落在「用户等着检索结果」的路径上，而且症状是「一条都搜不到」。
@@ -142,4 +112,40 @@ export function createModels(core: Foundation): Models {
   }
 
   return { llm, embedding, embeddingConfig, rerankConfig, rerankProvider };
+}
+
+export function createLlmProvider(llmConfig: Foundation['config']['providers']['llm']['default'], logger: Foundation['logger']) {
+  if (llmConfig.type === 'disabled') return new DisabledLlmProvider();
+  return new AiSdkLlmProvider({
+    type: llmConfig.type,
+    ...(llmConfig.baseUrl === '' ? {} : { baseUrl: llmConfig.baseUrl }),
+    model: llmConfig.model,
+    apiKey: llmConfig.apiKey,
+    maxTokens: llmConfig.maxTokens,
+    timeoutSeconds: llmConfig.timeoutSeconds,
+    pricing: llmConfig.pricing,
+    logger,
+  });
+}
+
+export function createEmbeddingProvider(embeddingConfig: Models['embeddingConfig'], logger: Foundation['logger']) {
+  if (embeddingConfig.type === 'disabled') return null;
+  return new AiSdkEmbeddingProvider({
+    type: embeddingConfig.type,
+    ...(embeddingConfig.baseUrl === '' ? {} : { baseUrl: embeddingConfig.baseUrl }),
+    model: embeddingConfig.model,
+    apiKey: embeddingConfig.apiKey,
+    dimension: embeddingConfig.dimension,
+    maxBatchSize: embeddingConfig.maxBatchSize,
+    timeoutSeconds: embeddingConfig.timeoutSeconds,
+    logger,
+  });
+}
+
+export function embeddingRuntimeOptions(settings: Models['embeddingConfig']): EmbeddingServiceDeps['config'] {
+  return {
+    dimension: settings.dimension,
+    maxBatchSize: settings.maxBatchSize,
+    timeoutMs: settings.timeoutSeconds * MILLISECONDS_PER_SECOND,
+  };
 }

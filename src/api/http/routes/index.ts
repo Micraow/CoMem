@@ -63,13 +63,9 @@ import { createTelemetryRoutes } from './telemetry.js';
 /** 路由层需要的全部依赖。`acl` 同时是 `Authorizer`（管理面方法也在它上面）。 */
 export interface HttpRouteServices {
   readonly config: ComemConfig;
-  /**
-   * 配置的四层输入与来源（`GET /config`）。
-   *
-   * 与 `config` 分开：生效值是快照，来源只能在加载时留下——请求时重读磁盘会
-   * 把「启动时生效的值」和「现在磁盘上的值」混在一起。
-   */
+  /** 配置来源与当前运行值；尚未应用的磁盘配置不会覆盖运行值。 */
   readonly configSnapshot: ConfigSnapshot;
+  readonly applyConfig: (values: Readonly<Record<string, unknown>>) => Promise<{ readonly restartRequired: boolean; readonly applied: readonly string[] }>;
   /** 模型服务：`POST /config/test` 的 LLM / 嵌入探针。 */
   readonly llm: LlmService;
   readonly embedding: EmbeddingService;

@@ -21,9 +21,7 @@
  *
  * ## 保存与生效是两件事
  *
- * 服务端配置只在启动时读一次，`PATCH` 成功只代表写进了覆盖文件。响应里的
- * `restartRequired` 恒为 `true`，页面的提示条与 `RESTART_COMMANDS` 说的都是
- * 「重启后生效」，不写「已应用」。
+ * `PATCH` 保存可热更新的值后立即应用；`GET` 仍单独报告需要重启的值。
  */
 
 import { isRecord } from './record'
@@ -57,6 +55,7 @@ export interface ConfigItemView {
   /** 密钥类与不可暴露项为 `null`。 */
   readonly value: unknown
   readonly source: ConfigSource
+  readonly pending?: { readonly value: unknown }
   readonly secret: boolean
   /** 仅密钥类有意义：值非空即已设置。 */
   readonly configured: boolean
@@ -76,11 +75,12 @@ export interface ConfigViewPayload {
   readonly items: readonly ConfigItemView[]
 }
 
-/** `PATCH /config` 的响应体。`restartRequired` 恒为 `true`。 */
+/** `PATCH /config` 的响应体。 */
 export interface ConfigPatchPayload {
   readonly written: number
   readonly overridePath: string
-  readonly restartRequired: true
+  readonly restartRequired: boolean
+  readonly applied: readonly string[]
 }
 
 /** 连接测试能测的三组（`POST /config/test` 的 `target`）。 */
@@ -730,7 +730,7 @@ export function configRowStateOf(
     } else if (item.secret && saved.value === '') {
       savedNote = '已清除，等待重启。'
     } else if (item.secret) {
-      savedNote = '新密钥已保存，等待重启。'
+      savedNote = '密钥更改已保存，等待重启。'
     } else {
       savedNote = '已保存，等待重启。'
     }
@@ -784,7 +784,7 @@ export function buildPatchValues(
   const errors: Record<string, string> = {}
 
   for (const item of items) {
-    if (!item.editable) {
+    if (!item.editable || item.source === 'env') {
       continue
     }
 
@@ -903,9 +903,9 @@ export function errorHintOf(message: string | null): string | null {
   return message.includes('环境变量') ? '环境变量优先于本页设置；改环境变量后重启进程。' : null;
 }
 
-/** 保存成功后的提示条。`restartRequired` 恒为真，文案不说「已应用」。 */
+/** 保存了暂不能热更新的设置。 */
 export function restartNoticeOf(overridePath: string): string {
-  return `设置已保存到 ${overridePath}。需要重启 CoMem 才能生效——配置只在启动时读一次。`
+  return `部分设置已保存到 ${overridePath}，将在 CoMem 重启后生效。`
 }
 
 /** 两种部署形态的重启命令。复制按钮由 `DomainCodeBlock` 提供。 */
@@ -916,7 +916,7 @@ export const RESTART_COMMANDS = [
 
 /** 连接测试的固定说明。这句不能省：否则「保存 + 测试通过」会被当成已生效。 */
 export const TEST_SCOPE_NOTE =
-  '「测试连接」使用当前表单内容，自动识别向量维度。保存后重启服务生效。'
+  '「测试连接」使用当前表单内容，自动识别向量维度。测试不会应用修改。'
 
 /** 连接测试的一行摘要：通过 / 失败 + 耗时。`detail` 另起一行原样显示。 */
 export function testSummaryOf(result: ConfigTestPayload): string {

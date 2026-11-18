@@ -8,8 +8,7 @@
  *
  * ## 保存不等于生效
  *
- * 服务端只在启动时读一次配置，`PATCH` 只写覆盖文件。保存成功后显示不可关闭的提示条
- * 与两条重启命令；连接测试使用未保存的表单草稿，不代表运行配置已生效。
+ * 保存后重新读取运行值和待重启值；连接测试使用当前表单，不修改运行配置。
  *
  * ## 环境变量遮住的项
  *
@@ -19,7 +18,6 @@
  */
 import {
   AlertTriangle,
-  CheckCircle2,
   ChevronDown,
   PlugZap,
   RefreshCw,
@@ -52,6 +50,7 @@ import {
   valueDisplayOf,
   type ConfigGroup,
   type ConfigItemView,
+  type ConfigPatchPayload,
   type ConfigRowState,
   type ConfigTestPayload,
   type ConfigTestTarget,
@@ -59,7 +58,6 @@ import {
   type LocalInferenceFillKind,
   type LocalInferenceStartPayload,
   type LocalInferenceStatusPayload,
-  type PendingConfigSave,
 } from '~/utils/settings'
 
 useHead({ title: '设置 · CoMem 控制台' })
@@ -86,17 +84,7 @@ const drafts = ref<Readonly<Record<string, string>>>({})
 const cleared = ref<ReadonlySet<string>>(new Set())
 const fieldErrors = ref<Readonly<Record<string, string>>>({})
 const saveError = ref<string | null>(null)
-const saveResult = ref<{ readonly written: number; readonly overridePath: string } | null>(null)
 const saving = ref(false)
-
-/**
- * 已写进覆盖文件、但还没成为运行值的项。`value` 是按配置类型转换后的值，
- * `draft` 是保存时输入框里的原文——用户再改它，这一项就重新算「待保存」。
- *
- * 保存后**不重新 GET**：`GET /config` 回的是启动快照，重新拉取会把刚填的值
- * 覆盖回旧值。表单继续用用户填的值，等重启（或用户点「重新读取运行中配置」）。
- */
-const pending = ref<Readonly<Record<string, PendingConfigSave>>>({})
 
 const expanded = ref<ReadonlySet<ConfigGroup>>(new Set(INITIALLY_EXPANDED_GROUPS))
 const showAdvanced = ref(false)
@@ -127,75 +115,24 @@ const inferenceError = ref<string | null>(null)
 const items = computed<readonly ConfigItemView[]>(() => view.value?.items ?? [])
 const groups = computed(() => groupSettings(items.value))
 
-/** 判断两个配置值是否相同（数组与标量都走 JSON 序列化）。 */
-function sameValueOf(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right)
-}
-
-/**
- * 一项待生效的保存是否已经在运行值里。
- *
- * 密钥没有明文可比，用「是否已设置 + 末 4 位掩码」判断；其余项直接比类型化值。
- * 重启后 `GET /config` 返回覆盖文件里的值，这项就自动从待生效里消失。
- */
-function isApplied(item: ConfigItemView, saved: PendingConfigSave): boolean {
-  if (item.secret) {
-    // 密钥没有明文可比：来源必须是覆盖文件，再用末 4 位确认掩码。
-    if (item.source !== 'override') {
-      return false
-    }
-    if (saved.value === '') {
-      return !item.configured
-    }
-    return (
-      item.configured &&
-      item.masked !== null &&
-      item.masked.endsWith(String(saved.value).slice(-4))
-    )
-  }
-  return sameValueOf(item.value, saved.value)
-}
-
-/**
- * 把待生效的值当成比较基线：`buildPatchValues` 只提交相对覆盖文件的改动。
- *
- * 没有这一层，保存后草稿仍相对运行值有差异，页头会一直显示「待保存」。
- */
-const baselineItems = computed<readonly ConfigItemView[]>(() =>
-  items.value.map((item) => {
-    const saved = pending.value[item.path]
-    return saved === undefined ? item : { ...item, value: saved.value }
-  }),
-)
-
-const preview = computed(() =>
-  buildPatchValues(baselineItems.value, drafts.value, cleared.value),
-)
-
-/** 这一项的草稿是否就是上次成功保存的原文。 */
-function pendingSavedOf(path: string): boolean {
-  const saved = pending.value[path]
-  return saved !== undefined && drafts.value[path] === saved.draft
-}
+const baselineItems = computed(() => items.value.map((item) =>
+  item.pending === undefined ? item : { ...item, value: item.pending.value },
+))
+const preview = computed(() => buildPatchValues(baselineItems.value, drafts.value, cleared.value))
 
 function rowStateOf(item: ConfigItemView): ConfigRowState {
-  return configRowStateOf(
-    item,
-    drafts.value[item.path] ?? '',
-    cleared.value.has(item.path),
-    pending.value[item.path],
-  )
+  const saved = item.pending === undefined ? undefined : {
+    value: item.pending.value, draft: draftOf({ ...item, value: item.pending.value }),
+  }
+  return configRowStateOf(item, drafts.value[item.path] ?? '', cleared.value.has(item.path), saved)
 }
 
-const pendingCount = computed(() => Object.keys(pending.value).length)
-
-const dirtyCount = computed(() =>
-  Object.keys(preview.value.values).filter((path) => !pendingSavedOf(path)).length,
-)
+const pendingCount = computed(() => items.value.filter((item) => item.pending !== undefined).length)
+const dirtyCount = computed(() => Object.keys(preview.value.values).length)
 
 const canSave = computed(
   () =>
-    !saving.value &&
+    !saving.value && !loading.value &&
     view.value !== null &&
     view.value.overrideWritable &&
     dirtyCount.value > 0 &&
@@ -302,43 +239,17 @@ function toggleGroup(group: ConfigGroup): void {
   expanded.value = next
 }
 
-function resetDrafts(
-  next: readonly ConfigItemView[],
-  saved: Readonly<Record<string, PendingConfigSave>> = {},
-): void {
-  drafts.value = Object.fromEntries(
-    next.map((item) => {
-      const entry = saved[item.path]
-      return [item.path, entry === undefined ? draftOf(item) : entry.draft]
-    }),
-  )
-  cleared.value = new Set()
-  fieldErrors.value = {}
-}
-
 async function load(): Promise<void> {
   loading.value = true
   loadError.value = null
   forbidden.value = false
   try {
     const payload = await api.get<ConfigViewPayload>('/config')
-    // 重启后已经生效的项从待生效里移除；重启前仍保留，表单继续显示用户填的值。
-    const nextPending = Object.fromEntries(
-      Object.entries(pending.value).filter(([path, saved]) => {
-        const item = payload.items.find((candidate) => candidate.path === path)
-        return item !== undefined && !isApplied(item, saved)
-      }),
-    )
-    const hadPending = Object.keys(pending.value).length > 0
-    const appliedAll = hadPending && Object.keys(nextPending).length === 0
-    pending.value = nextPending
     view.value = payload
-    resetDrafts(payload.items, nextPending)
-    if (appliedAll) {
-      // 重启后所有待生效项都成为运行值，旧的成功提示不再成立。
-      saveResult.value = null
-      saveError.value = null
-    }
+    drafts.value = Object.fromEntries(baselineItems.value.map((item) => [item.path, draftOf(item)]))
+    cleared.value = new Set()
+    fieldErrors.value = {}
+    saveError.value = null
   } catch (caught) {
     view.value = null
     if (isForbidden(caught)) {
@@ -351,60 +262,17 @@ async function load(): Promise<void> {
   }
 }
 
-/**
- * 放弃本地修改并回到正在运行的配置。
- *
- * 保存过的值仍在覆盖文件里；这里只是不再把它们当表单基线，避免用户以为
- * 「不重启也能看到保存的旧值」。
- */
-async function reloadRunning(): Promise<void> {
-  pending.value = {}
-  saveResult.value = null
-  saveError.value = null
-  await load()
-}
-
 async function save(): Promise<void> {
-  if (saving.value) {
-    return
-  }
-
-  const { values: previewValues, errors } = buildPatchValues(
-    baselineItems.value,
-    drafts.value,
-    cleared.value,
-  )
-  // 上一轮已经保存、这次没再改的密钥不要重复提交（非密钥项已由基线排除）。
-  const values = Object.fromEntries(
-    Object.entries(previewValues).filter(([path]) => !pendingSavedOf(path)),
-  )
-  if (Object.keys(errors).length > 0 || Object.keys(values).length === 0) {
-    return
-  }
+  if (!canSave.value) return
+  const { values } = preview.value
 
   saving.value = true
   saveError.value = null
   fieldErrors.value = {}
   try {
-    const result = await api.patch<{
-      readonly written: number
-      readonly overridePath: string
-      readonly restartRequired: true
-    }>('/config', { values })
-    const nextPending = { ...pending.value }
-    for (const [path, value] of Object.entries(values)) {
-      const item = items.value.find((candidate) => candidate.path === path)
-      if (item !== undefined && !item.secret && sameValueOf(item.value, value)) {
-        // 改回了运行值：覆盖文件里写的值与运行值相同，没有「待生效」可言。
-        delete nextPending[path]
-      } else {
-        nextPending[path] = { draft: drafts.value[path] ?? '', value }
-      }
-    }
-    pending.value = nextPending
-    saveResult.value = { written: result.written, overridePath: result.overridePath }
-    toast.show('success', `已写入 ${result.written} 项设置，重启后生效`)
-    // **不要重新 GET `/config`**：它回的是启动快照，会把刚填的值覆盖回旧值。
+    const result = await api.patch<ConfigPatchPayload>('/config', { values })
+    await load()
+    toast.show('success', result.restartRequired ? '已保存，仍有设置待重启' : '设置已生效')
   } catch (caught) {
     const message = errorMessageOf(caught)
     const details = caught instanceof ApiClientError ? caught.details : undefined
@@ -458,10 +326,10 @@ async function test(target: ConfigTestTarget | null): Promise<void> {
 
   probes.value = { ...probes.value, [target]: { status: 'running', result: null, error: null } }
   try {
-    const candidate = buildPatchValues(items.value, drafts.value, cleared.value)
+    const candidate = preview.value
     if (Object.keys(candidate.errors).length > 0) throw new Error('请先修正表单中的配置错误。')
     const result = await api.post<ConfigTestPayload & { dimension?: number }>('/config/test', { target, values: candidate.values })
-    if (target === 'embedding' && result.ok && result.dimension !== undefined) {
+    if (!saving.value && !loading.value && target === 'embedding' && result.ok && result.dimension !== undefined) {
       drafts.value = { ...drafts.value, 'providers.embedding.dimension': String(result.dimension) }
     }
     probes.value = { ...probes.value, [target]: { status: 'done', result, error: null } }
@@ -574,18 +442,9 @@ onMounted(() => {
           </UiBadge>
           <span v-if="pendingCount > 0" class="caption tnum">有 {{ pendingCount }} 项待重启生效</span>
           <span v-if="dirtyCount > 0" class="caption tnum">待保存 {{ dirtyCount }} 项</span>
-          <UiButton
-            v-if="dirtyCount > 0 || pendingCount > 0"
-            variant="plain"
-            size="sm"
-            title="放弃本地修改，按正在运行的配置重填表单"
-            @click="reloadRunning"
-          >
-            重新读取运行中配置
-          </UiButton>
-          <UiButton variant="secondary" size="sm" :disabled="loading" @click="load">
+          <UiButton variant="secondary" size="sm" :disabled="loading || saving" @click="load">
             <RefreshCw :size="14" :stroke-width="1.5" />
-            {{ loading ? '加载中' : '重新加载' }}
+            {{ loading ? '加载中' : dirtyCount > 0 ? '放弃未保存的更改' : '重新加载' }}
           </UiButton>
           <UiButton variant="primary" size="sm" :disabled="!canSave" @click="save">
             保存更改
@@ -593,11 +452,11 @@ onMounted(() => {
         </template>
       </DomainPageHeader>
 
-      <div v-if="saveResult !== null || saveError !== null" class="settings-notices">
-        <UiCallout v-if="saveResult !== null" tone="success" role="status">
-          <template #icon><CheckCircle2 :size="15" :stroke-width="1.4" /></template>
+      <div v-if="pendingCount > 0 || saveError !== null" class="settings-notices">
+        <UiCallout v-if="pendingCount > 0 && view !== null" tone="info" role="status">
+          <template #icon><AlertTriangle :size="15" :stroke-width="1.4" /></template>
           <div class="settings-restart">
-            <p class="body-sm">{{ restartNoticeOf(saveResult.overridePath) }}</p>
+            <p class="body-sm">{{ restartNoticeOf(view.overridePath) }}</p>
             <div class="settings-restart__commands">
               <DomainCodeBlock
                 v-for="command in RESTART_COMMANDS"
@@ -607,7 +466,6 @@ onMounted(() => {
                 :copy-label="`复制重启命令（${command.label}）`"
               />
             </div>
-            <p class="caption">已写入 {{ saveResult.written }} 项。重启后回到本页确认运行值。</p>
           </div>
         </UiCallout>
 
@@ -636,7 +494,7 @@ onMounted(() => {
         <UiSkeleton height="140px" />
       </div>
 
-      <div v-else class="stack-24">
+      <div v-else class="stack-24" :inert="saving || loading">
         <UiCallout tone="info">
           <template #icon><PlugZap :size="15" :stroke-width="1.4" /></template>
           <div>{{ TEST_SCOPE_NOTE }}</div>

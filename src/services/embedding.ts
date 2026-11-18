@@ -21,14 +21,7 @@
  * 决定怎么办：`hybrid` 退化成纯 FTS5，`vector` 返回空命中并说明原因。两种都不
  * 静默换引擎——静默换引擎比空结果更让人困惑。
  *
- * ## 缓存与熔断的关系
- *
- * **命中不推进熔断状态**：命中证明不了供应商可用，拿它 `#recordSuccess` 会让熔断
- * 在供应商仍然挂着时被一次缓存命中关掉。反过来，缓存**读失败**按未命中处理、**写
- * 失败**只记 warn——缓存坏掉不能变成嵌入失败（§7 的同一原则）。
- *
- * 部分命中时只把未命中的那几条送供应商：省 token 是次要的，主要是一条坏缓存行
- * 不会把整批拖成未命中。
+ * 缓存命中不证明供应商已经恢复，因此不推动熔断状态；缓存错误不影响写主路径。
  */
 
 import type { EmbeddingCacheEntry } from '../adapters/sqlite/embedding-cache.js';
@@ -84,21 +77,8 @@ export interface EmbedOutcome {
   readonly reason: string | null;
 }
 
-/**
- * 连续失败多少次后打开熔断。
- *
- * 5 是经验值：单次失败可能是抖动（网络闪断、供应商偶发 5xx），连续 5 次已经能
- * 确认不是抖动。取更大值会让供应商挂掉后的每个请求都白等一个超时；取更小值会在
- * 正常抖动时过早短路。
- */
+// 经验值：五次连续失败视为持续故障，给供应商 30 秒恢复窗口（与默认请求超时同量级）。
 const FAILURE_THRESHOLD = 5;
-
-/**
- * 熔断打开后多久允许探测，毫秒。
- *
- * 30 秒是经验值：给供应商一个恢复窗口，同时不让写路径在整段故障期间持续打网络。
- * 与 `timeoutSeconds` 默认 30 秒是同一个量级——探测本身要花掉一个超时预算。
- */
 const COOLDOWN_MS = 30_000;
 
 type CircuitState = 'closed' | 'open' | 'half-open';
@@ -115,10 +95,10 @@ interface CacheMiss {
 }
 
 export class EmbeddingService {
-  readonly #provider: EmbeddingProvider | null;
+  #provider: EmbeddingProvider | null;
   readonly #logger: Logger;
   readonly #cache: EmbeddingCachePort | null;
-  readonly #config: EmbeddingServiceDeps['config'];
+  #config: EmbeddingServiceDeps['config'];
 
   #state: CircuitState = 'closed';
   #consecutiveFailures = 0;
@@ -169,6 +149,15 @@ export class EmbeddingService {
     return this.#provider?.model ?? null;
   }
 
+  applyRuntime(provider: EmbeddingProvider, config: EmbeddingServiceDeps['config']): void {
+    this.#provider = provider;
+    this.#config = config;
+    this.#state = 'closed';
+    this.#consecutiveFailures = 0;
+    this.#openedAt = 0;
+    this.#probeInFlight = false;
+  }
+
   /**
    * 单次供应商调用的条数上限。
    *
@@ -205,6 +194,7 @@ export class EmbeddingService {
       return this.#degrade('没有配置 providers.embedding');
     }
 
+    const config = this.#config;
     const cached = this.#lookup(texts, provider.model);
     if (cached.size === texts.length) {
       return { vectors: this.#merge(texts, cached, new Map()), degraded: false, reason: null };
@@ -230,12 +220,12 @@ export class EmbeddingService {
 
     try {
       const produced = new Map<number, readonly number[]>();
-      for (let start = 0; start < misses.length; start += this.#config.maxBatchSize) {
-        const chunk = misses.slice(start, start + this.#config.maxBatchSize);
+      for (let start = 0; start < misses.length; start += config.maxBatchSize) {
+        const chunk = misses.slice(start, start + config.maxBatchSize);
         const result = await this.#embedBatch(
           provider,
           chunk.map((miss) => miss.text),
-          options,
+          options, config,
         );
         if (!result.ok) {
           return result.outcome;
@@ -248,12 +238,12 @@ export class EmbeddingService {
         }
       }
 
-      this.#recordSuccess();
+      if (provider === this.#provider) this.#recordSuccess();
       this.#store(texts, produced, provider.model);
       return { vectors: this.#merge(texts, cached, produced), degraded: false, reason: null };
     } finally {
       // 探测不论成功失败都要释放占位，否则半开状态下永远没有下一次探测。
-      if (isProbe) {
+      if (isProbe && provider === this.#provider) {
         this.#probeInFlight = false;
       }
     }
@@ -286,16 +276,17 @@ export class EmbeddingService {
     provider: EmbeddingProvider,
     batch: readonly string[],
     options: EmbeddingOptions | undefined,
+    config: EmbeddingServiceDeps['config'],
   ): Promise<BatchOutcome> {
     let result: EmbeddingResult;
     try {
       result = await provider.embed(batch, {
         // 调用方的预算只能收紧配置值，不能放宽（与 provider 的 `min` 同一语义）。
-        timeoutMs: Math.min(options?.timeoutMs ?? this.#config.timeoutMs, this.#config.timeoutMs),
+        timeoutMs: Math.min(options?.timeoutMs ?? config.timeoutMs, config.timeoutMs),
         ...(options?.signal === undefined ? { } : { signal: options.signal }),
       });
     } catch (error) {
-      this.#recordFailure();
+      if (provider === this.#provider) this.#recordFailure();
       const failure = ComemError.from(error);
       return { ok: false, outcome: this.#degrade(`嵌入调用失败（${failure.code}）：${failure.message}`) };
     }
@@ -303,7 +294,7 @@ export class EmbeddingService {
     // 条数不一致是供应商的 bug：把结果写回 `node_embedding` 会让向量与 URI
     // 错位，比直接降级严重得多。
     if (result.vectors.length !== batch.length) {
-      this.#recordFailure();
+      if (provider === this.#provider) this.#recordFailure();
       return {
         ok: false,
         outcome: this.#degrade(
@@ -318,20 +309,20 @@ export class EmbeddingService {
         // 维度不一致单独判，且消息里带两个数字：它最常见的成因是
         // `providers.embedding.dimension` 与模型不符，`assertValidVector` 的
         // 「长度与维度不匹配」不告诉用户该改哪一边。
-        if (vector.length !== this.#config.dimension) {
+        if (vector.length !== config.dimension) {
           throw new ComemError(
             'INVALID_ARGUMENT',
-            `向量维度与配置不一致：providers.embedding.dimension 配置为 ${this.#config.dimension}，供应商返回 ${vector.length}。`,
-            { expected: this.#config.dimension, actual: vector.length, model: provider.model },
+            `向量维度与配置不一致：providers.embedding.dimension 配置为 ${config.dimension}，供应商返回 ${vector.length}。`,
+            { expected: config.dimension, actual: vector.length, model: provider.model },
           );
         }
-        assertValidVector(vector, this.#config.dimension);
+        assertValidVector(vector, config.dimension);
         vectors.push([...vector]);
       }
     } catch (error) {
       // 维度 / NaN / 全零是配置或供应商的问题，不是「入参非法」：降级而不抛，
       // 让写路径继续，同时把原因留给日志。
-      this.#recordFailure();
+      if (provider === this.#provider) this.#recordFailure();
       const failure = ComemError.from(error);
       return { ok: false, outcome: this.#degrade(`嵌入供应商返回的向量不合法：${failure.message}`) };
     }

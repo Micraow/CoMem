@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { parse as parseYaml } from 'yaml';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { toErrorEnvelope } from '../../../src/api/http/error-mapper.js';
 import {
@@ -15,6 +15,7 @@ import { createConfigRoutes } from '../../../src/api/http/routes/config.js';
 import { createHttpServer } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import { loadConfigSnapshot } from '../../../src/config/index.js';
+import { startFakeLlmHttp } from '../../helpers/fake-llm-http.js';
 
 const LLM_KEY = 'sk-llm-secret-1234';
 const EMBEDDING_KEY = 'sk-embed-secret-5678';
@@ -49,6 +50,7 @@ beforeEach(async () => {
       `      apiKey: "${LLM_KEY}"`,
       '  embedding:',
       '    type: openai-compatible',
+      '    dimension: 2',
       `    apiKey: "${EMBEDDING_KEY}"`,
       '  rerank:',
       '    type: http',
@@ -76,6 +78,7 @@ afterEach(async () => {
   await container.services.indexObserver.drain();
   await app.close();
   await container.close();
+  vi.unstubAllGlobals();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -189,6 +192,10 @@ describe('GET /api/v1/config', () => {
 });
 
 describe('PATCH /api/v1/config', () => {
+  function patch(values: Record<string, unknown>) {
+    return inject({ method: 'PATCH', url: '/api/v1/config', payload: { values } });
+  }
+
   function overridePath(): string {
     return join(dataDir, '_meta', 'config.override.yaml');
   }
@@ -244,45 +251,81 @@ describe('PATCH /api/v1/config', () => {
     expect(existsSync(overridePath())).toBe(false);
   });
 
-  it('成功时原子写入覆盖文件，权限 0600，并声明需要重启', async () => {
-    const response = await inject({
-      method: 'PATCH',
-      url: '/api/v1/config',
-      payload: {
-        values: {
-          'providers.llm.default.baseUrl': 'http://127.0.0.1:8089/v1',
-          'providers.llm.default.apiKey': '',
-          'retrieval.assembly.compressRecallTimeoutMs': 1250,
-        },
-      },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(resultOf(response)).toMatchObject({
-      written: 3,
-      overridePath: overridePath(),
-      restartRequired: true,
-    });
-
-    // Windows 没有 POSIX 权限位
-    if (process.platform !== 'win32') {
-      expect(statSync(overridePath()).mode & 0o777).toBe(0o600);
+  it('原子保存并让下一次实际生成请求使用新连接；重启项仍显示运行值和保存值', async () => {
+    const model = await startFakeLlmHttp(() => 'pong');
+    try {
+      const result = resultOf(await patch({
+        'providers.llm.default.baseUrl': model.baseUrl,
+        'providers.llm.default.apiKey': '',
+        'retrieval.assembly.compressRecallTimeoutMs': 1250,
+        'summary.generator': 'rule',
+      }));
+      expect(result).toMatchObject({ written: 4, restartRequired: true, applied: expect.arrayContaining([
+        'providers.llm.default.baseUrl', 'providers.llm.default.apiKey', 'retrieval.assembly.compressRecallTimeoutMs',
+      ]) });
+      if (process.platform !== 'win32') expect(statSync(overridePath()).mode & 0o777).toBe(0o600);
+      expect(parseYaml(readFileSync(overridePath(), 'utf8'))).toMatchObject({
+        providers: { llm: { default: { baseUrl: model.baseUrl, apiKey: '' } } },
+        summary: { generator: 'rule' },
+      });
+      const items = itemsOf(resultOf(await inject({ method: 'GET', url: '/api/v1/config' })));
+      expect(items.get('providers.llm.default.baseUrl')).toMatchObject({ value: model.baseUrl, source: 'override' });
+      expect(items.get('providers.llm.default.apiKey')).toMatchObject({ configured: false, masked: null });
+      expect(items.get('retrieval.assembly.compressRecallTimeoutMs')?.['value']).toBe(1250);
+      expect(items.get('summary.generator')).toMatchObject({ value: 'llm', pending: { value: 'rule' } });
+      const probe = resultOf(await inject({ method: 'POST', url: '/api/v1/config/test', payload: { target: 'llm' } }));
+      expect(probe).toMatchObject({ ok: true });
+      expect(model.requests).toHaveLength(1);
+      expect(JSON.parse(model.requests[0] ?? '{}')).toMatchObject({ model: 'env-model' });
+      expect(loadConfigSnapshot({ path: configPath, env: testEnv() }).config.summary.generator).toBe('rule');
+    } finally {
+      await model.close();
     }
-    const written = parseYaml(readFileSync(overridePath(), 'utf8')) as {
-      providers: { llm: { default: { baseUrl: string; apiKey: string } } };
-    };
-    expect(written.providers.llm.default.baseUrl).toBe('http://127.0.0.1:8089/v1');
-    expect(written.providers.llm.default.apiKey).toBe('');
+  });
 
-    // 当前进程仍是启动快照：写盘不等于生效。
+  it('嵌入故障熔断后，保存新连接即恢复；维度变化不会应用或串进后续保存', async () => {
+    const fetchMock = vi.fn(async (_url: unknown, request?: RequestInit) => {
+      const input = (JSON.parse(String(request?.body)) as { input: string[] }).input;
+      return Response.json({ data: input.map((_text, index) => ({ index, embedding: [1, 2] })) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const urlKey = 'providers.embedding.baseUrl';
+    const dimensionKey = 'providers.embedding.dimension';
+    const batchKey = 'providers.embedding.maxBatchSize';
+    const apiKey = 'providers.embedding.apiKey';
+    const { embedding } = container.services;
+    for (let index = 0; index < 5; index++) {
+      fetchMock.mockImplementationOnce(async () => new Response('', { status: 401 }));
+      expect((await embedding.embed(['failure'])).degraded).toBe(true);
+    }
+    expect(embedding.available).toBe(false);
+    expect(resultOf(await patch({ [urlKey]: 'http://embedding.test/v1', [batchKey]: 1, [apiKey]: 'new-key-5678' })))
+      .toMatchObject({ restartRequired: false, applied: [urlKey, batchKey, apiKey] });
+    expect(await embedding.embed(['first', 'second'])).toMatchObject({ degraded: false, vectors: [[1, 2], [1, 2]] });
+    expect(fetchMock.mock.calls.slice(-2).map(([url, init]) => [String(url), new Headers(init?.headers).get('authorization')]))
+      .toEqual(Array(2).fill(['http://embedding.test/v1/embeddings', 'Bearer new-key-5678']));
+    expect(resultOf(await patch({ [dimensionKey]: 3, [apiKey]: 'pending-key-5678' })))
+      .toMatchObject({ restartRequired: true, applied: [] });
+    expect(resultOf(await patch({ [batchKey]: 2, 'retrieval.assembly.compressRecall': false })))
+      .toMatchObject({ restartRequired: true, applied: ['retrieval.assembly.compressRecall'] });
+    expect(embedding.maxBatchSize).toBe(1);
+    expect((await embedding.embed(['third'])).degraded).toBe(false);
+    expect(new Headers(fetchMock.mock.lastCall?.[1]?.headers).get('authorization')).toBe('Bearer new-key-5678');
+    const response = await inject({ method: 'GET', url: '/api/v1/config' });
+    expect(response.body).not.toContain('pending-key');
+    const items = itemsOf(resultOf(response));
+    expect(items.get(dimensionKey)).toMatchObject({ value: 2, pending: { value: 3 } });
+    expect(items.get(apiKey)).toMatchObject({ masked: '****5678', pending: { value: null } });
+  });
+
+  it('待重启的 LLM 协议不会因为再次改密钥而换掉运行中的供应商', async () => {
+    const type = 'providers.llm.default.type';
+    const key = 'providers.llm.default.apiKey';
+    expect(resultOf(await patch({ [type]: 'anthropic' }))).toMatchObject({ restartRequired: true, applied: [] });
+    expect(resultOf(await patch({ [key]: 'different-key-1234' }))).toMatchObject({ restartRequired: true, applied: [] });
+    expect(container.config.providers.llm.default).toMatchObject({ type: 'openai-compatible', apiKey: LLM_KEY });
     const items = itemsOf(resultOf(await inject({ method: 'GET', url: '/api/v1/config' })));
-    expect(items.get('providers.llm.default.baseUrl')?.['value']).toBe('http://file.example/v1');
-
-    // 下一次启动才会读到覆盖文件。
-    const reloaded = loadConfigSnapshot({ path: configPath, env: testEnv() });
-    expect(reloaded.config.providers.llm.default.baseUrl).toBe('http://127.0.0.1:8089/v1');
-    expect(reloaded.config.providers.llm.default.apiKey).toBe('');
-    expect(reloaded.config.retrieval.assembly.compressRecallTimeoutMs).toBe(1250);
+    expect(items.get(key)).toMatchObject({ masked: '****1234', source: 'file', pending: { value: null } });
   });
 
   it('非系统管理员返回 403', async () => {
@@ -304,6 +347,7 @@ describe('PATCH /api/v1/config', () => {
       createConfigRoutes({
         config: snapshot.config,
         configSnapshot: snapshot,
+        applyConfig: container.applyConfig,
         llm: container.services.llm,
         embedding: container.services.embedding,
         systemAdmin: { adminUserIds: ['local'], isBootstrapAdmin: () => false },

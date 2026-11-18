@@ -394,8 +394,7 @@ describe('保存', () => {
     const notice = restartNoticeOf('/var/lib/comem/_meta/config.override.yaml');
 
     expect(notice).toContain('设置已保存到 /var/lib/comem/_meta/config.override.yaml');
-    expect(notice).toContain('需要重启 CoMem 才能生效');
-    expect(notice).toContain('配置只在启动时读一次');
+    expect(notice).toContain('将在 CoMem 重启后生效');
     expect(notice).not.toContain('已应用');
     expect(RESTART_COMMANDS.map((command) => command.command)).toEqual([
       'pnpm dev',
@@ -403,7 +402,7 @@ describe('保存', () => {
     ]);
 
     expect(SETTINGS_PAGE).toContain("api.patch<");
-    expect(SETTINGS_PAGE).toContain('restartNoticeOf(saveResult.overridePath)');
+    expect(SETTINGS_PAGE).toContain('restartNoticeOf(view.overridePath)');
     expect(SETTINGS_PAGE).toContain('DomainCodeBlock');
   });
 });
@@ -455,7 +454,7 @@ describe('测试连接', () => {
 
   it('固定说明文案存在，且请求打到 /config/test', () => {
     expect(TEST_SCOPE_NOTE).toBe(
-      '「测试连接」使用当前表单内容，自动识别向量维度。保存后重启服务生效。',
+      '「测试连接」使用当前表单内容，自动识别向量维度。测试不会应用修改。',
     );
     expect(SETTINGS_PAGE).toContain('{{ TEST_SCOPE_NOTE }}');
     expect(SETTINGS_PAGE).toContain("'/config/test'");

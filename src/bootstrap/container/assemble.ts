@@ -53,6 +53,7 @@ import { createModels } from './models.js';
 import { migrateMemoryLinks } from './migrate-memory-links.js';
 import { createRetrieval } from './retrieval.js';
 import { createVectorBackfill } from './vector-backfill.js';
+import { createConfigApplier } from './config-applier.js';
 import type { Container, CreateContainerOptions } from './types.js';
 
 /**
@@ -78,8 +79,9 @@ export async function createContainer(
   const memoryStack = createMemory(foundation, models, access, retrieval);
   const background = createBackground(foundation, models, retrieval, memoryStack);
   const vectorBackfill = createVectorBackfill(foundation, models.embedding);
+  const applyConfig = createConfigApplier(foundation, models);
+  const api = createApi(foundation, access, retrieval, memoryStack, background, vectorBackfill, applyConfig);
 
-  const api = createApi(foundation, access, retrieval, memoryStack, background, vectorBackfill);
   const { config, logger, db } = foundation;
   const { commitRunner, scheduler, observability } = background;
   const { mcpRegistry, mcp, routes, resolveIdentity, services } = api;
@@ -91,6 +93,7 @@ export async function createContainer(
     logger,
     db,
     vectorBackfill,
+    applyConfig,
     observability,
     commitRunner,
     scheduler,

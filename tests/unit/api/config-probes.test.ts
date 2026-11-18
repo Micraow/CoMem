@@ -90,6 +90,7 @@ function servicesWith(
   return {
     config: loaded.config,
     configSnapshot: loaded,
+    applyConfig: async () => ({ restartRequired: true, applied: [] }),
     llm: { generate },
     embedding: { embed },
     systemAdmin: { adminUserIds: ['local'], isBootstrapAdmin: () => false },

@@ -1,17 +1,6 @@
-/**
- * 装配阶段 7：接口层（MCP 注册表 → 身份解析 → MCP 服务端 → 服务门面 → HTTP 路由）。
- *
- * 两处装配位置要紧：`services` 是 `Container.services` 的唯一来源（同一个
- * `taskRepository` 同时进 `services.taskStore`、`routes.taskStore` 与 `adminAccess`，
- * 只构造一次）；`resolveIdentity` 是 HTTP 与 MCP 共用的身份解析（凭据 + 回环信任，
- * §12.7）。
- *
- * `api/` 不能 import `adapters/`（§4.2），所以 `AdminAccess` 的 SQL 留在装配层。
- * 两个计数函数拆到了 `admin-queries.ts`、引导端口的 SQL 拆到了
- * `bootstrap-admin.ts`——本文件已经到形状门禁的上限。
- */
-
+/** HTTP / MCP 装配；两者共用身份解析和服务实例（§4.2、§12.7）。 */
 import type { IdentityResolver, SystemAdminPolicy } from '../../api/http/middleware.js';
+import type { HttpRouteServices } from '../../api/http/routes/index.js';
 import type { Identity, IdentityHeaders, IdentityRequest } from '../../api/http/middleware.js';
 import { createHttpRouteGroups } from '../../api/http/routes/index.js';
 import type { HttpRouteGroup } from '../../api/http/server.js';
@@ -51,6 +40,7 @@ export function createApi(
   memoryStack: MemoryStack,
   background: Background,
   vectorBackfill: ReturnType<typeof createVectorBackfill>,
+  applyConfig: HttpRouteServices['applyConfig'],
 ): Api {
   const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository, localInference } = core;
   const { memoryLink } = core;
@@ -124,6 +114,7 @@ export function createApi(
 
   const routes = createHttpRouteGroups({
     config, configSnapshot, llm, embedding,
+    applyConfig,
     vectorBackfill,
     draftProbe: createDraftProbe(logger),
     localInference,

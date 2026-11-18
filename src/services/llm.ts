@@ -57,7 +57,7 @@ const DEFAULT_RETRY_BASE_DELAY_MS = 500;
 const UNKNOWN_MODEL = 'unknown';
 
 export class LlmService {
-  readonly #runtime: LlmRuntimeState;
+  #runtime: LlmRuntimeState;
 
   constructor(options: LlmServiceOptions) {
     const pricing = options.pricing;
@@ -90,6 +90,11 @@ export class LlmService {
 
   listCalls(options: ListLlmCallsOptions): LlmCallPage {
     return listLlmCalls(this.#runtime.callLog, options);
+  }
+
+  /** 更新后续请求的供应商；在途请求完成后仍记录原调用结果。 */
+  applyRuntime(provider: LlmProvider, pricing: LlmPricing | undefined, model: string): void {
+    this.#runtime = { ...this.#runtime, provider, pricing, modelName: model };
   }
 
   get stats(): LlmCallStats {

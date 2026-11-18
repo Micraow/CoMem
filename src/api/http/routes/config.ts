@@ -2,8 +2,8 @@
  * 配置端点（架构文档 §18）：只读快照、写覆盖文件、连接测试。
  *
  * 三个端点都只给系统管理员（`assertSystemAdmin`）。读取口径是**当前进程已生效的
- * 配置**：`GET` 回启动快照，`POST /config/test` 用启动时构造的模型实例发请求。
- * 写覆盖文件不会热生效，响应固定带 `restartRequired: true`。
+ * 配置**：`GET` 回运行值，`POST /config/test` 无草稿时测试运行实例。
+ * 可运行期替换的 LLM / Embedding 连接参数立即生效；其余配置需要重启。
  *
  * 密钥纪律与 `admin-api-keys.ts` 相同：明文永不出现在任何响应里，只回
  * `configured` 与末 4 位掩码。探针实现在 `config-probes.ts`。
@@ -18,12 +18,11 @@ import type { FastifyInstance } from 'fastify';
 import { ComemError, fsErrorCode } from '../../../domain/errors.js';
 import { isRecord } from '../../../domain/guards.js';
 import { describeConfig, type ConfigLeafView } from '../../../config/metadata.js';
-import { hasPath } from '../../../config/merge.js';
-import { configWithOverride, nextOverrideFor, readOverride, writeOverrideFile } from '../../../config/override.js';
+import { hasPath, mergeConfig, nestedFromFlat } from '../../../config/merge.js';
+import { configWithOverride, readOverride } from '../../../config/override.js';
 import { ok } from '../envelope.js';
 import { assertSystemAdmin } from '../middleware.js';
 import { requireRecord, type HttpRouteGroup } from '../server.js';
-
 import { parseTarget, probe, type ConfigRouteServices } from './config-probes.js';
 
 export type { ConfigRouteServices } from './config-probes.js';
@@ -82,7 +81,7 @@ function assertWritablePaths(
 }
 
 export function createConfigRoutes(services: ConfigRouteServices): HttpRouteGroup {
-  const { configSnapshot, systemAdmin } = services;
+  const { configSnapshot, systemAdmin, applyConfig } = services;
 
   return {
     // 空前缀：挂在 `/config` 与 `/api/v1/config` 两处（与运维端点同一规则）。
@@ -90,9 +89,9 @@ export function createConfigRoutes(services: ConfigRouteServices): HttpRouteGrou
     register(app: FastifyInstance): void {
       app.get('/config', async (request) => {
         assertSystemAdmin(request, systemAdmin);
-        return ok(
-          describeConfig(configSnapshot, await overrideWritable(configSnapshot.overridePath)),
-        );
+        const writable = await overrideWritable(configSnapshot.overridePath);
+        const saved = configWithOverride(configSnapshot, readOverride(configSnapshot));
+        return ok(describeConfig(configSnapshot, writable, saved));
       });
 
       app.patch<{ Body: unknown }>('/config', async (request) => {
@@ -115,16 +114,12 @@ export function createConfigRoutes(services: ConfigRouteServices): HttpRouteGrou
           configSnapshot,
           entries.map(([path]) => path),
         );
-        const next = nextOverrideFor(
-          configSnapshot,
-          readOverride(configSnapshot),
-          Object.fromEntries(entries),
-        );
-        await writeOverrideFile(configSnapshot.overridePath, next);
+        const result = await applyConfig(Object.fromEntries(entries));
         return ok({
           written: entries.length,
           overridePath: configSnapshot.overridePath,
-          restartRequired: true,
+          restartRequired: result.restartRequired,
+          applied: result.applied,
         });
       });
 
@@ -135,7 +130,7 @@ export function createConfigRoutes(services: ConfigRouteServices): HttpRouteGrou
         if (body['values'] === undefined) return ok(await probe(target, services));
         const values = requireRecord(body['values'], 'values');
         assertWritablePaths(configSnapshot, Object.keys(values));
-        const candidate = configWithOverride(configSnapshot, nextOverrideFor(configSnapshot, readOverride(configSnapshot), values));
+        const candidate = configWithOverride(configSnapshot, mergeConfig(readOverride(configSnapshot), nestedFromFlat(values)));
         if (services.draftProbe === undefined) throw new ComemError('INTERNAL', '未装配草稿连接测试。');
         return ok(await services.draftProbe(target, candidate));
       });

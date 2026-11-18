@@ -23,7 +23,7 @@ export interface ConfigProbeServices {
 
 export type ConfigRouteServices = Pick<
   HttpRouteServices,
-  'config' | 'configSnapshot' | 'systemAdmin'
+  'config' | 'configSnapshot' | 'systemAdmin' | 'applyConfig'
 > & Pick<HttpRouteServices, 'draftProbe'> &
   ConfigProbeServices;
 

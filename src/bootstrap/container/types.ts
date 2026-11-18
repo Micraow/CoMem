@@ -79,6 +79,7 @@ export interface Container {
   /** 请求身份解析（凭据 + 回环信任，§12.7）。 */
   readonly resolveIdentity: IdentityResolver;
   readonly vectorBackfill: ReturnType<typeof import('./vector-backfill.js').createVectorBackfill>;
+  readonly applyConfig: (values: Readonly<Record<string, unknown>>) => Promise<{ readonly restartRequired: boolean; readonly applied: readonly string[] }>;
   /** 关闭数据库连接。幂等。 */
   close(): Promise<void>;
 }

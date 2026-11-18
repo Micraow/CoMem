@@ -134,8 +134,8 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 
 ### 在控制台里改设置
 
-服务端的配置只在**启动时读一次**。控制台不能热改内存里的快照，但可以把修改写进
-第二份配置文件，重启后生效：
+控制台将修改写入覆盖文件。可热更新的设置保存后立即生效，其他设置标为待重启。
+配置优先级为：
 
 ```
 环境变量 COMEM_* > {dataDir}/_meta/config.override.yaml > config.yaml > 内置默认值
@@ -162,9 +162,13 @@ pnpm dev -- --config /etc/comem/config.yaml --data-dir /var/lib/comem
 | `PATCH /api/v1/config` | 系统管理员 | 请求体 `{ "values": { "providers.llm.default.baseUrl": "http://127.0.0.1:8089/v1" } }`；先完整校验，合法才原子写入（同目录临时文件 + `rename`，权限 `0600`） |
 | `POST /api/v1/config/test` | 系统管理员 | 请求体 `{ "target": "llm" \| "embedding" \| "rerank", "values"?: { "配置路径": "草稿值" } }`，回 `{ ok, latencyMs, detail, dimension? }` |
 
-`GET /api/v1/config` 顶层另有 `overridePath` 与 `overrideWritable`（`fs.access`
-的结果）。`PATCH` 成功回 `{ written, overridePath, restartRequired: true }`——
-**写了覆盖文件不等于生效**，必须重启进程。
+`GET /api/v1/config` 返回运行值与来源；每项如果有待重启的保存值，会加上 `pending.value`（密钥为 `null`）。顶层另有 `overridePath` 与 `overrideWritable`。`PATCH` 成功返回 `{ written, overridePath, restartRequired, applied }`，其中 `applied` 是本次立即应用的路径，`restartRequired` 表示磁盘上仍有配置未生效。
+
+- 已配置的 LLM 保持供应商类型时，地址、密钥、模型名、生成限制、超时和价格可热更新。
+- 已启用的嵌入保持供应商类型、模型和维度时，地址、密钥、批次大小和超时可热更新；新连接会重置旧连接的熔断状态。更换地址时仍应确认使用的是同一嵌入模型，不能混用同名但不同的向量空间。
+- 召回压缩开关与超时立即生效，仍受宿主总等待预算限制。
+
+热更新不会中止在途模型请求。换连接时，在同一次保存中修改有关联的地址和密钥。启停模型、切换供应商类型、改嵌入模型或维度、改检索引擎、重排及其他设置需要重启。由环境变量覆盖的字段依旧只能修改环境变量后重启。
 
 **密钥的写入口只有 `apiKey`（以及不可编辑的 `auth.sessionSecret`）。** 写空串
 等于清除（`apiKey: ""`），不写这个键等于不改。`GET` 的响应里永远没有明文；
@@ -209,8 +213,7 @@ $EDITOR /var/lib/comem/_meta/config.override.yaml
 rm /var/lib/comem/_meta/config.override.yaml
 ```
 
-两种操作都要重启进程。没有热重载：没有 `SIGHUP`，也没有 `fs.watch`。`PATCH` 不会
-假装成功，响应里的 `restartRequired: true` 是固定值。
+直接编辑配置文件或删除覆盖文件都需要重启。进程不监听文件变化或 `SIGHUP`；立即应用仅发生在设置页或 `PATCH /config` 保存时。
 
 `pnpm check:config` 也会读覆盖文件：里面的每个键必须是 schema 里存在的节点，拼错
 （zod 默认会安静剥掉未知字段）会让检查失败；覆盖文件**不需要**被 `config.yaml`
@@ -1940,6 +1943,10 @@ Codex」，导出目录是一次性的。
 **413 是「请求体 / 上下文超限」，不要靠重试解决。** 它映射成 `INVALID_ARGUMENT`
 （不可重试）；看到它应该缩小单批输入，或换成上下文额度更大的模型。响应 body 里的
 供应商错误码与 `retry-after` 头当前不参与判定。
+
+### 供应商恢复后如何补齐
+
+使用管理员账号打开「会话与任务」。在任务列表筛选「失败」，可逐项重试或点「重试全部失败任务」；重试从未完成的步骤继续。「向量索引」显示缺失数量，点「补齐缺失向量」可在后台补算，不重建已有向量。仍有缺失时可查看进度和服务日志，排除故障后再次执行。已完成或当时明确跳过的任务不会被批量重试。
 
 ### 摘要一直是「待刷新」
 

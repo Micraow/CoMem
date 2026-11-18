@@ -15,7 +15,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { ComemError, errorMessage } from '../domain/errors.js';
 
 import { readConfigFile } from './file.js';
-import { mergeConfig, nestedFromFlat, type ConfigRecord } from './merge.js';
+import { collectLeaves, getPath, mergeConfig, type ConfigRecord } from './merge.js';
 import type { ConfigSnapshot } from './index.js';
 import { assertOverrideShape, validateConfigCandidate } from './validate.js';
 
@@ -31,34 +31,18 @@ export function readOverride(snapshot: ConfigSnapshot): ConfigRecord {
   return current;
 }
 
-/**
- * 合并 PATCH 的扁平值并校验**完整的**候选配置。
- *
- * 返回要写入的覆盖文件内容；校验失败时抛 `INVALID_ARGUMENT`（错误指向覆盖文件与
- * 字段），调用方还没碰到磁盘。
- */
-export function nextOverrideFor(
-  snapshot: ConfigSnapshot,
-  current: ConfigRecord,
-  values: Readonly<ConfigRecord>,
-): ConfigRecord {
-  const next = mergeConfig(current, nestedFromFlat(values));
-  const candidate = mergeConfig(
-    mergeConfig(mergeConfig(snapshot.defaults, snapshot.fileConfig), next),
-    snapshot.envOverrides,
-  );
-  validateConfigCandidate(candidate, {
-    configPath: snapshot.configPath,
-    overridePath: snapshot.overridePath,
-    overrideConfig: next,
-  });
-  return next;
-}
-
 export function configWithOverride(snapshot: ConfigSnapshot, override: ConfigRecord) {
-  return validateConfigCandidate(mergeConfig(
+  const parsed = validateConfigCandidate(mergeConfig(
     mergeConfig(mergeConfig(snapshot.defaults, snapshot.fileConfig), override), snapshot.envOverrides,
   ), { configPath: snapshot.configPath, overridePath: snapshot.overridePath, overrideConfig: override });
+  return { ...parsed, dataDir: parsed.dataDir || snapshot.config.dataDir };
+}
+
+/** Compare actual values before redaction, including keys with identical masked suffixes. */
+export function changedConfigLeaves(snapshot: ConfigSnapshot, saved: ConfigSnapshot['config']) {
+  return collectLeaves(snapshot.defaults).filter(({ path }) =>
+    JSON.stringify(getPath(snapshot.config, path)) !== JSON.stringify(getPath(saved, path)),
+  );
 }
 
 /**
