@@ -85,7 +85,6 @@ export function createCommitRunner(
         archive_summary: new ArchiveSummaryStep({
           summary,
           llm,
-          metadata,
           workingMemory: { enabled: config.memory.workingMemory.enabled },
           logger,
         }),

@@ -300,7 +300,6 @@ function createRunner(
           new ArchiveSummaryStep({
             summary,
             llm,
-            metadata,
             workingMemory: { enabled: false },
             logger,
           }),

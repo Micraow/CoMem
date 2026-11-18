@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
 import type { SessionMessage } from '../../../src/domain/session.js';
+import { segmentCjk } from '../../../src/domain/text.js';
 import { Uri } from '../../../src/domain/uri.js';
 import { startFakeLlmHttp, type FakeLlmHttp } from '../../helpers/fake-llm-http.js';
 
@@ -171,6 +172,20 @@ describe('memory.workingMemory.enabled = true（container → 管线 → 磁盘�
     );
     // L0 从工作记忆的一行概述提取，不是空文件。
     expect(abstract).toContain('代码风格');
+
+    const archiveUri = `${sessionUri.toString()}/history/archive_001`;
+    const indexed = started.db
+      .prepare(
+        `SELECT n.level, n.abstract, f.content
+           FROM node n
+           JOIN node_fts f ON f.uri = n.uri AND f.level = n.level
+          WHERE n.uri = ?
+          ORDER BY n.level`,
+      )
+      .all(archiveUri);
+    expect(indexed.map((row) => row['level'])).toEqual(['L0', 'L1']);
+    expect(String(indexed[0]?.['abstract'])).toContain('代码风格');
+    expect(String(indexed[1]?.['content'])).toContain(segmentCjk('会话工作记忆'));
 
     // 确实调过工作记忆这一路模型（不是规则摘要恰好长成这样）。
     expect(llm.requests.some((body) => body.includes('会话归档器'))).toBe(true);

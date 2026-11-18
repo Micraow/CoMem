@@ -131,6 +131,12 @@ export class RuleSummarizer implements SummaryGenerator {
       input.children.length === 0
         ? [EMPTY_DIRECTORY_TEXT]
         : input.children.map((child) => {
+            if (child.status === 'pending') {
+              return `- ${child.name}：待复核，正文与摘要未纳入目录概览。`;
+            }
+            if (child.status === 'archived') {
+              return `- ${child.name}：已归档，正文与摘要未纳入目录概览。`;
+            }
             const sentence = firstSentence(child.abstract);
             return sentence === '' ? `- ${child.name}` : `- ${child.name}：${sentence}`;
           });

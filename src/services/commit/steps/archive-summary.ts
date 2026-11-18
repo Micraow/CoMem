@@ -19,7 +19,6 @@
  * 先重建目录摘要、再覆盖，而不是二选一：目录摘要为空的归档在控制台上看起来像坏数据。
  */
 
-import type { MetadataFileStore } from '../../../adapters/fs/metadata-file.js';
 import { ComemError } from '../../../domain/errors.js';
 import type { LlmPrompt } from '../../../domain/llm.js';
 import type { Logger } from '../../../domain/log.js';
@@ -38,9 +37,8 @@ export interface WorkingMemoryInput {
 }
 
 export interface ArchiveSummaryStepDeps {
-  readonly summary: Pick<SummaryService, 'regenerate'>;
+  readonly summary: Pick<SummaryService, 'regenerate' | 'replace'>;
   readonly llm: Pick<LlmService, 'generate'>;
-  readonly metadata: Pick<MetadataFileStore, 'writeSummary'>;
   readonly workingMemory: {
     /** §18 的 `memory.workingMemory.enabled`，v1 默认 `false` */
     readonly enabled: boolean;
@@ -99,7 +97,6 @@ export class ArchiveSummaryStep extends CommitStep {
 
   readonly #summary: ArchiveSummaryStepDeps['summary'];
   readonly #llm: ArchiveSummaryStepDeps['llm'];
-  readonly #metadata: ArchiveSummaryStepDeps['metadata'];
   readonly #workingMemory: ArchiveSummaryStepDeps['workingMemory'];
   readonly #logger: Logger;
 
@@ -107,7 +104,6 @@ export class ArchiveSummaryStep extends CommitStep {
     super();
     this.#summary = deps.summary;
     this.#llm = deps.llm;
-    this.#metadata = deps.metadata;
     this.#workingMemory = deps.workingMemory;
     this.#logger = deps.logger;
   }
@@ -137,9 +133,9 @@ export class ArchiveSummaryStep extends CommitStep {
       });
     }
 
-    await this.#metadata.writeSummary(context.archiveUri, extractAbstract(overview), overview, {
-      generatedBy: 'llm',
-      generatedAt: new Date().toISOString(),
+    await this.#summary.replace(context.archiveUri, {
+      abstract: extractAbstract(overview),
+      overview,
       degraded: false,
     });
     this.#logger.info('归档工作记忆已生成', {

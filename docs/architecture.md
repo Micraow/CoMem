@@ -206,7 +206,8 @@ CoMem/
 │   ├── adapters/                     # ④ 适配层：具体技术实现
 │   │   ├── fs/
 │   │   │   ├── content-store.ts      # 内容读写（具体类，无接口）
-│   │   │   ├── metadata-file.ts      # .acl.json / .abstract.md / .overview.md 读写
+│   │   │   ├── metadata-file.ts      # .meta.json 与兼容导出
+│   │   │   ├── summary-file-store.ts # .abstract.md / .overview.md 双写
 │   │   │   └── path.ts               # URI ↔ 磁盘路径
 │   │   ├── sqlite/
 │   │   │   ├── database.ts           # 连接、WAL、迁移入口
@@ -1537,17 +1538,19 @@ levelWeight` 让它们在同一个排序里按层级竞争（§8.5）。
 
 ### 9.2 生成
 
-自底向上。一个目录的 L1 输入是「状态为 active 的直接子文件摘要」+「没有独立 ACL
-边界的直接子目录 L0 正文」：
+自底向上。一个目录的 L1 输入是「直接子文件的状态与摘要」+「没有独立 ACL 边界的
+直接子目录 L0 正文」：
 
 ```
 叶子目录 → 父目录 → ... → scope 根
 ```
 
-只有 `contextType = memory` 且状态为 `pending` / `archived` 的文件不进入生成请求，
-也不进入输入 digest；审批把文件索引状态改为 `active` 后，下一次显式重建或正常失效
-重算才会把它带入。archived session / resource 目录不能因为状态名相同而从
-摘要树中消失。`.history` 版本文件仍由目录存储层提前隐藏，不依赖这条状态过滤。
+`contextType = memory` 且状态为 `pending` / `archived` 的文件仍以「名称 + 状态」占位
+进入生成请求和输入 digest，但其索引摘要与正文都不传入生成器。这样父目录能明确写出
+「有一条待复核内容」或「有一条已归档内容」，不会把实际存在的子项误报成空目录。
+审批把文件索引状态改为 `active` 后，下一次显式重建或正常失效重算才把它的摘要带入。
+archived session / resource 目录不能因为状态名相同而从摘要树中消失。`.history`
+版本文件仍由目录存储层提前隐藏，不依赖这条状态过滤。
 
 **直接子目录有自己的 `.acl.json` 时，父目录摘要不读它的 L0。** 文件没有独立 ACL，
 继承所在目录；目录的 `.acl.json` 就是摘要聚合不得跨过的权限边界。子目录仍可在同一
@@ -1585,10 +1588,16 @@ messages.jsonl”的空材料覆盖已生成的概览。
 
 两者实现同一个 `SummaryGenerator` 接口（`domain/summary.ts`），`services/summary.ts` 按配置选择。降级不是静默的：结果带 `degraded: true`，控制台显示，`health` 工具报告。
 
-**一次生成写两行索引。** L0 行与 L1 行在同一个事务里写（`SummaryService.#persistSummary`，
-那是摘要写索引的唯一入口），所以概览与摘要不会各自漂移；`node` 与 `node_fts` 两张表
-也在这个事务里，中途失败整批回滚（`SqliteFtsIndex.upsert` 检测到外层已有事务会直接
-复用，见 `services/summary.ts` 文件头）。
+**一次生成写两行索引。** L0 行与 L1 行在同一个事务里写
+（`src/services/summary/persist.ts` 的 `persistSummary`，那是摘要写索引的唯一入口），
+所以概览与摘要不会各自漂移；`node` 与 `node_fts` 两张表也在这个事务里，中途失败
+整批回滚（`SqliteFtsIndex.upsert` 检测到外层已有事务会直接复用）。
+
+`.abstract.md` 与 `.overview.md` 的每个文件分别原子替换，两个文件由
+`MetadataFileStore` 按目录串行写入；读取时还会比较两份 frontmatter 的生成信息，
+把“两个文件都在但来自不同一代”标为不一致。文件先写、索引事务后提交，因此进程在
+两者之间退出时仍可能暂时落后；下一次刷新会比对文件正文与 L0/L1 的 `node` /
+`node_fts` 行并重建，而不是因为 `summary_input_digest` 没变就跳过。
 
 **提示词不在代码里拼。** 静态骨架在仓库的 `prompts/summarize-system.md` 与 `prompts/summarize-user.md`，动态部分（目录地址、直接子节点、两个字数预算）由 `services/prompts/summarize.ts` 渲染成字符串后用 `{{name}}` 注入。模板可以在控制台修改（§18「提示词」），改完下一次摘要生成就生效，不需要重启。
 
@@ -1615,7 +1624,13 @@ messages.jsonl”的空材料覆盖已生成的概览。
 
 **为什么消费时要减而不是清零。** 开始生成前先把本轮计数持久化并记下快照，不提前清零；写回成功后执行 `pending = max(pending - 消费时的快照, 0)`。生成失败时计数仍在，下一次失效或健康检查能看到待刷新工作；生成期间到达的改动也继续保留。
 
-**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。每次非 force 生成前，协调器先计算当前目录输入的稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 摘要，以及归档根目录可选的本批对话材料），并与 `node.summary_input_digest` 比较。相同就消费本轮 pending 并返回 `unchanged` / `stale`，不调用模型；不同才把同一份已读取输入交给生成器，成功落盘时把它的 digest 与摘要一起写回。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest；尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型，输入确实变化则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。`force` 跳过 digest 比较，始终保持显式全量重建语义。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
+**同一目录的刷新在进程内 single-flight。** 一个目录已有生成在跑时，后来的失效通知并入同一条尾批，仍按事件次数计数；不同目录各自并行。每次非 force 生成前，协调器先计算当前目录输入的稳定 digest（目录 URI、直接子项按名称规范排序后的 URI / 名称 / 类别 / 状态 / 摘要，以及归档根目录可选的本批对话材料），并与 `node.summary_input_digest` 比较。相同就消费本轮 pending 并返回 `unchanged` / `stale`，不调用模型；不同才把同一份已读取输入交给生成器，成功落盘时把它的 digest 与摘要一起写回。摘要输入编码在 `version = 2` 中加入状态；升级后旧记录会因版本失配自动重建，避免继续使用把待复核子项误写成空目录的摘要。模型调用完成后，协调器重新读取目录摘要输入并计算稳定 digest；尾批输入与这次生成的输入相同，说明生成结果已经覆盖这些通知，不再调用模型，输入确实变化则只为最新输入再生成一轮。尾批处理期间又到达通知时本轮不会吞掉它，而是继续到计数稳定。这里没有时间窗口或延迟，判定只看事件计数与输入内容。`force` 跳过 digest 比较，始终保持显式全量重建语义。共享一轮生成的并发调用中只有一个负责继续向父目录传播；否则同一份 L0 变化会被父目录计成多次，并可能产生重复模型调用。
+
+**产物不完整时立即自愈。** 当 `summary_input_digest` 已存在时，刷新入口会检查
+`.abstract.md` / `.overview.md` 是否完整且同代，以及 L0、L1 的 `node` 行和
+`node_fts` 行是否仍与两份正文一致。任一缺失或陈旧都会跳过“相同输入不重算”的
+快速路径，重新生成并原子替换两行索引。这里只修被刷新到或显式重建的目录，不在启动时
+全库扫描。
 
 **摘要写入不反向触发失效。** `.abstract.md` / `.overview.md` 由 `MetadataFileStore` 直接原子写入；`IndexObserver` 只接收正文写入、删除与移动通知，不监听这两个元数据文件。摘要生成因此不会通过 observer 递归触发自己。
 
@@ -1784,7 +1799,10 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 
 **作用**：让下一次提交的抽取知道「上次聊到哪了」。没有它，每次提交都是孤立的一次抽取，无法判断「这个偏好是延续还是改变」。
 
-**怎么用**：下一次提交时，上一个归档的 `.overview.md` 作为 `latestArchiveOverview` 喂进抽取 prompt。第一次提交没有前序，这一段为空。
+**怎么用**：下一次提交时，上一个归档的 `.overview.md` 作为 `latestArchiveOverview` 喂进抽取 prompt。第一次提交没有前序，这一段为空。工作记忆生成后经
+`SummaryService.replace()` 替换归档目录的 L0/L1：同一目录锁内先重写两份摘要文件，
+再在事务里同步更新 L0、L1 的 `node` 与 `node_fts` 行。它不能绕过摘要服务只改文件，
+否则控制台看到工作记忆，检索仍会命中替换前的普通摘要。
 
 **默认关闭**（`memory.workingMemory.enabled = false`）。开它会多一次 LLM 调用，只在长会话场景有价值。**开启就必须有可用的 LLM**：工作记忆没有规则生成器，`providers.llm.default.type: disabled` 时 `loadConfig` 抛 `INVALID_ARGUMENT`（与 `ingest` 的降级不同——导入的阶段一有独立产物，工作记忆没有）。
 

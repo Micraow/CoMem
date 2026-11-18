@@ -30,6 +30,11 @@ const GENERATION = {
   generatedAt: '2026-11-08T00:00:00.000Z',
   degraded: false,
 } as const;
+const LATER_GENERATION = {
+  generatedBy: 'llm',
+  generatedAt: '2026-11-08T00:00:01.000Z',
+  degraded: false,
+} as const;
 
 const SESSION_META: SessionMeta = {
   sessionId: 'sess_7f3a91c2',
@@ -81,7 +86,13 @@ describe('readSummary', () => {
   it('目录不存在时返回空摘要，不抛错', async () => {
     await expect(
       store.readSummary(Uri.parse('comem://user/alice/never-created')),
-    ).resolves.toEqual({ abstract: '', overview: '', complete: false, generation: null });
+    ).resolves.toEqual({
+      abstract: '',
+      overview: '',
+      complete: false,
+      consistent: false,
+      generation: null,
+    });
   });
 
   it('目录存在但没有摘要文件时返回空摘要', async () => {
@@ -90,6 +101,7 @@ describe('readSummary', () => {
       abstract: '',
       overview: '',
       complete: false,
+      consistent: false,
       generation: null,
     });
   });
@@ -102,6 +114,7 @@ describe('readSummary', () => {
       abstract: '一句话摘要\n',
       overview: '',
       complete: false,
+      consistent: false,
       generation: null,
     });
   });
@@ -113,6 +126,7 @@ describe('readSummary', () => {
       abstract: '一句话摘要',
       overview: '完整概览',
       complete: true,
+      consistent: true,
       generation: GENERATION,
     });
   });
@@ -128,6 +142,24 @@ describe('readSummary', () => {
     expect(content.generation).toBeNull();
   });
 
+  it('L0 与 L1 来自不同生成时标记为不一致', async () => {
+    await mkdir(directoryPath(), { recursive: true });
+    await writeFile(
+      join(directoryPath(), ABSTRACT_FILE_NAME),
+      `---\ngenerated_by: llm\ngenerated_at: ${GENERATION.generatedAt}\n---\n\n旧摘要\n`,
+      'utf8',
+    );
+    await writeFile(
+      join(directoryPath(), OVERVIEW_FILE_NAME),
+      `---\ngenerated_by: llm\ngenerated_at: ${LATER_GENERATION.generatedAt}\n---\n\n新概览\n`,
+      'utf8',
+    );
+
+    const content = await store.readSummary(DIRECTORY);
+    expect(content.complete).toBe(true);
+    expect(content.consistent).toBe(false);
+  });
+
   it('写入的临时文件不会被当成摘要读出来', async () => {
     await mkdir(directoryPath(), { recursive: true });
     // 模拟一个「写到一半」的临时文件：内容是不完整的 frontmatter。
@@ -141,6 +173,7 @@ describe('readSummary', () => {
       abstract: '',
       overview: '',
       complete: false,
+      consistent: false,
       generation: null,
     });
   });
@@ -168,6 +201,7 @@ describe('writeSummary', () => {
       abstract: 'L0',
       overview: 'L1',
       complete: true,
+      consistent: true,
       generation: null,
     });
   });
@@ -247,16 +281,19 @@ describe('writeSummary', () => {
     expect(names.filter((name) => name.startsWith(TEMP_FILE_PREFIX))).toEqual([]);
   });
 
-  it('并发写不会互相踩踏，最终是两个文件之一', async () => {
+  it('并发写不会互相踩踏，最终 L0/L1 来自同一代', async () => {
     await Promise.all([
-      store.writeSummary(DIRECTORY, 'L0-第一份', 'L1-第一份'),
-      store.writeSummary(DIRECTORY, 'L0-第二份', 'L1-第二份'),
+      store.writeSummary(DIRECTORY, 'L0-第一份', 'L1-第一份', GENERATION),
+      store.writeSummary(DIRECTORY, 'L0-第二份', 'L1-第二份', LATER_GENERATION),
     ]);
 
     const content = await store.readSummary(DIRECTORY);
     expect(content.complete).toBe(true);
-    expect(['L0-第一份', 'L0-第二份']).toContain(content.abstract);
-    expect(['L1-第一份', 'L1-第二份']).toContain(content.overview);
+    expect(content.consistent).toBe(true);
+    expect([
+      ['L0-第一份', 'L1-第一份'],
+      ['L0-第二份', 'L1-第二份'],
+    ]).toContainEqual([content.abstract, content.overview]);
     expect((await readdir(directoryPath())).filter((n) => n.startsWith(TEMP_FILE_PREFIX))).toEqual(
       [],
     );
@@ -266,7 +303,13 @@ describe('writeSummary', () => {
     await store.writeSummary(DIRECTORY, '', '', GENERATION);
 
     const content = await store.readSummary(DIRECTORY);
-    expect(content).toEqual({ abstract: '', overview: '', complete: true, generation: GENERATION });
+    expect(content).toEqual({
+      abstract: '',
+      overview: '',
+      complete: true,
+      consistent: true,
+      generation: GENERATION,
+    });
   });
 
   it('目标目录被同名文件占住时抛 ALREADY_EXISTS', async () => {

@@ -10,7 +10,6 @@ import type { Mock } from 'vitest';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager } from '../../../src/adapters/fs/lock.js';
 import { toDiskPath } from '../../../src/adapters/fs/path.js';
-import type { SummaryGeneration } from '../../../src/adapters/fs/metadata-file.js';
 import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { MemoryLinkRepository } from '../../../src/adapters/sqlite/memory-link-repository.js';
@@ -26,6 +25,7 @@ import { preferencesMemoryType } from '../../../src/domain/memory-types/preferen
 import { profileMemoryType } from '../../../src/domain/memory-types/profile.js';
 import type { BatchOperation } from '../../../src/domain/merge-op.js';
 import type { ContentPart, SessionMessage } from '../../../src/domain/session.js';
+import type { DirectorySummary } from '../../../src/domain/summary.js';
 import { Uri } from '../../../src/domain/uri.js';
 import {
   CommitPipeline,
@@ -275,12 +275,13 @@ describe('实体抽取产物', () => {
 describe('ArchiveSummaryStep', () => {
   it('工作记忆关闭时只重建一次归档摘要，并由摘要服务读取受控 JSONL', async () => {
     const regenerate = vi.fn<(rootUri: Uri) => Promise<string[]>>(async () => [ARCHIVE]);
+    const replace = vi.fn<(directoryUri: Uri, summary: DirectorySummary) => Promise<'changed' | 'unchanged'>>(
+      async () => 'changed',
+    );
     const generate = vi.fn();
-    const writeSummary = vi.fn();
     const step = new ArchiveSummaryStep({
-      summary: { regenerate },
+      summary: { regenerate, replace },
       llm: { generate },
-      metadata: { writeSummary },
       workingMemory: { enabled: false },
       logger,
     });
@@ -290,7 +291,7 @@ describe('ArchiveSummaryStep', () => {
     expect(regenerate).toHaveBeenCalledOnce();
     expect(regenerate).toHaveBeenCalledWith(Uri.parse(ARCHIVE));
     expect(generate).not.toHaveBeenCalled();
-    expect(writeSummary).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
   });
 
   it('开启工作记忆时生成 6 段并写归档目录的 .overview.md', async () => {
@@ -324,6 +325,9 @@ describe('ArchiveSummaryStep', () => {
       '无',
     ].join('\n');
     const regenerate = vi.fn<(rootUri: Uri) => Promise<string[]>>(async () => [ARCHIVE]);
+    const replace = vi.fn<
+      (directoryUri: Uri, summary: DirectorySummary) => Promise<'changed' | 'unchanged'>
+    >(async () => 'changed');
     const generate = vi.fn<(prompt: LlmPrompt, options?: LlmOptions) => Promise<LlmResult>>(
       async () => ({
         text: overview,
@@ -331,18 +335,9 @@ describe('ArchiveSummaryStep', () => {
         finishReason: 'stop',
       }),
     );
-    const writeSummary = vi.fn<
-      (
-        directoryUri: Uri,
-        abstract: string,
-        overview: string,
-        generation: SummaryGeneration,
-      ) => Promise<void>
-    >(async () => undefined);
     const step = new ArchiveSummaryStep({
-      summary: { regenerate },
+      summary: { regenerate, replace },
       llm: { generate },
-      metadata: { writeSummary },
       workingMemory: { enabled: true },
       logger,
     });
@@ -360,16 +355,18 @@ describe('ArchiveSummaryStep', () => {
     expect(prompt?.messages[0]?.content).toContain('# 上次');
     expect(prompt?.messages[0]?.content).toContain('记住代码风格');
 
-    const call = writeSummary.mock.calls[0];
+    const call = replace.mock.calls[0];
     expect(call?.[0].toString()).toBe(ARCHIVE);
-    expect(call?.[1]).toBe('**一行概述**：代码风格 | 定下严格模式 | 已完成');
-    expect(call?.[2]).toBe(overview);
-    expect(call?.[3]).toMatchObject({ generatedBy: 'llm', degraded: false });
+    expect(call?.[1]).toEqual({
+      abstract: '**一行概述**：代码风格 | 定下严格模式 | 已完成',
+      overview,
+      degraded: false,
+    });
   });
 
   it('工作记忆为空时抛 PROVIDER_UNAVAILABLE', async () => {
     const step = new ArchiveSummaryStep({
-      summary: { regenerate: async () => [] },
+      summary: { regenerate: async () => [], replace: async () => 'changed' },
       llm: {
         generate: async () => ({
           text: '   ',
@@ -377,7 +374,6 @@ describe('ArchiveSummaryStep', () => {
           finishReason: 'stop',
         }),
       },
-      metadata: { writeSummary: async () => undefined },
       workingMemory: { enabled: true },
       logger,
     });

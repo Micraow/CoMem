@@ -9,6 +9,7 @@ import { AclFileStore } from '../../../src/adapters/fs/acl-file.js';
 import { ContentStore } from '../../../src/adapters/fs/content-store.js';
 import { createPathLockManager, type PathLockManager } from '../../../src/adapters/fs/lock.js';
 import { MetadataFileStore } from '../../../src/adapters/fs/metadata-file.js';
+import { toDiskPath } from '../../../src/adapters/fs/path.js';
 import { FakeLlmProvider } from '../../helpers/fake-llm-provider.js';
 import { openDatabase, runMigrations } from '../../../src/adapters/sqlite/database.js';
 import { NodeRepository } from '../../../src/adapters/sqlite/node-repository.js';
@@ -267,7 +268,7 @@ describe('regenerate', () => {
     expect(recomputed).toEqual([TEAM, PREFERENCES, MEMORIES]);
   });
 
-  it('pending / archived 文件不进入生成请求，审批变 active 后显式刷新才进入', async () => {
+  it('pending / archived 文件以占位状态进入请求，审批变 active 后才带入摘要', async () => {
     await makeDirectory(PREFERENCES);
     const active = `${PREFERENCES}/active.md`;
     const pending = `${PREFERENCES}/pending.md`;
@@ -293,17 +294,28 @@ describe('regenerate', () => {
     await service.regenerate(Uri.parse(PREFERENCES));
     const parentInputs = (): SummaryInput[] =>
       inputs.filter((input) => input.uri.toString() === PREFERENCES);
-    expect(parentInputs()[0]?.children.map((child) => child.name)).toEqual([
-      'active.md',
-      'archived-session',
+    expect(parentInputs()[0]?.children.map((child) => [
+      child.name,
+      child.status,
+      child.abstract,
+    ])).toEqual([
+      ['active.md', 'active', '已经生效。'],
+      ['archived-session', 'active', ''],
+      ['archived.md', 'archived', ''],
+      ['pending.md', 'pending', ''],
     ]);
 
     db.prepare('UPDATE node SET status = ? WHERE uri = ?').run('active', pending);
     await createService({ generator }).regenerate(Uri.parse(PREFERENCES));
-    expect(parentInputs()[1]?.children.map((child) => child.name)).toEqual([
-      'active.md',
-      'archived-session',
-      'pending.md',
+    expect(parentInputs()[1]?.children.map((child) => [
+      child.name,
+      child.status,
+      child.abstract,
+    ])).toEqual([
+      ['active.md', 'active', '已经生效。'],
+      ['archived-session', 'active', ''],
+      ['archived.md', 'archived', ''],
+      ['pending.md', 'active', '等待复核。'],
     ]);
   });
 
@@ -454,6 +466,7 @@ describe('regenerate', () => {
         uri: Uri.parse(ARCHIVE),
         name: 'archive_001',
         kind: 'directory',
+        status: 'active',
         abstract: '',
       },
     ]);
@@ -593,7 +606,13 @@ describe('degraded', () => {
     const summary = await summarizer.generate({
       uri: Uri.parse(PREFERENCES),
       children: [
-        { uri: Uri.parse(STYLE), name: 'code-style.md', kind: 'document', abstract: '代码风格。第二句。' },
+        {
+          uri: Uri.parse(STYLE),
+          name: 'code-style.md',
+          kind: 'document',
+          status: 'active',
+          abstract: '代码风格。第二句。',
+        },
       ],
     });
 
@@ -602,6 +621,35 @@ describe('degraded', () => {
     expect(summary.overview).toContain('- code-style.md：代码风格。');
     // L0 从 L1 正文提取（§9.1），不是另生成一份。
     expect(summary.abstract).toBe('- code-style.md：代码风格。');
+  });
+
+  it('RuleSummarizer 只显示非 active 子项的状态，不泄露摘要或误报空目录', async () => {
+    const summarizer = new RuleSummarizer();
+    const summary = await summarizer.generate({
+      uri: Uri.parse(PREFERENCES),
+      children: [
+        {
+          uri: Uri.parse(`${PREFERENCES}/pending.md`),
+          name: 'pending.md',
+          kind: 'document',
+          status: 'pending',
+          abstract: 'SECRET_PENDING_SUMMARY',
+        },
+        {
+          uri: Uri.parse(`${PREFERENCES}/archived.md`),
+          name: 'archived.md',
+          kind: 'document',
+          status: 'archived',
+          abstract: 'SECRET_ARCHIVED_SUMMARY',
+        },
+      ],
+    });
+
+    expect(summary.overview).toContain('pending.md：待复核');
+    expect(summary.overview).toContain('archived.md：已归档');
+    expect(summary.overview).not.toContain('（这个目录是空的。）');
+    expect(summary.overview).not.toContain('SECRET_PENDING_SUMMARY');
+    expect(summary.overview).not.toContain('SECRET_ARCHIVED_SUMMARY');
   });
 
   it('LlmSummarizer 调模型，结果带 degraded: false', async () => {
@@ -745,9 +793,15 @@ describe('摘要输入 digest 空跑', () => {
     await writeText(STYLE, '# 风格\n\n代码风格正文。\n');
     await seedRow(STYLE, { abstract: '生效中的摘要' });
 
-    const { generator, inputs } = spyGenerator((input) =>
-      input.children.length === 0 ? '空目录' : (input.children[0]?.abstract ?? '')
-    );
+    const { generator, inputs } = spyGenerator((input) => {
+      if (input.children.length === 0) {
+        return '空目录';
+      }
+      const child = input.children[0];
+      return child?.status === 'active'
+        ? child.abstract
+        : `${child?.status ?? 'missing'}占位`;
+    });
     const service = createService({ generator });
     await service.regenerate(Uri.parse(PREFERENCES));
 
@@ -760,7 +814,7 @@ describe('摘要输入 digest 空跑', () => {
     await service.invalidate(Uri.parse(STYLE));
 
     expect(inputs.filter((input) => input.uri.toString() === PREFERENCES)).toHaveLength(2);
-    expect((await summaryFiles(PREFERENCES)).abstract).toBe('空目录');
+    expect((await summaryFiles(PREFERENCES)).abstract).toBe('pending占位');
   });
 });
 
@@ -1663,5 +1717,55 @@ describe('目录的 L1 概览行', () => {
     expect(ftsRow(PREFERENCES, 'L1')?.content).toBe(segmentCjk(OVERVIEW));
     // ...而 L0 行按观察者的写法被清空，等下一次摘要重算恢复。
     expect(ftsRow(PREFERENCES, 'L0')).toEqual({ abstract: '', content: '' });
+  });
+
+  it.each(['.abstract.md', '.overview.md'])(
+    '%s 被删除后，下一次刷新会重建摘要文件与两行索引',
+    async (fileName) => {
+      await regenerateWith(OVERVIEW);
+      const service = createService();
+      const preferences = Uri.parse(PREFERENCES);
+
+      await rm(join(toDiskPath(dataDir, preferences), fileName));
+      expect((await metadata.readSummary(preferences)).complete).toBe(false);
+
+      await service.markStale(preferences);
+
+      const repaired = await metadata.readSummary(preferences);
+      expect(repaired.complete).toBe(true);
+      expect(repaired.consistent).toBe(true);
+      expect(levelsOf(PREFERENCES)).toEqual(['L0', 'L1']);
+      expect(ftsRow(PREFERENCES, 'L1')?.content).toContain('code-style.md');
+    },
+  );
+
+  it('L1 索引行被删除后，相同输入也会触发重建', async () => {
+    await regenerateWith(OVERVIEW);
+    const service = createService();
+    const preferences = Uri.parse(PREFERENCES);
+    db.prepare("DELETE FROM node WHERE uri = ? AND level = 'L1'").run(PREFERENCES);
+    expect(levelsOf(PREFERENCES)).toEqual(['L0']);
+
+    await service.markStale(preferences);
+
+    expect(levelsOf(PREFERENCES)).toEqual(['L0', 'L1']);
+    expect(ftsRow(PREFERENCES, 'L1')?.content).toContain('code-style.md');
+  });
+
+  it('L1 索引仍是旧正文时，相同输入也会触发重建', async () => {
+    await regenerateWith(OVERVIEW);
+    const service = createService();
+    const preferences = Uri.parse(PREFERENCES);
+    db.prepare("UPDATE node SET body_digest = 'stale' WHERE uri = ? AND level = 'L1'").run(
+      PREFERENCES,
+    );
+
+    await service.markStale(preferences);
+
+    const files = await metadata.readSummary(preferences);
+    const l1 = db
+      .prepare("SELECT body_digest FROM node WHERE uri = ? AND level = 'L1'")
+      .get(PREFERENCES);
+    expect(l1?.['body_digest']).toBe(stableDigest(files.overview));
   });
 });

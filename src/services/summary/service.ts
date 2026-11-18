@@ -23,7 +23,9 @@ import type { Uri } from '../../domain/uri.js';
 
 import type { AclService } from '../acl.js';
 
+import { summaryInputDigest } from './generation.js';
 import { invalidateNode, propagateFrom } from './invalidate.js';
+import { persistSummary, withDirectoryLock } from './persist.js';
 import { SummaryRefreshCoordinator } from './refresh.js';
 import type {
   InvalidationResult,
@@ -91,6 +93,24 @@ export class SummaryService {
   }
 
   /**
+   * 用一份已经生成好的正文替换目录摘要，并同步写 L0/L1 两行索引。
+   *
+   * 工作记忆会替换归档目录的 L1。它不能绕过本服务直接写 metadata 文件，否则
+   * `.overview.md` 已是工作记忆，检索里的 L1 仍是生成前的普通摘要。
+   */
+  async replace(
+    directoryUri: Uri,
+    summary: DirectorySummary,
+  ): Promise<'changed' | 'unchanged'> {
+    return withDirectoryLock(this.#locks, directoryUri, async () => {
+      const ports = this.#context();
+      const inputDigest = await summaryInputDigest(ports, directoryUri);
+      const previous = this.#nodes.get(directoryUri.toString())?.bodyDigest ?? null;
+      return persistSummary(ports, directoryUri, summary, inputDigest, 0, previous);
+    });
+  }
+
+  /**
    * 写节点之后的失效传播（§9.3）。
    *
    * `nodeUri` 是被写入 / 删除 / 移动的节点。五步见文件头；两条提前返回的路径都要
@@ -128,15 +148,15 @@ export class SummaryService {
   /**
    * 读目录摘要（不管新鲜度），给 `getAcl` 之类的只读面用。
    *
-   * 两个文件缺任一就没有完整摘要，返回 `null` —— 「摘要都不全」比「只有半份摘要」
-   * 更接近调用方想要的语义（重建索引、显示「暂无摘要」）。
+   * 两个文件缺任一，或两份 frontmatter 表明它们来自不同代写入，就返回 `null`。
+   * 「摘要不可用」比「显示半份摘要」更接近调用方要的语义。
    *
    * `degraded` 从 `SummaryFileContent.generation` 回填——断网时走规则摘要，模型看到的
    * 概览质量会明显下降，这个标记是它判断「要不要重试」的依据（§9.2）。
    */
   async read(directoryUri: Uri): Promise<DirectorySummary | null> {
     const content = await this.#metadata.readSummary(directoryUri);
-    if (!content.complete) {
+    if (!content.complete || !content.consistent) {
       return null;
     }
     return {

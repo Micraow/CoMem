@@ -19,7 +19,8 @@ export function digestSummaryInput(input: SummaryInput): string {
     return 0;
   });
   return stableDigest(JSON.stringify({
-    version: 1,
+    // v2：status 进入输入。升级后旧的摘要输入自然失配，存量错误摘要会重建。
+    version: 2,
     uri: input.uri.toString(),
     sourceText: input.sourceText ?? null,
     dialogue: input.dialogue ?? null,
@@ -27,6 +28,7 @@ export function digestSummaryInput(input: SummaryInput): string {
       uri: child.uri.toString(),
       name: child.name,
       kind: child.kind,
+      status: child.status,
       abstract: child.abstract,
     })),
   }));

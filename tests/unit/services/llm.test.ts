@@ -379,6 +379,7 @@ describe('提示词模板', () => {
           uri: Uri.parse('comem://user/alice/memories/profile.md'),
           name: 'profile.md',
           kind: 'document',
+          status: 'active',
           abstract: 'alice，后端工程师。',
         },
       ],
@@ -393,6 +394,27 @@ describe('提示词模板', () => {
     expect(rendered).toContain('alice，后端工程师。');
   });
 
+  it('待复核子项在摘要 prompt 中显示状态，但不传入摘要', () => {
+    const prompt = buildSummaryPrompt({
+      uri: Uri.parse('comem://user/alice/memories/experiences'),
+      children: [
+        {
+          uri: Uri.parse('comem://user/alice/memories/experiences/pipeline.md'),
+          name: 'pipeline.md',
+          kind: 'document',
+          status: 'pending',
+          abstract: '',
+        },
+      ],
+    });
+    const rendered = prompt.messages.map((message) => message.content).join('\n');
+
+    expect(rendered).toContain('pipeline.md');
+    expect(rendered).toContain('待复核');
+    expect(rendered).toContain('正文与摘要未纳入当前目录概览');
+    expect(rendered).not.toContain('（这个目录是空的。）');
+  });
+
   it('归档摘要把本批对话事实作为明确输入，不从 messages.jsonl 生成 L0', () => {
     const prompt = buildSummaryPrompt({
       uri: Uri.parse('comem://user/alice/sessions/s1/history/archive_001'),
@@ -401,6 +423,7 @@ describe('提示词模板', () => {
           uri: Uri.parse('comem://user/alice/sessions/s1/history/archive_001/messages.jsonl'),
           name: 'messages.jsonl',
           kind: 'document',
+          status: 'active',
           abstract: '',
         },
       ],

@@ -202,12 +202,14 @@ describe('summaryInputDigest', () => {
         uri: Uri.parse('comem://user/alice/memories/preferences/b.md'),
         name: 'b.md',
         kind: 'document' as const,
+        status: 'active' as const,
         abstract: 'B',
       },
       {
         uri: Uri.parse('comem://user/alice/memories/preferences/a'),
         name: 'a',
         kind: 'directory' as const,
+        status: 'active' as const,
         abstract: 'A',
       },
     ],
@@ -222,6 +224,13 @@ describe('summaryInputDigest', () => {
   it('子项摘要变化会改变 digest', () => {
     const changed = input.children.map((child, index) =>
       index === 0 ? { ...child, abstract: 'B changed' } : child
+    );
+    expect(digestSummaryInput({ ...input, children: changed })).not.toBe(digestSummaryInput(input));
+  });
+
+  it('子项状态变化会改变 digest', () => {
+    const changed = input.children.map((child, index) =>
+      index === 0 ? { ...child, status: 'pending' as const, abstract: '' } : child
     );
     expect(digestSummaryInput({ ...input, children: changed })).not.toBe(digestSummaryInput(input));
   });

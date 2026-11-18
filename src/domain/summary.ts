@@ -8,7 +8,7 @@
  */
 
 import type { ConversationTextMessage } from './conversation.js';
-import type { NodeKind } from './node.js';
+import type { NodeKind, NodeStatus } from './node.js';
 import type { Uri } from './uri.js';
 
 /** L0 正文预算，单位是 Unicode 码点；不按字节计，避免把中文预算压成 1/3（§9.1）。 */
@@ -47,7 +47,9 @@ export interface SummaryChild {
   readonly uri: Uri;
   readonly name: string;
   readonly kind: NodeKind;
-  /** 文件的摘要；目录的 L0 正文 */
+  /** 索引状态；非 active 记忆仍会作为占位项保留在输入里。 */
+  readonly status: NodeStatus;
+  /** active 子项的摘要；非 active 记忆为空，避免待复核 / 已归档正文进入上级摘要。 */
   readonly abstract: string;
 }
 

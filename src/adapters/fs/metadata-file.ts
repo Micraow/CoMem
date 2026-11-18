@@ -20,9 +20,9 @@
  *
  * 三个不变量：
  *
- * 1. **原子写**：同目录临时文件（`TEMP_FILE_PREFIX`）→ `fsync` → `rename`。任何
- *    时刻读到的摘要要么是旧的完整内容，要么是新的完整内容。两个文件先各写一份
- *    临时文件、再依次改名，把「L0 已更新、L1 还是旧的」的窗口压到两次 rename 之间。
+ * 1. **单文件原子、双文件同代**：同目录临时文件（`TEMP_FILE_PREFIX`）→ `fsync` →
+ *    `rename`。同一目录的 `writeSummary` 调用串行执行，两个文件先都写好临时文件，
+ *    再依次改名，避免两代写入互相穿插。
  * 2. **frontmatter 可带可剥**：读只返回正文（调用方拿到的是可以直接注入模型的
  *    文本），写的时候带上生成信息（`generated_by` / `generated_at` / `degraded`）。
  *    磁盘上已有的其它键（`freshness` 等）原样保留，与 `ContentStore` 的元数据
@@ -31,7 +31,7 @@
  *    `readSummary` 里被吞掉。
  */
 
-import { mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type {
@@ -50,61 +50,27 @@ import type { SessionMeta } from '../../domain/session.js';
 import { isSessionStatus } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
-import { writeFileAtomic, writeFileStaged } from './atomic-write.js';
+import { writeFileAtomic } from './atomic-write.js';
 import { createFsErrorMapper } from './error-map.js';
-import { parseDocument, serializeDocument } from './frontmatter.js';
 import { toDiskPath } from './path.js';
+import {
+  SummaryFileStore,
+  type SummaryFileContent,
+  type SummaryGeneration,
+} from './summary-file-store.js';
 
-/** L0 摘要文件名（架构文档 §6.2 规则 6 的保留名之一）。 */
-export const ABSTRACT_FILE_NAME = '.abstract.md';
-
-/** L1 概览文件名（同上）。 */
-export const OVERVIEW_FILE_NAME = '.overview.md';
+export { ABSTRACT_FILE_NAME, OVERVIEW_FILE_NAME } from './summary-file-store.js';
+export type {
+  SummaryFileContent,
+  SummaryGeneration,
+} from './summary-file-store.js';
 
 export const META_FILE_NAME = '.meta.json';
-
-/**
- * 生成信息。字段名是磁盘上的 YAML 键（snake_case，§6.7 的示例）。
- *
- * `degraded` 必须对调用方可见：静默降级等于骗人（§17.9）。断网时走规则摘要，
- * 模型看到的概览质量会明显下降，这个标记是它判断「要不要重试」的依据。
- */
-export interface SummaryGeneration {
-  readonly generatedBy: 'llm' | 'rule';
-  /** ISO 8601；不传则由调用方决定是否落盘（重放时保持原值） */
-  readonly generatedAt?: string;
-  readonly degraded?: boolean;
-}
-
-export interface SummaryFileContent {
-  /** 正文（不含 frontmatter）；文件不存在时是空串 */
-  readonly abstract: string;
-  readonly overview: string;
-  /** 两个文件是否都存在 */
-  readonly complete: boolean;
-  /**
-   * 生成信息；两个文件都没有 frontmatter 时为 `null`。
-   *
-   * **必须回填**：调用方（控制台的监控页、`health` 工具）靠 `degraded` 区分「模型
-   * 生成的摘要」和「断网时规则拼出来的摘要」。少了这个字段，`degraded` 只能恒为
-   * `false`，断网降级就变成静默降级（§9.2、§17.9）。
-   *
-   * L0 与 L1 是同一次生成写的，取非空的优先；两者不一致时以 L1 为准。
-   */
-  readonly generation: SummaryGeneration | null;
-}
 
 export interface MetadataFileStoreDeps {
   readonly dataDir: string;
   readonly logger: Logger;
 }
-
-/** 磁盘键名。YAML 惯例用 snake_case，TypeScript 用 camelCase，映射只发生在这里。 */
-const FRONTMATTER_KEYS = {
-  generatedBy: 'generated_by',
-  generatedAt: 'generated_at',
-  degraded: 'degraded',
-} as const;
 
 /**
  * 本适配器的 errno → `ComemError` 映射（架构文档 §19）。公共表与机制在
@@ -131,39 +97,6 @@ export const mapFsError = createFsErrorMapper(
     INTERNAL: '摘要文件系统操作失败',
   },
 );
-
-/**
- * 从 frontmatter 回填生成信息；没有任何生成键时返回 `null`。
- *
- * 手工写的摘要文件可能没有这三个键，此时按「来源未知」处理（`null`），不要编造
- * `generatedBy: 'llm'`——那会让监控页把手工内容算成模型产出。
- */
-function readGeneration(data: Readonly<Record<string, unknown>>): SummaryGeneration | null {
-  const generatedBy = data[FRONTMATTER_KEYS.generatedBy];
-  const generatedAt = data[FRONTMATTER_KEYS.generatedAt];
-  const degraded = data[FRONTMATTER_KEYS.degraded];
-  if (generatedBy !== 'llm' && generatedBy !== 'rule') {
-    return null;
-  }
-  return {
-    generatedBy,
-    ...(typeof generatedAt === 'string' ? { generatedAt } : {}),
-    ...(typeof degraded === 'boolean' ? { degraded } : {}),
-  };
-}
-
-function toGenerationRecord(generation: SummaryGeneration): Record<string, unknown> {
-  const record: Record<string, unknown> = {
-    [FRONTMATTER_KEYS.generatedBy]: generation.generatedBy,
-  };
-  if (generation.generatedAt !== undefined) {
-    record[FRONTMATTER_KEYS.generatedAt] = generation.generatedAt;
-  }
-  if (generation.degraded !== undefined) {
-    record[FRONTMATTER_KEYS.degraded] = generation.degraded;
-  }
-  return record;
-}
 
 /**
  * 磁盘上的 `.meta.json` 是本模块自己写的；内容不合法说明数据被改坏了，是程序缺陷。
@@ -321,10 +254,16 @@ function readProjectId(value: unknown, uri: Uri): string | undefined {
 export class MetadataFileStore {
   readonly #dataDir: string;
   readonly #logger: Logger;
+  readonly #summaries: SummaryFileStore;
 
   constructor(deps: MetadataFileStoreDeps) {
     this.#dataDir = deps.dataDir;
     this.#logger = deps.logger;
+    this.#summaries = new SummaryFileStore({
+      dataDir: deps.dataDir,
+      logger: deps.logger,
+      mapError: mapFsError,
+    });
   }
 
   /**
@@ -334,24 +273,7 @@ export class MetadataFileStore {
    * 抛错会逼每个调用方先 `exists` 再读，而那个判断在并发下没有意义。
    */
   async readSummary(directoryUri: Uri): Promise<SummaryFileContent> {
-    const directory = toDiskPath(this.#dataDir, directoryUri);
-    const [abstract, overview] = await Promise.all([
-      this.#readDocument(join(directory, ABSTRACT_FILE_NAME), directoryUri),
-      this.#readDocument(join(directory, OVERVIEW_FILE_NAME), directoryUri),
-    ]);
-
-    const content: SummaryFileContent = {
-      abstract: abstract?.body ?? '',
-      overview: overview?.body ?? '',
-      complete: abstract !== null && overview !== null,
-      generation: overview?.generation ?? abstract?.generation ?? null,
-    };
-    this.#logger.debug('读取目录摘要', {
-      uri: directoryUri.toString(),
-      hasAbstract: abstract !== null,
-      hasOverview: overview !== null,
-    });
-    return content;
+    return this.#summaries.read(directoryUri);
   }
 
   /**
@@ -367,31 +289,7 @@ export class MetadataFileStore {
     overview: string,
     generation?: SummaryGeneration,
   ): Promise<void> {
-    const directory = toDiskPath(this.#dataDir, directoryUri);
-    await this.#ensureDirectory(directory, directoryUri);
-
-    const abstractPath = join(directory, ABSTRACT_FILE_NAME);
-    const overviewPath = join(directory, OVERVIEW_FILE_NAME);
-
-    const abstractTemp = await this.#writeTemp(abstractPath, abstract, directoryUri, generation);
-    let overviewTemp: string;
-    try {
-      overviewTemp = await this.#writeTemp(overviewPath, overview, directoryUri, generation);
-    } catch (error) {
-      // 第二个文件写不出来时清掉第一个的临时文件，不留垃圾。
-      await rm(abstractTemp, { force: true }).catch(() => undefined);
-      throw error;
-    }
-
-    await this.#rename(abstractTemp, abstractPath, directoryUri);
-    await this.#rename(overviewTemp, overviewPath, directoryUri);
-
-    this.#logger.debug('写入目录摘要', {
-      uri: directoryUri.toString(),
-      abstractChars: abstract.length,
-      overviewChars: overview.length,
-      degraded: generation?.degraded ?? false,
-    });
+    await this.#summaries.write(directoryUri, abstract, overview, generation);
   }
 
   /**
@@ -467,67 +365,6 @@ export class MetadataFileStore {
     const absolute = join(directory, META_FILE_NAME);
     const content = `${JSON.stringify(value, null, 2)}\n`;
     await writeFileAtomic(absolute, content, (error) => mapFsError(error, directoryUri));
-  }
-
-  /** 读一个摘要文件的正文与生成信息；不存在返回 `null`。 */
-  async #readDocument(
-    absolute: string,
-    directoryUri: Uri,
-  ): Promise<{ readonly body: string; readonly generation: SummaryGeneration | null } | null> {
-    let raw: string;
-    try {
-      raw = (await readFile(absolute)).toString('utf8');
-    } catch (error) {
-      const fsCode = fsErrorCode(error);
-      if (fsCode === 'ENOENT' || fsCode === 'ENOTDIR') {
-        return null;
-      }
-      throw mapFsError(error, directoryUri);
-    }
-    const parsed = parseDocument(raw);
-    return { body: parsed.body, generation: readGeneration(parsed.data) };
-  }
-
-  /** 读磁盘上现有的 frontmatter 键值；文件不存在返回空对象。 */
-  async #readFrontmatter(
-    absolute: string,
-    directoryUri: Uri,
-  ): Promise<Readonly<Record<string, unknown>>> {
-    let raw: string;
-    try {
-      raw = (await readFile(absolute)).toString('utf8');
-    } catch (error) {
-      const fsCode = fsErrorCode(error);
-      if (fsCode === 'ENOENT' || fsCode === 'ENOTDIR') {
-        return {};
-      }
-      throw mapFsError(error, directoryUri);
-    }
-    return parseDocument(raw).data;
-  }
-
-  /** 写一份临时文件，返回它的路径。改名由调用方在两边都写成功之后统一做。 */
-  async #writeTemp(
-    absolute: string,
-    body: string,
-    directoryUri: Uri,
-    generation: SummaryGeneration | undefined,
-  ): Promise<string> {
-    const existing = await this.#readFrontmatter(absolute, directoryUri);
-    const data =
-      generation === undefined ? existing : { ...existing, ...toGenerationRecord(generation) };
-    const content = serializeDocument(body, data);
-
-    return writeFileStaged(absolute, content, (error) => mapFsError(error, directoryUri));
-  }
-
-  async #rename(temp: string, absolute: string, directoryUri: Uri): Promise<void> {
-    try {
-      await rename(temp, absolute);
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => undefined);
-      throw mapFsError(error, directoryUri);
-    }
   }
 
   async #ensureDirectory(directory: string, directoryUri: Uri): Promise<void> {

@@ -13,7 +13,7 @@ import type { ContentStore } from '../../adapters/fs/content-store.js';
 import type { MetadataFileStore } from '../../adapters/fs/metadata-file.js';
 import type { NodeRepository } from '../../adapters/sqlite/node-repository.js';
 import type { ConversationTextMessage } from '../../domain/conversation.js';
-import type { NodeKind } from '../../domain/node.js';
+import type { NodeKind, NodeStatus } from '../../domain/node.js';
 import { digestSummaryInput } from '../../domain/summary-input.js';
 import {
   extractAbstract,
@@ -157,25 +157,26 @@ async function readSummaryInput(
     ) {
       continue;
     }
-    // 待复核 / 已归档节点不进入目录摘要生成请求，也不进入 digest。正文仍可按 URI
-    // 读取；这里遵循检索面只认 active 的同一状态边界。版本文件由 store 提前隐藏。
-    if (
+    // 待复核 / 已归档记忆的正文和文件摘要不能进入上级摘要，但子项本身必须留下：
+    // 否则目录会把「有待复核内容」误写成「空目录」。版本文件由 store 提前隐藏。
+    const status: NodeStatus =
       indexed !== null &&
       indexed.contextType === 'memory' &&
       indexed.status !== 'active'
-    ) {
-      continue;
-    }
+        ? indexed.status
+        : 'active';
     const kind: NodeKind = entry.kind === 'directory' ? 'directory' : 'document';
     let abstract: string;
-    if (kind === 'directory') {
+    if (status !== 'active') {
+      abstract = '';
+    } else if (kind === 'directory') {
       abstract = isArchiveRoot(entry.uri)
         ? ''
         : (await ports.metadata.readSummary(entry.uri)).abstract;
     } else {
       abstract = indexed?.abstract ?? '';
     }
-    children.push({ uri: entry.uri, name: entry.uri.name, kind, abstract });
+    children.push({ uri: entry.uri, name: entry.uri.name, kind, status, abstract });
   }
   const archiveConversation = await readArchiveConversation(
     ports.store,

@@ -30,11 +30,18 @@ function renderChildren(input: SummaryPromptInput): string {
     return '（这个目录是空的。）';
   }
   return input.children
-    .map((child) =>
-      [`### ${child.name}（${child.kind}）`, `uri: ${child.uri.toString()}`, '摘要：', child.abstract].join(
-        '\n',
-      ),
-    )
+    .map((child) => {
+      const status = child.status === 'active'
+        ? undefined
+        : child.status === 'pending'
+          ? '待复核；正文与摘要未纳入当前目录概览。'
+          : '已归档；正文与摘要未纳入当前目录概览。';
+      return [
+        `### ${child.name}（${child.kind}）`,
+        `uri: ${child.uri.toString()}`,
+        ...(status === undefined ? ['摘要：', child.abstract] : [`状态：${status}`]),
+      ].join('\n');
+    })
     .join('\n\n');
 }
 
