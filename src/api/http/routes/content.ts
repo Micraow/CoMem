@@ -47,8 +47,8 @@ interface ContentAbstractResponse {
   readonly abstract: string | null;
   /** 摘要是否来自降级路径（`summary.generator = rule`）。 */
   readonly degraded: boolean;
-  /** 文件级摘要读索引（`index`），目录级读 `.abstract.md`（`summary`）。 */
-  readonly source: 'index' | 'summary';
+  /** 画像由正文生成（`content`），其他文件读索引，目录读 `.abstract.md`。 */
+  readonly source: 'content' | 'index' | 'summary';
 }
 
 /** `GET /content/overview` 的响应体。 */

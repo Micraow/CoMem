@@ -32,6 +32,7 @@ import {
   type FrontmatterFields,
 } from './frontmatter.js';
 import { frontmatterFieldsOf } from '../memory/frontmatter.js';
+import { profileAbstractFromBody } from '../memory/document.js';
 import { errorMessage } from '../../domain/errors.js';
 
 import type { IndexObserverDeps } from './ports.js';
@@ -127,7 +128,9 @@ export async function documentRecord(
     // 那是整份文档不可解析，旧类型跟着一起作废。
     memoryType: invalidStatus ? null : (fields.memoryType ?? existing?.memoryType ?? null),
     level: DOCUMENT_LEVEL,
-    abstract: document.frontmatter?.summary ?? null,
+    abstract: !invalidStatus && fields.memoryType === 'profile'
+      ? profileAbstractFromBody(document.text)
+      : (document.frontmatter?.summary ?? null),
     content: document.text,
     bodyDigest: stableDigest(document.text),
     size,

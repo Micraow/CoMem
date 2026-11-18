@@ -731,6 +731,8 @@ summary: URI 规范与路径规范化规则
 
 这样摘要跟着文件走：移动、复制、备份都不用额外维护。重建索引时扫一遍文件头就够，一次 LLM 都不调。文档层只建模 `summary` 一个字段，其余键写回时原样保留。
 
+画像的 L0 从全部事实条目按原顺序拼接，去掉条目标记与归档日期，在 256 字符内保留完整事实并标出省略。写入、索引重建和 `/content/abstract` 都使用同一规则，详情直接读当前正文，因此存量画像不必重写就能显示更新后的提要。完整带日期的事实仍以 L2 为准。这些操作不调用模型。
+
 **文件摘要的失效不写在文件头上。** `write` / `edit` 改动正文后，写入路径调 `SummaryService.markStale(父目录)`（`src/services/write-through.ts`）；基线摘要、生成输入 digest、待刷新计数与生成时的直接子项数存在索引的 `node.summary_baseline` / `node.summary_input_digest` / `node.summary_pending` / `node.summary_entries` 四列（§8.1）。是否立刻重算由 §9.3 的阈值判定，只记脏的目录等下一次改动再判定。
 
 **边界：只有 Markdown 支持。** 代码、JSON、纯文本没有统一的 frontmatter 语法（`#` 在 Python 是注释，在 C 里是预处理指令），强行加会破坏原文。这类文件的摘要存在索引的 `node.abstract` 字段里，重建时重算。资源目录里文档占绝大多数，代码文件重算是可接受的成本，不为了统一而污染原文。

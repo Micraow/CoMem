@@ -30,6 +30,7 @@
  */
 
 import { PROFILE_ENTRY_MAX_CHARS } from './memory-types/profile.js';
+import { ABSTRACT_MAX_CHARS, truncateToChars } from './summary.js';
 
 /** 违规种类。与 `profile.ts` 的格式契约逐条对应，只包含能做字面判定的那些。 */
 export type ProfileViolationKind =
@@ -70,6 +71,26 @@ const CODE_FENCE_PREFIX = '```';
  * `missing-date-suffix` 恰好是画像里最该被看见的一条。
  */
 const DATE_SUFFIX_PATTERN = /[(（]as of ([^)）]*)[)）]$/u;
+
+/** Show the facts themselves; dates and the complete list remain in L2. */
+export function summarizeProfile(content: string): string | null {
+  const facts = content.split(/\r?\n/u)
+    .map((line) => line.trim().replace(/^[-*]\s+/u, '').replace(DATE_SUFFIX_PATTERN, '').trim())
+    .filter(Boolean);
+  const full = facts.join('；');
+  if (full === '') return null;
+  if (characterCount(full) <= ABSTRACT_MAX_CHARS) return full;
+
+  // Prefer complete facts and make omissions visible within the same L0 budget.
+  const suffix = '…';
+  let preview = '';
+  for (const fact of facts) {
+    const next = preview === '' ? fact : `${preview}；${fact}`;
+    if (characterCount(next + suffix) > ABSTRACT_MAX_CHARS) break;
+    preview = next;
+  }
+  return (preview || truncateToChars(full, ABSTRACT_MAX_CHARS - suffix.length)) + suffix;
+}
 
 /** 契约写的日期形状是 `YYYY-MM-DD`，不接受 `2026-1-5` 这种缩写。 */
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/u;

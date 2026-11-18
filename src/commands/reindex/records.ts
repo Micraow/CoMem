@@ -14,6 +14,7 @@ import { contextTypeOf, stableDigest } from '../../domain/node.js';
 import type { NodeStatus } from '../../domain/node.js';
 import type { IndexRecord } from '../../domain/retrieval.js';
 import { frontmatterFieldsOf, parseFrontmatterFields } from '../../services/memory/frontmatter.js';
+import { profileAbstractFromBody } from '../../services/memory/document.js';
 
 import type { DiskNode } from './walk.js';
 
@@ -130,7 +131,9 @@ export async function buildRecords(
       // `status` 非法时例外：那是整份文档不可解析，旧类型跟着一起作废。
       memoryType: invalidStatus ? null : (fields.memoryType ?? existing?.memoryType ?? null),
       level: DOCUMENT_LEVEL,
-      abstract: typeof summary === 'string' && summary !== '' ? summary : null,
+      abstract: !invalidStatus && fields.memoryType === 'profile'
+        ? profileAbstractFromBody(document.body)
+        : (typeof summary === 'string' && summary !== '' ? summary : null),
       content: document.body,
       bodyDigest: stableDigest(document.body),
       size: stat.size,

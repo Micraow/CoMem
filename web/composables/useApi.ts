@@ -461,7 +461,7 @@ export interface SummaryLayerPayload {
   readonly abstract?: string | null
   readonly overview?: string | null
   readonly degraded: boolean
-  readonly source: 'index' | 'summary' | 'none'
+  readonly source: 'content' | 'index' | 'summary' | 'none'
 }
 
 /** `GET /content/read`。 */

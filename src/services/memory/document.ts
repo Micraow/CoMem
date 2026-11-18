@@ -18,6 +18,7 @@ import {
   type MemoryTypeSchema,
 } from '../../domain/memory-type.js';
 import { ABSTRACT_MAX_CHARS, truncateToChars } from '../../domain/summary.js';
+import { summarizeProfile } from '../../domain/profile-format.js';
 import type { Uri } from '../../domain/uri.js';
 import { invalidArgument } from '../../domain/errors.js';
 import { frontmatterFieldsOf, parseSources, parseSupersedes, splitFrontmatter } from './frontmatter.js';
@@ -154,6 +155,10 @@ function extractContent(body: string): string | null {
   return rest.startsWith('\n') ? rest.slice(1) : rest;
 }
 
+export function profileAbstractFromBody(body: string): string | null {
+  return summarizeProfile(extractContent(body) ?? body);
+}
+
 /**
  * 追加去重 + 截断到 `MAX_SOURCES`。
  *
@@ -247,7 +252,10 @@ export function serializeMemoryDocument(input: MemoryStructure & {
     header.push(formatField(SOURCES_KEY, input.sources));
   }
 
-  const summary = abstractOfContent(input.fields[CONTENT_FIELD]);
+  const content = input.fields[CONTENT_FIELD];
+  const summary = input.memoryType === 'profile' && typeof content === 'string'
+    ? summarizeProfile(content)
+    : abstractOfContent(content);
   if (summary !== null) {
     header.push(`${SUMMARY_KEY}: ${formatScalar(summary)}`);
   }

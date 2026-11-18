@@ -1,9 +1,10 @@
-export type SummarySource = 'index' | 'summary' | 'none'
+export type SummarySource = 'content' | 'index' | 'summary' | 'none'
 
 const ARCHIVED_MESSAGES_PATH =
   /^comem:\/\/user\/([^/]+)\/sessions\/([^/]+)\/([^/]+)\/archive_\d+\/messages\.jsonl$/u
 
 export function summarySourceLabelOf(source: SummarySource | null): string | null {
+  if (source === 'content') return '正文提要'
   if (source === 'index') {
     return '索引摘要'
   }

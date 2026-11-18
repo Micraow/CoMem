@@ -586,6 +586,16 @@ describe('文件系统与内容', () => {
     expect(overview['source']).toBe('none');
   });
 
+  it('画像提要从当前正文生成，即使旧文件头只有第一条事实', async () => {
+    const uri = `${ROOT}/memories/profile.md`;
+    const content = '---\nmemory_type: profile\nsummary: 旧事实\n---\n\n## content\n\n- 学习单周期 MIPS (as of 2026-11-17)\n- 使用中文交流 (as of 2026-11-17)\n- 学习最大流 (as of 2026-11-18)';
+    await container.services.filesystem.write(Uri.parse(uri), content, AUTH_PRINCIPALS);
+    await container.services.indexObserver.drain();
+    const result = resultOf(await inject({ method: 'GET', url: `/api/v1/content/abstract?uri=${encode(uri)}` }));
+    expect(result).toMatchObject({ abstract: '学习单周期 MIPS；使用中文交流；学习最大流', source: 'content' });
+    expect((await container.services.index.stat(uri))?.abstract).toBe(result['abstract']);
+  });
+
   it('content/download 校验签名', async () => {
     const file = `${ROOT}/resource.md`;
     await inject({ method: 'POST', url: '/api/v1/content/write', payload: { uri: file, content: '附件' } });

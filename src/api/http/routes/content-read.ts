@@ -6,6 +6,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import { ComemError } from '../../../domain/errors.js';
+import { profileAbstractFromBody } from '../../../services/memory/document.js';
 import { verifyDownloadToken } from '../../mcp/tools/download.js';
 import { sliceText } from '../../text-slice.js';
 import { ok } from '../envelope.js';
@@ -65,6 +66,13 @@ export function createContentReadRoutes(services: HttpRouteServices): HttpRouteG
         // 页永远显示「还没有摘要」，而摘要其实早就生成了。
         const node = await services.index.stat(uri.toString());
         if (node !== null && node.kind === 'document') {
+          if (node.memoryType === 'profile') {
+            const document = await filesystem.read(uri, requestContextOf(request).principals);
+            return ok<ContentAbstractResponse>({
+              uri: uri.toString(), abstract: profileAbstractFromBody(document.text),
+              degraded: false, source: 'content',
+            });
+          }
           return ok<ContentAbstractResponse>({
             uri: uri.toString(),
             abstract: node.abstract,
