@@ -246,6 +246,9 @@ export class IdentityService {
     return this.#groups.list(options);
   }
 
+  /** 当前身份空间发现用：一次取完全部组，不受管理列表分页上限影响。 */
+  listAllGroups(): readonly Group[] { return this.#groups.list({ limit: this.#groups.count() }); }
+
   /** 更新组，不存在抛 `NOT_FOUND`。 */
   updateGroup(
     id: string,

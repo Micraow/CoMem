@@ -614,6 +614,106 @@ describe('文件系统与内容', () => {
     expect(rejected.statusCode).toBe(403);
     expect(errorOf(rejected)['code']).toBe('PERMISSION_DENIED');
   });
+
+  it('fs 与 ACL 能力按目标节点和当前主体返回，共享子树无需父根可发现', async () => {
+    const { acl, filesystem, identity } = container.services;
+    const password = 'capability-password';
+    identity.createUser({ id: 'reader', displayName: 'Reader' });
+    await identity.ensureUserNamespace('reader');
+    await identity.setPassword('reader', password);
+
+    const groupRoot = Uri.parse('comem://group/capabilities');
+    await acl.ensureRootPreset(groupRoot, 'local');
+    const readers = [
+      { name: 'read', level: 1 as const },
+      { name: 'write', level: 3 as const },
+      { name: 'manage', level: 7 as const },
+    ];
+    for (const reader of readers) {
+      const directory = groupRoot.child(reader.name);
+      await filesystem.mkdir(directory, AUTH_PRINCIPALS);
+      await acl.setAcl(
+        directory,
+        {
+          mode: 'inherit',
+          entries: [{ principal: 'user:reader', level: reader.level, effect: 'allow' }],
+        },
+        SUBJECT,
+        AUTH_PRINCIPALS,
+      );
+    }
+
+    const readDirectory = groupRoot.child('read');
+    const readFile = readDirectory.child('note.md');
+    await filesystem.write(readFile, 'shared note', AUTH_PRINCIPALS);
+
+    const login = resultOf(
+      await inject({
+        method: 'POST',
+        url: '/api/v1/auth/login',
+        payload: { username: 'reader', password },
+      }),
+    );
+    const headers = { authorization: `Bearer ${String(login['token'])}` };
+
+    const hiddenRoot = await inject({
+      method: 'GET',
+      url: `/api/v1/fs/ls?uri=${encode(groupRoot.toString())}`,
+      headers,
+    });
+    expect(hiddenRoot.statusCode).toBe(403);
+
+    const listed = resultOf(
+      await inject({
+        method: 'GET',
+        url: `/api/v1/fs/ls?uri=${encode(readDirectory.toString())}`,
+        headers,
+      }),
+    );
+    expect(listed['capabilities']).toEqual({ read: true, write: false, manage: false });
+    expect((listed['entries'] as Record<string, unknown>[]).map((entry) => entry['name']))
+      .toContain('note.md');
+
+    const fileStat = resultOf(
+      await inject({
+        method: 'GET',
+        url: `/api/v1/fs/stat?uri=${encode(readFile.toString())}`,
+        headers,
+      }),
+    );
+    expect(fileStat['capabilities']).toEqual({ read: true, write: false, manage: false });
+
+    const tree = resultOf(
+      await inject({
+        method: 'GET',
+        url: `/api/v1/fs/tree?uri=${encode(readDirectory.toString())}&depth=1`,
+        headers,
+      }),
+    );
+    expect(tree['capabilities']).toEqual({ read: true, write: false, manage: false });
+
+    for (const expected of [
+      { name: 'write', capabilities: { read: true, write: true, manage: false } },
+      { name: 'manage', capabilities: { read: true, write: true, manage: true } },
+    ]) {
+      const stat = resultOf(
+        await inject({
+          method: 'GET',
+          url: `/api/v1/fs/stat?uri=${encode(groupRoot.child(expected.name).toString())}`,
+          headers,
+        }),
+      );
+      expect(stat['capabilities']).toEqual(expected.capabilities);
+    }
+
+    const aclSnapshot = resultOf(
+      await inject({
+        method: 'GET',
+        url: `/api/v1/acl?uri=${encode(readDirectory.toString())}`,
+      }),
+    );
+    expect(aclSnapshot['capabilities']).toEqual({ read: true, write: true, manage: true });
+  });
 });
 
 describe('检索', () => {

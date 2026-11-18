@@ -159,25 +159,41 @@ export class AutomaticContext {
     const personal = userScopeOf(options.subject, '自动上下文身份');
     await this.deps.authorizer.assert(personal, READ_LEVEL, options.principals);
 
-    const groupRoots = options.principals.flatMap((principal) => {
-      const parsed = parsePrincipal(principal);
-      return parsed.kind === 'group' ? [Uri.parse(`comem://group/${parsed.id}`)] : [];
-    });
-    const roots = [personal, ...groupRoots];
-    const readableRoots = await this.deps.authorizer.filterReadable(roots, options.principals);
-    const scopes = new Set<string>();
-
-    for (const root of roots) {
-      if (!readableRoots.has(root.toString())) continue;
-      this.addRootScopes(scopes, root, options.projectId);
+    const candidates = new Map<string, Uri>([[personal.toString(), personal]]);
+    const readableScopes = this.deps.readableScopes?.(options.principals);
+    for (const raw of readableScopes ?? []) {
+      const scope = Uri.tryParse(raw);
+      if (scope !== null) candidates.set(scope.toString(), scope);
+    }
+    if (readableScopes === undefined) {
+      for (const principal of options.principals) {
+        const parsed = parsePrincipal(principal);
+        if (parsed.kind !== 'group') continue;
+        const root = Uri.parse(`comem://group/${parsed.id}`);
+        candidates.set(root.toString(), root);
+      }
     }
 
-    if (options.projectId !== undefined) {
-      for (const raw of this.deps.readableScopes?.(options.principals) ?? []) {
-        const scope = Uri.tryParse(raw);
-        if (scope?.projectId !== options.projectId) continue;
-        this.addSharedProjectScope(scopes, scope, options.projectId);
+    const readable = await this.deps.authorizer.filterReadable(
+      [...candidates.values()],
+      options.principals,
+    );
+    const scopes = new Set<string>();
+
+    for (const scope of candidates.values()) {
+      if (!readable.has(scope.toString())) continue;
+      if (scope.isRoot) {
+        this.addRootScopes(scopes, scope, options.projectId);
+        continue;
       }
+      if (scope.projectId !== null) {
+        if (options.projectId !== undefined && scope.projectId === options.projectId) {
+          this.addSharedProjectScope(scopes, scope, options.projectId);
+        }
+        continue;
+      }
+      const category = scope.segments[0];
+      if (category === 'memories' || category === 'resources') scopes.add(scope.toString());
     }
 
     return [...scopes];
@@ -193,7 +209,6 @@ export class AutomaticContext {
   }
 
   private addSharedProjectScope(target: Set<string>, scope: Uri, projectId: string): void {
-    if (scope.scope !== 'user') return;
     const root = Uri.parse(`comem://${scope.scope}/${scope.rootId}`);
     const project = projectScopeOf(root, projectId);
     if (scope.equals(project)) {

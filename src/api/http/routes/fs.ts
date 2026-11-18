@@ -1,18 +1,9 @@
 /**
  * 文件系统路由（架构文档 §14、§12.4）。
  *
- * 每个出口先求权，再调服务——服务内部也会再求一次（`FileSystemService` 的每个
- * 方法都以 `authorizer.assert` 开头）。这里不是重复劳动：§12.4 的出口清单是按
- * **出口**数的，路由层自己漏一个 `assert` 就等于少一道闸，而服务层的实现可能
- * 在重构时被换掉。
- *
- * `cp` 没有服务原语。`ContentStore` 只有 `move`（跨设备时内部才是「复制再删」），
- * 没有公开的 `copy`。这里按「文件读正文 + 摘要 frontmatter、目录递归」实现，
- * 走 `FileSystemService` 的 `read` / `write` / `mkdir` / `list`：
- *
- * - 权限、路径锁、观察者（索引 / 权限 / 摘要失效）全部生效；
- * - 记忆文件的 `memory_type` / `status` 等 frontmatter 字段**不会**被复制——它们由
- *   `MemoryService` 维护，`fs/cp` 不是记忆复制路径。复制出来的文件按普通文档索引。
+ * 路由与 `FileSystemService` 各自求权，分别守护出口契约和内部调用。
+ * `cp` 没有存储原语，这里递归调用读、写、建目录和列目录；记忆 frontmatter
+ * 不随复制保留，复制结果按普通文档重新索引。
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -47,11 +38,14 @@ interface SerializedEntry {
   readonly size: number;
 }
 
+interface FsCapabilities { readonly read: boolean; readonly write: boolean; readonly manage: boolean }
+
 /** `GET /fs/tree` 的响应体：根 URI + 展平后的条目 + 是否被截断。 */
 interface SerializedTree {
   readonly root: string;
   readonly entries: readonly SerializedEntry[];
   readonly truncated: boolean;
+  readonly capabilities: FsCapabilities;
 }
 
 /** `GET /fs/stat` 的 stat 字段；目标不存在时授权层返回 404（`NOT_FOUND`），`null` 只用于并发删除。 */
@@ -65,12 +59,14 @@ interface FsStat {
 interface FsListResponse {
   readonly uri: string;
   readonly entries: readonly SerializedEntry[];
+  readonly capabilities: FsCapabilities;
 }
 
 /** `GET /fs/stat` 的响应体。 */
 interface FsStatResponse {
   readonly uri: string;
   readonly stat: FsStat | null;
+  readonly capabilities: FsCapabilities;
 }
 
 /** `POST /fs/mkdir` 的响应体。 */
@@ -100,11 +96,25 @@ function serializeEntry(entry: TreeEntry): SerializedEntry {
   };
 }
 
-function serializeTree(result: TreeResult): SerializedTree {
+async function capabilitiesOf(
+  authorizer: HttpRouteServices['authorizer'],
+  uri: Uri,
+  principals: readonly string[],
+): Promise<FsCapabilities> {
+  const [read, write, manage] = await Promise.all([
+    authorizer.check(uri, READ, principals),
+    authorizer.check(uri, WRITE, principals),
+    authorizer.check(uri, MANAGE, principals),
+  ]);
+  return { read, write, manage };
+}
+
+function serializeTree(result: TreeResult, capabilities: FsCapabilities): SerializedTree {
   return {
     root: result.root.toString(),
     entries: result.entries.map(serializeEntry),
     truncated: result.truncated,
+    capabilities,
   };
 }
 
@@ -159,6 +169,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         return ok<FsListResponse>({
           uri: uri.toString(),
           entries: (await filesystem.list(uri, principals)).map(serializeEntry),
+          capabilities: await capabilitiesOf(authorizer, uri, principals),
         });
       });
 
@@ -169,7 +180,12 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
         const limit = optionalQueryInteger(query, 'limit', DEFAULT_TREE_LIMIT, { min: 1 });
         const principals = requestContextOf(request).principals;
         await authorizer.assert(uri, READ, principals);
-        return ok<SerializedTree>(serializeTree(await filesystem.tree(uri, principals, { depth, limit })));
+        return ok<SerializedTree>(
+          serializeTree(
+            await filesystem.tree(uri, principals, { depth, limit }),
+            await capabilitiesOf(authorizer, uri, principals),
+          ),
+        );
       });
 
       app.get<{ Querystring: Record<string, unknown> }>('/stat', async (request) => {
@@ -184,6 +200,7 @@ export function createFsRoutes(services: HttpRouteServices): HttpRouteGroup {
             stat === null
               ? null
               : { kind: stat.kind, size: stat.size, updatedAt: stat.updatedAt },
+          capabilities: await capabilitiesOf(authorizer, uri, principals),
         });
       });
 

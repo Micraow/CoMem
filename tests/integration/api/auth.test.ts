@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createHttpServer } from '../../../src/api/http/server.js';
 import { createContainer, type Container } from '../../../src/bootstrap/container.js';
+import { Uri } from '../../../src/domain/uri.js';
 
 const PASSWORD = 'correct-password';
 const SESSION_SECRET = 'test-session-secret';
@@ -170,6 +171,13 @@ describe('账号安全', () => {
       subject: 'user:local',
       principals: ['user:local', 'user:*'],
       isAdmin: true,
+      sharedFolders: [],
+      spaces: [{
+        scope: 'comem://user/local',
+        kind: 'personal',
+        displayName: 'local',
+        access: 'owner',
+      }],
     });
 
     const alice = await inject({
@@ -185,6 +193,116 @@ describe('账号安全', () => {
     expect((json(alice)['result'] as Record<string, unknown>)['principals']).toContain(
       'user:alice',
     );
+  });
+
+  it('GET /auth/me 返回实际可读空间，组名与 owner/member/granted 来源来自 ACL', async () => {
+    await Promise.all([seedUser('alice'), seedUser('bob'), seedUser('carol')]);
+    const { identity, acl } = container.services;
+    identity.createGroup({
+      id: 'eng',
+      displayName: '工程团队',
+      ownerUserId: 'alice',
+    });
+    identity.createGroup({
+      id: 'research',
+      displayName: '研究团队',
+      ownerUserId: 'alice',
+    });
+    identity.addMember('eng', 'bob');
+
+    await acl.ensureRootPreset(Uri.parse('comem://group/eng'), 'alice');
+    const sharedFolder = Uri.parse('comem://group/eng/resources/交接资料');
+    await container.services.filesystem.mkdir(sharedFolder, ['user:alice', 'user:*']);
+    await acl.setAcl(sharedFolder, {
+      mode: 'inherit', entries: [{ principal: 'user:carol', level: 1, effect: 'allow' }],
+    }, 'user:alice', ['user:alice', 'user:*']);
+    const researchRoot = Uri.parse('comem://group/research');
+    await acl.ensureRootPreset(researchRoot, 'alice');
+    await acl.setAcl(
+      researchRoot,
+      {
+        mode: 'inherit',
+        entries: [
+          { principal: 'group:research', level: 3, effect: 'allow' },
+          { principal: 'user:alice', level: 7, effect: 'allow' },
+          { principal: 'user:carol', level: 1, effect: 'allow' },
+        ],
+      },
+      'user:alice',
+      ['user:alice', 'user:*'],
+    );
+
+    const [aliceToken, bobToken, carolToken] = await Promise.all([
+      login('alice'),
+      login('bob'),
+      login('carol'),
+    ]);
+    for (const [token, expected] of [
+      [aliceToken, []], [bobToken, []], [carolToken, [{ uri: sharedFolder.toString(), displayName: '交接资料' }]],
+    ] as const) {
+      const response = await inject({ method: 'GET', url: '/api/v1/auth/me', headers: bearer(token) });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(json(response)['result']).toMatchObject({ sharedFolders: expected });
+    }
+    const spacesOf = async (token: string): Promise<readonly Record<string, unknown>[]> => {
+      const response = await inject({
+        method: 'GET',
+        url: '/api/v1/auth/me',
+        headers: bearer(token),
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      return (json(response)['result'] as Record<string, unknown>)['spaces'] as
+        readonly Record<string, unknown>[];
+    };
+
+    expect(await spacesOf(aliceToken)).toEqual([
+      {
+        scope: 'comem://user/alice',
+        kind: 'personal',
+        displayName: 'alice',
+        access: 'owner',
+      },
+      {
+        scope: 'comem://group/eng',
+        kind: 'group',
+        displayName: '工程团队',
+        access: 'owner',
+      },
+      {
+        scope: 'comem://group/research',
+        kind: 'group',
+        displayName: '研究团队',
+        access: 'owner',
+      },
+    ]);
+    expect(await spacesOf(bobToken)).toEqual([
+      {
+        scope: 'comem://user/bob',
+        kind: 'personal',
+        displayName: 'bob',
+        access: 'owner',
+      },
+      {
+        scope: 'comem://group/eng',
+        kind: 'group',
+        displayName: '工程团队',
+        access: 'member',
+      },
+    ]);
+    expect(await spacesOf(carolToken)).toEqual([
+      {
+        scope: 'comem://user/carol',
+        kind: 'personal',
+        displayName: 'carol',
+        access: 'owner',
+      },
+      {
+        scope: 'comem://group/research',
+        kind: 'group',
+        displayName: '研究团队',
+        access: 'granted',
+      },
+    ]);
   });
 
   it('自助改密码需要认证，错误当前密码返回 currentPassword 字段且不使登录态失效', async () => {

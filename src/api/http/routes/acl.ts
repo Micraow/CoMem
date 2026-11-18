@@ -27,13 +27,16 @@ import {
   type AclMode,
 } from '../../../domain/acl.js';
 import { ComemError, invalidArgument } from '../../../domain/errors.js';
+import type { Uri } from '../../../domain/uri.js';
 import { ok } from '../envelope.js';
 import { requestContextOf } from '../middleware.js';
 import { requireRecord, requireUri, type HttpRouteGroup } from '../server.js';
 
 import type { HttpRouteServices } from './index.js';
 
-/** §12.1：manage = 7。ACL 的读写都要求它。 */
+/** §12.1：read = 1、write = 3、manage = 7。ACL 管理要求 manage。 */
+const READ = 1;
+const WRITE = 3;
 const MANAGE = 7;
 
 
@@ -98,6 +101,13 @@ interface AclGetResponse {
   readonly entries: readonly AclEntry[];
   /** 按 principal 分组的有效级别（升序）。 */
   readonly effective: Readonly<Record<string, readonly AclLevel[]>>;
+  readonly capabilities: AclCapabilities;
+}
+
+interface AclCapabilities {
+  readonly read: boolean;
+  readonly write: boolean;
+  readonly manage: boolean;
 }
 
 /** `PUT /acl` 的响应体：写入后的整份状态。 */
@@ -130,6 +140,19 @@ function serializeEffective(
   return result;
 }
 
+async function capabilitiesOf(
+  authorizer: HttpRouteServices['authorizer'],
+  uri: Uri,
+  principals: readonly string[],
+): Promise<AclCapabilities> {
+  const [read, write, manage] = await Promise.all([
+    authorizer.check(uri, READ, principals),
+    authorizer.check(uri, WRITE, principals),
+    authorizer.check(uri, MANAGE, principals),
+  ]);
+  return { read, write, manage };
+}
+
 export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
   const { acl, authorizer } = services;
 
@@ -147,6 +170,7 @@ export function createAclRoutes(services: HttpRouteServices): HttpRouteGroup {
           mode: snapshot.mode,
           entries: snapshot.entries,
           effective: serializeEffective(snapshot.effective),
+          capabilities: await capabilitiesOf(authorizer, uri, context.principals),
         });
       });
 

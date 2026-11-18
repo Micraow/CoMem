@@ -1291,7 +1291,7 @@ RRF 仍然只比较名次（§8.3）；层级权重是**文档先验**（摘要�
 
 ### 8.6 上下文组装（Context Assembly）
 
-**自动上下文。** `SearchService.automaticContext(query, options)` 供 `POST /api/v1/context` 使用。身份取认证请求；默认范围统一为本人根、实际可读的组根与直接授权子树。范围查询来自物化权限，候选与正文再次求权；无权节点的 URI、索引摘要也不出现在输出。共享结论不展开私有源会话。撤权与退组在下一次请求生效，已经进入宿主历史的文字无法远程撤回。
+**自动上下文。** `SearchService.automaticContext(query, options)` 供 `POST /api/v1/context` 使用。身份取认证请求；默认范围统一为本人根、实际可读的组根与直接授权子树。范围查询来自物化权限，候选与正文再次求权。自动召回仅取可读的长期记忆，处理项目时只纳入当前项目的项目记忆。切换文件工作区或手动搜索范围不会更改宿主自动召回的范围。无权节点的 URI、索引摘要也不出现在输出。共享结论不展开私有源会话。撤权与退组在下一次请求生效，已经进入宿主历史的文字无法远程撤回。
 
 空 query 用于开局：读取本人 `memories/profile.md` 与最多 4 条偏好的正文，按既有 chat 配额最多 5 条；偏好超出的内容留待语义召回。普通 query 只固定读取 profile，优先使用当前问题与最近 10 条可读 user/assistant 对话，历史尾部最多 4000 字符。近期读取跨 live 和归档、按消息 ID 去重，并持会话 TREE 锁避免与归档交错。检索前不做每轮 LLM 查询改写，主动 `search` 的改写路径保留。自动候选只查 memory，不把整段原始会话送作长期事实。
 
@@ -3173,7 +3173,7 @@ API Key 让某个凭据失效，不能一次作废某个用户除此之外的全
 | 引导状态 | `GET /api/v1/bootstrap` | 只读探测，**恒定 200**（匿名）。回 `needsSetup` / `boundSubject` / `adminConfigured`。控制台在拿到身份之前调它；`needsSetup` 就是「`app_user` 里没有任何密码哈希」。**不返回令牌本身** |
 | 登录 | `POST /api/v1/auth/login` | `{username, password}` → `{token, expiresAt, subject, principals}` |
 | 登出 | `POST /api/v1/auth/logout` | 无服务端状态，只回 `{loggedOut: true}` |
-| 当前身份 | `GET /api/v1/auth/me` | `{subject, principals, isAdmin}`；`isAdmin` 使用系统管理员策略 |
+| 当前身份 | `GET /api/v1/auth/me` | `{subject, principals, isAdmin, spaces, sharedFolders}`；`isAdmin` 使用系统管理员策略 |
 | 自助改密码 | `POST /api/v1/auth/password` | 已认证请求，`{currentPassword, newPassword}`；只改当前 `subject`，成功后轮换 `session_epoch`，已有 session token 下次请求 401 |
 | 建用户 | `POST /api/v1/admin/users` | `{id, displayName, email?, password?}`，系统管理员（§12.4）。`password` 省略时建出无密码账号（先当 ACL 主体用），传了则**先过口令策略再建账号**、一次完成建账号 + 设密码；响应带 `hasPassword` |
 | 列用户 | `GET /api/v1/admin/users` | 每一项带 `hasPassword`：只由 `app_user.password_hash` 非空派生，不回哈希或其任何派生值 |
@@ -3346,7 +3346,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 
 ## 14. HTTP API
 
-自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals, isAdmin}`，含组成员身份与系统管理员判定。
+自动上下文新增 `POST /api/v1/context`：`{query?, sessionId?, contextEpoch?, maxTokens?, maxBytes?, limit?, budgetMs?, previousDeliveryToken?}`，空 query 取本人背景；认证身份确定可读范围，上限 30 秒，可用 `budgetMs` 收紧到宿主剩余预算。`POST /api/v1/context/ack` 接收 `{deliveryToken}`，只确认当前身份的签名回执。`GET /api/v1/auth/me` 返回当前请求的 `{subject, principals, isAdmin, spaces, sharedFolders}`。`spaces` 只列有读权限的个人或团队根，提供显示名称和访问来源；`sharedFolders` 列能直接进入但没有可读空间根的授权目录。
 
 统一前缀 `/api/v1`。记忆复核等端点把完整的 percent-encoded `comem://` URI 放在一个路径参数里；路由器允许该参数最多 4 KiB，避免合法的长主题和多层路径在进入 URI 校验前被 Fastify 默认的 100 字符限制拒绝。响应封套：
 
@@ -3719,7 +3719,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 
 - **概览页：`GET /tasks`、`GET /health` 与 `GET /memories/pending` 分开。** `/tasks` 是系统管理员专属（§12.4），因为 `task` 表没有可求权的目标；`/health` 对任何身份可用；待复核摘要按当前空间和当前身份过滤。三个请求各配加载态与错误：任务 403 不遮挡健康徽标和指标，待复核查询失败也不影响其它全局指标。
 - **用户与组页：403 显示空态，并收起新建按钮。** `/admin/users` 与 `/admin/groups` 同样只给系统管理员，普通身份拿到的是 403。侧栏按 `GET /auth/me` 的 `isAdmin` 显示管理员入口，服务端仍独立校验权限。「我的账户」并排显示登录账号与系统角色。首次初始化的管理员和 `auth.adminUserIds` 名单使用同一角色判定，控制台不修改这份名单。
-- **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
+- **文件详情页：摘要失败只影响摘要区。** `/fs/stat` 失败（节点不存在、读不了）才整页失败；`/content/abstract` 取不到时只在摘要区显示「摘要没有取到」，元信息、正文与 ACL 照常渲染。`/fs/stat`、`/fs/ls`、`/fs/tree` 与 `/acl` 返回当前身份的 `capabilities: {read, write, manage}`，各操作仍在服务端独立校验。两个端点对同一 URI 都要求读权限，摘要取不到不代表节点读不了（`web/pages/files/[...path].vue`）。
 - **文件详情页的「关联」区块独立取数。** URI 第三段是 `memories` 时（`user/{uid}/memories/...`、`group/{gid}/memories/...`），左栏多一个「关联」区块：`direction=links` 与 `direction=backlinks` 各请求一次 `GET /memories/{uri}/links`，分「这条记忆指向」与「指向这条记忆」两组。`link_type` 翻译成中文（派生自 / 引用了 / 相关，反向分别是派生出 / 被引用 / 相关），未知值原样显示——新增关系类型时界面不会静默吞掉一条边。`weight` 与 `matchText` 不展示（前者是内部强度，后者当前产生端恒为空）。两个请求并行、切换节点后丢弃迟到响应；失败只置该区块的提示，不碰正文与摘要（`web/pages/files/[...path].vue`、`web/utils/memoryLinks.ts`）。
 - **文件详情页的「记忆」区块回答「为什么搜不到」。** `memories/` 下的**文件**另请求一次 `GET /memories/{uri}`，显示记忆类型、状态、能否被检索与有效期。状态与类型取自**检索索引**而不是记忆文件的 frontmatter：TTL 归档只把索引行改成 `archived`，文件里仍是 `active`（§11.7），读文件会在归档后给出相反的答案。能否被检索由状态推导：检索只返回 `active`（索引的 `n.status = 'active'`），所以 `pending` 写「待复核，检索不到」并给「去复核」入口，`archived` 写「已归档，检索不到」并说明按 URI 仍可读取。没有恢复端点，因此不给恢复按钮——按了也做不成事。有效期来自记忆文件（索引的 `NodeStat` 没有这两列）。没有索引行、目录、`.history` 版本文件与 `.abstract.md` 显示「未知」，与请求失败分开。请求失败只影响这一块，正文、摘要、关联与权限照常渲染（`web/pages/files/[...path].vue`、`web/components/domain/SummaryPanel.vue`）。
 

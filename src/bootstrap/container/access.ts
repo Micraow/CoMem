@@ -147,10 +147,13 @@ export async function createAccess(
     }
   }
 
-  // §12.6 根预置 + §6.5 的四个基础上下文目录。见 `ensureUserNamespace` 的注释。
-  //
+  // §12.6 根预置 + §6.5 的四个基础上下文目录。启动时修复全部已有用户：
+  // `projects/` 是后加入的目录，只修绑定主体会让旧账号继续缺少项目根。
   // 幂等：行已存在就是覆盖成同样的值。
-  await userNamespace.ensure(boundPrincipal.id);
+  const existingUsers = userRepository.list({ limit: userRepository.count() });
+  for (const user of existingUsers) {
+    await userNamespace.ensure(user.id);
+  }
 
   return {
     subject,

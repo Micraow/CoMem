@@ -13,6 +13,7 @@ const ALICE = 'comem://user/alice';
 const GROUP = 'comem://group/eng';
 const LOCAL = ['user:local', 'user:*', 'group:eng'];
 const ALICE_PRINCIPALS = ['user:alice', 'user:*'];
+const BOB = ['user:bob', 'user:*'];
 
 let directory: string;
 let container: Container;
@@ -85,6 +86,62 @@ async function context(payload: Record<string, unknown>) {
 }
 
 describe('POST /context 项目范围', () => {
+  it('显式组根授权无需成员关系即可进入自动召回与手动范围，未授权组仍被 ACL 挡住', async () => {
+    const { acl, search, identity } = container.services;
+    identity.createUser({ id: 'bob', displayName: 'Bob' });
+    await identity.ensureUserNamespace('bob');
+    identity.createGroup({ id: 'shared', displayName: '共享团队', ownerUserId: 'local' });
+    identity.createGroup({ id: 'private', displayName: '私有团队', ownerUserId: 'local' });
+    const sharedRoot = Uri.parse('comem://group/shared');
+    const privateRoot = Uri.parse('comem://group/private');
+    await acl.ensureRootPreset(sharedRoot, 'local');
+    await acl.ensureRootPreset(privateRoot, 'local');
+    await acl.setAcl(sharedRoot, {
+      mode: 'inherit',
+      entries: [
+        { principal: 'group:shared', level: 3, effect: 'allow' },
+        { principal: 'user:local', level: 7, effect: 'allow' },
+        { principal: 'user:bob', level: 1, effect: 'allow' },
+      ],
+    }, 'user:local', LOCAL);
+
+    await write(`${sharedRoot.toString()}/memories/granted.md`, 'grantmarker 显式组授权');
+    await write(`${privateRoot.toString()}/memories/secret.md`, 'privatemarker 未授权内容');
+
+    const automaticScopes = await search.defaultScopes('user:bob', BOB);
+    expect(automaticScopes).toContain(sharedRoot.toString());
+    expect(automaticScopes).not.toContain(privateRoot.toString());
+
+    const automatic = await search.automaticContext('grantmarker', {
+      subject: 'user:bob',
+      principals: BOB,
+      scopes: [],
+      maxBytes: 5000,
+      maxTokens: 1200,
+      limit: 20,
+    });
+    expect(automatic.rendered).toContain('显式组授权');
+    expect(automatic.rendered).not.toContain('未授权内容');
+
+    const manualShared = await search.find('grantmarker', {
+      subject: 'user:bob',
+      principals: BOB,
+      scopes: [sharedRoot.toString()],
+      limit: 20,
+    });
+    expect(manualShared.map((hit) => hit.uri)).toContain(
+      `${sharedRoot.toString()}/memories/granted.md`,
+    );
+
+    const manualPrivate = await search.find('privatemarker', {
+      subject: 'user:bob',
+      principals: BOB,
+      scopes: [privateRoot.toString()],
+      limit: 20,
+    });
+    expect(manualPrivate).toEqual([]);
+  });
+
   it('只召回个人直属内容、当前项目和可读团队同项目范围', async () => {
     await write(`${ROOT}/memories/preferences/global.md`, 'recallmarker personal-preference-always');
     await write(`${ROOT}/resources/personal.md`, 'recallmarker personal-resource');

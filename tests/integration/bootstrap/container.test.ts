@@ -178,6 +178,41 @@ describe('createContainer', () => {
     expect(listed.map((entry) => entry.uri.name)).toEqual(['memories', 'projects', 'resources']);
   });
 
+  it('启动时给所有已有用户补齐 projects 根', async () => {
+    const { identity } = container.services;
+    for (const id of ['alice', 'bob']) {
+      identity.createUser({ id, displayName: id });
+      await identity.ensureUserNamespace(id);
+      await rm(join(dataDir, 'user', id, 'projects'), { recursive: true, force: true });
+    }
+    await container.close();
+
+    container = await createContainer({
+      configPath: join(dataDir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: dataDir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_PROVIDERS_LLM_DEFAULT_TYPE: 'disabled',
+        COMEM_LOGGING_LEVEL: 'error',
+      },
+    });
+
+    for (const id of ['alice', 'bob']) {
+      await expect(stat(join(dataDir, 'user', id, 'projects'))).resolves.toBeDefined();
+      const listed = await container.services.filesystem.list(
+        Uri.parse(`comem://user/${id}`),
+        [`user:${id}`, 'user:*'],
+      );
+      expect(listed.map((entry) => entry.uri.name).sort()).toEqual([
+        'memories',
+        'projects',
+        'resources',
+        'sessions',
+      ]);
+    }
+  });
+
   it('close() 幂等', async () => {
     await container.close();
     await expect(container.close()).resolves.toBeUndefined();
