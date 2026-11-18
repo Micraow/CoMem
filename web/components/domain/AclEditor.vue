@@ -15,7 +15,7 @@
  */
 import { AlertTriangle, Plus, ShieldAlert, Trash2 } from 'lucide-vue-next'
 
-import type { AclPayload } from '~/composables/useApi'
+import type { AclCapabilities, AclPayload } from '~/composables/useApi'
 import {
   ACL_EFFECTS,
   ACL_EFFECT_LABEL,
@@ -45,6 +45,8 @@ const props = defineProps<{
   loading: boolean
   error: string | null
   busy: boolean
+  /** `undefined` = 调用方没有传；`null` = 旧服务端没有返回能力。 */
+  capability?: AclCapabilities | null
 }>()
 
 const emit = defineEmits<{
@@ -97,6 +99,10 @@ const confirmOpen = computed({
 })
 
 const isRestricted = computed(() => props.acl?.mode === 'restricted')
+const canManage = computed(() => props.capability?.manage)
+const controlsDisabled = computed(
+  () => props.busy || props.loading || canManage.value === false,
+)
 
 const modeLabel = computed(() => {
   const mode = props.acl?.mode
@@ -223,13 +229,15 @@ function confirm(): void {
           <span class="caption">切断继承</span>
           <UiSwitch
             :model-value="isRestricted"
-            :disabled="props.busy || props.loading"
+            :disabled="controlsDisabled"
             aria-label="切断继承"
             @update:model-value="onModeToggle"
           />
           <UiBadge :variant="isRestricted ? 'red' : 'outline'">
             {{ modeLabel }}
           </UiBadge>
+          <UiBadge v-if="props.capability === null" variant="orange">权限状态未知</UiBadge>
+          <UiBadge v-else-if="canManage === false" variant="red">只读</UiBadge>
         </div>
       </header>
 
@@ -279,7 +287,7 @@ function confirm(): void {
                 <UiButton
                   variant="plain"
                   size="sm"
-                  :disabled="props.busy"
+                  :disabled="controlsDisabled"
                   @click="requestRevoke(entry.principal)"
                 >
                   <Trash2 :size="13" :stroke-width="1.5" />
@@ -299,7 +307,7 @@ function confirm(): void {
         />
       </section>
 
-      <section class="grantbar">
+      <section v-if="canManage !== false" class="grantbar">
         <div class="sec-head">
           <span class="sec-label">添加授权</span>
           <span class="spacer" />
@@ -317,7 +325,7 @@ function confirm(): void {
           />
           <UiSelect v-model="grantLevel" :options="LEVEL_OPTIONS" aria-label="授权级别" />
           <UiSelect v-model="grantEffect" :options="EFFECT_OPTIONS" aria-label="授权效果" />
-          <UiButton variant="secondary" size="sm" :disabled="props.busy" @click="requestGrant">
+          <UiButton variant="secondary" size="sm" :disabled="controlsDisabled" @click="requestGrant">
             <Plus :size="14" :stroke-width="1.8" />
             添加
           </UiButton>

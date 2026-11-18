@@ -348,6 +348,7 @@ export interface TreeEntryPayload {
 export interface FsListPayload {
   readonly uri: string
   readonly entries: readonly TreeEntryPayload[]
+  readonly capabilities?: AclCapabilities | null
 }
 
 /** `GET /fs/stat`。目标不存在时接口返回 404 `NOT_FOUND`；`stat` 为 null 只用于并发删除。 */
@@ -358,6 +359,11 @@ export interface FsStatPayload {
     readonly size: number
     readonly updatedAt: string
   } | null
+  /**
+   * 当前身份在这个节点上的有效能力。服务端没有返回时为 `null`，界面不能据此猜成
+   * 任何一档；新服务端应在这里给出 ACL 管理能力。
+   */
+  readonly capabilities?: AclCapabilities | null
 }
 
 /** `GET /health`（架构文档 §17.9）。 */
@@ -505,12 +511,20 @@ export interface MemoryMetaPayload {
 export interface AclPayload {
   readonly uri: string
   readonly mode: AclMode
+  /** 旧服务端没有这个字段；调用方必须归一成 `null` 而不是猜权限。 */
+  readonly capabilities?: AclCapabilities | null
   readonly entries: readonly {
     readonly principal: string
     readonly level: AclLevel
     readonly effect: AclEffect
   }[]
   readonly effective: Readonly<Record<string, readonly AclLevel[]>>
+}
+
+export interface AclCapabilities {
+  readonly read: boolean
+  readonly write: boolean
+  readonly manage: boolean
 }
 
 /**

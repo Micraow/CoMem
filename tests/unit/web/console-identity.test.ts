@@ -14,7 +14,9 @@ import {
   consoleScopeLabel,
   identityHeaders,
   logoutConsole,
+  refreshConsoleIdentity,
   setConsoleIdentity,
+  subscribeConsoleIdentity,
   type ConsoleRequest,
 } from '../../../web/composables/consoleIdentity.js';
 
@@ -212,7 +214,12 @@ describe('身份引导的状态机（GET /bootstrap 优先）', () => {
 
       expect(state).toEqual({
         status: 'ready',
-        identity: { subject: SUBJECT, scopes: ['comem://user/alice'], isAdmin: false },
+        identity: {
+          subject: SUBJECT,
+          scopes: ['comem://user/alice'],
+          isAdmin: false,
+          sharedFolders: [],
+        },
       });
       // 当前身份策略一次，两个候选根各探测一次；组根 404 被跳过。
       expect(calls).toHaveLength(4);
@@ -276,9 +283,101 @@ describe('身份引导的状态机（GET /bootstrap 优先）', () => {
           subject: SUBJECT,
           scopes: ['comem://user/alice', 'comem://group/eng'],
           isAdmin: true,
+          sharedFolders: [],
         },
       });
     } finally {
+      Reflect.deleteProperty(globalThis, 'sessionStorage');
+    }
+  });
+
+  it('新后端直接使用 /auth/me 的 spaces，并通知已挂载的空间选择器', async () => {
+    const storage = new Map<string, string>();
+    Object.defineProperty(globalThis, 'sessionStorage', {
+      value: {
+        getItem: (key: string): string | null => storage.get(key) ?? null,
+        setItem: (key: string, value: string): void => {
+          storage.set(key, value);
+        },
+        removeItem: (key: string): void => {
+          storage.delete(key);
+        },
+      },
+      configurable: true,
+      writable: true,
+    });
+    const calls: string[] = [];
+    const notifications: string[] = [];
+    const unsubscribe = subscribeConsoleIdentity((next) => {
+      if (next.status === 'ready') {
+        notifications.push(...next.identity.scopes);
+      }
+    });
+    try {
+      clearConsoleSession();
+      writeConsoleSession({
+        token: 'v1.test.token',
+        subject: SUBJECT,
+        principals: [SUBJECT],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      const state = await refreshConsoleIdentity(
+        BASE,
+        routedRequest(
+          {
+            [`${BASE}/auth/me`]: {
+              status: 'ok',
+              result: {
+                subject: SUBJECT,
+                principals: [SUBJECT],
+                isAdmin: false,
+                spaces: [
+                  {
+                    scope: 'comem://user/alice',
+                    kind: 'personal',
+                    displayName: 'Alice',
+                    access: 'owner',
+                  },
+                  {
+                    scope: 'comem://group/research',
+                    kind: 'group',
+                    displayName: '研究团队',
+                    access: 'granted',
+                  },
+                ],
+                sharedFolders: [
+                  {
+                    uri: 'comem://user/alice/resources/team-notes',
+                    displayName: '团队资料',
+                  },
+                ],
+              },
+            },
+          },
+          calls,
+        ),
+      );
+
+      expect(state).toMatchObject({
+        status: 'ready',
+        identity: {
+          scopes: ['comem://user/alice', 'comem://group/research'],
+          spaces: [
+            { displayName: 'Alice', access: 'owner' },
+            { displayName: '研究团队', access: 'granted' },
+          ],
+          sharedFolders: [
+            {
+              uri: 'comem://user/alice/resources/team-notes',
+              displayName: '团队资料',
+            },
+          ],
+        },
+      });
+      expect(calls).toEqual([`GET ${BASE}/auth/me`]);
+      expect(notifications).toEqual(['comem://user/alice', 'comem://group/research']);
+    } finally {
+      unsubscribe();
       Reflect.deleteProperty(globalThis, 'sessionStorage');
     }
   });

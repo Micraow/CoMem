@@ -42,10 +42,29 @@ import { fetchConsoleBootstrap, type ConsoleBootstrap } from './consoleBootstrap
 export interface ConsoleIdentity {
   /** 登录用户的主体，形如 `user:alice`。 */
   readonly subject: string
+  /**
+   * `/auth/me` 返回的当前可读空间。`scopes` 保留为所有旧页面使用的地址清单；
+   * 需要显示组名与访问来源的入口直接读这里，不再从 subject / principals 猜。
+   */
+  readonly spaces?: readonly ConsoleSpace[]
+  /** 与服务端空间枚举无关的直接授权目录；进入时不能改写全局当前空间。 */
+  readonly sharedFolders?: readonly ConsoleSharedFolder[]
   /** 该主体可寻址且可读的根；个人根在前。为空表示没有任何可访问的命名空间。 */
   readonly scopes: readonly string[]
   /** 服务端按 `auth.adminUserIds` 与引导管理员策略判定的系统管理员身份。 */
   readonly isAdmin: boolean
+}
+
+export interface ConsoleSpace {
+  readonly scope: string
+  readonly kind: 'personal' | 'group'
+  readonly displayName: string
+  readonly access: 'owner' | 'member' | 'granted'
+}
+
+export interface ConsoleSharedFolder {
+  readonly uri: string
+  readonly displayName: string
 }
 
 /** 身份引导的状态。`pending` 只在插件跑完之前存在，控制台挂载时不会再看到它。 */
@@ -110,6 +129,22 @@ export type ConsoleRequest = (
  * 「两个请求共用一份模块状态」的串号问题。整页刷新时模块重新求值，插件重新拉取。
  */
 let state: ConsoleIdentityState = { status: 'pending' }
+const identityListeners = new Set<(state: ConsoleIdentityState) => void>()
+
+function publishIdentityState(next: ConsoleIdentityState): void {
+  state = next
+  for (const listener of identityListeners) {
+    listener(next)
+  }
+}
+
+/** 侧栏与当前工作区共享同一份身份更新，管理页刷新后无需整页重载。 */
+export function subscribeConsoleIdentity(
+  listener: (state: ConsoleIdentityState) => void,
+): () => void {
+  identityListeners.add(listener)
+  return () => identityListeners.delete(listener)
+}
 
 /** 当前引导状态。`app.vue` 用它决定渲染页面还是整页错误。 */
 export function consoleIdentityState(): ConsoleIdentityState {
@@ -118,22 +153,22 @@ export function consoleIdentityState(): ConsoleIdentityState {
 
 /** 插件拉取成功后调用。 */
 export function setConsoleIdentity(identity: ConsoleIdentity): void {
-  state = { status: 'ready', identity }
+  publishIdentityState({ status: 'ready', identity })
 }
 
 /** 有账号但没有可用会话时调用。 */
 export function setConsoleIdentityUnauthenticated(): void {
-  state = { status: 'unauthenticated' }
+  publishIdentityState({ status: 'unauthenticated' })
 }
 
 /** 服务端说这份安装还没有可登录账号时调用。 */
 export function setConsoleIdentitySetupRequired(bootstrap: ConsoleBootstrap): void {
-  state = { status: 'setup-required', bootstrap }
+  publishIdentityState({ status: 'setup-required', bootstrap })
 }
 
 /** 插件拉取失败后调用。`message` 是给用户看的整页错误。 */
 export function setConsoleIdentityFailure(message: string): void {
-  state = { status: 'failed', message }
+  publishIdentityState({ status: 'failed', message })
 }
 
 /**
@@ -239,8 +274,67 @@ type CurrentIdentityPolicy =
       readonly subject: string;
       readonly principals: readonly string[];
       readonly isAdmin: boolean;
+      /** 新后端直接返回；旧后端没有这个字段，由根探测生成地址清单。 */
+      readonly spaces: readonly ConsoleSpace[] | null;
+      readonly sharedFolders: readonly ConsoleSharedFolder[] | null;
     }
   | { readonly status: 'unauthenticated' }
+
+function spacesOf(value: unknown): readonly ConsoleSpace[] | null {
+  if (value === undefined) {
+    return null
+  }
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const spaces: ConsoleSpace[] = []
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      typeof item['scope'] !== 'string' ||
+      (item['kind'] !== 'personal' &&
+        item['kind'] !== 'group') ||
+      typeof item['displayName'] !== 'string' ||
+      (item['access'] !== 'owner' &&
+        item['access'] !== 'member' &&
+        item['access'] !== 'granted')
+    ) {
+      return null
+    }
+    spaces.push({
+      scope: item['scope'],
+      kind: item['kind'],
+      displayName: item['displayName'],
+      access: item['access'],
+    })
+  }
+  return spaces
+}
+
+function sharedFoldersOf(value: unknown): readonly ConsoleSharedFolder[] | null {
+  if (value === undefined) {
+    return null
+  }
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const folders: ConsoleSharedFolder[] = []
+  for (const item of value) {
+    if (
+      !isRecord(item) ||
+      typeof item['uri'] !== 'string' ||
+      item['uri'] === '' ||
+      typeof item['displayName'] !== 'string'
+    ) {
+      return null
+    }
+    folders.push({
+      uri: item['uri'],
+      displayName: item['displayName'],
+    })
+  }
+  return folders
+}
 
 /**
  * 逐个验证候选根可读。
@@ -345,6 +439,30 @@ async function fetchCurrentIdentityPolicy(
       (principal): principal is string => typeof principal === 'string',
     ),
     isAdmin: result['isAdmin'],
+    spaces: spacesOf(result['spaces']),
+    sharedFolders: sharedFoldersOf(result['sharedFolders']),
+  }
+}
+
+function identityOf(
+  policy: Extract<CurrentIdentityPolicy, { readonly status: 'ok' }>,
+  fallbackScopes: readonly string[],
+): ConsoleIdentity {
+  const sharedFolders = policy.sharedFolders ?? []
+  if (policy.spaces !== null) {
+    return {
+      subject: policy.subject,
+      spaces: policy.spaces,
+      scopes: policy.spaces.map((space) => space.scope),
+      isAdmin: policy.isAdmin,
+      sharedFolders,
+    }
+  }
+  return {
+    subject: policy.subject,
+    scopes: fallbackScopes,
+    isAdmin: policy.isAdmin,
+    sharedFolders,
   }
 }
 
@@ -376,26 +494,72 @@ export async function bootstrapConsoleIdentity(
     return { status: 'unauthenticated' }
   }
 
-  const result = await fetchReadableScopes(
-    baseUrl,
-    request,
-    session.token,
-    policy.subject,
-    policy.principals,
-  )
-  if (result.status === 'unauthenticated') {
-    clearConsoleSession()
-    return { status: 'unauthenticated' }
+  let fallbackScopes: readonly string[] = []
+  if (policy.spaces === null) {
+    const result = await fetchReadableScopes(
+      baseUrl,
+      request,
+      session.token,
+      policy.subject,
+      policy.principals,
+    )
+    if (result.status === 'unauthenticated') {
+      clearConsoleSession()
+      return { status: 'unauthenticated' }
+    }
+    fallbackScopes = result.scopes
   }
 
   return {
     status: 'ready',
-    identity: {
-      subject: policy.subject,
-      scopes: result.scopes,
-      isAdmin: policy.isAdmin,
-    },
+    identity: identityOf(policy, fallbackScopes),
   }
+}
+
+/**
+ * 在工作区进入和管理操作结束后重新读取 `/auth/me`。
+ *
+ * 新后端的 `spaces` 是物化 ACL 的结果，直接决定侧栏可选团队；不能拿本地 principal
+ * 列表或旧缓存猜。旧后端没有 `spaces` 时仍沿用可读根探测，页面照常工作。
+ */
+export async function refreshConsoleIdentity(
+  baseUrl: string,
+  request: ConsoleRequest,
+): Promise<ConsoleIdentityState> {
+  const session = readConsoleSession()
+  if (session === null || isConsoleSessionExpired(session)) {
+    clearConsoleSession()
+    setConsoleIdentityUnauthenticated()
+    return { status: 'unauthenticated' }
+  }
+
+  const policy = await fetchCurrentIdentityPolicy(baseUrl, request, session)
+  if (policy.status === 'unauthenticated') {
+    clearConsoleSession()
+    setConsoleIdentityUnauthenticated()
+    return { status: 'unauthenticated' }
+  }
+
+  let fallbackScopes: readonly string[] = []
+  if (policy.spaces === null) {
+    const result = await fetchReadableScopes(
+      baseUrl,
+      request,
+      session.token,
+      policy.subject,
+      policy.principals,
+    )
+    if (result.status === 'unauthenticated') {
+      clearConsoleSession()
+      setConsoleIdentityUnauthenticated()
+      return { status: 'unauthenticated' }
+    }
+    fallbackScopes = result.scopes
+  }
+
+  const identity = identityOf(policy, fallbackScopes)
+  setConsoleIdentity(identity)
+  return { status: 'ready', identity }
 }
 
 /** 登录响应解出来的会话。 */

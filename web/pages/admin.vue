@@ -40,7 +40,10 @@ import { Copy, Plus, ShieldCheck } from 'lucide-vue-next'
 
 import { ApiClientError, errorMessageOf, isForbidden, useApi } from '~/composables/useApi'
 import { useToast } from '~/composables/useToast'
-import { consoleIdentityState } from '~/composables/consoleIdentity'
+import {
+  consoleIdentityState,
+  refreshConsoleIdentity,
+} from '~/composables/consoleIdentity'
 import { CLIPBOARD_DENIED_MESSAGE, copyToClipboard } from '~/utils/clipboard'
 import { isRecord } from '~/utils/record'
 import type { GroupRowPayload } from '~/components/domain/GroupTable.vue'
@@ -105,6 +108,7 @@ const PAGE_SIZE = 100
 
 const api = useApi()
 const toast = useToast()
+const runtimeConfig = useRuntimeConfig()
 const identityState = consoleIdentityState()
 const currentUserId = computed(() => {
   const subject =
@@ -198,6 +202,18 @@ const membersError = ref<string | null>(null)
 const memberInput = ref('')
 const addingMember = ref(false)
 const removingMember = ref<string | null>(null)
+
+/** 组成员、owner 与显示名变化会改变可读空间，侧栏刷新同一份身份状态。 */
+async function refreshIdentitySpaces(): Promise<void> {
+  try {
+    await refreshConsoleIdentity(
+      String(runtimeConfig.public.apiBase),
+      (url, init) => fetch(url, init),
+    )
+  } catch (caught) {
+    toast.show('warning', `空间列表暂时没有刷新：${errorMessageOf(caught)}`)
+  }
+}
 
 const detailOpen = computed({
   get: () => detailGroup.value !== null,
@@ -511,6 +527,7 @@ async function saveGroup(): Promise<void> {
     }
     groupDialogOpen.value = false
     await loadGroups()
+    await refreshIdentitySpaces()
   } catch (caught) {
     toast.show('error', errorMessageOf(caught))
   } finally {
@@ -551,6 +568,7 @@ async function confirmDelete(): Promise<void> {
     )
     pendingDelete.value = null
     await Promise.all([loadUsers(), loadGroups()])
+    await refreshIdentitySpaces()
     if (detailGroup.value !== null) {
       await loadMembers(detailGroup.value.id)
     }
@@ -597,6 +615,7 @@ async function addMember(): Promise<void> {
     memberInput.value = ''
     toast.show('success', `已把 ${userId} 加入 ${group.id}`)
     await Promise.all([loadMembers(group.id), loadGroups()])
+    await refreshIdentitySpaces()
   } catch (caught) {
     toast.show('error', errorMessageOf(caught))
   } finally {
@@ -616,6 +635,7 @@ async function removeMember(userId: string): Promise<void> {
     )
     toast.show('success', `已把 ${userId} 移出 ${group.id}`)
     await Promise.all([loadMembers(group.id), loadGroups()])
+    await refreshIdentitySpaces()
   } catch (caught) {
     toast.show('error', errorMessageOf(caught))
   } finally {

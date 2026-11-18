@@ -20,9 +20,14 @@ import {
   Terminal,
   Users,
 } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 
-import { consoleIdentityState, consoleScopeLabel } from '~/composables/consoleIdentity'
+import {
+  consoleIdentityState,
+  consoleScopeLabel,
+  subscribeConsoleIdentity,
+} from '~/composables/consoleIdentity'
 import { selectScopeRoot, useScopeRoot } from '~/composables/useApi'
 import { isActivePath, navGroupsFor, type NavIconName } from '~/utils/nav'
 
@@ -42,21 +47,32 @@ const NAV_ICONS: Record<NavIconName, Component> = {
   account: CircleUserRound,
 }
 
-const state = consoleIdentityState()
-const identity = state.status === 'ready' ? state.identity : null
+const state = ref(consoleIdentityState())
+const identity = computed(() =>
+  state.value.status === 'ready' ? state.value.identity : null,
+)
 const scopeRoot = useScopeRoot()
 const scopeOptions = computed(() =>
-  (identity?.scopes ?? []).map((scope) => ({
-    value: scope,
-    label: consoleScopeLabel(scope, identity?.subject ?? ''),
-  })),
+  (identity.value?.spaces ?? []).length > 0
+    ? (identity.value?.spaces ?? []).map((space) => ({
+        value: space.scope,
+        label: space.displayName,
+      }))
+    : (identity.value?.scopes ?? []).map((scope) => ({
+        value: scope,
+        label: consoleScopeLabel(scope, identity.value?.subject ?? ''),
+      })),
 )
 const hasScopeChoice = computed(() => scopeOptions.value.length > 1)
 const currentScopeLabel = computed(() => {
-  if (identity === null || scopeRoot.value === '') {
+  const currentIdentity = identity.value
+  if (currentIdentity === null || scopeRoot.value === '') {
     return '暂无可访问空间'
   }
-  return consoleScopeLabel(scopeRoot.value, identity.subject)
+  return (
+    currentIdentity.spaces?.find((space) => space.scope === scopeRoot.value)?.displayName ??
+    consoleScopeLabel(scopeRoot.value, currentIdentity.subject)
+  )
 })
 const scopeModel = computed({
   get: () => scopeRoot.value,
@@ -65,7 +81,17 @@ const scopeModel = computed({
   },
 })
 const route = useRoute()
-const navGroups = computed(() => navGroupsFor(identity?.isAdmin === true))
+const navGroups = computed(() => navGroupsFor(identity.value?.isAdmin === true))
+
+let unsubscribeIdentity: (() => void) | undefined
+onMounted(() => {
+  unsubscribeIdentity = subscribeConsoleIdentity((next) => {
+    state.value = next
+  })
+})
+onBeforeUnmount(() => {
+  unsubscribeIdentity?.()
+})
 </script>
 
 <template>
