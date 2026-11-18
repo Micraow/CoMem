@@ -292,7 +292,13 @@ describe('LLM 调用持久化', () => {
 
     await summarizer.generate({
       uri: Uri.parse('comem://user/alice/memories'),
-      children: [],
+      children: [{
+        uri: Uri.parse('comem://user/alice/memories/profile.md'),
+        name: 'profile.md',
+        kind: 'document',
+        status: 'active',
+        abstract: '用户画像。',
+      }],
     });
 
     expect(service.listCalls({ subject: 'user:alice' }).items[0]).toMatchObject({

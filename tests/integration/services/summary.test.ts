@@ -652,20 +652,75 @@ describe('degraded', () => {
     expect(summary.overview).not.toContain('SECRET_ARCHIVED_SUMMARY');
   });
 
-  it('LlmSummarizer 调模型，结果带 degraded: false', async () => {
+  it('LlmSummarizer 对会话导航和空目录使用规则结果，不调用模型且不标记降级', async () => {
+    const provider = new FakeLlmProvider([]);
+    const summarizer = new LlmSummarizer(new LlmService({ provider, logger }));
+    const sessionInput: SummaryInput = {
+      uri: Uri.parse(`${SCOPE_ROOT}/projects/comem/sessions/sess_1`),
+      children: [
+        {
+          uri: Uri.parse(`${SCOPE_ROOT}/projects/comem/sessions/sess_1/history`),
+          name: 'history',
+          kind: 'directory',
+          status: 'active',
+          abstract: 'SECRET_NAVIGATION_SUMMARY',
+        },
+      ],
+    };
+
+    const navigation = await summarizer.generate(sessionInput);
+    const empty = await summarizer.generate({
+      uri: Uri.parse(PREFERENCES),
+      children: [],
+    });
+
+    expect(navigation.overview).toContain('history：SECRET_NAVIGATION_SUMMARY');
+    expect(navigation.degraded).toBe(false);
+    expect(empty.overview).toContain('（这个目录是空的。）');
+    expect(empty.degraded).toBe(false);
+    expect(provider.calls).toHaveLength(0);
+    expect(JSON.stringify(provider.calls)).not.toContain('SECRET_NAVIGATION_SUMMARY');
+  });
+
+  it('LlmSummarizer 即使归档根为空也保留语义模型调用', async () => {
+    const provider = new FakeLlmProvider([{ text: '# archive_001\n\n归档摘要。' }]);
+    const summarizer = new LlmSummarizer(new LlmService({ provider, logger }));
+
+    const summary = await summarizer.generate({
+      uri: Uri.parse(ARCHIVE),
+      children: [],
+    });
+
+    expect(summary.abstract).toBe('归档摘要。');
+    expect(summary.degraded).toBe(false);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0]?.options?.purpose).toBe('archive_summary');
+  });
+
+  it('LlmSummarizer 对实质目录继续调模型，结果带 degraded: false', async () => {
     const provider = new FakeLlmProvider([
       { text: '# preferences\n\n模型摘要。\n\n## 快速导航\n\n- `a.md`' },
       { text: '# preferences\n\n第二次摘要。' },
     ]);
     const summarizer = new LlmSummarizer(new LlmService({ provider, logger }));
+    const children: SummaryInput['children'] = [
+      {
+        uri: Uri.parse(STYLE),
+        name: 'code-style.md',
+        kind: 'document',
+        status: 'active',
+        abstract: '代码风格。',
+      },
+    ];
 
-    const first = await summarizer.generate({ uri: Uri.parse(PREFERENCES), children: [] });
+    const first = await summarizer.generate({ uri: Uri.parse(PREFERENCES), children });
     expect(first.degraded).toBe(false);
     expect(first.abstract).toBe('模型摘要。');
     expect(provider.calls).toHaveLength(1);
 
-    const second = await summarizer.generate({ uri: Uri.parse(PREFERENCES), children: [] });
+    const second = await summarizer.generate({ uri: Uri.parse(PREFERENCES), children });
     expect(second.abstract).toBe('第二次摘要。');
+    expect(provider.calls).toHaveLength(2);
   });
 
   it('降级标记写进摘要文件的 frontmatter', async () => {

@@ -93,6 +93,7 @@ function dialogueFacts(dialogue: SummaryInput['dialogue']): {
 export class LlmSummarizer implements SummaryGenerator {
   readonly #llm: LlmService;
   readonly #options: SummarizerOptions;
+  readonly #deterministic = new RuleSummarizer(false);
 
   constructor(llm: LlmService, options: SummarizerOptions = DEFAULT_SUMMARIZER_OPTIONS) {
     this.#llm = llm;
@@ -100,6 +101,9 @@ export class LlmSummarizer implements SummaryGenerator {
   }
 
   async generate(input: SummaryInput): Promise<DirectorySummary> {
+    if (isDeterministicDirectory(input)) {
+      return this.#deterministic.generate(input);
+    }
     const prompt = buildSummaryPrompt({
       uri: input.uri,
       children: input.children,
@@ -120,12 +124,30 @@ export class LlmSummarizer implements SummaryGenerator {
 }
 
 /**
- * 断网降级的摘要生成器（§9.2 的实现 2）。
+ * 会话导航目录只承载路径导航，没有需要模型归纳的正文；空目录也只有一个确定结论。
+ * 归档根保留语义摘要，即使当前没有直接子项也继续走配置的生成器。
+ */
+function isDeterministicDirectory(input: SummaryInput): boolean {
+  if (isArchiveRoot(input.uri)) return false;
+  if (input.children.length === 0) return true;
+  const categoryIndex = input.uri.segments[0] === 'projects' ? 2 : 0;
+  return input.uri.segments[categoryIndex] === 'sessions';
+}
+
+/**
+ * 规则摘要生成器（§9.2 的实现 2）。
  *
  * 不调模型，纯字符串拼接：一级标题 + 每个直接子节点一行「名字：摘要首句」。
- * 结果恒带 `degraded: true`——静默降级等于骗人（§17.9）。
+ * 默认用于断网降级并带 `degraded: true`；`LlmSummarizer` 对会话导航和空目录
+ * 会以 `degraded: false` 复用同一个实现，因为这些结果本来就是确定性的。
  */
 export class RuleSummarizer implements SummaryGenerator {
+  readonly #degraded: boolean;
+
+  constructor(degraded = true) {
+    this.#degraded = degraded;
+  }
+
   async generate(input: SummaryInput): Promise<DirectorySummary> {
     const dialogue = dialogueFacts(input.dialogue);
     const childLines =
@@ -147,6 +169,6 @@ export class RuleSummarizer implements SummaryGenerator {
     ];
     const lines = [...dialogueLines, ...childLines];
     const overview = [`# ${ruleTitle(input.uri)}`, '', ...lines].join('\n');
-    return { abstract: extractAbstract(overview), overview, degraded: true };
+    return { abstract: extractAbstract(overview), overview, degraded: this.#degraded };
   }
 }

@@ -1587,14 +1587,23 @@ messages.jsonl”的空材料覆盖已生成的概览。
 原始 JSONL。规则生成器从材料中保留首条用户意图、末条助手答复和直接子节点，继续明确
 标记 `degraded: true`。
 
+**会话导航目录和空目录不调用模型。** 即使用户配置
+`summary.generator: llm`，scope 根或项目根下的 `sessions/` 目录本身及其后代
+（归档根除外），以及没有任何直接子项的目录，都直接使用规则摘要。结果是预期中的
+确定性输出，`degraded: false`，不会把正常路径当成故障；它也不会进入模型请求，
+因此子项摘要或会话导航信息不会被发送给供应商。`archive_NNN/` 归档根仍按原语义
+调用摘要模型，即使当前没有直接子项也不降为规则摘要。其他有实质子项的目录继续按
+`summary.generator` 配置生成。
+
 **存量目录不会自动获得新排序。** 已生成且仍新鲜的 `experiences/.overview.md` 等父目录
 摘要要等正常失效重算，或运维显式重建对应目录；部署本身不批量扫描、不触碰原始文件。
 
 `SummaryGenerator` 是 Strategy，两个实现：
 
 - `LlmSummarizer`：调 `LlmProvider`，按固定结构产出（标题、简述、快速导航、逐条详述）
-- `RuleSummarizer`：断网降级。有归档对话时保留首条用户意图与末条助手答复，再取
-  子节点名字 + 各自摘要首句；不调模型
+- `RuleSummarizer`：断网降级或上述预期确定性项。有归档对话时保留首条用户意图与
+  末条助手答复，再取子节点名字 + 各自摘要首句；不调模型。断网降级时
+  `degraded: true`，预期确定性项由 `LlmSummarizer` 内部以 `degraded: false` 调用
 
 两者实现同一个 `SummaryGenerator` 接口（`domain/summary.ts`），`services/summary.ts` 按配置选择。降级不是静默的：结果带 `degraded: true`，控制台显示，`health` 工具报告。
 
