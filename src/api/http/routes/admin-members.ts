@@ -1,7 +1,6 @@
 /**
  * 组成员关系（`/admin/groups/{id}/members*`）。
  *
- * 函数体与拆分前逐字相同，只加了 `ok` 的类型实参与 import。
  */
 
 import type { FastifyInstance } from 'fastify';

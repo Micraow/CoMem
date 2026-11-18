@@ -610,7 +610,7 @@ curl -sS -X DELETE http://127.0.0.1:1933/api/v1/admin/api-keys/key_xxxxxxxx \
   不在 HTTP 管理面）。
 - **召回账本是缓存，删账号 / 组时一起删。** `_meta/recall/*.recall_log.json` 记的是
   「这个作用域投过哪些 URI」。`DELETE /admin/users/{id}` 与 `/admin/groups/{id}` 在撤权
-  之前先删对应账本（`src/api/http/routes/admin-users.ts:119`、`src/api/http/routes/admin-groups.ts:181`），同 ID 重建的账号不会继承
+  之前先删对应账本（`src/api/http/routes/admin-users.ts`、`src/api/http/routes/admin-groups.ts`），同 ID 重建的账号不会继承
   去重状态。账本是缓存，删除的代价只是「多投一次」；先删它，失败时什么都没动。
 - **`node_embedding` 按 URI 留旧向量。** 向量行带 `content_digest`：正文变了就重算，
   正文没变就复用。它只回答「这段正文的向量是什么」，不携带授权信息，所以删账号不清
@@ -1126,7 +1126,7 @@ docker run --rm comem:local node -e "require('node:sqlite'); require('sqlite-vec
 
 **容器内外结果一致**（`1968 passed | 1 skipped`，105 个文件）。`resolveDataDir` 仍用
 `existsSync('/.dockerenv') || pid === 1` 判定容器，但 `loadConfig` 把 `container` /
-`isRoot` 做成可注入参数（`src/config/index.ts:212`），`tests/unit/config.test.ts` 的
+`isRoot` 做成可注入参数（`src/config/index.ts`），`tests/unit/config.test.ts` 的
 `dataDir` 用例显式传 `container: false`（`:132`）、`container: true`（`:156`）、
 `isRoot: true`（`:166`），断言与运行环境无关——之前那 3 条「容器里 dataDir 推导成
 XDG 路径」的失败因此不再出现。
@@ -2266,11 +2266,11 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
     逐条去重，v1 不做。
 
 18. **`ingest_cursor` 不随账号删除。** 游标表按 `(harness, native_session_id)` 存
-    `session_uri` 与 `cursor_value` 列，行类型 `IngestCursorRow`（`src/adapters/sqlite/ingest-cursor-repository.ts:25`），
+    `session_uri` 与 `cursor_value` 列，行类型 `IngestCursorRow`（`src/adapters/sqlite/ingest-cursor-repository.ts`），
     而 `IdentityService.deleteUser` 只清身份行、成员关系、API Key、组 owner 与召回账本
-    （`src/services/identity.ts:197`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
-    原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest/session-ingest.ts:52`），
-    读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest/session-ingest.ts:109`），新账号的会话
+    （`src/services/identity.ts`），不碰这张表。删账号 → 重建同 ID → 再导入**同一个
+    原生会话**时，游标仍在末尾：`readMessages` 从游标之后读（`src/services/ingest/session-ingest.ts`），
+    读到 0 条消息，整段会话被记成「跳过」（`src/services/ingest/session-ingest.ts`），新账号的会话
     目录里没有消息。恢复：删掉对应行再重跑导入
     （`DELETE FROM ingest_cursor WHERE harness = '...' AND native_session_id = '...'`，
     见「导入本机 Agent 对话」的幂等一段）。
@@ -2311,7 +2311,7 @@ COMEM_SERVER_PORT=1934 COMEM_WEB_PORT=3082 pnpm dev --data-dir ./local/preview/d
     win32-x64,linux-arm64).`。三条都没有降级路径：向量检索是 `retrieval.engine =
     vector | hybrid` 的唯一实现，加载失败直接抛错，不会静默退回 FTS。
 
-24. **锁文件依赖硬链接。** `src/adapters/fs/lock.ts:268` 用 `link()` 原子创建
+24. **锁文件依赖硬链接。** `src/adapters/fs/lock.ts` 用 `link()` 原子创建
     `.comem-lock`，只有 `EEXIST` 被当成「锁被占用」；其它 errno 原样抛出，不重试、
     不降级。**NFS / CIFS** 上 `link` 可能返回
     `EPERM: operation not permitted, link '...comem-lock.tmp' -> '...comem-lock'`

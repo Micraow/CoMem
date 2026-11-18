@@ -2197,7 +2197,7 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 是刻意的：TTL 问「这条记忆还有没有被用到」，账本问「下一轮还用不用再发」。
 
 **`rule_search` 有一处同类的残余。** 它的相对阈值（默认 0.65）在工具层生效
-（`src/api/mcp/tools/rule-search.ts:89`），而记账发生在服务层的 `findWithDiagnostics`
+（`src/api/mcp/tools/rule-search.ts`），而记账发生在服务层的 `findWithDiagnostics`
 （`services/retrieval/service.ts`）：被阈值裁掉、没进返回文本的规则也会记一次。上界是 `RULE_LIMIT`（5）条，且被裁掉的规则不会
 再随后的 `read` 续一次，量级可以接受；要消掉它得给 `find` 加一个「不记账」的入口，
 那是一个只为工具层服务的开关，不值。
@@ -2887,10 +2887,10 @@ memories/preferences/.history/code-style.md--20261110T022746123Z.md
 **`.history` 不参与目录摘要。** 每次覆盖写都会在 `.history` 新增文件；照常传播会让每次
 覆盖多出两次 LLM 摘要调用（`.history` 目录与它上面的类型目录），而版本文件不是给检索用
 的内容。`SummaryService` 对路径里含 `.history` 的目录直接返回 `unchanged`，摘要传播在
-那里停（`src/services/summary/refresh.ts:173`）。
+那里停（`src/services/summary/refresh.ts`）。
 
 **`reconcile` 重放必须带上 `valid_*`。** 从磁盘重建索引行时，有效期从 frontmatter 重新
-解析（`src/services/reconcile.ts:372`），不取旧行。漏掉这一步（或退回只重放 status 与
+解析（`src/services/reconcile.ts`），不取旧行。漏掉这一步（或退回只重放 status 与
 正文的旧实现）会让 `valid_until` 变成 NULL：一份已经失效的历史版本在重放之后重新出现在
 `find` / `search` 里。`reindex` 整行覆盖 `node`，所以这是现有实现里**唯一**会静默破坏
 「检索只看当前值」这条不变量的路径——写路径的 `parseValidityInstant` 与索引观察者的
@@ -3776,7 +3776,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 - 每张 Hook 事件卡里的「后台处理」行**并成全局一行**：后台耗时按阶段，同一份进程级快照不属于任何事件（§17.2）。
 - 「模型成本累计」卡片在没配 `providers.llm.default.pricing` 时显示「未配置单价，成本不可计算」，不显示 `$0.0000`；配了单价时真实花费 0 才显示 0（§17.4）。
 - 任务表与会话页**没有重试按钮**：`POST /tasks/{id}/retry` 只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期），界面上永远点不到一个能重试的行；重启会把租约过期的任务重置回排队。要重试只能走接口。
-- 会话页**没有「回收记录」**：`TaskService.recover()` 在启动时把租约过期的 `running` 重置回 `pending`，只返回重置条数（`bootstrap/main.ts:134` 把它记进一条日志）；`task` 表不留回收历史，也没有端点返回逐条记录。控制台只能看到任务当前状态——被回收的任务重新出现在待处理里，但不显示「它是被回收的」。
+- 会话页**没有「回收记录」**：`TaskService.recover()` 在启动时把租约过期的 `running` 重置回 `pending`，只返回重置条数（`bootstrap/main.ts` 把它记进一条日志）；`task` 表不留回收历史，也没有端点返回逐条记录。控制台只能看到任务当前状态——被回收的任务重新出现在待处理里，但不显示「它是被回收的」。
 - 概览页「最近任务」改名「待处理任务」，并删掉「已完成 / 失败」两个状态文案：`GET /tasks` 不返回这两种状态。
 - 文件详情里**文档的 L1「概览」档删掉**：`GET /content/overview` 对 document 恒返回 `overview: null`，前端没有合成逻辑；目录的 L1 是真实的（来自摘要文件），保留。
 - 记忆复核页的**「置信度」徽章删掉**：`confidence` 只出现在查询改写的结果里（§8.8），抽取产出的记忆没有这个字段，徽章从来不会显示。

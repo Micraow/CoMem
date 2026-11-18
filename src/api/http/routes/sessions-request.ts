@@ -2,7 +2,6 @@
  * 会话请求解析与参数校验。
  *
  * 这里只做请求解析与参数校验，不碰响应形状——响应 DTO 在 `sessions.ts` 顶部。
- * 函数体与拆分前逐字相同，只改了 import 与导出。
  */
 
 import { userScopeOf } from '../../../domain/acl.js';

@@ -221,7 +221,7 @@ function findOptions(overrides: Partial<FindOptions> = {}): FindOptions {
 describe('engine: fts5', () => {
   const DOC = 'comem://user/alice/mem/db.md';
 
-  it('回归基线：命中形状与查询参数与接入向量前逐字一致', async () => {
+  it('回归基线：命中形状与查询参数保持稳定', async () => {
     await seed(DOC, '上下文记忆数据库的设计');
     const service = createService({ engine: 'fts5' });
     const search = vi.spyOn(index, 'search');
@@ -256,6 +256,7 @@ describe('engine: fts5', () => {
       asOf: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
       // 服务层默认与 MCP / HTTP 共用 `services/retrieval/budget.ts` 的 10。
       limit: 10,
+      returnCandidates: true,
     });
   });
 

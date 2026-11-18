@@ -53,32 +53,8 @@
  * 超了记 `warn` 并返回已统计数。画像格式自查（`profileFormatHealth`）同样要读文件
  * 正文，上界 `PROFILE_CHECK_LIMIT`，超了 `truncated: true` 并记 `warn`。
  *
- * ## 5. 为什么这里能直接写 SQL
- *
- * `services/` 不能 import `node:sqlite`（§4.2），而健康度与 `/metrics` 的计数是
- * 「一条 SELECT 就够」的只读聚合。为它们各建一个仓储只会把同一张表的读路径拆散，
- * 所以和 `SummaryService` 的 `SummaryDatabase` 一样，声明最小结构端口
- * `ObservabilityDatabase`，实例由 `bootstrap/` 注入 `DatabaseSync`。写入路径仍然
- * 走 `RequestLogRepository`——写要事务与列映射，读不要。
- *
- * ## 6. 拆分后的模块（本文件只是门面，导出面与原实现一致）
- *
- * 实现按职责放在 `services/observability/` 下，调用方的 import 路径
- * （`services/observability.js`）与导出符号都不变：
- *
- * - `contracts.ts`：公开契约（只读数据库端口、Hook 报告、归因报告、请求记录、采样）
- * - `deps.ts`：`ObservabilityServiceDeps`（装配契约）
- * - `queries.ts`：`NODE_SELF_ROW` 谓词与单行聚合
- * - `timing.ts`：阶段计时、请求作用域、归因
- * - `request-record.ts`：`request_log` 写入与请求日志
- * - `hook-overhead.ts`：Hook 上报白名单、最近一次的四阶段耗时
- * - `metrics.ts`：`/metrics` 文本渲染与请求耗时累加器
- * - `llm-usage.ts`：模型用量、成本与计价开关的样本
- * - `health.ts`：健康度聚合
- * - `profile-format.ts`：画像格式自查
- * - `service.ts`：`ObservabilityService` 的装配壳
- *
- * 这个文件只做 re-export：改实现不要加在这里，读代码从 `service.ts` 进。
+ * 实现按职责放在 `services/observability/` 下；对外导出面与 import 路径不变。
+ * 只读端口的存在理由见 `observability/contracts.ts`，阶段计时见 `observability/timing.ts`。
  */
 
 export type {
