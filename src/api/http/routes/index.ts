@@ -18,6 +18,7 @@ import type { Authorizer } from '../../../services/authorizer.js';
 import type { DreamerService } from '../../../services/dreamer/service.js';
 import type { EmbeddingService } from '../../../services/embedding.js';
 import type { FileSystemService } from '../../../services/filesystem.js';
+import type { GroupNamespaceService } from '../../../services/group-namespace.js';
 import type { IdentityService } from '../../../services/identity.js';
 import type { LlmService } from '../../../services/llm.js';
 import type { MemoryService } from '../../../services/memory.js';
@@ -75,6 +76,7 @@ export interface HttpRouteServices {
   readonly filesystem: FileSystemService;
   /** 管理面（`getAcl` / `setAcl` / grant / revoke）。 */
   readonly acl: AclService;
+  readonly groupNamespace: GroupNamespaceService;
   /**
    * 写路径的授权端口（与 `FileSystemService` 同一实例）。
    *

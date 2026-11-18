@@ -12,6 +12,7 @@ import { dirname } from 'node:path';
 import { ReconcileLog } from '../../adapters/fs/reconcile-log.js';
 import { ContextAssembler } from '../../services/context-assembler.js';
 import { FileSystemService } from '../../services/filesystem.js';
+import { GroupNamespaceService } from '../../services/group-namespace.js';
 import { IndexObserver } from '../../services/index-observer.js';
 import { RecallLedger } from '../../services/recall-ledger.js';
 import type { LedgerStore } from '../../services/recall-ledger.js';
@@ -70,6 +71,7 @@ export interface Retrieval {
   readonly assembler: ContextAssembler;
   readonly reconcileLog: ReconcileLog;
   readonly indexObserver: IndexObserver;
+  readonly groupNamespace: GroupNamespaceService;
   readonly authorizer: InheritingAuthorizer;
   readonly filesystem: FileSystemService;
   readonly ledger: RecallLedger;
@@ -142,17 +144,29 @@ function createRetrievalCore(
   return { summary, assembler, reconcileLog, indexObserver, authorizer };
 }
 
-export function createRetrieval(
+export async function createRetrieval(
   core: Foundation,
   models: Models,
   access: Access,
-): Retrieval {
+): Promise<Retrieval> {
   const { summary, assembler, reconcileLog, indexObserver, authorizer } =
     createRetrievalCore(core, models, access);
   const { config, logger, dataDir, store, metadata, locks, index, nodes, permissions } = core;
   const { taskRepository, vectors } = core;
   const { llm, embedding, rerankProvider, rerankConfig } = models;
   const { acl } = access;
+  const { groupRepository } = core;
+
+  const groupNamespace = new GroupNamespaceService({
+    store,
+    acl,
+    observer: indexObserver,
+    logger,
+  });
+  // 启动时修复旧版本留下的组：它们可能只有 ACL 或只有物理目录，也可能两者都缺。
+  await groupNamespace.ensureAll(
+    groupRepository.list({ limit: groupRepository.count() }),
+  );
 
   // 访问计数的唯一写入口：检索命中与按 URI 读取共用同一条 UPDATE。`SearchService`
   // 内部已经 catch，这个闭包不能写成 `async`（返回的 Promise 会被丢掉，拒绝就没人
@@ -239,6 +253,7 @@ export function createRetrieval(
     summary, assembler,
     reconcileLog,
     indexObserver,
+    groupNamespace,
     authorizer,
     filesystem,
     ledger,

@@ -49,24 +49,26 @@ export async function materializeSessionPermissions(
 }
 
 /**
- * 通知「`messages.jsonl` 已写入」。
+ * 通知「节点已写入」。
  *
  * 与 `FileSystemService.#notifyWritten` 同一时序：先落盘、再通知。观察者失败只记
  * 日志——文件已经是真相，回滚反而丢数据；索引与权限是派生数据，靠对账修复（§7）。
  */
 export async function notifyNodeWritten(
   ports: HookPorts,
-  messagesUri: Uri,
+  uri: Uri,
+  kind: 'file' | 'directory' = 'file',
 ): Promise<void> {
   const observer = ports.observer;
   if (observer === undefined) {
     return;
   }
   try {
-    await observer.onNodeWritten(messagesUri, 'file');
+    await observer.onNodeWritten(uri, kind);
   } catch (error) {
-    ports.logger.error('会话消息写入后维护索引失败，已忽略。', {
-      uri: messagesUri.toString(),
+    ports.logger.error('会话节点写入后维护索引失败，已忽略。', {
+      uri: uri.toString(),
+      kind,
       error: error instanceof Error ? error.message : String(error),
     });
   }

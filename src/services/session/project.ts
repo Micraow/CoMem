@@ -11,6 +11,7 @@ import { projectScopeOf } from '../../domain/project.js';
 import type { SessionMeta } from '../../domain/session.js';
 import type { Uri } from '../../domain/uri.js';
 
+import { notifyNodeWritten } from './hooks.js';
 import type { SessionPorts } from './ports.js';
 import { requireSession } from './storage.js';
 
@@ -53,6 +54,40 @@ export function projectBindingOf(
 }
 
 /**
+ * 建立项目作用域的固定目录。
+ *
+ * 文件树读的是磁盘目录，再按 `node_permission` 过滤。项目目录若等到阶段二提交才
+ * 创建，用户刚把会话绑定到项目时会在树里完全看不到它。这里统一建立并通知
+ * 观察者，让创建、补绑和后续追加消息都收敛到同一套目录结构。
+ */
+export async function prepareProjectScope(
+  ports: SessionPorts,
+  projectScopeUri: Uri,
+): Promise<void> {
+  const projectsDirectory = projectScopeUri.parent();
+  if (projectsDirectory?.name !== 'projects') {
+    throw new ComemError(
+      'INVALID_ARGUMENT',
+      `项目目录必须是个人根下的 projects/{id}：${projectScopeUri.toString()}`,
+      { projectScopeUri: projectScopeUri.toString() },
+    );
+  }
+
+  const directories = [
+    projectsDirectory,
+    projectScopeUri,
+    projectScopeUri.child('memories'),
+    projectScopeUri.child('resources'),
+  ] as const;
+  for (const directory of directories) {
+    await ports.store.mkdir(directory, { recursive: true });
+  }
+  for (const directory of directories) {
+    await notifyNodeWritten(ports, directory, 'directory');
+  }
+}
+
+/**
  * 在一个已经持有会话 `TREE` 锁的读写路径中确保 projectId 一致。
  *
  * `requestedProjectId` 缺省时不主动绑定；已有绑定原样返回。已有绑定与请求不同
@@ -69,6 +104,8 @@ export async function ensureProjectBinding(
       return { meta };
     }
     const binding = projectBindingOf(sessionUri, meta.projectId);
+    // 修复旧版本只落 projectId、尚未创建目录的会话；幂等，重复写入只做 stat/upsert。
+    await prepareProjectScope(ports, binding.projectScopeUri);
     return {
       meta,
       projectId: binding.projectId,
@@ -89,6 +126,7 @@ export async function ensureProjectBinding(
     );
   }
 
+  await prepareProjectScope(ports, binding.projectScopeUri);
   const nextMeta =
     meta.projectId === binding.projectId ? meta : { ...meta, projectId: binding.projectId };
   if (nextMeta !== meta) {

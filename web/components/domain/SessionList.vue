@@ -62,6 +62,7 @@ export interface SessionMessagePayload {
 export interface SessionSummaryPayload {
   readonly id: string
   readonly uri: string
+  readonly projectId?: string
   readonly status: SessionStatus
   readonly messageCount: number
   readonly lastCommitAt: string | null
@@ -128,7 +129,7 @@ function toDisplayPart(part: SessionPartPayload): DisplayPart {
 </script>
 
 <script setup lang="ts">
-import { Archive, CheckCircle2, ChevronRight, MessageSquare } from 'lucide-vue-next'
+import { Archive, CheckCircle2, ChevronRight, FolderGit2, MessageSquare } from 'lucide-vue-next'
 
 import {
   ApiClientError,
@@ -138,6 +139,7 @@ import {
 } from '~/composables/useApi'
 
 import { formatDateTimeWithSeconds, formatRelativeTime } from '~/utils/format'
+import { projectRouteOf } from '~/utils/projectRoute'
 import { sessionArchiveRouteOf } from '~/utils/sessionArchive'
 
 const props = withDefaults(
@@ -285,6 +287,18 @@ function commitTitleOf(session: SessionSummaryPayload): string {
           <UiBadge :variant="session.status === 'open' ? 'solid' : 'outline-faint'" size="sm">
             {{ sessionStatusLabel(session.status) }}
           </UiBadge>
+
+          <NuxtLink
+            v-if="session.projectId"
+            class="session__project"
+            :to="projectRouteOf(session.projectId, scopeRoot) ?? '/files'"
+            :aria-label="`查看项目 ${session.projectId}`"
+            :title="`查看项目 ${session.projectId}`"
+          >
+            <FolderGit2 :size="13" :stroke-width="1.7" aria-hidden="true" />
+            <span class="session__project-label">项目</span>
+            <span>{{ session.projectId }}</span>
+          </NuxtLink>
 
           <span class="session__count">待提交 {{ session.messageCount }} 条</span>
 
@@ -477,6 +491,38 @@ function commitTitleOf(session: SessionSummaryPayload): string {
   font-size: 13px;
   color: var(--label-3);
   font-variant-numeric: tabular-nums;
+}
+
+.session__project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+  color: var(--label-2);
+  font-size: 12px;
+  text-decoration: none;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.session__project-label {
+  flex: 0 0 auto;
+  color: var(--label-3);
+  font-size: 11px;
+}
+
+.session__project > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session__project:hover {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .session__time {

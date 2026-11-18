@@ -52,14 +52,20 @@ export function createApi(
   const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository, localInference } = core;
   const { memoryLink } = core;
   const { acl, subject, groups, identity: identityService, auth: authService } = access;
-  const { summary, filesystem, task, session, assembler, ledger, search, indexObserver, llm, embedding } =
+  const { summary, filesystem, task, session, assembler, ledger, search, indexObserver, groupNamespace, llm, embedding } =
     retrieval;
   const { authorizer } = retrieval;
   const { memory, dreamer, resource, reconcile } = memoryStack;
   const { observability } = background;
 
   const mcpRegistry = createToolRegistry();
-  const resolveIdentity = createIdentityResolver(config, subject, identityService, authService);
+  const resolveIdentity = createIdentityResolver(
+    config,
+    subject,
+    identityService,
+    authService,
+    groupNamespace,
+  );
   const bootstrap = createBootstrapAccess(db, logger);
   // 每次求权查一次引导标记：它在 `POST /bootstrap/admin` 里写入，快照会让新管理员
   // 在重启前一直 403。
@@ -120,6 +126,7 @@ export function createApi(
     observability,
     filesystem,
     acl,
+    groupNamespace,
     authorizer,
     summary,
     index,
@@ -178,21 +185,38 @@ function createIdentityResolver(
   subject: string,
   identityService: Access['identity'],
   authService: Access['auth'],
+  groupNamespace: Retrieval['groupNamespace'],
 ): IdentityResolver {
   return async (headers, request) => {
     const credential = bearerCredential(headers['authorization']);
     if (credential !== null) {
       const context = await authService.resolveBearer(credential);
+      await ensureGroups(context.principals, identityService, groupNamespace);
       return { subject: context.subject, principals: context.principals };
     }
     if (trustsLoopback(config, headers, request)) {
-      return resolveBoundSubject(subject, identityService);
+      const context = await resolveBoundSubject(subject, identityService);
+      await ensureGroups(context.principals, identityService, groupNamespace);
+      return context;
     }
     throw new ComemError(
       'UNAUTHENTICATED',
       '缺少 Authorization: Bearer 凭据。只有本机回环地址的请求可以不带凭据。',
     );
   };
+}
+
+/** 请求访问某个组时，修复旧版本留下的缺目录 / 缺索引 / 缺权限。 */
+async function ensureGroups(
+  principals: readonly string[],
+  identity: Access['identity'],
+  namespace: Retrieval['groupNamespace'],
+): Promise<void> {
+  for (const principal of principals) {
+    if (!principal.startsWith('group:')) continue;
+    const group = identity.getGroup(principal.slice('group:'.length));
+    if (group !== null) await namespace.ensure(group);
+  }
 }
 
 /**

@@ -344,6 +344,8 @@ comem://{scope}/{path}
 | `comem://user/{uid}/` | `user:{uid} = manage` | `memories/` `resources/` `sessions/` `projects/` |
 | `comem://group/{gid}/` | `group:{gid} = write` | `memories/` `resources/` `projects/` |
 
+组的根和三个基础目录在创建组时立即物化为索引与权限行。容器启动时会扫描已有组，认证请求命中组主体时也会再次检查；旧版本留下的缺目录、缺索引或缺权限行会就地补齐。
+
 项目是根下面的二级命名空间，结构跟根同构（少 `sessions/` 和 `projects/`）：
 
 ```

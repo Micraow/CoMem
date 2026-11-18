@@ -73,7 +73,7 @@ export async function createContainer(
     foundation.db.close();
     throw error;
   });
-  const retrieval = createRetrieval(foundation, models, access);
+  const retrieval = await createRetrieval(foundation, models, access);
   const memoryStack = createMemory(foundation, models, access, retrieval);
   const background = createBackground(foundation, models, retrieval, memoryStack);
   const api = createApi(foundation, access, retrieval, memoryStack, background);

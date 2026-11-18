@@ -106,17 +106,18 @@ describe('createContainer', () => {
     await expect(stat(join(dataDir, '_meta', 'comem.sqlite'))).resolves.toBeDefined();
   });
 
-  it('全新部署只建三个基础目录', async () => {
+  it('全新部署建立四个基础目录，项目作用域在绑定时立即可见', async () => {
     // 不预置的后果不是「权限收得太紧」而是**全新部署下什么都看不见**：
     // `list` / `tree` / `GET /sessions` 都走 `filterReadable`，物化表里没有根行
     // 就一条都返回不了，而「空列表」和「没有权限」是两件事。
     const root = Uri.parse('comem://user/local');
-    for (const name of ['memories', 'resources', 'sessions']) {
+    for (const name of ['memories', 'projects', 'resources', 'sessions']) {
       await expect(stat(join(dataDir, 'user', 'local', name))).resolves.toBeDefined();
     }
     const listed = await container.services.filesystem.list(root, PRINCIPALS);
     expect(listed.map((entry) => entry.uri.name).sort()).toEqual([
       'memories',
+      'projects',
       'resources',
       'sessions',
     ]);
@@ -124,6 +125,57 @@ describe('createContainer', () => {
     // 会话页走的是 `filesystem.list(scope.child('sessions'), PRINCIPALS)`，不是 `SessionService`。
     const sessions = await container.services.filesystem.list(root.child('sessions'), PRINCIPALS);
     expect(sessions).toEqual([]);
+
+    const passedSession = await container.services.session.create(root, PRINCIPALS, {
+      sessionId: 'project-probe',
+      projectId: 'comem',
+    });
+    const project = root.child('projects', 'comem');
+    // 不先 stat/assert 项目节点：创建会话本身必须完成目录、索引和权限物化。
+    const projects = await container.services.filesystem.list(root.child('projects'), PRINCIPALS);
+    expect(projects.map((entry) => entry.uri.name)).toEqual(['comem']);
+    const projectEntries = await container.services.filesystem.list(project, PRINCIPALS);
+    expect(projectEntries.map((entry) => entry.uri.name)).toEqual(['memories', 'resources']);
+    expect(passedSession.toString()).toBe(`${ROOT}/sessions/project-probe`);
+  });
+
+  it('启动时修复旧版本已有组的目录、索引与权限', async () => {
+    container.services.identity.createGroup({
+      id: 'eng',
+      displayName: 'Engineering',
+      ownerUserId: 'local',
+    });
+    await container.close();
+
+    container = await createContainer({
+      configPath: join(dataDir, 'config.yaml'),
+      env: {
+        ...process.env,
+        COMEM_DATA_DIR: dataDir,
+        COMEM_SUMMARY_GENERATOR: 'rule',
+        COMEM_PROVIDERS_LLM_DEFAULT_TYPE: 'disabled',
+        COMEM_LOGGING_LEVEL: 'error',
+      },
+    });
+
+    const groupRoot = Uri.parse('comem://group/eng');
+    for (const name of ['memories', 'projects', 'resources']) {
+      await expect(stat(join(dataDir, 'group', 'eng', name))).resolves.toBeDefined();
+      const uri = groupRoot.child(name);
+      expect(
+        container.db.prepare('SELECT COUNT(*) AS total FROM node WHERE uri = ?').get(uri.toString()),
+      ).toEqual({ total: 1 });
+      expect(
+        container.db
+          .prepare(
+            'SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ? AND principal = ?',
+          )
+          .get(uri.toString(), 'group:eng'),
+      ).toEqual({ total: 1 });
+    }
+
+    const listed = await container.services.filesystem.list(groupRoot, ['group:eng', 'user:*']);
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['memories', 'projects', 'resources']);
   });
 
   it('close() 幂等', async () => {

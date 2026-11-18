@@ -549,7 +549,7 @@ export class IdentityService {
     return revoked;
   }
 
-  /** 建用户之后预置命名空间（根 + 三个上下文目录 + 权限行）。 */
+  /** 建用户之后预置命名空间（根 + 四个上下文目录 + 权限行）。 */
   async ensureUserNamespace(userId: string): Promise<void> {
     await this.#namespace.ensure(userId);
   }

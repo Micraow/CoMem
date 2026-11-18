@@ -42,7 +42,7 @@ import {
 } from './admin-request.js';
 
 export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteGroup {
-  const { identity, authorizer, adminAccess, acl, ledger, systemAdmin } = services;
+  const { identity, authorizer, adminAccess, acl, groupNamespace, ledger, systemAdmin } = services;
 
   return {
     prefix: '/admin',
@@ -95,12 +95,12 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
           ...(description === undefined ? {} : { description }),
           ownerUserId,
         });
-        // 根预置必须在建组之后：`ensureRootPreset` 只接受根 URI，而根要由组 ID
-        // 拼出来。不补这一步，组空间没有任何可授权的节点，成员也拿不到可读范围。
-        //
-        // owner 就是创建者：组根只有 `group:{gid} = write` 时没有任何主体能求
-        // manage，`setAcl` / `getAcl` 永远 403（§12.2 不变量 3）。
-        await acl.ensureRootPreset(Uri.parse(`comem://group/${group.id}`), ownerUserId);
+        if (groupNamespace !== undefined) {
+          await groupNamespace.ensure(group);
+        } else {
+          // 兼容只装配管理面路由的旧测试替身。生产装配走上面的完整初始化。
+          await acl.ensureRootPreset(Uri.parse(`comem://group/${group.id}`), ownerUserId);
+        }
         return ok<GroupResponse>({ group });
       });
 
@@ -185,6 +185,7 @@ export function createAdminGroupRoutes(services: AdminRouteServices): HttpRouteG
         // 删组保留数据，但清空该子树内的全部 ACL 条目（§12.2、operations.md）。
         const clearedAclFiles = await acl.purgeSubtree(Uri.parse(`comem://group/${id}`));
         identity.deleteGroup(id);
+        groupNamespace?.invalidate(id);
         return ok<AdminDeleteResponse>({ id, deleted: true, revokedPermissions, clearedAclFiles });
       });
     },

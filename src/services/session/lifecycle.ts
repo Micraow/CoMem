@@ -17,7 +17,7 @@ import {
   notifyNodeWritten,
 } from './hooks.js';
 import type { SessionPorts, SessionRemoval } from './ports.js';
-import { bindProject } from './project.js';
+import { bindProject, prepareProjectScope } from './project.js';
 import {
   countMessages,
   createSessionId,
@@ -56,6 +56,9 @@ export async function createSession(
     options.projectId === undefined
       ? undefined
       : projectScopeOf(scopeUri, options.projectId).name;
+  if (projectId !== undefined) {
+    await prepareProjectScope(ports, projectScopeOf(scopeUri, projectId));
+  }
   // 锁文件是会话目录的同级文件，`sessions/` 必须先存在（`acquire` 不建父目录）。
   // 目录已存在时它是幂等的，所以放在检查之前不会改变「存在」的判据。
   await ports.store.mkdir(sessionUri, { recursive: true });

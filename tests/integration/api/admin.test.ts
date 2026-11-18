@@ -582,9 +582,9 @@ describe('删除账号的授权清理', () => {
 
     const listed = resultOf(await inject({ method: 'GET', url: '/api/v1/admin/users' }));
     const bob = (listed['users'] as Record<string, unknown>[]).find((row) => row['id'] === 'bob');
-    // 新账号只该拿到自己的命名空间（根 + 三个基础目录各一行），alice 根下的
+    // 新账号只该拿到自己的命名空间（根 + 四个基础目录各一行），alice 根下的
     // 那条 `write` 授权必须消失。
-    expect(bob?.['permissionCount']).toBe(4);
+    expect(bob?.['permissionCount']).toBe(5);
     const aliceRootUri = aliceRoot.toString();
     expect(
       countRows(
@@ -772,6 +772,54 @@ describe('purgePrincipal 的事务边界', () => {
 });
 
 describe('组的根预置', () => {
+  it('建组后立即可见基础目录、索引与权限', async () => {
+    await createGroup('eng');
+
+    const groupRoot = Uri.parse('comem://group/eng');
+    for (const name of ['memories', 'projects', 'resources']) {
+      await expect(access(join(dataDir, 'group', 'eng', name))).resolves.toBeUndefined();
+      const uri = groupRoot.child(name);
+      expect(countRows('SELECT COUNT(*) AS total FROM node WHERE uri = ?', uri.toString())).toBe(1);
+      expect(
+        countRows(
+          'SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ? AND principal = ?',
+          uri.toString(),
+          'group:eng',
+        ),
+      ).toBe(1);
+    }
+
+    const listed = await container.services.filesystem.list(groupRoot, ['group:eng', 'user:*']);
+    expect(listed.map((entry) => entry.uri.name)).toEqual(['memories', 'projects', 'resources']);
+  });
+
+  it('成员请求会修复旧组缺失的基础目录及派生行', async () => {
+    await createGroup('eng');
+    await inject({
+      method: 'POST',
+      url: '/api/v1/admin/groups/eng/members',
+      payload: { userId: 'local' },
+    });
+
+    const projects = join(dataDir, 'group', 'eng', 'projects');
+    const projectsUri = 'comem://group/eng/projects';
+    await rm(projects, { recursive: true, force: true });
+    container.db.prepare('DELETE FROM node_permission WHERE node_uri = ?').run(projectsUri);
+    container.db.prepare('DELETE FROM node WHERE uri = ?').run(projectsUri);
+
+    resultOf(await inject({ method: 'GET', url: '/api/v1/admin/groups' }));
+
+    await expect(access(projects)).resolves.toBeUndefined();
+    expect(countRows('SELECT COUNT(*) AS total FROM node WHERE uri = ?', projectsUri)).toBe(1);
+    expect(
+      countRows(
+        'SELECT COUNT(*) AS total FROM node_permission WHERE node_uri = ? AND principal = ?',
+        projectsUri,
+        'group:eng',
+      ),
+    ).toBe(1);
+  });
+
   it('建组后 comem://group/{gid}/ 有 ACL 根，创建者拿到 manage，成员有可读范围', async () => {
     await createGroup('eng');
 

@@ -2029,7 +2029,8 @@ I/O 出了问题，后者说明单个上游在预算内没答上来。
 （`node_permission`）里没有这个节点就默认 deny。三种常见情况：
 
 1. **数据根是空的、还没初始化**：启动时会预置 `user/{uid}/` 与 `memories` / `resources` /
-   `sessions` 三个基础目录的权限行（`src/bootstrap/container/access.ts`）。没跑到说明启动自检失败。
+   `sessions` / `projects` 四个基础目录的权限行（`src/bootstrap/container/access.ts`）。
+   没跑到说明启动自检失败。
 2. **请求身份不是这个作用域的用户**：`GET /sessions` 只列当前身份可读的根。用 API Key 或
    session token 代表 `user:bob` 时，`user:local` 的会话列表是 403（权限不足，不是 401）。
    没有凭据且不是回环来源时根本走不到这里——`src/bootstrap/container/api.ts` 的

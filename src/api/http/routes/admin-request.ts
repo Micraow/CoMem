@@ -93,6 +93,12 @@ export type AdminAcl = Pick<
   'ensureRootPreset' | 'setGroupOwner' | 'purgePrincipal' | 'purgeSubtree'
 >;
 
+/** 管理面建组后初始化物理目录、索引与权限，删组后清掉进程内就绪状态。 */
+export type AdminGroupNamespace = Pick<
+  HttpRouteServices['groupNamespace'],
+  'ensure' | 'invalidate'
+>;
+
 /**
  * 管理面需要的召回账本操作。
  *
@@ -106,6 +112,8 @@ export type AdminRouteServices = Pick<
   'identity' | 'authorizer' | 'adminAccess'
 > & {
   readonly acl: AdminAcl;
+  /** 旧测试装配可以省略；生产装配总会提供并在建组后立即执行。 */
+  readonly groupNamespace?: AdminGroupNamespace;
   readonly ledger: AdminRecallLedger;
   /**
    * 系统管理员判定（`config.auth.adminUserIds` + 引导管理员）。

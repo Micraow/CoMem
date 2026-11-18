@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -198,12 +198,21 @@ describe('create / load', () => {
       sessionId: 'sess_project',
       projectId: 'comem',
     });
+    const projectDirectory = join(dataDir, 'user', 'alice', 'projects', 'comem');
+    expect((await readdir(projectDirectory)).sort()).toEqual(['memories', 'resources']);
+
+    // 旧版本可能只写了 projectId。下一次会话写入要补齐目录结构。
+    await rm(projectDirectory, { recursive: true });
     await service.addMessage(sessionUri, message('m1'));
 
     expect(sessionUri.toString()).toBe(`${SCOPE_ROOT}/sessions/sess_project`);
     expect((await service.load(sessionUri)).projectId).toBe('comem');
     expect((await service.readSessionMeta(sessionUri))?.projectId).toBe('comem');
     expect((await service.load(sessionUri)).messages.map((item) => item.id)).toEqual(['m1']);
+    expect((await readdir(projectDirectory)).sort()).toEqual([
+      'memories',
+      'resources',
+    ]);
   });
 
   it('legacy 会话首次绑定项目幂等，不覆盖消息；不同项目返回冲突', async () => {
@@ -216,6 +225,9 @@ describe('create / load', () => {
     const second = await service.bindProject(sessionUri, 'comem');
     expect(first.projectScopeUri.toString()).toBe(`${SCOPE_ROOT}/projects/comem`);
     expect(second.projectId).toBe('comem');
+    await expect(
+      stat(join(dataDir, 'user', 'alice', 'projects', 'comem', 'memories')),
+    ).resolves.toBeDefined();
     await expect(service.bindProject(sessionUri, 'other')).rejects.toMatchObject({
       code: 'CONFLICT',
     });
