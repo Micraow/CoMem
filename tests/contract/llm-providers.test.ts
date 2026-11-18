@@ -7,7 +7,6 @@
  * - `DisabledLlmProvider`：关闭态桩，只注册「关闭时该抛什么」的契约。
  */
 
-import { TypeValidationError } from 'ai';
 import { vi } from 'vitest';
 
 import { ComemError } from '../../src/domain/errors.js';
@@ -71,9 +70,9 @@ function chatProvider(): InstanceType<typeof AiSdkLlmProvider> {
   });
 }
 
-function textResult(): Record<string, unknown> {
+function textResult(text = 'ok'): Record<string, unknown> {
   return {
-    text: 'ok',
+    text,
     usage: { inputTokens: 10, outputTokens: 4 },
     finishReason: 'stop',
   };
@@ -102,11 +101,7 @@ const aiSdkSubject: LlmConformanceSubject = {
     return chatProvider();
   },
   createJson: () => {
-    mocks.generateObject.mockResolvedValue({
-      object: { ok: true },
-      usage: { inputTokens: 3, outputTokens: 2 },
-      finishReason: 'stop',
-    });
+    mocks.generateText.mockResolvedValue(textResult('{"ok":true}'));
     return chatProvider();
   },
   failUnknown: () => {
@@ -118,9 +113,7 @@ const aiSdkSubject: LlmConformanceSubject = {
     return chatProvider().complete(CONFORMANCE_PROMPT);
   },
   failJsonSchema: () => {
-    mocks.generateObject.mockRejectedValue(
-      new TypeValidationError({ value: 'not-json', cause: new Error('bad schema') }),
-    );
+    mocks.generateText.mockResolvedValue(textResult('{"ok":"not-a-boolean"}'));
     return chatProvider().completeJson(CONFORMANCE_PROMPT, CONFORMANCE_SCHEMA);
   },
   providerFailure: (failure) => {

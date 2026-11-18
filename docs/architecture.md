@@ -119,7 +119,7 @@ export interface LlmResult {
 
 `finishReason` 是接口的一部分，不是实现细节：抽取管线要靠它区分「模型说完了」和「被截断了」，截断时重试同样的上限只会再截断一次，必须报错让人调大 `maxTokens`。
 
-`LlmOptions.retry` 默认允许应用层重试。已有单一硬 deadline、到点后必须立即降级的调用显式设为 `false`；该设置同时覆盖供应商错误重试和结构化输出解析重试。
+`LlmOptions.retry` 默认允许应用层重试。已有单一硬 deadline、到点后必须立即降级的调用显式设为 `false`；该设置同时覆盖供应商错误重试和结构化输出解析重试。`memory_extract` 由 `LlmService` 按 purpose 强制设为 `false`，由提交管线负责步骤重放。
 
 实现放在 `adapters/llm/ai-sdk-provider.ts`，内部用 Vercel AI SDK：
 
@@ -129,6 +129,12 @@ import { generateText, generateObject } from 'ai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createAnthropic } from '@ai-sdk/anthropic';
 ```
+
+OpenAI 兼容接口不保证执行 `response_format`。一些兼容网关会接受
+`json_object` / `json_schema`，但不约束上游输出；因此该适配器把 Zod schema 转成
+JSON Schema 写进系统指令，用普通文本调用生成，再在进程内提取完整 JSON 值并用
+Zod 校验。模型在 JSON 外包 Markdown 代码块或说明文字时，只移除这层传输包装，
+不修复对象字段。Anthropic 分支继续使用原生 `generateObject`。
 
 不自己写 HTTP 客户端、流式解析、重试和 token 统计。想加 Anthropic 就是配置里 `type: anthropic`，`services/` 一行不用改。
 
@@ -2092,7 +2098,13 @@ LLM 看不到原始 URI，只看到「第 N 个读过的记忆文件」（page_i
 
 让模型直接输出 URI 会引入拼写错误和幻觉路径；page_id 是它刚刚亲眼读到的编号。新建项用 ≥ 100 的编号，避免和已读项冲突。起始编号是代码里的常量（`NEW_PAGE_ID_START`），模板通过 `{{newPageIdStart}}` / `{{newPageIdExamples}}` 引用——写死在 `.md` 里会让「改常量」与「改提示词」漂移。
 
-**解析失败只重试一次。** 第二次还失败就抛错，`.done` 不写。截断（`finishReason === 'length'`）**不重试**——同样的上限只会再截断一次，必须报错让人调大 `maxTokens`。
+**重放由提交步骤统一负责。** `LlmService` 对 `purpose = memory_extract` 的结构化
+调用强制使用 `LlmOptions.retry = false`，因为 `CommitPipeline` 已经会重放失败的
+步骤。若 LLM 服务再在单次步骤内重试，一次 120 秒供应商超时会被放大成 360 秒，
+外层次重放后还会继续相乘。结构化结果仍由适配器本地校验；重放后仍失败才抛错，
+`.done` 不写。
+截断（`finishReason === 'length'`）**不重试**——同样的上限只会再截断一次，必须
+报错让人调大 `maxTokens`。
 
 ### 11.5 规则合并
 

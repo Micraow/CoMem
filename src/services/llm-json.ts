@@ -13,10 +13,13 @@ export async function executeJsonCall<T>(
   schema: ZodType<T>,
   options?: LlmOptions,
 ): Promise<T> {
+  const effectiveOptions = options?.purpose === 'memory_extract'
+    ? { ...options, retry: false }
+    : options;
   let parseFailures = 0;
-  const result = await executeCall<LlmJsonResult<T>>(runtime, options, {
+  const result = await executeCall<LlmJsonResult<T>>(runtime, effectiveOptions, {
     kind: 'json',
-    invoke: () => runtime.provider.completeJson(prompt, schema, options),
+    invoke: () => runtime.provider.completeJson(prompt, schema, effectiveOptions),
     usageOf: (value) => value.usage,
     finishOf: (value) => value.finishReason,
     finishFailure: (value) =>
@@ -36,13 +39,13 @@ export async function executeJsonCall<T>(
       if (failure.code === 'INVALID_ARGUMENT') {
         parseFailures += 1;
         return (
-          options?.retry !== false &&
+          effectiveOptions?.retry !== false &&
           parseFailures < JSON_PARSE_ATTEMPTS &&
           attempt < runtime.maxAttempts &&
-          options?.abortSignal?.aborted !== true
+          effectiveOptions?.abortSignal?.aborted !== true
         );
       }
-      return canRetry(runtime, failure, attempt, options);
+      return canRetry(runtime, failure, attempt, effectiveOptions);
     },
     isParseFailure: (failure) => failure.code === 'INVALID_ARGUMENT',
   });

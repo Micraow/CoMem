@@ -168,7 +168,7 @@ describe('LLM 调用持久化', () => {
       () => service.generateJson(
         { messages: [{ role: 'user', content: 'x' }] },
         z.object({ ok: z.boolean() }),
-        { purpose: 'memory_extract' },
+        { purpose: 'query_rewrite' },
       ),
     );
 

@@ -217,6 +217,7 @@ function createExtractStep(
 ): {
   readonly step: MemoryExtractStep;
   readonly fakeMemory: FakeMemoryPort;
+  readonly provider: FakeLlmProvider;
   readonly written: MemoryOperationsFile[];
 } {
   const llm = new LlmService({ provider, logger, retryBaseDelayMs: 0 });
@@ -230,7 +231,7 @@ function createExtractStep(
     profile: { maxChars: 800 },
     ...(options.prefetchTopN === undefined ? {} : { prefetchTopN: options.prefetchTopN }),
   });
-  return { step, fakeMemory, written: artifacts.written };
+  return { step, fakeMemory, provider, written: artifacts.written };
 }
 
 function extracted(context: StepContext): MemoryExtractResult {
@@ -240,6 +241,34 @@ function extracted(context: StepContext): MemoryExtractResult {
   }
   return value;
 }
+
+it('记忆抽取禁用 LLM 内部重试，由提交步骤统一控制重放', async () => {
+  const { step, provider } = createExtractStep(
+    new FakeLlmProvider([{ json: { operations: [] } }]),
+  );
+
+  await step.run(createContext());
+
+  expect(provider.calls).toHaveLength(1);
+  expect(provider.calls[0]?.options).toMatchObject({
+    purpose: 'memory_extract',
+    retry: false,
+  });
+});
+
+it('记忆抽取的供应商超时不在 LLM 层重复三次，由提交步骤统一重放', async () => {
+  const provider = new FakeLlmProvider([
+    { error: new ComemError('PROVIDER_UNAVAILABLE', '供应商调用超时。') },
+    { json: { operations: [] } },
+  ]);
+  const { step } = createExtractStep(provider);
+
+  await expect(step.run(createContext())).rejects.toMatchObject({
+    code: 'PROVIDER_UNAVAILABLE',
+  });
+
+  expect(provider.calls).toHaveLength(1);
+});
 
 describe('实体抽取产物', () => {
   it('先分配同批实体编号，再保存经验引用，归档恢复使用同一个编号', async () => {
@@ -683,7 +712,7 @@ describe('MemoryExtractStep', () => {
     expect(rendered).not.toContain('[tool_result');
   });
 
-  it('输出解析失败只重试一次，第二次仍失败抛 INVALID_ARGUMENT', async () => {
+  it('输出解析失败不在步骤内重试，直接抛 INVALID_ARGUMENT 交给提交管线重放', async () => {
     const provider = new FakeLlmProvider([
       { json: { operations: '不是数组' } },
       { json: { operations: '仍然不是数组' } },
@@ -691,7 +720,7 @@ describe('MemoryExtractStep', () => {
     const { step } = createExtractStep(provider);
 
     await expect(step.run(createContext())).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls).toHaveLength(1);
   });
 
   it('截断（finishReason === length）不重试：只调一次模型', async () => {

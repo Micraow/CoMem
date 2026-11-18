@@ -24,17 +24,15 @@ import {
   NoObjectGeneratedError,
   TypeValidationError,
   type LanguageModel,
-  type ModelMessage,
 } from 'ai';
 import type { ZodType } from 'zod';
 import { ComemError } from '../../domain/errors.js';
 import type {
-  LlmJsonResult, LlmMessage,
+  LlmJsonResult,
   LlmOptions,
   LlmPrompt,
   LlmProvider,
   LlmResult,
-  LlmUsage,
 } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
@@ -43,6 +41,8 @@ import {
   mapProviderError,
   type ProviderErrorMapOptions,
 } from './provider-error-mapping.js';
+import { generateJsonText } from './json-text.js';
+import { readUsage } from './usage.js';
 export interface AiSdkProviderOptions {
   /** 对应 `config.providers.llm.default`（§18）。 */
   readonly type: 'openai-compatible' | 'anthropic';
@@ -78,25 +78,6 @@ function mapFinishReason(reason: string, logger: Logger, model: string): LlmResu
       return 'stop';
   }
 }
-/**
- * AI SDK 的 usage 字段名在不同版本 / provider 之间不一致：v4 起是
- * `inputTokens` / `outputTokens`，更早的版本与部分兼容实现仍是
- * `promptTokens` / `completionTokens`。两种都兼容，缺的按 0 算。
- */
-interface RawUsage {
-  readonly promptTokens?: number;
-  readonly completionTokens?: number;
-  readonly inputTokens?: number;
-  readonly outputTokens?: number;
-}
-
-function readUsage(usage: RawUsage): LlmUsage {
-  return {
-    promptTokens: usage.promptTokens ?? usage.inputTokens ?? 0,
-    completionTokens: usage.completionTokens ?? usage.outputTokens ?? 0,
-  };
-}
-
 /**
  * 结构化输出解析失败（模型返回了不合 schema 的 JSON）。
  *
@@ -155,17 +136,6 @@ const ERROR_MAP_OPTIONS: ProviderErrorMapOptions = {
   classify: classifyJsonGenerationFailure,
 };
 
-/** `LlmMessage` 的三分法正好对应 AI SDK 的三种消息类型，逐分支构造让类型收窄。 */
-function toModelMessage(message: LlmMessage): ModelMessage {
-  if (message.role === 'system') {
-    return { role: 'system', content: message.content };
-  }
-  if (message.role === 'user') {
-    return { role: 'user', content: message.content };
-  }
-  return { role: 'assistant', content: message.content };
-}
-
 /**
  * 按 `type` 选 SDK 并构造模型实例（§18：换供应商只改配置，不改代码）。
  *
@@ -188,12 +158,14 @@ function createLanguageModel(options: AiSdkProviderOptions): LanguageModel {
 
 export class AiSdkLlmProvider implements LlmProvider {
   private readonly model: LanguageModel;
+  private readonly type: AiSdkProviderOptions['type'];
   private readonly modelId: string;
   private readonly maxTokens: number;
   private readonly timeoutSeconds: number;
   private readonly logger: Logger;
 
   constructor(options: AiSdkProviderOptions) {
+    this.type = options.type;
     this.modelId = options.model;
     this.maxTokens = options.maxTokens;
     this.timeoutSeconds = options.timeoutSeconds;
@@ -207,7 +179,7 @@ export class AiSdkLlmProvider implements LlmProvider {
         generateText({
           model: this.model,
           ...(prompt.system === undefined ? {} : { instructions: prompt.system }),
-          messages: prompt.messages.map(toModelMessage),
+          messages: [...prompt.messages],
           maxOutputTokens: options?.maxTokens ?? this.maxTokens,
           ...(options?.temperature === undefined ? {} : { temperature: options.temperature }),
           // 重试在上层；SDK 的默认重试（2 次）会绕过「截断不重试」的判断。
@@ -226,13 +198,34 @@ export class AiSdkLlmProvider implements LlmProvider {
   }
 
   async completeJson<T>(prompt: LlmPrompt, schema: ZodType<T>, options?: LlmOptions): Promise<LlmJsonResult<T>> {
+    if (this.type === 'openai-compatible') {
+      const result = await this.run(
+        (abortSignal) =>
+          generateJsonText({
+            model: this.model,
+            prompt,
+            schema,
+            messages: [...prompt.messages],
+            maxTokens: options?.maxTokens ?? this.maxTokens,
+            temperature: options?.temperature,
+            abortSignal,
+          }),
+        options,
+      );
+      return {
+        value: result.value,
+        usage: result.usage,
+        finishReason: mapFinishReason(result.finishReason, this.logger, this.modelId),
+      };
+    }
+
     const result = await this.run(
       (abortSignal) =>
         generateObject({
           model: this.model,
           schema,
           ...(prompt.system === undefined ? {} : { instructions: prompt.system }),
-          messages: prompt.messages.map(toModelMessage),
+          messages: [...prompt.messages],
           maxOutputTokens: options?.maxTokens ?? this.maxTokens,
           ...(options?.temperature === undefined ? {} : { temperature: options.temperature }),
           maxRetries: 0,

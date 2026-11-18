@@ -1,4 +1,3 @@
-import { NoObjectGeneratedError } from 'ai';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -93,6 +92,7 @@ function textResult(overrides: Record<string, unknown> = {}): Record<string, unk
     text: 'ok',
     usage: { inputTokens: 10, outputTokens: 4 },
     finishReason: 'stop',
+    response: { id: 'response-1', modelId: 'test-model', timestamp: new Date(0) },
     ...overrides,
   };
 }
@@ -289,8 +289,60 @@ describe('complete', () => {
 });
 
 describe('completeJson', () => {
-  it('把 schema 传给 generateObject 并返回 object', async () => {
+  it('OpenAI 兼容路径把 schema 写进 instructions，用文本调用后本地校验', async () => {
     const { provider } = createProvider();
+    const schema = z.object({ ok: z.boolean() });
+    mocks.generateText.mockResolvedValue(textResult({
+      text: '{"ok":true}',
+      usage: { inputTokens: 2, outputTokens: 1 },
+    }));
+
+    const value = await provider.completeJson(PROMPT, schema);
+
+    expect(value.value).toEqual({ ok: true });
+    expect(value.usage).toEqual({ promptTokens: 2, completionTokens: 1 });
+    expect(value.finishReason).toBe('stop');
+    expect(mocks.generateObject).not.toHaveBeenCalled();
+    expect(mocks.generateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxRetries: 0,
+        instructions: expect.stringContaining('"additionalProperties":false'),
+        abortSignal: expect.any(AbortSignal),
+      }),
+    );
+    expect(
+      (mocks.generateText.mock.calls[0]?.[0] as { instructions: string }).instructions,
+    ).toContain('你是抽取器。');
+  });
+
+  it('OpenAI 兼容路径从代码块或说明文字中提取唯一 JSON 对象', async () => {
+    const { provider } = createProvider();
+    mocks.generateText.mockResolvedValue(textResult({
+      text: '结果如下：\n```json\n{"ok":true}\n```\n请查收。',
+    }));
+
+    const value = await provider.completeJson(PROMPT, z.object({ ok: z.boolean() }));
+
+    expect(value.value).toEqual({ ok: true });
+  });
+
+  it('schema transform 无法转成 JSON Schema 时仍按提示词返回并执行本地转换', async () => {
+    const { provider } = createProvider();
+    mocks.generateText.mockResolvedValue(textResult({ text: '{"value":" trimmed "}' }));
+    const schema = z.object({ value: z.string() }).transform(({ value }) => ({
+      value: value.trim(),
+    }));
+
+    const value = await provider.completeJson(PROMPT, schema);
+
+    expect(value.value).toEqual({ value: 'trimmed' });
+    expect(
+      (mocks.generateText.mock.calls[0]?.[0] as { instructions: string }).instructions,
+    ).toContain('遵循系统提示词中已经声明的 JSON 结构');
+  });
+
+  it('Anthropic 继续使用原生 generateObject', async () => {
+    const { provider } = createProvider('anthropic');
     const schema = z.object({ ok: z.boolean() });
     mocks.generateObject.mockResolvedValue({
       object: { ok: true },
@@ -301,8 +353,7 @@ describe('completeJson', () => {
     const value = await provider.completeJson(PROMPT, schema);
 
     expect(value.value).toEqual({ ok: true });
-    expect(value.usage).toEqual({ promptTokens: 2, completionTokens: 1 });
-    expect(value.finishReason).toBe('stop');
+    expect(mocks.generateText).not.toHaveBeenCalled();
     expect(mocks.generateObject).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
@@ -313,31 +364,13 @@ describe('completeJson', () => {
     );
   });
 
-  it('结构化输出被截断时映射成 PROVIDER_UNAVAILABLE 并带 truncated 标记', async () => {
-    // `generateObject` 在截断时也抛 `NoObjectGeneratedError`（cause 是 JSON 解析
-    // 失败），只看 cause 会把它当成「模型乱说话」而重试一次。必须看 finishReason：
-    // 模型没说完，重试同样的 maxTokens 只会再截断一次（§11.4）。
+  it('OpenAI 兼容文本被截断时映射成 PROVIDER_UNAVAILABLE 并带 truncated 标记', async () => {
     const { provider } = createProvider();
-    mocks.generateObject.mockRejectedValue(
-      new NoObjectGeneratedError({
-        message: 'truncated',
-        cause: new Error('unterminated JSON'),
-        text: '{"ok":',
-        response: { id: 'r1', modelId: 'test', timestamp: new Date() },
-        usage: {
-          inputTokens: 1,
-          outputTokens: 1,
-          totalTokens: 2,
-          inputTokenDetails: {
-            noCacheTokens: undefined,
-            cacheReadTokens: undefined,
-            cacheWriteTokens: undefined,
-          },
-          outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
-        },
-        finishReason: 'length',
-      }),
-    );
+    mocks.generateText.mockResolvedValue(textResult({
+      text: '{"ok":',
+      usage: { inputTokens: 1, outputTokens: 1 },
+      finishReason: 'length',
+    }));
 
     const error = await provider
       .completeJson(PROMPT, z.object({ ok: z.boolean() }))

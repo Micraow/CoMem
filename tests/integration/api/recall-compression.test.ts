@@ -85,6 +85,8 @@ it('默认压缩只使用可读召回项，渲染来源并转义正文，回执�
     expect(requests[0]).not.toContain('用户熟悉网络研究');
     expect(requests[0]).not.toContain('secret laptop configuration');
     expect(requests[0]).toContain('Debian');
+    expect(requests[0]).not.toContain('response_format');
+    expect(requests[0]).toContain('JSON Schema');
     respondWith([{ source: 1000, text: '虚构事实' }]);
     const next = await recall('laptop', { previousDeliveryToken: result.deliveryToken });
     expect(next.rendered).not.toContain('Fedora');
