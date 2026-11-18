@@ -56,7 +56,7 @@ import { createPromptRoutes } from './prompts.js';
 import { createResourceRoutes } from './resources.js';
 import { createSearchRoutes } from './search.js';
 import { createSessionRoutes } from './sessions.js';
-import type { TaskQueryStore } from './tasks.js';
+import type { TaskQueryStore, VectorBackfillPort } from './tasks.js';
 import { createTaskRoutes } from './tasks.js';
 import { createTelemetryRoutes } from './telemetry.js';
 
@@ -100,6 +100,7 @@ export interface HttpRouteServices {
   readonly tasks: TaskService;
   /** 任务行的只读查询端口；由 bootstrap 注入 `TaskRepository`。 */
   readonly taskStore: TaskQueryStore;
+  readonly vectorBackfill: VectorBackfillPort;
   readonly memory: MemoryService;
   /** 记忆关联边（§11.10）：`GET /memories/:uri/links` 读它。不进 MCP。 */
   readonly memoryLink: MemoryLinkService;

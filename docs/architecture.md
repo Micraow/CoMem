@@ -1770,7 +1770,7 @@ Template Method 固定「跳过已完成 → 跳过不可执行 → 执行 → �
 - 认领：`UPDATE task SET status='running', lease_until=now+60s WHERE id=? AND (status='pending' OR (status='running' AND lease_until < now))`
 - 心跳：每 20 秒续租
 - 启动扫描：`status='running'` 且租约过期 → 重置为 `pending`、`lease_until = NULL`，**不动 `attempts`**（下次认领时才 `attempts += 1`；与「失败回 `pending`」同一条口径，认领才是执行次数的计数点）
-- 重试上限 3 次。超限置 `failed`，错误写进 `error` 字段和 `error.log`
+- 重试上限 3 次。超限置 `failed`，错误写进 `error` 字段和 `error.log`。管理员手动重试只将 `failed` 任务重新排队并重置尝试次数，保留失败原因与已完成步骤，执行器继续处理未完成步骤。
 
 **每个步骤的产物必须持久化。** 这是设计约束，不是实现细节。`stepsDone` 是重放判据：重放会跳过它记下的步骤。如果某一步的产物只存在 `StepContext.state`（进程内存）里，那么这一步之后的**任何**一次瞬态失败（供应商 503、SQLite 写冲突、租约过期、进程重启）都会让重放跳过它、下游拿到空输入。记忆操作不幂等，所以步骤不能被重跑；能做的只有让「跳过」不丢产物。
 
@@ -3370,7 +3370,7 @@ HTTP 侧到点返回 **503 `PROVIDER_UNAVAILABLE`** 的错误封套，`details` 
 | 内容 | `GET /content/read`、`/content/abstract`、`/content/overview`、`/content/download`；`POST /content/write`、`/content/edit` |
 | 检索 | `POST /search/find`、`/search/search`、`/search/grep`、`/search/glob`。前两个（`/search/search` 的 `mode=context` 也走同一个包装）受 30 秒总上限约束，到点返回 503 `PROVIDER_UNAVAILABLE`（§13.3）；`grep` / `glob` 不调模型，没有这一层 |
 | 会话 | `POST /sessions`、`/sessions/{id}/messages`、`/sessions/{id}/commit`；`GET /sessions`、`/sessions/{id}`、`/sessions/{id}/activity` |
-| 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`。三个都只认系统管理员（§12.4） |
+| 任务 | `GET /tasks/{id}`、`GET /tasks`、`POST /tasks/{id}/retry`、`POST /tasks/retry-failed`（返回 `queued` 条数）、`GET/POST /tasks/vector-backfill`（查询状态 / 启动后台补齐）。只认系统管理员（§12.4） |
 | ACL | `GET /acl`、`PUT /acl`、`POST /acl/grant`、`POST /acl/revoke` |
 | 记忆 | `GET /memories/pending`、`GET /memories/{uri}`（单条记忆元数据：类型、状态取自检索索引，有效期取自记忆文件；不是当前记忆时字段为 `null`）、`POST /memories`（新建记忆：类型 + 标题/主题 + 正文，路径由服务端算）、`POST /memories/dreamer`、`POST /memories/{uri}/approve`（空 body 兼容审批；编辑审批传 `{content, expectedUpdatedAt}`，§11.6）、`POST /memories/{uri}/reject`、`GET /memories/{uri}/links`（`?direction=links\|backlinks`，§11.10） |
 | 资源 | `POST /resources`、`POST /resources/temp-upload` |
@@ -3719,7 +3719,7 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 | 记忆复核 | 待确认列表优先显示更新与推断偏好；详情展示正文、真实的版本差异及来源；逐条更新通过 / 拒绝的结果 |
 | ACL 管理 | 节点树 + 授权列表；切换 inherit / restricted；显示有效权限的推导链 |
 | 用户与组 | 系统管理员入口；用户列表显示服务器判定的角色，组成员列表区分所有者和成员。管理员可以为其他用户设置或重置密码；查看或管理节点读写权限使用「权限管理」 |
-| 会话与任务 | 会话列表、归档列表、最近 100 条任务（包含运行中、完成与失败）；已提交且 live 消息为空的会话展开后显示「已归档」，并直接链接到该会话的真实 `history/` 目录；「导入历史会话」打开 `/connect#import-history`；没有重试入口，也没有回收记录列表（理由见下） |
+| 会话与任务 | 会话、归档、最近 100 条任务；管理员可筛选失败任务、单条或批量重试，并在「向量索引」查看缺失数及补齐进度。已归档且无未提交消息的会话链接到 `history/`；「导入历史会话」打开 `/connect#import-history`。 |
 | 接入 Agent | 按宿主给出安装与 MCP 配置；Hermes 检查仅认可已经提交的 Hermes 会话，不根据任意归档推断自动召回已经生效 |
 | 监控 | 记忆健康度、开销归因、吞吐与用量、请求记录（见 §17.10） |
 | 提示词 | 内置提示词的正文、可用变量、渲染预览；保存 / 恢复默认（见 §18「提示词」） |
@@ -3803,7 +3803,6 @@ Nuxt 3 + shadcn-vue + Tailwind。业务页面与账号入口如下：
 - 概览页与监控页的待复核卡**只请求一页 `/memories/pending`**：响应里的 `total` 与 `oldestPendingAgeSeconds` 已由服务端对完整可读队列计算，`limit=1` 不把返回数组长度冒充总数。`GET /health` 的 `memory.*` 保留为公开全库运维口径，不再用于当前空间待复核卡。
 - 每张 Hook 事件卡里的「后台处理」行**并成全局一行**：后台耗时按阶段，同一份进程级快照不属于任何事件（§17.2）。
 - 「模型成本累计」卡片在没配 `providers.llm.default.pricing` 时显示「未配置单价，成本不可计算」，不显示 `$0.0000`；配了单价时真实花费 0 才显示 0（§17.4）。
-- 任务表与会话页**没有重试按钮**：`POST /tasks/{id}/retry` 只接受 `failed`，而 `GET /tasks` 只列可认领的任务（`pending` 或租约过期），界面上永远点不到一个能重试的行；重启会把租约过期的任务重置回排队。要重试只能走接口。
 - 会话页**没有「回收记录」**：`TaskService.recover()` 在启动时把租约过期的 `running` 重置回 `pending`，只返回重置条数（`bootstrap/main.ts` 把它记进一条日志）；`task` 表不留回收历史，也没有端点返回逐条记录。控制台只能看到任务当前状态——被回收的任务重新出现在待处理里，但不显示「它是被回收的」。
 - 概览页「最近任务」改名「待处理任务」，并删掉「已完成 / 失败」两个状态文案：`GET /tasks` 不返回这两种状态。
 - 文件详情里**文档的 L1「概览」档删掉**：`GET /content/overview` 对 document 恒返回 `overview: null`，前端没有合成逻辑；目录的 L1 是真实的（来自摘要文件），保留。

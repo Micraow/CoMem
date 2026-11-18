@@ -36,12 +36,16 @@ const TABS = [
 ] as const
 
 const api = useApi()
+const toast = useToast()
 const scopeRoot = useScopeRoot()
 
 const tab = ref<'sessions' | 'tasks'>('sessions')
 
 const sessions = ref<readonly SessionSummaryPayload[]>([])
 const tasks = ref<readonly TaskRowPayload[]>([])
+const failedOnly = ref(false)
+const retrying = ref(false)
+let taskRequest = 0
 
 const loadingSessions = ref(false)
 const loadingTasks = ref(false)
@@ -75,15 +79,20 @@ async function loadSessions(): Promise<void> {
 
 /** `silent` 用于轮询：不把骨架屏闪回来，避免每次刷新都跳一下。 */
 async function loadTasks(silent = false): Promise<void> {
+  const token = ++taskRequest
   if (!silent) {
     loadingTasks.value = true
   }
   try {
-    const payload = await api.get<TaskListPayload>('/tasks', { view: 'recent' })
+    const payload = await api.get<TaskListPayload>('/tasks', {
+      view: 'recent', status: failedOnly.value ? 'failed' : undefined,
+    })
+    if (token !== taskRequest) return
     tasks.value = payload.tasks
     tasksError.value = null
     tasksForbidden.value = false
   } catch (caught) {
+    if (token !== taskRequest) return
     // `PERMISSION_DENIED` 映射到 403（`src/domain/errors.ts`）。这不是故障，是
     // 「当前账号不是系统管理员」，服务端消息里的配置项名不进界面（§11）。
     // 判定与取文案共用 `isForbidden`，与概览页、用户与组页同一份。
@@ -99,7 +108,27 @@ async function loadTasks(silent = false): Promise<void> {
       }
     }
   } finally {
-    loadingTasks.value = false
+    if (token === taskRequest) loadingTasks.value = false
+  }
+}
+
+async function retryTask(id?: string): Promise<void> {
+  if (retrying.value) return
+  retrying.value = true
+  actionError.value = null
+  try {
+    let queued = 1
+    if (id === undefined) queued = (await api.post<{ queued: number }>('/tasks/retry-failed')).queued
+    else await api.post(`/tasks/${encodeURIComponent(id)}/retry`)
+    toast.show('success', queued === 0 ? '没有需要重试的任务' : `已将 ${queued} 个任务重新排队`)
+    highlightTaskId.value = id ?? null
+    failedOnly.value = false
+    await loadTasks(true)
+  } catch (caught) {
+    actionError.value = errorMessageOf(caught)
+    await loadTasks(true)
+  } finally {
+    retrying.value = false
   }
 }
 
@@ -156,6 +185,7 @@ watch(tab, (current) => {
     void loadSessions()
   }
 })
+watch(failedOnly, () => { void loadTasks() })
 
 async function refresh(): Promise<void> {
   actionError.value = null
@@ -208,14 +238,20 @@ watch(scopeRoot, () => {
           @commit="commitSession"
         />
 
-        <DomainTaskTable
-          v-else
-          :tasks="tasks"
-          :loading="loadingTasks"
-          :error="tasksError"
-          :forbidden="tasksForbidden"
-          :highlight-id="highlightTaskId"
-        />
+        <div v-else class="stack-16">
+          <DomainVectorBackfill v-if="!tasksForbidden" />
+          <DomainTaskTable
+            v-model:failed-only="failedOnly"
+            :tasks="tasks"
+            :loading="loadingTasks"
+            :error="tasksError"
+            :forbidden="tasksForbidden"
+            :highlight-id="highlightTaskId"
+            :retrying="retrying"
+            @retry="retryTask"
+            @retry-all="retryTask()"
+          />
+        </div>
       </div>
     </div>
   </div>

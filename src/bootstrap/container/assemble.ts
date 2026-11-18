@@ -52,6 +52,7 @@ import { createMemory } from './memory.js';
 import { createModels } from './models.js';
 import { migrateMemoryLinks } from './migrate-memory-links.js';
 import { createRetrieval } from './retrieval.js';
+import { createVectorBackfill } from './vector-backfill.js';
 import type { Container, CreateContainerOptions } from './types.js';
 
 /**
@@ -76,10 +77,10 @@ export async function createContainer(
   const retrieval = await createRetrieval(foundation, models, access);
   const memoryStack = createMemory(foundation, models, access, retrieval);
   const background = createBackground(foundation, models, retrieval, memoryStack);
-  const api = createApi(foundation, access, retrieval, memoryStack, background);
+  const vectorBackfill = createVectorBackfill(foundation, models.embedding);
 
-  const { config, logger, db, store, embeddings } = foundation;
-  const { embedding } = models;
+  const api = createApi(foundation, access, retrieval, memoryStack, background, vectorBackfill);
+  const { config, logger, db } = foundation;
   const { commitRunner, scheduler, observability } = background;
   const { mcpRegistry, mcp, routes, resolveIdentity, services } = api;
   const { indexObserver } = retrieval;
@@ -89,7 +90,7 @@ export async function createContainer(
     config,
     logger,
     db,
-    vectorBackfill: { store, embeddings, embedding },
+    vectorBackfill,
     observability,
     commitRunner,
     scheduler,
@@ -108,6 +109,7 @@ export async function createContainer(
       // 再停在途提交任务：它们调模型、写归档与记忆，`db.close()` 之后写库会抛。
       // 与 `main.ts` 的退出路径都调 `stop()`，所以它必须幂等（它确实幂等）。
       await commitRunner.stop();
+      await vectorBackfill.stop();
       // 再等后台的摘要失效跑完：`db.close()` 之后它们写库会抛。
       await indexObserver.drain();
       db.close();

@@ -369,6 +369,14 @@ describe('startVectorBackfill', () => {
       expect.objectContaining({ embedded: 0, failed: expect.any(Number) }));
     expect(info.mock.calls.map(([message]) => message)).not.toContain('存量向量回填完成。');
     expect(hasDocumentsMissingVectors(reader.db, MODEL)).toBe(true);
+    expect(reader.vectorBackfill.status()).toMatchObject({ running: false, missing: 2, progress: { failed: 2 } });
+
+    mocks.embedMany.mockImplementation(async ({ values }: { values: string[] }) => ({
+      embeddings: values.map(() => [1, 0, 0]), usage: { tokens: values.length },
+    }));
+    expect(reader.vectorBackfill.resume()).toMatchObject({ running: true, missing: 2 });
+    await startVectorBackfill(reader).done;
+    expect(reader.vectorBackfill.status()).toMatchObject({ running: false, missing: 0, progress: { embedded: 2, failed: 0 } });
   });
 
   it('关闭序列先停回填再关容器：回填写库不能撞上已关闭的连接', async () => {

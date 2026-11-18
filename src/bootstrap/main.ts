@@ -3,8 +3,7 @@
  *
  * 这里只做五件事：装配容器、跑启动自检、起 HTTP、接退出信号、在监听之后启动存量
  * 向量回填。**没有业务逻辑**——一旦入口里出现「顺便做点什么」，它就成了第二个编排层，
- * 而测试永远只覆盖得到容器里的那一份。回填是这条规则的唯一例外，理由见
- * `startVectorBackfill`：它的触发点是「进程就绪」与「收到退出信号」，两者都只在这里。
+ * 而测试永远只覆盖得到容器里的那一份。启动与退出只负责启停容器里的回填执行器。
  *
  * ## 启动自检
  *
@@ -26,11 +25,7 @@
 import { pathToFileURL } from 'node:url';
 
 import { startHttpServer } from '../api/http/server.js';
-import {
-  documentsMissingVectors,
-  embedMissingNodes,
-  hasDocumentsMissingVectors,
-} from '../commands/reindex.js';
+import { hasDocumentsMissingVectors } from '../commands/reindex.js';
 import type { Logger } from '../domain/log.js';
 import { MILLISECONDS_PER_SECOND } from '../domain/time.js';
 
@@ -127,139 +122,9 @@ export function warnIfVectorsMissing(
   );
 }
 
-/** 后台回填的句柄。`runMain` 把它交给关闭序列，测试用它等一个确定的完成点。 */
-export interface VectorBackfillHandle {
-  /** 回填结束（完成 / 中止 / 出错都算）后 resolve。从不 reject。 */
-  readonly done: Promise<void>;
-  /** 中止并等它真的停下；重复调用安全。 */
-  stop(): Promise<void>;
-}
-
-/**
- * 每个容器最多一个在跑的回填。
- *
- * 键是容器而不是模块级单值：一个进程只有一个容器，所以效果就是进程内互斥（第二次
- * 启动没有意义，回填是幂等的，重复跑只是白扫一遍）；而测试里每个用例一份容器，
- * 不会被上一个用例已经在跑的 Promise 挡住。
- */
-const backfills = new WeakMap<Container, VectorBackfillHandle>();
-
-/**
- * 在监听之后启动存量向量回填（**不 await**）。
- *
- * 触发点只能在这里：`createContainer` 不知道 HTTP 什么时候就绪，而回填要读盘、打
- * 供应商，放到监听之前等于让「服务可用」等存量的大小。
- *
- * 关闭走 `ShutdownTargets.backfill`：`stop()` 中止在途的供应商调用并等当前批次收尾，
- * 之后 `container.close()` 才关数据库。
- *
- * ## 跨进程并发：不加锁，靠「单进程部署」这个既有假设
- *
- * 同一个 `dataDir` 起两个服务端进程本来就不在支持范围内（`docs/operations.md` 的已知
- * 限制「同一个 `dataDir` 只支持一个服务端进程」：会话轮次时钟、幂等索引、对账队列都是
- * 进程内状态）。仓库里唯一的跨进程锁是内容路径锁（`adapters/fs/lock.ts`，按 URI 保护
- * 文件写），它保护的是「谁在写这个节点」，覆盖不了「谁在给这个节点写向量」；任务租约
- * 只用于阶段二任务，也不提供数据根级的互斥。
- *
- * 所以这里**不新增**跨进程锁。两个进程同时回填的后果：`vec0` 没有 compare-and-set，
- * 两个进程各用自己读到的正文各自 `DELETE + INSERT`，最后写入者赢。不会写坏行（行里的
- * 摘要与向量由同一次读盘产出），但两次写入之间可能出现「向量对应 A、摘要对应 B」的
- * 短暂状态——前提是同一份文件在两次读盘之间被改了；下一次回填 / `pnpm reindex` 按磁盘
- * 重算会修正它，因为两者的输入都是磁盘正文，不是旧向量。
- */
-export function startVectorBackfill(container: Container): VectorBackfillHandle {
-  const running = backfills.get(container);
-  if (running !== undefined) {
-    return running;
-  }
-  const abort = new AbortController();
-  // 回填自己处理每个节点的失败；走到这里的是全局故障（磁盘满、表被外部改坏）。
-  // 记 error 后照常 resolve：启动不应该因为回填失败而挂掉，`done` 也从不对调用方抛。
-  const done = backfillMissingVectors(container, abort.signal).catch((error: unknown) => {
-    container.logger.error('存量向量回填中断：已补齐的保留，剩下的下次启动再补。', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
-  const handle: VectorBackfillHandle = {
-    done,
-    stop: async () => {
-      abort.abort();
-      await done;
-    },
-  };
-  backfills.set(container, handle);
-  return handle;
-}
-
-/**
- * 把「切到 `vector` / `hybrid` 之前就存在、从来没有嵌过」的记忆补上向量。
- *
- * 候选集是 `documentsMissingVectors` 的 SQL 存在性判定（与 `warnIfVectorsMissing`
- * 共用同一份谓词），所以「没事可做」的启动只多一次 `NOT EXISTS` 扫描；正文与摘要
- * 仍然由 `embedMissingNodes` 从磁盘读。
- *
- * **失败处理是「记 warn、跳过、继续下一批」。** 理由：
- * 1. `EmbeddingService` 已经有熔断（连续 5 次失败后短路 30 秒）。供应商真挂了，
- *    继续下一批只是让每个批次立即降级，不会猛打请求；停下来反而让「恢复之后要
- *    重启一次才继续补」变成新的运维动作。
- * 2. 单个坏文件不阻塞后续节点；下次启动只补仍缺失的节点。
- *
- * `fts5` 部署与未配置嵌入时一次都不查库：没有 `node_embedding` 表的库查它会报
- * no such table（与 `warnIfVectorsMissing` 同一约定）。
- */
-async function backfillMissingVectors(container: Container, signal: AbortSignal): Promise<void> {
-  const { config, logger, db } = container;
-  if (config.retrieval.engine === 'fts5') {
-    return;
-  }
-  const embeddingConfig = config.providers.embedding;
-  if (embeddingConfig.type === 'disabled') {
-    return;
-  }
-
-  const { store, embeddings, embedding } = container.vectorBackfill;
-  const model = embedding.model;
-  if (model === null) {
-    return;
-  }
-
-  const uris = documentsMissingVectors(db, model);
-  if (uris.length === 0) {
-    return;
-  }
-  logger.info('存量节点没有向量，开始在后台补齐。', {
-    engine: config.retrieval.engine,
-    model,
-    missing: uris.length,
-  });
-
-  const result = await embedMissingNodes(uris, {
-    store,
-    embeddings,
-    embedding,
-    logger,
-    signal,
-    // 一批 = 供应商的一次调用（服务内部还会按同一上限再切片，见 `EmbeddingService`）。
-    batchSize: embedding.maxBatchSize,
-    onBatch: (progress) => {
-      logger.info('向量回填进度。', {
-        embedded: progress.embedded,
-        skipped: progress.skipped,
-        failed: progress.failed,
-        remaining: progress.remaining,
-        total: uris.length,
-      });
-    },
-  });
-
-  const counts = {
-    embedded: result.embeddedUris.length,
-    skipped: result.skipped,
-    failed: result.failedUris.length,
-  };
-  if (result.aborted) logger.info('存量向量回填已中止（进程正在退出）。', counts);
-  else if (counts.failed > 0) logger.warn('存量向量回填仍有失败，缺失项未写入。', counts);
-  else logger.info('存量向量回填完成。', counts);
+/** 启动与手动补齐共用同一个执行器，关闭时等待它停下。 */
+export function startVectorBackfill(container: Container) {
+  return container.vectorBackfill.start();
 }
 
 /**
@@ -311,7 +176,7 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
 
   // 存量向量回填：监听之后启动，不等它。`fts5` / 未配置嵌入时它立即返回（一次库都
   // 不查），所以这里不需要再判一遍引擎。
-  const backfill = startVectorBackfill(container);
+  startVectorBackfill(container);
 
   let shuttingDown = false;
 
@@ -344,7 +209,7 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
           {
             server,
             commitRunner: container.commitRunner,
-            backfill,
+            backfill: container.vectorBackfill,
             container,
             logger,
           },

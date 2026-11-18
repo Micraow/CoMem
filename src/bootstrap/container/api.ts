@@ -33,6 +33,7 @@ import type { MemoryStack } from './memory.js';
 import type { Retrieval } from './retrieval.js';
 import { errorMessage } from '../../domain/errors.js';
 import { createDraftProbe } from './config-probe.js';
+import type { createVectorBackfill } from './vector-backfill.js';
 
 /** 接口层产物。`resolveIdentity` 给 HTTP 与 MCP 共用。 */
 export interface Api {
@@ -49,6 +50,7 @@ export function createApi(
   retrieval: Retrieval,
   memoryStack: MemoryStack,
   background: Background,
+  vectorBackfill: ReturnType<typeof createVectorBackfill>,
 ): Api {
   const { config, configSnapshot, logger, db, index, taskRepository, prompts, userRepository, groupRepository, localInference } = core;
   const { memoryLink } = core;
@@ -122,6 +124,7 @@ export function createApi(
 
   const routes = createHttpRouteGroups({
     config, configSnapshot, llm, embedding,
+    vectorBackfill,
     draftProbe: createDraftProbe(logger),
     localInference,
     observability,

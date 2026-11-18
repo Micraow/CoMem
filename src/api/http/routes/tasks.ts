@@ -90,7 +90,19 @@ export interface TaskQueryStore {
   get(id: string): TaskRecord | null;
   claimable(now: Date, limit: number): readonly ClaimableTaskRecord[];
   recent(limit: number, status?: TaskStatus): readonly TaskRecord[];
-  requeue(id: string, now: Date): void;
+  retryFailed(now: Date, id?: string): number;
+}
+
+export interface VectorBackfillStatus {
+  readonly missing: number | null;
+  readonly running: boolean;
+  readonly progress: { readonly remaining: number; readonly total: number; readonly failed: number; readonly embedded: number } | null;
+  readonly error: string | null;
+}
+
+export interface VectorBackfillPort {
+  status(): VectorBackfillStatus;
+  resume(): VectorBackfillStatus;
 }
 
 /** 默认返回条数。与 `TaskService.claimable` 的上限一致。 */
@@ -131,11 +143,23 @@ interface TaskRetryResponse {
 }
 
 export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
-  const { taskStore, systemAdmin } = services;
+  const { taskStore, systemAdmin, vectorBackfill } = services;
 
   return {
     prefix: '/tasks',
     register(app: FastifyInstance): void {
+      app.get('/vector-backfill', async (request) => {
+        assertSystemAdmin(request, systemAdmin);
+        return ok(vectorBackfill.status());
+      });
+      app.post('/vector-backfill', async (request, reply) => {
+        assertSystemAdmin(request, systemAdmin);
+        return reply.code(202).send(ok(vectorBackfill.resume()));
+      });
+      app.post('/retry-failed', async (request) => {
+        assertSystemAdmin(request, systemAdmin);
+        return ok({ queued: taskStore.retryFailed(new Date()) });
+      });
       app.get<{ Params: { id: string } }>('/:id', async (request) => {
         assertSystemAdmin(request, systemAdmin);
         const task = taskStore.get(request.params.id);
@@ -177,7 +201,7 @@ export function createTaskRoutes(services: HttpRouteServices): HttpRouteGroup {
             { taskId: task.id, status: task.status },
           );
         }
-        taskStore.requeue(task.id, new Date());
+        taskStore.retryFailed(new Date(), task.id);
         return ok<TaskRetryResponse>({ task: taskStore.get(task.id) });
       });
     },

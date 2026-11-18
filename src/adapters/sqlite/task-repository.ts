@@ -277,17 +277,7 @@ export class TaskRepository {
     this.#logger.debug('任务步骤写回', { taskId: id, steps: stepsDone.length });
   }
 
-  /**
-   * 失败但还值得重试：回到 `pending`，**不动 `attempts`**。
-   *
-   * 这次执行的开始已经在 `tryClaim` 里记过（一次认领 = 一次执行的开始），这里再加
-   * 一次会把「一次失败」记成两次，可重试次数凭空减半。`domain/task.ts` 的转移表里
-   * `running → pending` 是合法转移；这里用一条 UPDATE 完成，不经过内存里的
-   * `transition`——那会多一次读。
-   *
-   * 保留 `error`：它是「上一次失败的原因」，重试成功后由 `finish('done')` 清空。
-   * 清掉的话，一个反复失败的任务在队列里看不到任何线索。
-   */
+  /** 自动重试保留已用次数和最后一次失败原因。 */
   requeue(id: string, now: Date): void {
     withWriteTransaction(this.#db, () => {
       this.#db
@@ -299,6 +289,14 @@ export class TaskRepository {
         .run(now.toISOString(), id);
     });
     this.#logger.debug('任务回到队列', { taskId: id });
+  }
+
+  /** 显式重试获得完整重试预算，已完成步骤与上次失败原因保留。 */
+  retryFailed(now: Date, id?: string): number {
+    return withWriteTransaction(this.#db, () => Number(this.#db.prepare(
+      `UPDATE task SET status = 'pending', attempts = 0, lease_until = NULL, updated_at = ?
+        WHERE status = 'failed'${id === undefined ? '' : ' AND id = ?'}`,
+    ).run(now.toISOString(), ...(id === undefined ? [] : [id])).changes));
   }
 
   /**

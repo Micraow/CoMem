@@ -63,3 +63,9 @@ export function documentsMissingVectors(db: DatabaseSync, model: string): readon
     .all(stableDigest(''), model);
   return rows.map((row) => String(row['uri']));
 }
+
+export function countDocumentsMissingVectors(db: DatabaseSync, model: string): number {
+  const row = db.prepare(`SELECT count(*) AS total FROM node n WHERE ${MISSING_VECTOR_WHERE}`)
+    .get(stableDigest(''), model);
+  return Number(row?.['total']);
+}

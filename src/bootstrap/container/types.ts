@@ -7,8 +7,6 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-import type { ContentStore } from '../../adapters/fs/content-store.js';
-import type { EmbeddingRepository } from '../../adapters/sqlite/embedding-repository.js';
 import type { TaskRepository } from '../../adapters/sqlite/task-repository.js';
 import type { IdentityResolver } from '../../api/http/middleware.js';
 import type { HttpRouteGroup } from '../../api/http/server.js';
@@ -80,17 +78,7 @@ export interface Container {
   readonly routes: readonly HttpRouteGroup[];
   /** 请求身份解析（凭据 + 回环信任，§12.7）。 */
   readonly resolveIdentity: IdentityResolver;
-  /**
-   * 存量向量回填的依赖（`main.ts` 的 `startVectorBackfill` 消费）。
-   *
-   * 放三样东西而不是让 `main` 自己 `new`：适配器只允许在这里构造（§4.4）。
-   * 候选集、分批与失败处理都不属于装配，留在 `main` / `commands/reindex.ts`。
-   */
-  readonly vectorBackfill: {
-    readonly store: ContentStore;
-    readonly embeddings: EmbeddingRepository;
-    readonly embedding: EmbeddingService;
-  };
+  readonly vectorBackfill: ReturnType<typeof import('./vector-backfill.js').createVectorBackfill>;
   /** 关闭数据库连接。幂等。 */
   close(): Promise<void>;
 }

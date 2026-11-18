@@ -634,6 +634,9 @@ describe('任务端点只对系统管理员开放', () => {
         headers: bearer(aliceToken),
       });
       expect(aliceList.statusCode).toBe(403);
+      for (const [method, path] of [['POST', 'retry-failed'], ['GET', 'vector-backfill'], ['POST', 'vector-backfill']] as const) {
+        expect((await inject(harness, { method, url: `/api/v1/tasks/${path}`, headers: bearer(aliceToken) })).statusCode).toBe(403);
+      }
       // 任务没有被 requeue。
       expect(harness.container.services.taskStore.get(task.id)?.status).toBe('failed');
 
@@ -655,6 +658,19 @@ describe('任务端点只对系统管理员开放', () => {
       });
       expect(adminRetry.statusCode).toBe(200);
       expect(harness.container.services.taskStore.get(task.id)?.status).toBe('pending');
+
+      const pending = harness.container.services.task.create('archive', {});
+      const done = harness.container.services.task.create('archive', {});
+      const store = harness.container.services.taskStore;
+      store.finish(done.id, 'done', null, new Date());
+      store.tryClaim(task.id, new Date(), 60);
+      store.finish(task.id, 'failed', 'provider unavailable', new Date());
+      const batch = await inject(harness, { method: 'POST', url: '/api/v1/tasks/retry-failed', headers: bearer(adminToken) });
+      expect(batch.statusCode).toBe(200);
+      expect(batch.json()).toMatchObject({ result: { queued: 1 } });
+      expect(store.get(task.id)).toMatchObject({ status: 'pending', attempts: 0, error: 'provider unavailable' });
+      expect(store.get(done.id)?.status).toBe('done');
+      expect(store.get(pending.id)?.status).toBe('pending');
     } finally {
       await stop(harness);
     }

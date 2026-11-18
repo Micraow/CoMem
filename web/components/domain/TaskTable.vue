@@ -60,9 +60,12 @@ const props = withDefaults(
     forbidden: boolean
     /** 刚提交的会话产出的任务 ID：高亮并滚到可视区。 */
     highlightId: string | null
+    retrying: boolean
   }>(),
   { forbidden: false, highlightId: null },
 )
+const failedOnly = defineModel<boolean>('failedOnly', { required: true })
+const emit = defineEmits<{ retry: [id: string]; 'retry-all': [] }>()
 
 const expiredCount = computed(() => props.tasks.filter((task) => isLeaseExpired(task)).length)
 
@@ -99,8 +102,14 @@ watch(
       panel
       flush
     >
-      <template #actions>
-        <span class="caption">最近更新的 100 条任务</span>
+      <template v-if="!props.forbidden" #actions>
+        <UiButton :variant="failedOnly ? 'secondary' : 'plain'" size="sm" :aria-pressed="failedOnly" :disabled="props.loading || props.retrying" @click="failedOnly = !failedOnly">
+          只看失败
+        </UiButton>
+        <UiButton v-if="failedOnly && props.tasks.length > 0" variant="secondary" size="sm" :disabled="props.loading || props.retrying" @click="emit('retry-all')">
+          <RotateCcw :size="14" />
+          {{ props.retrying ? '正在排队' : '重试全部失败任务' }}
+        </UiButton>
       </template>
 
       <UiEmpty v-if="props.forbidden" forbidden />
@@ -118,6 +127,7 @@ watch(
             <th>创建时间</th>
             <th>租约到期</th>
             <th class="num">重试次数</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -129,7 +139,10 @@ watch(
           >
             <td class="mono strong">
               {{ task.id }}
-              <span v-if="task.error !== null" class="task-error" :title="task.error">有错误记录</span>
+              <details v-if="task.error !== null" class="task-error">
+                <summary>失败原因</summary>
+                <span>{{ task.error }}</span>
+              </details>
             </td>
             <td>{{ taskTypeLabelOf(task.type) }}</td>
             <td>
@@ -156,11 +169,16 @@ watch(
               <span v-else class="faint">—</span>
             </td>
             <td class="num">{{ task.attempts }}</td>
+            <td>
+              <UiButton v-if="task.status === 'failed'" variant="secondary" size="sm" :disabled="props.loading || props.retrying" @click="emit('retry', task.id)">
+                重试
+              </UiButton>
+            </td>
           </tr>
         </tbody>
       </UiTable>
 
-      <UiEmpty v-else v-slot="{ size }" title="还没有任务记录">
+      <UiEmpty v-else v-slot="{ size }" :title="failedOnly ? '没有失败任务' : '还没有任务记录'">
         <RotateCcw :size="size" :stroke-width="1.4" />
       </UiEmpty>
     </UiCard>
@@ -175,16 +193,12 @@ watch(
 }
 
 .task-error {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 0 6px;
-  border-radius: 5px;
-  background: var(--fill-2);
   font-family: var(--font);
   font-size: 12px;
   line-height: 18px;
-  color: var(--label-3);
-  vertical-align: 1px;
+  color: var(--label-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .lease-expired {
