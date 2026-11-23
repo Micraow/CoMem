@@ -19,32 +19,21 @@
  * 由 `IngestService` 记进报告。
  */
 
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
-import { ComemError, errorMessage } from '../../domain/errors.js';
+import { ComemError } from '../../domain/errors.js';
 import { isRecord } from '../../domain/guards.js';
-import type {
-  CursorKind,
-  IngestCursor,
-  IngestHarness,
-  NormalizedMessage,
-  SessionRef,
-} from '../../domain/ingest.js';
+import type { IngestHarness, NormalizedMessage } from '../../domain/ingest.js';
 import type { Logger } from '../../domain/log.js';
 
-import {
-  parseJsonDocument,
-  walkFiles,
-  type LogSource,
-  type ReadMessagesResult,
-  type SourceFileError,
-} from '../source.js';
+import { TreeLogSource, type TreeConversation, type TreeMessageNode } from './tree-source.js';
 
-const DOWNLOADS = join(homedir(), 'Downloads');
 const QWEN_FILE_PREFIX = 'Qwen-chat-export-';
 const QWEN_FILE_SUFFIX = '.json';
+
+export interface QwenSourceOptions {
+  /** 覆盖默认路径（`~/Downloads/Qwen-chat-export-*.json`）。 */
+  readonly paths?: readonly string[];
+  readonly logger: Logger;
+}
 
 interface QwenNode {
   readonly id: string;
@@ -55,23 +44,6 @@ interface QwenNode {
   readonly contentList: readonly Record<string, unknown>[];
   readonly timestamp: string | null;
   readonly model: string | null;
-}
-
-interface QwenConversation {
-  readonly id: string;
-  readonly title: string | null;
-  readonly startedAt: string | null;
-  readonly nodes: ReadonlyMap<string, QwenNode>;
-}
-
-export interface QwenSourceOptions {
-  /** 覆盖默认路径（`~/Downloads/Qwen-chat-export-*.json`）。 */
-  readonly paths?: readonly string[];
-  readonly logger: Logger;
-}
-
-function isQwenFile(name: string): boolean {
-  return name.startsWith(QWEN_FILE_PREFIX) && name.endsWith(QWEN_FILE_SUFFIX);
 }
 
 /** 时间戳可能是 epoch 秒（数字）或 ISO 字符串。 */
@@ -166,7 +138,24 @@ function historyNodes(history: unknown): ReadonlyMap<string, QwenNode> {
   return nodes;
 }
 
-function toConversation(value: unknown): QwenConversation | null {
+function messageOf(node: QwenNode, startedAt: string | null): NormalizedMessage | null {
+  if (node.role !== 'user' && node.role !== 'assistant') {
+    return null;
+  }
+  const text = textOf(node);
+  if (text.trim() === '') {
+    return null;
+  }
+  return {
+    role: node.role,
+    text,
+    createdAt: node.timestamp ?? startedAt,
+    model: node.model,
+    cwd: null,
+  };
+}
+
+function conversationOf(value: unknown): TreeConversation | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -175,16 +164,26 @@ function toConversation(value: unknown): QwenConversation | null {
   if (typeof id !== 'string' || !isRecord(chat)) {
     return null;
   }
-  const nodes = historyNodes(chat['history']);
-  if (nodes.size === 0) {
+  const raw = historyNodes(chat['history']);
+  if (raw.size === 0) {
     return null;
   }
 
   let startedAt: string | null = null;
-  for (const node of nodes.values()) {
+  for (const node of raw.values()) {
     if (node.timestamp !== null && (startedAt === null || node.timestamp < startedAt)) {
       startedAt = node.timestamp;
     }
+  }
+
+  const nodes = new Map<string, TreeMessageNode>();
+  for (const node of raw.values()) {
+    nodes.set(node.id, {
+      id: node.id,
+      parentId: node.parentId,
+      childrenIds: node.childrenIds,
+      message: messageOf(node, startedAt),
+    });
   }
 
   const title = value['title'];
@@ -196,199 +195,28 @@ function toConversation(value: unknown): QwenConversation | null {
   };
 }
 
-/** 从根沿 `childrenIds[0]` 走到叶子；环用 visited 兜底。 */
-function linearPath(nodes: ReadonlyMap<string, QwenNode>): readonly string[] {
-  const root = [...nodes.values()].find((node) => node.parentId === null);
-  if (root === undefined) {
-    return [];
-  }
-  const path: string[] = [];
-  const visited = new Set<string>();
-  let current: QwenNode | undefined = root;
-  while (current !== undefined && !visited.has(current.id)) {
-    visited.add(current.id);
-    path.push(current.id);
-    const nextId: string | undefined = current.childrenIds[0];
-    current = nextId === undefined ? undefined : nodes.get(nextId);
-  }
-  return path;
-}
-
-function messageOf(node: QwenNode, conversation: QwenConversation): NormalizedMessage | null {
-  if (node.role !== 'user' && node.role !== 'assistant') {
-    return null;
-  }
-  const text = textOf(node);
-  if (text.trim() === '') {
-    return null;
-  }
-  return {
-    role: node.role,
-    text,
-    createdAt: node.timestamp ?? conversation.startedAt,
-    model: node.model,
-    cwd: null,
-  };
-}
-
-export class QwenSource implements LogSource {
+export class QwenSource extends TreeLogSource {
   readonly harness: IngestHarness = 'qwen';
-  readonly cursorKind: CursorKind = 'tree_node';
-
-  readonly #paths: readonly string[] | null;
-  readonly #logger: Logger;
-  readonly #documents = new Map<string, readonly QwenConversation[]>();
-  readonly #fileErrors: SourceFileError[] = [];
+  protected readonly label = 'Qwen';
 
   constructor(options: QwenSourceOptions) {
-    this.#paths = options.paths === undefined || options.paths.length === 0 ? null : options.paths;
-    this.#logger = options.logger;
+    super(options);
   }
 
-  get fileErrors(): readonly SourceFileError[] {
-    return this.#fileErrors;
+  protected matchesExportFile(name: string): boolean {
+    return name.startsWith(QWEN_FILE_PREFIX) && name.endsWith(QWEN_FILE_SUFFIX);
   }
 
-  async *discoverSessions(): AsyncIterable<SessionRef> {
-    for (const locator of await this.#locators()) {
-      let conversations: readonly QwenConversation[];
-      try {
-        conversations = await this.#load(locator);
-      } catch (error) {
-        // 一份损坏的导出不该让同来源的其它文件也导不进来。跳过并记进报告，
-        // 由用户在报告里看到「哪个文件被跳过了、为什么」。
-        const message = errorMessage(error);
-        this.#fileErrors.push({ locator, message });
-        this.#logger.error('跳过无法解析的 Qwen 导出文件', { locator, reason: message });
-        continue;
-      }
-      for (const conversation of conversations) {
-        yield {
-          harness: this.harness,
-          nativeSessionId: conversation.id,
-          locator,
-          title: conversation.title,
-          startedAt: conversation.startedAt,
-        };
-      }
-    }
-    this.#documents.clear();
-  }
-
-  async readMessages(
-    ref: SessionRef,
-    cursor: IngestCursor | null,
-    limit: number,
-  ): Promise<ReadMessagesResult> {
-    if (!Number.isInteger(limit) || limit <= 0) {
-      throw new ComemError('INVALID_ARGUMENT', `每次读取的条数必须是正整数：${limit}`, {
-        limit,
-      });
-    }
-    if (cursor !== null && cursor.kind !== 'tree_node') {
-      throw new ComemError('INVALID_ARGUMENT', `游标类型与源不匹配：${ref.locator}`, {
-        locator: ref.locator,
-        kind: cursor.kind,
-      });
-    }
-
-    const conversation = (await this.#load(ref.locator)).find(
-      (candidate) => candidate.id === ref.nativeSessionId,
-    );
-    if (conversation === undefined) {
-      throw new ComemError('NOT_FOUND', `导出文件里找不到会话：${ref.nativeSessionId}`, {
-        locator: ref.locator,
-        nativeSessionId: ref.nativeSessionId,
-      });
-    }
-
-    const path = linearPath(conversation.nodes);
-    let index = 0;
-    if (cursor !== null && cursor.value !== '') {
-      const found = path.indexOf(cursor.value);
-      if (found === -1) {
-        throw new ComemError('INTERNAL', `游标指向的节点不在会话路径上：${cursor.value}`, {
-          locator: ref.locator,
-          nativeSessionId: ref.nativeSessionId,
-          cursor: cursor.value,
-        });
-      }
-      index = found + 1;
-    }
-
-    const messages: NormalizedMessage[] = [];
-    let position = cursor?.value ?? '';
-    while (index < path.length) {
-      const nodeId = path[index];
-      index += 1;
-      if (nodeId === undefined) {
-        break;
-      }
-      position = nodeId;
-      const node = conversation.nodes.get(nodeId);
-      if (node === undefined) {
-        continue;
-      }
-      const message = messageOf(node, conversation);
-      if (message !== null) {
-        messages.push(message);
-      }
-      if (messages.length >= limit) {
-        break;
-      }
-    }
-
-    return { messages, cursor: { kind: 'tree_node', value: position } };
-  }
-
-  async #locators(): Promise<readonly string[]> {
-    if (this.#paths !== null) {
-      return this.#paths;
-    }
-    // 真实导出在 `~/Downloads/AI对话/Qwen-chat-export-*.json`——比任务草图多一层。
-    const locators: string[] = [];
-    for await (const path of walkFiles(DOWNLOADS, isQwenFile)) {
-      locators.push(path);
-    }
-    return locators;
-  }
-
-  async #load(locator: string): Promise<readonly QwenConversation[]> {
-    const cached = this.#documents.get(locator);
-    if (cached !== undefined) {
-      return cached;
-    }
-
-    let raw: string;
-    try {
-      raw = await readFile(locator, 'utf8');
-    } catch (error) {
-      throw new ComemError('NOT_FOUND', `读不到 Qwen 导出文件：${locator}`, {
-        locator,
-        reason: errorMessage(error),
-      });
-    }
-
-    const parsed = parseJsonDocument(raw, locator);
-    if (parsed.repaired) {
-      this.#logger.warn('Qwen 导出文件的脱敏伪影已按 0 修复', { locator });
-    }
-    if (!isRecord(parsed.value) || !Array.isArray(parsed.value['data'])) {
+  protected conversationsOf(parsed: unknown, locator: string): readonly unknown[] {
+    if (!isRecord(parsed) || !Array.isArray(parsed['data'])) {
       throw new ComemError('INVALID_ARGUMENT', `Qwen 导出文件缺少 data 数组：${locator}`, {
         locator,
       });
     }
+    return parsed['data'];
+  }
 
-    const conversations: QwenConversation[] = [];
-    for (const value of parsed.value['data']) {
-      const conversation = toConversation(value);
-      if (conversation === null) {
-        this.#logger.warn('跳过无法解析的 Qwen 会话', { locator });
-        continue;
-      }
-      conversations.push(conversation);
-    }
-    this.#documents.set(locator, conversations);
-    return conversations;
+  protected toConversation(value: unknown): TreeConversation | null {
+    return conversationOf(value);
   }
 }

@@ -20,6 +20,52 @@ const MAX_PAGE_SIZE = 100;
 
 export type LlmCallLogPort = Pick<LlmCallRepository, 'insert' | 'list'>;
 
+/**
+ * 一次逻辑调用（含重试）累计的用量。
+ *
+ * `complete` 只在每一次失败尝试都带回了可用用量时才为真——此时日志里记的是
+ * 「整次调用真实花了多少 token」；缺一次就只能记 `null`，否则账目偏小。
+ */
+export interface LlmUsageTally {
+  promptTokens: number;
+  completionTokens: number;
+  complete: boolean;
+}
+
+export function addAttemptUsage(tally: LlmUsageTally, usage: LlmUsage): void {
+  tally.promptTokens += usage.promptTokens;
+  tally.completionTokens += usage.completionTokens;
+}
+
+export function addFailedAttemptUsage(tally: LlmUsageTally, error: unknown): void {
+  const details = ComemError.from(error).details?.['usage'];
+  if (typeof details !== 'object' || details === null || Array.isArray(details)) {
+    tally.complete = false;
+    return;
+  }
+  const usage = details as Record<string, unknown>;
+  const promptTokens = usage['promptTokens'];
+  const completionTokens = usage['completionTokens'];
+  if (
+    typeof promptTokens !== 'number' ||
+    !Number.isInteger(promptTokens) ||
+    promptTokens < 0 ||
+    typeof completionTokens !== 'number' ||
+    !Number.isInteger(completionTokens) ||
+    completionTokens < 0
+  ) {
+    tally.complete = false;
+    return;
+  }
+  addAttemptUsage(tally, { promptTokens, completionTokens });
+}
+
+export function talliedUsage(tally: LlmUsageTally): LlmUsage | null {
+  return tally.complete
+    ? { promptTokens: tally.promptTokens, completionTokens: tally.completionTokens }
+    : null;
+}
+
 export interface LlmCallPageItem {
   readonly id: string;
   readonly targetUri: string | null;

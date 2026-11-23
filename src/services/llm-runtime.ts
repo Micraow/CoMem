@@ -7,7 +7,14 @@ import type {
 } from '../domain/llm.js';
 import type { Logger } from '../domain/log.js';
 
-import { persistLlmCall, type LlmCallLogPort } from './llm-call-log.js';
+import {
+  addAttemptUsage,
+  addFailedAttemptUsage,
+  persistLlmCall,
+  talliedUsage,
+  type LlmCallLogPort,
+  type LlmUsageTally,
+} from './llm-call-log.js';
 import { llmCostUsd, type LlmPricing } from './llm-cost.js';
 
 export interface LlmStatsState {
@@ -28,12 +35,6 @@ export interface LlmRuntimeState {
   readonly modelName: string;
   readonly callLog: LlmCallLogPort | undefined;
   readonly totals: LlmStatsState;
-}
-
-export interface LlmUsageTally {
-  promptTokens: number;
-  completionTokens: number;
-  complete: boolean;
 }
 
 const MAX_RETRY_DELAY_MS = 8_000;
@@ -134,40 +135,6 @@ function recordUsage(
     finishReason,
     durationMs: Date.now() - startedAt,
   });
-}
-
-function addAttemptUsage(tally: LlmUsageTally, usage: LlmUsage): void {
-  tally.promptTokens += usage.promptTokens;
-  tally.completionTokens += usage.completionTokens;
-}
-
-function addFailedAttemptUsage(tally: LlmUsageTally, error: unknown): void {
-  const details = ComemError.from(error).details?.['usage'];
-  if (typeof details !== 'object' || details === null || Array.isArray(details)) {
-    tally.complete = false;
-    return;
-  }
-  const usage = details as Record<string, unknown>;
-  const promptTokens = usage['promptTokens'];
-  const completionTokens = usage['completionTokens'];
-  if (
-    typeof promptTokens !== 'number' ||
-    !Number.isInteger(promptTokens) ||
-    promptTokens < 0 ||
-    typeof completionTokens !== 'number' ||
-    !Number.isInteger(completionTokens) ||
-    completionTokens < 0
-  ) {
-    tally.complete = false;
-    return;
-  }
-  addAttemptUsage(tally, { promptTokens, completionTokens });
-}
-
-function talliedUsage(tally: LlmUsageTally): LlmUsage | null {
-  return tally.complete
-    ? { promptTokens: tally.promptTokens, completionTokens: tally.completionTokens }
-    : null;
 }
 
 /**

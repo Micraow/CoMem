@@ -1,5 +1,5 @@
 /**
- * DeepSeek 的会话导出（`~/Downloads/*\/conversations.json`）。
+ * DeepSeek 的会话导出（`~/Downloads/*\\/conversations.json`）。
  *
  * 文件是一个 JSON 数组，每个会话里 `mapping` 是**树**（`parent` / `children`），
  * 不是线性数组——导出时编辑、重新生成分支都会留下兄弟节点。
@@ -28,48 +28,17 @@
  * `TOOL_OPEN`、`TOOL_SEARCH`、`TOOL_FIND`、`FILE`、`SEARCH` 都不是正文。
  */
 
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
-import { ComemError, errorMessage } from '../../domain/errors.js';
+import { ComemError } from '../../domain/errors.js';
 import { isRecord } from '../../domain/guards.js';
-import type {
-  CursorKind,
-  IngestCursor,
-  IngestHarness,
-  NormalizedMessage,
-  SessionRef,
-} from '../../domain/ingest.js';
+import type { IngestHarness, NormalizedMessage } from '../../domain/ingest.js';
 import type { Logger } from '../../domain/log.js';
 
-import {
-  parseJsonDocument,
-  walkFiles,
-  type LogSource,
-  type ReadMessagesResult,
-  type SourceFileError,
-} from '../source.js';
+import { TreeLogSource, type TreeConversation, type TreeMessageNode } from './tree-source.js';
 
-const DOWNLOADS = join(homedir(), 'Downloads');
 const CONVERSATIONS_FILE = 'conversations.json';
 
-interface DeepSeekNode {
-  readonly id: string;
-  readonly parent: string | null;
-  readonly children: readonly string[];
-  readonly message: Record<string, unknown> | null;
-}
-
-interface DeepSeekConversation {
-  readonly id: string;
-  readonly title: string | null;
-  readonly insertedAt: string | null;
-  readonly mapping: ReadonlyMap<string, DeepSeekNode>;
-}
-
 export interface DeepSeekSourceOptions {
-  /** 覆盖默认路径（`~/Downloads/*\/conversations.json`）。 */
+  /** 覆盖默认路径（`~/Downloads/*\\/conversations.json`）。 */
   readonly paths?: readonly string[];
   readonly logger: Logger;
 }
@@ -122,7 +91,32 @@ function textFromContentParts(content: unknown): string {
   return parts.filter((part): part is string => typeof part === 'string').join('\n');
 }
 
-function toNode(id: string, value: unknown): DeepSeekNode | null {
+function messageOf(
+  value: Record<string, unknown>,
+  fallbackCreatedAt: string | null,
+): NormalizedMessage | null {
+  const fromFragments = textFromFragments(value['fragments']);
+  const role = fromFragments?.role ?? value['role'];
+  const text = fromFragments?.text ?? textFromContentParts(value['content']);
+  if ((role !== 'user' && role !== 'assistant') || text.trim() === '') {
+    return null;
+  }
+
+  const insertedAt = value['inserted_at'];
+  return {
+    role,
+    text,
+    createdAt: typeof insertedAt === 'string' ? insertedAt : fallbackCreatedAt,
+    model: typeof value['model'] === 'string' ? value['model'] : null,
+    cwd: null,
+  };
+}
+
+function toNode(
+  id: string,
+  value: unknown,
+  fallbackCreatedAt: string | null,
+): TreeMessageNode | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -131,15 +125,15 @@ function toNode(id: string, value: unknown): DeepSeekNode | null {
   const message = value['message'];
   return {
     id,
-    parent: typeof parent === 'string' ? parent : null,
-    children: Array.isArray(children)
+    parentId: typeof parent === 'string' ? parent : null,
+    childrenIds: Array.isArray(children)
       ? children.filter((child): child is string => typeof child === 'string')
       : [],
-    message: isRecord(message) ? message : null,
+    message: isRecord(message) ? messageOf(message, fallbackCreatedAt) : null,
   };
 }
 
-function toConversation(value: unknown): DeepSeekConversation | null {
+function conversationOf(value: unknown): TreeConversation | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -148,234 +142,50 @@ function toConversation(value: unknown): DeepSeekConversation | null {
   if (typeof id !== 'string' || !isRecord(mapping)) {
     return null;
   }
-  const nodes = new Map<string, DeepSeekNode>();
+
+  const insertedAt = value['inserted_at'];
+  const fallbackCreatedAt = typeof insertedAt === 'string' ? insertedAt : null;
+  const nodes = new Map<string, TreeMessageNode>();
   for (const [nodeId, node] of Object.entries(mapping)) {
-    const parsed = toNode(nodeId, node);
+    const parsed = toNode(nodeId, node, fallbackCreatedAt);
     if (parsed !== null) {
       nodes.set(nodeId, parsed);
     }
   }
+
   const title = value['title'];
-  const insertedAt = value['inserted_at'];
   return {
     id,
     title: typeof title === 'string' && title !== '' ? title : null,
-    insertedAt: typeof insertedAt === 'string' ? insertedAt : null,
-    mapping: nodes,
+    startedAt: fallbackCreatedAt,
+    nodes,
   };
 }
 
-/**
- * 从根沿 `children[0]` 走到叶子。没有根（`parent` 全非空、数据损坏）时返回空。
- * 环用 `visited` 兜底：损坏的导出不该让导入进程转不出来。
- */
-function linearPath(mapping: ReadonlyMap<string, DeepSeekNode>): readonly string[] {
-  const root = [...mapping.values()].find((node) => node.parent === null);
-  if (root === undefined) {
-    return [];
-  }
-
-  const path: string[] = [];
-  const visited = new Set<string>();
-  let current: DeepSeekNode | undefined = root;
-  while (current !== undefined && !visited.has(current.id)) {
-    visited.add(current.id);
-    path.push(current.id);
-    const nextId: string | undefined = current.children[0];
-    current = nextId === undefined ? undefined : mapping.get(nextId);
-  }
-  return path;
-}
-
-function messageOf(
-  node: DeepSeekNode,
-  conversation: DeepSeekConversation,
-): NormalizedMessage | null {
-  const message = node.message;
-  if (message === null) {
-    return null;
-  }
-
-  const fromFragments = textFromFragments(message['fragments']);
-  const role = fromFragments?.role ?? message['role'];
-  const text = fromFragments?.text ?? textFromContentParts(message['content']);
-  if ((role !== 'user' && role !== 'assistant') || text.trim() === '') {
-    return null;
-  }
-
-  const insertedAt = message['inserted_at'];
-  return {
-    role,
-    text,
-    createdAt:
-      typeof insertedAt === 'string'
-        ? insertedAt
-        : conversation.insertedAt,
-    model: typeof message['model'] === 'string' ? message['model'] : null,
-    cwd: null,
-  };
-}
-
-export class DeepSeekSource implements LogSource {
+export class DeepSeekSource extends TreeLogSource {
   readonly harness: IngestHarness = 'deepseek';
-  readonly cursorKind: CursorKind = 'tree_node';
-
-  readonly #paths: readonly string[] | null;
-  readonly #logger: Logger;
-  /** 当前文件解析后的会话。按 locator 缓存：一个 32MB 文件只解析一次。 */
-  readonly #documents = new Map<string, readonly DeepSeekConversation[]>();
-  readonly #fileErrors: SourceFileError[] = [];
+  protected readonly label = 'DeepSeek';
 
   constructor(options: DeepSeekSourceOptions) {
-    this.#paths = options.paths === undefined || options.paths.length === 0 ? null : options.paths;
-    this.#logger = options.logger;
+    super(options);
   }
 
-  get fileErrors(): readonly SourceFileError[] {
-    return this.#fileErrors;
+  protected matchesExportFile(name: string): boolean {
+    return name === CONVERSATIONS_FILE;
   }
 
-  async *discoverSessions(): AsyncIterable<SessionRef> {
-    for (const locator of await this.#locators()) {
-      let conversations: readonly DeepSeekConversation[];
-      try {
-        conversations = await this.#load(locator);
-      } catch (error) {
-        // 一份损坏的导出不该让同来源的其它文件也导不进来。跳过并记进报告。
-        const message = errorMessage(error);
-        this.#fileErrors.push({ locator, message });
-        this.#logger.error('跳过无法解析的 DeepSeek 导出文件', { locator, reason: message });
-        continue;
-      }
-      for (const conversation of conversations) {
-        yield {
-          harness: this.harness,
-          nativeSessionId: conversation.id,
-          locator,
-          title: conversation.title,
-          startedAt: conversation.insertedAt,
-        };
-      }
-    }
-    // 发现结束后不再需要整份文档：908 个会话全留在内存里只会占着堆。
-    this.#documents.clear();
-  }
-
-  async readMessages(
-    ref: SessionRef,
-    cursor: IngestCursor | null,
-    limit: number,
-  ): Promise<ReadMessagesResult> {
-    if (!Number.isInteger(limit) || limit <= 0) {
-      throw new ComemError('INVALID_ARGUMENT', `每次读取的条数必须是正整数：${limit}`, {
-        limit,
-      });
-    }
-    if (cursor !== null && cursor.kind !== 'tree_node') {
-      throw new ComemError('INVALID_ARGUMENT', `游标类型与源不匹配：${ref.locator}`, {
-        locator: ref.locator,
-        kind: cursor.kind,
-      });
-    }
-
-    const conversation = (await this.#load(ref.locator)).find(
-      (candidate) => candidate.id === ref.nativeSessionId,
-    );
-    if (conversation === undefined) {
-      throw new ComemError('NOT_FOUND', `导出文件里找不到会话：${ref.nativeSessionId}`, {
-        locator: ref.locator,
-        nativeSessionId: ref.nativeSessionId,
-      });
-    }
-
-    const path = linearPath(conversation.mapping);
-    let index = 0;
-    if (cursor !== null && cursor.value !== '') {
-      const found = path.indexOf(cursor.value);
-      if (found === -1) {
-        throw new ComemError('INTERNAL', `游标指向的节点不在会话路径上：${cursor.value}`, {
-          locator: ref.locator,
-          nativeSessionId: ref.nativeSessionId,
-          cursor: cursor.value,
-        });
-      }
-      index = found + 1;
-    }
-
-    const messages: NormalizedMessage[] = [];
-    let position = cursor?.value ?? '';
-    while (index < path.length) {
-      const nodeId = path[index];
-      index += 1;
-      if (nodeId === undefined) {
-        break;
-      }
-      position = nodeId;
-      const node = conversation.mapping.get(nodeId);
-      if (node === undefined) {
-        continue;
-      }
-      const message = messageOf(node, conversation);
-      if (message !== null) {
-        messages.push(message);
-      }
-      if (messages.length >= limit) {
-        break;
-      }
-    }
-
-    return { messages, cursor: { kind: 'tree_node', value: position } };
-  }
-
-  async #locators(): Promise<readonly string[]> {
-    if (this.#paths !== null) {
-      return this.#paths;
-    }
-    // 真实导出在 `~/Downloads/AI对话/deepseek_data-…/conversations.json`——比任务
-    // 草图多一层。递归找同名文件，比写死一级目录稳。
-    const locators: string[] = [];
-    for await (const path of walkFiles(DOWNLOADS, (name) => name === CONVERSATIONS_FILE)) {
-      locators.push(path);
-    }
-    return locators;
-  }
-
-  async #load(locator: string): Promise<readonly DeepSeekConversation[]> {
-    const cached = this.#documents.get(locator);
-    if (cached !== undefined) {
-      return cached;
-    }
-
-    let raw: string;
-    try {
-      raw = await readFile(locator, 'utf8');
-    } catch (error) {
-      throw new ComemError('NOT_FOUND', `读不到 DeepSeek 导出文件：${locator}`, {
-        locator,
-        reason: errorMessage(error),
-      });
-    }
-
-    const parsed = parseJsonDocument(raw, locator);
-    if (parsed.repaired) {
-      this.#logger.warn('DeepSeek 导出文件的脱敏伪影已按 0 修复', { locator });
-    }
-    if (!Array.isArray(parsed.value)) {
+  protected conversationsOf(parsed: unknown, locator: string): readonly unknown[] {
+    // 顶层不是数组说明这份导出不可用。静默返回 0 个会话会让「导入完了但什么都
+    // 没发生」看起来像正常状态，所以这里明确抛错，由 `IngestService` 记进报告。
+    if (!Array.isArray(parsed)) {
       throw new ComemError('INVALID_ARGUMENT', `DeepSeek 导出文件的顶层不是数组：${locator}`, {
         locator,
       });
     }
+    return parsed;
+  }
 
-    const conversations: DeepSeekConversation[] = [];
-    for (const value of parsed.value) {
-      const conversation = toConversation(value);
-      if (conversation === null) {
-        this.#logger.warn('跳过无法解析的 DeepSeek 会话', { locator });
-        continue;
-      }
-      conversations.push(conversation);
-    }
-    this.#documents.set(locator, conversations);
-    return conversations;
+  protected toConversation(value: unknown): TreeConversation | null {
+    return conversationOf(value);
   }
 }
