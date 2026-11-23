@@ -10,26 +10,23 @@
  */
 
 import { ComemError } from '../../../domain/errors.js';
-import { LEVELS } from '../../../domain/level.js';
-import { CONTEXT_TYPES } from '../../../domain/node.js';
 import type { SearchPlan } from '../../../domain/retrieval.js';
 import type { ContextAssembly } from '../../../services/search.js';
 import { isSearchMode, SEARCH_MODES, type SearchMode } from '../../search-mode.js';
-import { DEFAULT_SEARCH_LIMIT } from '../../../services/retrieval/budget.js';
 import {
   asRecord,
-  formatDegradations,
   formatHits,
-  optionalContextType,
-  optionalLevel,
   optionalString,
-  nonEmptyString,
-  optionalStringArray,
-  positiveInteger,
-  readScopes,
   textResult,
   type McpToolDefinition,
 } from '../registry.js';
+
+import {
+  RETRIEVAL_FILTER_PROPERTIES,
+  collectRetrievalArgs,
+  singleOrUndefined,
+  withDegradations,
+} from './retrieval-args.js';
 
 function parseMode(value: string | undefined): SearchMode {
   if (value === undefined) {
@@ -101,29 +98,7 @@ export const searchTool: McpToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: '自然语言查询；会被 queryFilters 清洗' },
-      targetUri: {
-        type: 'string',
-        description: '可选的目录 URI，用来收窄范围；~ 是当前身份的根',
-      },
-      limit: { type: 'integer', minimum: 1, default: DEFAULT_SEARCH_LIMIT },
-      level: { type: 'string', enum: LEVELS },
-      contextType: { type: 'string', enum: CONTEXT_TYPES },
-      memoryTypes: {
-        type: 'array',
-        items: { type: 'string' },
-        description: '只看这些记忆类型（如 rules / preferences / entities）；省略表示不限',
-      },
-      updatedAfter: {
-        type: 'string',
-        format: 'date-time',
-        description: '只返回该时刻之后（含）更新的节点，ISO 8601',
-      },
-      updatedBefore: {
-        type: 'string',
-        format: 'date-time',
-        description: '只返回该时刻之前（含）更新的节点，ISO 8601',
-      },
+      ...RETRIEVAL_FILTER_PROPERTIES,
       sessionId: { type: 'string', description: '可选：提供最近消息用于解析指代' },
       mode: {
         type: 'string',
@@ -136,19 +111,11 @@ export const searchTool: McpToolDefinition = {
     required: ['query'],
   },
   async execute(input, context) {
-    const args = asRecord(input, 'search');
-    const query = nonEmptyString(args, 'query', 'search');
-    const targetUri = optionalString(args, 'targetUri', 'search');
-    const limit = positiveInteger(args, 'limit', DEFAULT_SEARCH_LIMIT, 'search');
-    const level = optionalLevel(args, 'level', 'search');
-    const contextType = optionalContextType(args, 'contextType', 'search');
-    const sessionId = optionalString(args, 'sessionId', 'search');
-    const mode = parseMode(optionalString(args, 'mode', 'search'));
+    const raw = asRecord(input, 'search');
+    const args = await collectRetrievalArgs(raw, 'search', context);
+    const sessionId = optionalString(raw, 'sessionId', 'search');
+    const mode = parseMode(optionalString(raw, 'mode', 'search'));
     // 记忆类型 / 时间范围是**过滤维度**，不是新的检索面：两种 mode 都下推给索引。
-    const memoryTypes = optionalStringArray(args, 'memoryTypes', 'search');
-    const updatedAfter = optionalString(args, 'updatedAfter', 'search');
-    const updatedBefore = optionalString(args, 'updatedBefore', 'search');
-    const scopes = await readScopes(context, targetUri);
     // 本地索引阶段；随后的意图分析 / 嵌入 / 重排由服务层上报（`onUpstream`）。
     context.deadline?.mark('index');
     const deadline = {
@@ -159,17 +126,17 @@ export const searchTool: McpToolDefinition = {
 
     if (mode === 'context') {
       // 跨轮去重：传了 sessionId 才有轮次时钟（见 `ContextOptions.sessionId`）。
-      const diagnostics = await context.search.contextWithDiagnostics(query, {
-        scopes,
+      const diagnostics = await context.search.contextWithDiagnostics(args.query, {
+        scopes: args.scopes,
         subject: context.subject,
         principals: context.principals,
-        limit,
+        limit: args.limit,
         sessionId,
-        levels: level === undefined ? undefined : [level],
-        contextTypes: contextType === undefined ? undefined : [contextType],
-        memoryTypes,
-        updatedAfter,
-        updatedBefore,
+        levels: singleOrUndefined(args.level),
+        contextTypes: singleOrUndefined(args.contextType),
+        memoryTypes: args.memoryTypes,
+        updatedAfter: args.updatedAfter,
+        updatedBefore: args.updatedBefore,
         ...deadline,
       });
 
@@ -177,7 +144,7 @@ export const searchTool: McpToolDefinition = {
       context.logger.debug('MCP search（context）完成', {
         requestId: context.requestId,
         sessionId: sessionId ?? null,
-        scopes,
+        scopes: args.scopes,
         items: assembled.items.length,
         tokensUsed: assembled.tokensUsed,
         dropped: assembled.dropped,
@@ -186,30 +153,32 @@ export const searchTool: McpToolDefinition = {
       // `mode=context` 也可能在向量 / 重排上降级：只给条目数的话，
       // `Context: 0 item(s)` 会被读成「记忆里没有」。
       return textResult(
-        [formatContext(assembled), ...formatDegradations(context.config.retrieval.engine, diagnostics)].join(
-          '\n',
+        withDegradations(
+          context.config.retrieval.engine,
+          diagnostics,
+          formatContext(assembled),
         ),
       );
     }
 
-    const result = await context.search.search(query, {
-      scopes,
+    const result = await context.search.search(args.query, {
+      scopes: args.scopes,
       subject: context.subject,
       principals: context.principals,
-      limit,
+      limit: args.limit,
       sessionId,
-      levels: level === undefined ? undefined : [level],
-      contextTypes: contextType === undefined ? undefined : [contextType],
-      memoryTypes,
-      updatedAfter,
-      updatedBefore,
+      levels: singleOrUndefined(args.level),
+      contextTypes: singleOrUndefined(args.contextType),
+      memoryTypes: args.memoryTypes,
+      updatedAfter: args.updatedAfter,
+      updatedBefore: args.updatedBefore,
       ...deadline,
     });
 
     context.logger.debug('MCP search 完成', {
       requestId: context.requestId,
       sessionId: sessionId ?? null,
-      scopes,
+      scopes: args.scopes,
       queries: result.plan.queries.length,
       analyzed: result.plan.analyzed,
       returned: result.hits.length,
@@ -217,10 +186,10 @@ export const searchTool: McpToolDefinition = {
 
     return textResult(
       `${formatHits(result.hits)}\n${formatQueryPlan(result.plan, {
-        scopes,
-        limit,
-        level,
-        contextType,
+        scopes: args.scopes,
+        limit: args.limit,
+        level: args.level,
+        contextType: args.contextType,
         sessionId,
       })}`,
     );

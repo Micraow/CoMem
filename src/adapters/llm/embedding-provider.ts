@@ -23,6 +23,7 @@ import { MILLISECONDS_PER_SECOND } from '../../domain/time.js';
 import { OPENAI_DEFAULT_BASE_URL } from './provider-defaults.js';
 import { assertValidVector } from '../../domain/embedding.js';
 import { embedBatchWithContextFallback } from './embedding-batch.js';
+import { startCallTimeout } from './call-timeout.js';
 import {
   mapProviderError,
   type ProviderErrorMapOptions,
@@ -203,46 +204,26 @@ export class AiSdkEmbeddingProvider implements EmbeddingProvider {
     return { vectors, usage: { promptTokens: tokens, totalTokens: tokens } };
   }
 
-  /**
-   * 单批调用的超时与取消。
-   *
-   * 超时用 `AbortController` + `setTimeout`：SDK 会把信号透传给 fetch，底层连接
-   * 随之中断。`EmbeddingOptions.signal`（HTTP 请求断开时由接口层传入）与超时信号
-   * 用 `AbortSignal.any` 合并——任一触发都中止这次调用。
-   *
-   * `EmbeddingOptions.timeoutMs` 是**上限**：实际取
-   * `min(构造时的 timeoutSeconds * 1000, timeoutMs)`，内部预算只能收紧用户配置。
-   *
-   * 定时器 `unref()`：正常结束时它会清掉，但进程退出时不该被一个 30 秒的计时器拖住。
-   */
+  /** 单批调用的超时与取消 */
   private async run<T>(
     operation: (abortSignal: AbortSignal) => Promise<T>,
     options?: EmbeddingOptions,
   ): Promise<T> {
-    // 与重排同一语义：`timeoutMs` 只能收紧 `providers.embedding.timeoutSeconds`，
-    // 不能放宽。查询嵌入的 6 秒预算不该把用户配的 1 秒变成 6 秒。
-    const configuredMs = this.timeoutSeconds * MILLISECONDS_PER_SECOND;
-    const timeoutMs =
-      options?.timeoutMs === undefined ? configuredMs : Math.min(configuredMs, options.timeoutMs);
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, timeoutMs);
-    timer.unref();
-
-    const abortSignal =
-      options?.signal === undefined
-        ? controller.signal
-        : AbortSignal.any([controller.signal, options.signal]);
-
+    const timeout = startCallTimeout(this.timeoutSeconds, {
+      timeoutMs: options?.timeoutMs,
+      signal: options?.signal,
+    });
     try {
-      return await operation(abortSignal);
+      return await operation(timeout.signal);
     } catch (error) {
-      throw mapProviderError(error, { timedOut, timeoutMs }, ERROR_MAP_OPTIONS);
+      timeout.rethrowCallerAbort();
+      throw mapProviderError(
+        error,
+        { timedOut: timeout.timedOut(), timeoutMs: timeout.timeoutMs },
+        ERROR_MAP_OPTIONS,
+      );
     } finally {
-      clearTimeout(timer);
+      timeout.dispose();
     }
   }
 }
