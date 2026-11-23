@@ -24,81 +24,31 @@
  */
 
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
-import type {
-  IngestHarness,
-  NormalizedMessage,
-  SessionRef,
-} from '../../domain/ingest.js';
-import type { Logger } from '../../domain/log.js';
+import type { IngestHarness, NormalizedMessage, SessionRef } from '../../domain/ingest.js';
 
 import { isRecord } from '../../domain/guards.js';
-import { JsonlLogSource, readLines, walkFiles } from '../source.js';
+import { JsonlDiscoverySource, joinTextBlocks, type JsonlSourceOptions } from './jsonl-discovery.js';
 
 const DEFAULT_ROOT = join(homedir(), '.codex', 'sessions');
 const JSONL_SUFFIX = '.jsonl';
 const ROLLOUT_PREFIX = 'rollout-';
 
-export interface CodexSourceOptions {
-  /** 覆盖默认根（`~/.codex/sessions`）。空数组表示用默认值。 */
-  readonly paths?: readonly string[];
-  readonly logger: Logger;
-}
+export type CodexSourceOptions = JsonlSourceOptions;
 
-function isRolloutFile(name: string): boolean {
-  return name.startsWith(ROLLOUT_PREFIX) && name.endsWith(JSONL_SUFFIX);
-}
-
-/**
- * `content` 的 block 里只有 `input_text` / `output_text` 是正文；`input_image`
- * 只存引用，正文里没有可导入的文本。
- */
-function extractText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  const texts: string[] = [];
-  for (const part of content) {
-    if (!isRecord(part)) {
-      continue;
-    }
-    const type = part['type'];
-    if (type !== 'input_text' && type !== 'output_text') {
-      continue;
-    }
-    const text = part['text'];
-    if (typeof text === 'string') {
-      texts.push(text);
-    }
-  }
-  return texts.join('\n');
-}
-
-export class CodexSource extends JsonlLogSource {
+export class CodexSource extends JsonlDiscoverySource {
   readonly harness: IngestHarness = 'codex';
 
-  readonly #roots: readonly string[];
   /** `locator` → `session_meta.payload.cwd`。发现会话时填充，`parseLine` 读取。 */
   readonly #cwdByLocator = new Map<string, string>();
 
-  constructor(options: CodexSourceOptions) {
-    super(options.logger);
-    this.#roots = options.paths === undefined || options.paths.length === 0 ? [DEFAULT_ROOT] : options.paths;
+  protected defaultRoot(): string {
+    return DEFAULT_ROOT;
   }
 
-  async *discoverSessions(): AsyncIterable<SessionRef> {
-    for (const root of this.#roots) {
-      for await (const path of walkFiles(root, isRolloutFile)) {
-        const ref = await this.#describeSession(path);
-        if (ref !== null) {
-          yield ref;
-        }
-      }
-    }
+  protected matchesLogFile(name: string): boolean {
+    return name.startsWith(ROLLOUT_PREFIX) && name.endsWith(JSONL_SUFFIX);
   }
 
   protected parseLine(
@@ -116,7 +66,12 @@ export class CodexSource extends JsonlLogSource {
     if (role !== 'user' && role !== 'assistant') {
       return null;
     }
-    const text = extractText(payload['content']);
+    // `content` 的 block 里只有 `input_text` / `output_text` 是正文；
+    // `input_image` 只存引用，正文里没有可导入的文本。
+    const text = joinTextBlocks(
+      payload['content'],
+      (part) => part['type'] === 'input_text' || part['type'] === 'output_text',
+    );
     if (text.trim() === '') {
       return null;
     }
@@ -131,30 +86,30 @@ export class CodexSource extends JsonlLogSource {
   }
 
   /**
+   * `session_meta` 通常在首行。拿到它（或第一条 `response_item`）之后就不需要
+   * 继续扫——发现阶段不读正文，一个 200MB 的 rollout 不该被完整读一遍。
+   */
+  protected headComplete(head: readonly Record<string, unknown>[]): boolean {
+    return head.some(
+      (value) => value['type'] === 'session_meta' || value['type'] === 'response_item',
+    );
+  }
+
+  /**
    * 从 `session_meta` 取会话身份与 cwd。没有 `session_meta` 的文件（导出被截断、
    * 手工改过）退回文件名，仍然可导入——会话 ID 只要求「同一文件稳定」。
    */
-  async #describeSession(path: string): Promise<SessionRef | null> {
+  protected inspectHead(
+    path: string,
+    head: readonly Record<string, unknown>[],
+  ): SessionRef | null {
     let nativeSessionId: string | null = null;
     let cwd: string | null = null;
     let startedAt: string | null = null;
     let sawSessionMeta = false;
     let sawResponseItem = false;
 
-    for await (const line of readLines(path, 0)) {
-      if (line.text.trim() === '') {
-        continue;
-      }
-      let value: unknown;
-      try {
-        value = JSON.parse(line.text);
-      } catch {
-        continue;
-      }
-      if (!isRecord(value)) {
-        continue;
-      }
-
+    for (const value of head) {
       if (value['type'] === 'session_meta') {
         sawSessionMeta = true;
         const payload = value['payload'];
@@ -177,12 +132,6 @@ export class CodexSource extends JsonlLogSource {
           startedAt = value['timestamp'];
         }
       }
-
-      // `session_meta` 通常在首行。拿到它（或第一条 response_item）之后就不需要
-      // 继续扫——发现阶段不读正文，一个 200MB 的 rollout 不该被完整读一遍。
-      if (sawSessionMeta || sawResponseItem) {
-        break;
-      }
     }
 
     if (!sawSessionMeta && !sawResponseItem) {
@@ -193,7 +142,7 @@ export class CodexSource extends JsonlLogSource {
     }
     return {
       harness: this.harness,
-      nativeSessionId: nativeSessionId ?? basename(path, JSONL_SUFFIX),
+      nativeSessionId: nativeSessionId ?? this.fallbackSessionId(path),
       locator: path,
       title: null,
       startedAt,
