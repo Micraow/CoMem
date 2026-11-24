@@ -9,10 +9,10 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import type { LlmCallRecord } from '../../domain/llm.js';
 import type { Logger } from '../../domain/log.js';
-import { MILLISECONDS_PER_DAY } from '../../domain/time.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { pruneByRetention } from './retention.js';
 
 export interface LlmCallCursor {
   readonly startedAt: string;
@@ -163,44 +163,11 @@ export class LlmCallRepository {
 
   /** 按时间与全局行数裁剪；两者的最旧行都走 `llm_call_log_started`。 */
   prune(options: LlmCallPruneOptions): number {
-    const cutoff = new Date(
-      options.now.getTime() - options.retainDays * MILLISECONDS_PER_DAY,
-    ).toISOString();
-
-    const deleted = withWriteTransaction(this.#db, () => {
-      const expired = this.#db
-        .prepare('DELETE FROM llm_call_log WHERE started_at < ?')
-        .run(cutoff).changes;
-      const total = Number(
-        this.#db.prepare('SELECT COUNT(*) AS total FROM llm_call_log').get()?.['total'] ?? 0,
-      );
-      let overflow = 0;
-      if (total > options.retainRows) {
-        overflow = Number(
-          options.retainRows <= 0
-            ? this.#db.prepare('DELETE FROM llm_call_log').run().changes
-            : this.#db
-                .prepare(
-                  `DELETE FROM llm_call_log
-                    WHERE rowid IN (
-                      SELECT rowid FROM llm_call_log
-                       ORDER BY started_at ASC
-                       LIMIT ?
-                    )`,
-                )
-                .run(total - options.retainRows).changes,
-        );
-      }
-      return Number(expired) + Number(overflow);
-    });
-
-    if (deleted > 0) {
-      this.#logger.info('模型调用记录已裁剪', {
-        deleted,
-        retainDays: options.retainDays,
-        retainRows: options.retainRows,
-      });
-    }
-    return deleted;
+    return pruneByRetention(
+      this.#db,
+      { table: 'llm_call_log', timeColumn: 'started_at', label: '模型调用记录已裁剪' },
+      options,
+      this.#logger,
+    );
   }
 }

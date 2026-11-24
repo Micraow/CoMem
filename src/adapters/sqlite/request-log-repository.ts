@@ -10,21 +10,17 @@
  *    抛错。一条坏行不该让整个列表页 500——那样连「哪一行坏了」都看不到。
  * 2. **时间只用 ISO 8601 字符串**。与 `node` / `task` 表一致：ISO 8601 的字典序等于
  *    时间序，裁剪与分页的 `WHERE` / `ORDER BY` 不需要 `julianday()` 之类的转换。
- * 3. **裁剪两条规则都在一个事务里**（§17.6：7 天或 10 万条，先到先删）。先按天数
- *    删、再按行数删；第二条只看剩下的行，所以两条规则不会互相「救回」被删的行。
- *    行数规则前先 `COUNT(*)`，超限时按 `created_at` 升序取溢出行数的 rowid 再按
- *    rowid 删。原因：`id NOT IN (SELECT ... LIMIT ?)` 在超限与不超限时都要全表扫
- *    （10 万行实测 75 ms），而这个方法现在每轮调度都会调，稳态成本必须与「没有可
- *    删的行」同阶（实测约 1 ms）。
+ * 3. **裁剪走 `./retention.js`**（§17.6：7 天或 10 万条，先到先删）。这里只交出表名
+ *    与时间列，两条规则怎么配合写在 `pruneByRetention` 的文件头。
  */
 
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { Logger } from '../../domain/log.js';
-import { MILLISECONDS_PER_DAY } from '../../domain/time.js';
 
 import { withWriteTransaction } from './database.js';
 import { placeholders } from './node-repository.js';
+import { pruneByRetention } from './retention.js';
 
 /** `request_log` 表的一行（架构文档 §17.6）。 */
 export interface RequestLogRow {
@@ -127,46 +123,11 @@ export class RequestLogRepository {
    * 临时 B 树——10 万行实测 50 ms）。
    */
   prune(options: RequestLogPruneOptions): number {
-    const cutoff = new Date(
-      options.now.getTime() - options.retainDays * MILLISECONDS_PER_DAY,
-    ).toISOString();
-
-    const deleted = withWriteTransaction(this.#db, () => {
-      const expired = this.#db
-        .prepare('DELETE FROM request_log WHERE created_at < ?')
-        .run(cutoff).changes;
-
-      const total = Number(
-        this.#db.prepare('SELECT COUNT(*) AS total FROM request_log').get()?.['total'] ?? 0,
-      );
-      let overflow = 0;
-      if (total > options.retainRows) {
-        overflow = Number(
-          options.retainRows <= 0
-            ? this.#db.prepare('DELETE FROM request_log').run().changes
-            : this.#db
-                .prepare(
-                  `DELETE FROM request_log
-                    WHERE rowid IN (
-                      SELECT rowid FROM request_log
-                       ORDER BY created_at ASC
-                       LIMIT ?
-                    )`,
-                )
-                .run(total - options.retainRows).changes,
-        );
-      }
-
-      return Number(expired) + Number(overflow);
-    });
-
-    if (deleted > 0) {
-      this.#logger.info('请求记录已裁剪', {
-        deleted,
-        retainDays: options.retainDays,
-        retainRows: options.retainRows,
-      });
-    }
-    return deleted;
+    return pruneByRetention(
+      this.#db,
+      { table: 'request_log', timeColumn: 'created_at', label: '请求记录已裁剪' },
+      options,
+      this.#logger,
+    );
   }
 }
