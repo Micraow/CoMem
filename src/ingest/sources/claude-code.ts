@@ -21,13 +21,11 @@ import { join } from 'node:path';
 import type { IngestHarness, NormalizedMessage, SessionRef } from '../../domain/ingest.js';
 
 import { isRecord } from '../../domain/guards.js';
-import { JsonlDiscoverySource, joinTextBlocks, type JsonlSourceOptions } from './jsonl-discovery.js';
+import { JsonlDiscoverySource, joinTextBlocks } from './jsonl-discovery.js';
 
 const DEFAULT_ROOT = join(homedir(), '.claude', 'projects');
 const JSONL_SUFFIX = '.jsonl';
 const HISTORY_FILE_NAME = 'history.jsonl';
-
-export type ClaudeCodeSourceOptions = JsonlSourceOptions;
 
 function isConversationType(value: unknown): value is 'user' | 'assistant' {
   return value === 'user' || value === 'assistant';

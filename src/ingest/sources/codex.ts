@@ -29,13 +29,11 @@ import { join } from 'node:path';
 import type { IngestHarness, NormalizedMessage, SessionRef } from '../../domain/ingest.js';
 
 import { isRecord } from '../../domain/guards.js';
-import { JsonlDiscoverySource, joinTextBlocks, type JsonlSourceOptions } from './jsonl-discovery.js';
+import { JsonlDiscoverySource, joinTextBlocks } from './jsonl-discovery.js';
 
 const DEFAULT_ROOT = join(homedir(), '.codex', 'sessions');
 const JSONL_SUFFIX = '.jsonl';
 const ROLLOUT_PREFIX = 'rollout-';
-
-export type CodexSourceOptions = JsonlSourceOptions;
 
 export class CodexSource extends JsonlDiscoverySource {
   readonly harness: IngestHarness = 'codex';

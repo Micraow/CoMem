@@ -67,9 +67,6 @@ export const REWRITE_SCHEMA = z
     queries: normalizeTypedQueries(value.queries, MAX_TYPED_QUERIES),
   }));
 
-/** schema 的输出形状，服务层用。 */
-export type RewriteOutput = z.infer<typeof REWRITE_SCHEMA>;
-
 /** 一条历史消息。只取 user / assistant，工具输出在服务层就过滤掉了（§10.1）。 */
 export interface RewriteMessage {
   readonly role: string;
